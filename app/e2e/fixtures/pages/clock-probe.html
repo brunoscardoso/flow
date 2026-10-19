@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Clock probe</title>
+<body>
+<h1>Clock probe</h1>
+<script>
+  // Three sources, three conversions in cdp-capture.ts:
+  //   Runtime.consoleAPICalled → params.timestamp        (ms since epoch)
+  //   Log.entryAdded           → entry.timestamp         (ms since epoch)
+  //   Network.requestWillBeSent→ params.wallTime * 1000  (SECONDS since epoch)
+  // This page provokes all three so the probe can compare each against the
+  // host's own clock.
+  window.__probeStart = Date.now()
+  console.log('CLOCK_PROBE console at', window.__probeStart)
+  // A request that will fail is still a requestWillBeSent, which is all the
+  // network timestamp needs.
+  fetch('http://127.0.0.1:8099/clock-probe').catch(() => {})
+</script>
+</body>

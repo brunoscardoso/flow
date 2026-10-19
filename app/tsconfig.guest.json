@@ -1,0 +1,9 @@
+{
+  "// why": "The embedded browser's <webview> guest bundle (guest preload + inspect bridge) is a THIRD compilation target beside main and renderer: it runs in a DOM context (needs the DOM lib) AND uses electron's ipcRenderer (needs node/electron types). It is deliberately outside tsconfig.node.json / tsconfig.test.json so its DOM lib never leaks into the main/preload/test program (a stray `/// <reference lib=\"dom\" />` in a src/main file broke when-idle.test.ts exactly this way).",
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src/browser-guest/**/*", "src/shared/**/*"],
+  "exclude": ["src/**/*.test.ts"]
+}

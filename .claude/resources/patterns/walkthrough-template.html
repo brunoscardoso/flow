@@ -1,0 +1,382 @@
+<!doctype html>
+<!--
+  FLOW FEATURE WALKTHROUGH — page template (plan-flow).
+
+  Copy this file to <discovery basename>.walkthrough.html and fill every
+  `SLOT` below (none may be left). `OPTIONAL` parts are filled or deleted. Everything marked FLOW CHROME is the Flow design system and
+  stays exactly as it is: it is what tells a reader, wherever the page is
+  shared, that it came from Flow IDE. Repeat the marked components (cards,
+  steps, later sections) as many times as the discovery needs.
+
+  The MOCKUPS are the target app's screens, not Flow's: give them the target
+  app's own look in the APP THEME slot and keep their markup inside `.mock`.
+
+  Rules: one self-contained file, no external URLs, fonts or images (the page
+  runs offline in a sandbox), no emoji decoration.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="Flow IDE — feature walkthrough">
+<title><!-- SLOT: feature name --> · Feature walkthrough · Flow</title>
+<style>
+/* ── FLOW CHROME: design tokens (Flow IDE, dark default + warm light) ───── */
+:root {
+  --flow-bg: #181818;
+  --flow-surface: #1f1f1f;
+  --flow-raised: #2a2a2b;
+  --flow-border: #2b2b2b;
+  --flow-text: #cccccc;
+  --flow-text-2: #9d9d9d;
+  --flow-accent: #3794ff;
+  --flow-accent-muted: rgba(55, 148, 255, 0.16);
+  --flow-proposed: #e1ae47;
+  --flow-font: 'Inter Variable', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --flow-mono: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  color-scheme: dark;
+}
+:root[data-theme='light'] {
+  --flow-bg: #f2efe9;
+  --flow-surface: #fdfbf7;
+  --flow-raised: #e9e5dd;
+  --flow-border: #e2ddd3;
+  --flow-text: #37352f;
+  --flow-text-2: #6b6659;
+  --flow-accent: #2f74c0;
+  --flow-accent-muted: rgba(47, 116, 192, 0.14);
+  --flow-proposed: #b8791e;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --flow-bg: #f2efe9;
+    --flow-surface: #fdfbf7;
+    --flow-raised: #e9e5dd;
+    --flow-border: #e2ddd3;
+    --flow-text: #37352f;
+    --flow-text-2: #6b6659;
+    --flow-accent: #2f74c0;
+    --flow-accent-muted: rgba(47, 116, 192, 0.14);
+    --flow-proposed: #b8791e;
+    color-scheme: light;
+  }
+}
+
+/* ── FLOW CHROME: page ──────────────────────────────────────────────────── */
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 104px; }
+body { margin: 0; background: var(--flow-bg); color: var(--flow-text); font: 15px/1.6 var(--flow-font); }
+a { color: var(--flow-accent); }
+code { font-family: var(--flow-mono); font-size: 0.86em; }
+
+.flow-header {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 32px; background: var(--flow-surface);
+  border-bottom: 1px solid var(--flow-border);
+}
+.flow-brand { display: inline-flex; align-items: center; gap: 7px; color: var(--flow-text); text-decoration: none; }
+.flow-mark { width: 18px; height: 18px; }
+.flow-word { font-family: var(--flow-mono); font-weight: 600; letter-spacing: -0.02em; }
+.flow-kind {
+  font-family: var(--flow-mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--flow-text-2); padding-left: 12px; border-left: 1px solid var(--flow-border);
+}
+.flow-meta { margin-left: auto; font-size: 13px; color: var(--flow-text-2); }
+.flow-theme {
+  font: inherit; font-size: 12px; color: var(--flow-text-2); cursor: pointer;
+  background: var(--flow-raised); border: 1px solid var(--flow-border); border-radius: 6px; padding: 3px 10px;
+}
+.flow-theme:hover { color: var(--flow-text); border-color: var(--flow-accent); }
+
+.flow-nav {
+  position: sticky; top: 49px; z-index: 9;
+  display: flex; gap: 4px; overflow-x: auto; padding: 8px 32px;
+  background: var(--flow-bg); border-bottom: 1px solid var(--flow-border);
+}
+.flow-nav a {
+  flex: none; font-size: 13px; color: var(--flow-text-2); text-decoration: none;
+  padding: 4px 12px; border-radius: 999px;
+}
+.flow-nav a:hover { color: var(--flow-text); background: var(--flow-raised); }
+.flow-nav a.active { color: var(--flow-text); background: var(--flow-accent-muted); }
+
+.flow-main { max-width: 1180px; margin: 0 auto; padding: 48px 32px 80px; }
+.flow-section { padding: 56px 0 8px; border-top: 1px solid var(--flow-border); }
+.flow-section:first-child { border-top: none; padding-top: 8px; }
+.flow-eyebrow { font-family: var(--flow-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--flow-accent); margin: 0 0 10px; }
+.flow-h1 { font-size: 44px; line-height: 1.12; letter-spacing: -0.02em; margin: 0 0 16px; }
+.flow-h2 { font-size: 28px; line-height: 1.2; letter-spacing: -0.01em; margin: 0 0 12px; }
+.flow-lead { font-size: 18px; color: var(--flow-text-2); max-width: 760px; margin: 0 0 24px; }
+.flow-pills { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.flow-pills li { font-size: 13px; padding: 4px 12px; border-radius: 999px; background: var(--flow-raised); border: 1px solid var(--flow-border); }
+
+/* The claim: this is a proposal, not shipped behaviour. Dashed like every
+   prediction on the board. */
+.flow-proposed {
+  margin: 24px 0 0; padding: 12px 16px; border-radius: 8px; font-size: 14px;
+  border: 1px dashed var(--flow-proposed); color: var(--flow-text-2);
+  background: color-mix(in srgb, var(--flow-proposed) 7%, transparent);
+}
+.flow-proposed strong { color: var(--flow-text); }
+
+.flow-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+.flow-card { background: var(--flow-surface); border: 1px solid var(--flow-border); border-radius: 10px; padding: 20px; }
+.flow-card h3 { font-size: 16px; margin: 0 0 6px; }
+.flow-card p { margin: 0; font-size: 14px; color: var(--flow-text-2); }
+
+.flow-step { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 32px; align-items: start; padding: 40px 0; border-top: 1px dashed var(--flow-border); }
+.flow-step:first-of-type { border-top: none; }
+.flow-step-num { font-family: var(--flow-mono); font-size: 12px; color: var(--flow-accent); margin: 0 0 6px; }
+.flow-step h3 { font-size: 22px; margin: 0 0 8px; }
+.flow-step p { margin: 0 0 14px; color: var(--flow-text-2); }
+.flow-checks { list-style: none; margin: 0 0 16px; padding: 0; }
+.flow-checks li { position: relative; padding: 3px 0 3px 22px; font-size: 14px; }
+.flow-checks li::before { content: ''; position: absolute; left: 2px; top: 10px; width: 9px; height: 5px; border: solid var(--flow-accent); border-width: 0 0 2px 2px; transform: rotate(-45deg); }
+.flow-built-on { font-size: 13px; color: var(--flow-text-2); padding: 10px 12px; border-radius: 8px; background: var(--flow-surface); border: 1px solid var(--flow-border); }
+.flow-built-on strong { color: var(--flow-text); }
+
+/* THE MOCKUP FRAME is Flow's; what is inside it is the target app's. */
+.flow-mock {
+  margin: 0; border: 1px solid var(--flow-border); border-radius: 10px; overflow: hidden;
+  background: var(--flow-surface);
+}
+.flow-mock-bar { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid var(--flow-border); font-family: var(--flow-mono); font-size: 11px; color: var(--flow-text-2); }
+.flow-mock-bar::before { content: 'MOCKUP'; letter-spacing: 0.12em; color: var(--flow-proposed); }
+.flow-mock-screen { overflow: auto; }
+
+/* THE WORKFLOW DIAGRAM — the first thing on the page: the whole journey at a
+   glance, one node per step, before any of it is explained. Flow's own
+   drawing (never the target app's look), so it reads the same in every
+   walkthrough. A node that is NEW is dashed, like every prediction on the
+   board; a node the app already does today is solid. Rows wrap; under 860px
+   the diagram runs top to bottom. */
+.flow-wf { display: flex; flex-wrap: wrap; align-items: stretch; gap: 10px 0; margin: 20px 0 0; padding: 0; list-style: none; }
+.flow-wf-item { display: contents; }
+.flow-wf-node {
+  flex: 1 1 150px; max-width: 260px; min-width: 0;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 14px 16px; border-radius: 10px; text-decoration: none; color: var(--flow-text);
+  background: var(--flow-surface); border: 1px solid var(--flow-border);
+  border-top: 3px solid var(--flow-text-2);
+}
+.flow-wf-node:hover { border-color: var(--flow-accent); }
+.flow-wf-node.is-new { border-style: dashed; border-top-style: solid; }
+.flow-wf-node[data-actor='person'] { border-top-color: var(--flow-accent); }
+.flow-wf-node[data-actor='app'] { border-top-color: var(--flow-text-2); }
+.flow-wf-node[data-actor='system'] { border-top-color: var(--flow-proposed); }
+.flow-wf-actor { font-family: var(--flow-mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--flow-text-2); }
+.flow-wf-node strong { font-size: 15px; line-height: 1.3; }
+.flow-wf-node span.flow-wf-what { font-size: 13px; color: var(--flow-text-2); }
+.flow-wf-branch { margin-top: 4px; padding-top: 6px; border-top: 1px dashed var(--flow-border); font-size: 12px; color: var(--flow-text-2); }
+.flow-wf-new { align-self: flex-start; font-family: var(--flow-mono); font-size: 10px; letter-spacing: 0.1em; color: var(--flow-proposed); }
+.flow-wf-arrow {
+  flex: 0 0 44px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  font-family: var(--flow-mono); font-size: 10px; color: var(--flow-text-2); text-align: center;
+}
+.flow-wf-arrow::after {
+  content: ''; width: 34px; height: 10px; margin-top: 3px; background: var(--flow-text-2);
+  clip-path: polygon(0 42%, 76% 42%, 76% 0, 100% 50%, 76% 100%, 76% 58%, 0 58%);
+}
+.flow-wf-legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 16px 0 0; font-size: 12px; color: var(--flow-text-2); }
+.flow-wf-legend span::before { content: ''; display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px; border-radius: 2px; background: currentColor; }
+.flow-wf-legend .person { color: var(--flow-accent); }
+.flow-wf-legend .app { color: var(--flow-text-2); }
+.flow-wf-legend .system { color: var(--flow-proposed); }
+.flow-wf-legend .new::before { background: none; border: 1px dashed var(--flow-text-2); }
+.flow-wf-legend span { color: var(--flow-text-2); }
+
+.flow-later { background: var(--flow-surface); border: 1px dashed var(--flow-border); border-radius: 10px; padding: 20px; margin: 0 0 16px; }
+.flow-later h3 { margin: 0 0 6px; font-size: 16px; }
+.flow-later p { margin: 0; color: var(--flow-text-2); font-size: 14px; }
+
+.flow-footer { display: flex; align-items: center; gap: 8px; justify-content: center; padding: 28px 32px 40px; border-top: 1px solid var(--flow-border); font-size: 13px; color: var(--flow-text-2); }
+.flow-footer .flow-mark { width: 14px; height: 14px; }
+
+@media (max-width: 860px) {
+  .flow-step { grid-template-columns: 1fr; }
+  .flow-h1 { font-size: 34px; }
+  .flow-meta { display: none; }
+  .flow-wf { flex-direction: column; }
+  .flow-wf-node { flex: none; max-width: none; }
+  .flow-wf-arrow { flex-basis: auto; flex-direction: row; gap: 8px; padding: 4px 0; }
+  .flow-wf-arrow::after { transform: rotate(90deg); margin: 0; }
+}
+
+/* ── APP THEME: the TARGET APP's look, scoped to the mockups ────────────── */
+/* SLOT: the target app's own tokens and component styles, from its code or
+   the discovery's Design Context. Everything here must be scoped under
+   `.mock` so it never restyles Flow's chrome. Example shape:
+.mock { --app-bg: #ffffff; --app-text: #1a1a2e; --app-brand: #5b5bd6;
+        background: var(--app-bg); color: var(--app-text); font: 14px/1.5 system-ui, sans-serif; }
+.mock .app-sidebar { ... }
+*/
+</style>
+</head>
+<body>
+
+<!-- ── FLOW CHROME: header ────────────────────────────────────────────── -->
+<header class="flow-header">
+  <span class="flow-brand" title="Made with Flow IDE">
+    <svg class="flow-mark" viewBox="0 0 96 96" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M25 66 L36 34"/><path d="M47 37 L57 50 L47 63"/><path d="M59 37 L69 50 L59 63"/>
+    </svg>
+    <span class="flow-word">flow</span>
+  </span>
+  <span class="flow-kind">Feature walkthrough</span>
+  <span class="flow-meta"><!-- SLOT: target project · feature name · discovery vN --></span>
+  <button type="button" class="flow-theme" data-flow-theme-toggle>Light</button>
+</header>
+
+<!-- ── FLOW CHROME: section nav (one link per section below) ──────────── -->
+<nav class="flow-nav" aria-label="Sections">
+  <a href="#workflow">Workflow</a>
+  <a href="#overview">Overview</a>
+  <a href="#building">What's being built</a>
+  <a href="#flow">User flow</a>
+  <a href="#picture">The full picture</a>
+  <!-- OPTIONAL: one link per Later section; delete this line when there is none -->
+</nav>
+
+<main class="flow-main">
+
+  <!-- WORKFLOW DIAGRAM — always the FIRST section. The whole user journey on
+       one line of boxes, before a word of it is explained: one node per step
+       of the User flow below (same order, same titles), each linking to its
+       step. `data-actor` says who acts — person (the user), app (the target
+       app's UI), system (a backend, job or integration). Add `is-new` to a
+       node the discovery introduces and put the NEW tag in it; a node the app
+       already does today stays solid. An arrow's label is what moves between
+       the two (an event, a click, a message); leave it empty when nothing
+       needs saying, and keep it to one to three words. A branch the journey can take is ONE line inside the node
+       it leaves from, never a second diagram. -->
+  <section class="flow-section" id="workflow">
+    <p class="flow-eyebrow">Workflow</p>
+    <h2 class="flow-h2"><!-- SLOT: the journey in one line, e.g. from asking to getting an answer --></h2>
+    <ol class="flow-wf" aria-label="Workflow">
+      <!-- COMPONENT: workflow node — repeat one per step, with an arrow between each pair -->
+      <li class="flow-wf-item"><a class="flow-wf-node is-new" data-actor="person" href="#step-1">
+        <span class="flow-wf-actor"><!-- SLOT: Person | App | System --></span>
+        <strong><!-- SLOT: step title, as in the User flow --></strong>
+        <span class="flow-wf-what"><!-- SLOT: what happens, in a few words --></span>
+        <span class="flow-wf-new">NEW</span>
+        <!-- OPTIONAL: a branch, as <span class="flow-wf-branch">If the condition: where it goes</span> -->
+      </a></li>
+      <li class="flow-wf-arrow" aria-hidden="true"><!-- SLOT: what moves to the next node, or nothing --></li>
+      <!-- /COMPONENT -->
+    </ol>
+    <p class="flow-wf-legend"><span class="person">Person</span><span class="app">App</span><span class="system">System</span><span class="new">New in this feature</span></p>
+  </section>
+
+  <section class="flow-section" id="overview">
+    <p class="flow-eyebrow"><!-- SLOT: short kicker, e.g. the product area --></p>
+    <h1 class="flow-h1"><!-- SLOT: what the user gets, in one sentence --></h1>
+    <p class="flow-lead"><!-- SLOT: one or two sentences of pitch --></p>
+    <ul class="flow-pills">
+      <li><!-- SLOT: capability --></li>
+    </ul>
+    <p class="flow-proposed"><strong>Proposed experience, not shipped.</strong> <!-- SLOT: one sentence on what is decided and what is still open, from the discovery --></p>
+  </section>
+
+  <section class="flow-section" id="building">
+    <p class="flow-eyebrow">What's being built</p>
+    <h2 class="flow-h2"><!-- SLOT: heading --></h2>
+    <div class="flow-cards">
+      <!-- COMPONENT: capability card — repeat. Text only, no icon. -->
+      <div class="flow-card">
+        <h3><!-- SLOT: capability name --></h3>
+        <p><!-- SLOT: one or two sentences --></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="flow-section" id="flow">
+    <p class="flow-eyebrow">User flow</p>
+    <h2 class="flow-h2"><!-- SLOT: heading, e.g. how it works, step by step --></h2>
+
+    <!-- COMPONENT: step — repeat 3 to 6 times, numbering them. -->
+    <article class="flow-step" id="step-1">
+      <div>
+        <p class="flow-step-num">Step 1</p>
+        <h3><!-- SLOT: step title --></h3>
+        <p><!-- SLOT: one or two sentences --></p>
+        <ul class="flow-checks">
+          <li><!-- SLOT: what the user does or sees --></li>
+        </ul>
+        <p class="flow-built-on"><strong>Built on:</strong> <!-- SLOT: the real existing code this step stands on, from the Codebase Analysis --></p>
+      </div>
+      <figure class="flow-mock">
+        <figcaption class="flow-mock-bar"><!-- SLOT: target app · screen name --></figcaption>
+        <div class="flow-mock-screen">
+          <div class="mock">
+            <!-- SLOT: the screen, in the target app's look (APP THEME) -->
+          </div>
+        </div>
+      </figure>
+    </article>
+  </section>
+
+  <section class="flow-section" id="picture">
+    <p class="flow-eyebrow">The full picture</p>
+    <h2 class="flow-h2"><!-- SLOT: where the feature lives in the app --></h2>
+    <figure class="flow-mock">
+      <figcaption class="flow-mock-bar"><!-- SLOT: target app · full shell --></figcaption>
+      <div class="flow-mock-screen">
+        <div class="mock">
+          <!-- SLOT: the whole app shell with the feature in place -->
+        </div>
+      </div>
+    </figure>
+  </section>
+
+  <!-- OPTIONAL COMPONENT: later section — one per deferred phase the discovery
+       records; uncomment and fill, or delete this block when there is none.
+  <section class="flow-section" id="later-1">
+    <p class="flow-eyebrow">Later</p>
+    <div class="flow-later">
+      <h3>(phase name)</h3>
+      <p>(what it adds, and that it is not in this version)</p>
+    </div>
+  </section>
+  -->
+
+</main>
+
+<!-- ── FLOW CHROME: footer ────────────────────────────────────────────── -->
+<footer class="flow-footer">
+  <svg class="flow-mark" viewBox="0 0 96 96" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M25 66 L36 34"/><path d="M47 37 L57 50 L47 63"/><path d="M59 37 L69 50 L59 63"/>
+  </svg>
+  <span>Made with Flow IDE · a user walkthrough generated from a discovery</span>
+</footer>
+
+<!-- ── FLOW CHROME: theme toggle + section in view. Navigation only. ──── -->
+<script>
+(function () {
+  var root = document.documentElement;
+  var toggle = document.querySelector('[data-flow-theme-toggle]');
+  function current() {
+    var set = root.getAttribute('data-theme');
+    if (set === 'light' || set === 'dark') return set;
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  }
+  function label() { if (toggle) toggle.textContent = current() === 'dark' ? 'Light' : 'Dark'; }
+  if (toggle) toggle.addEventListener('click', function () {
+    root.setAttribute('data-theme', current() === 'dark' ? 'light' : 'dark');
+    label();
+  });
+  label();
+  var links = Array.prototype.slice.call(document.querySelectorAll('.flow-nav a'));
+  if (!('IntersectionObserver' in window)) return;
+  var observer = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      if (!entry.isIntersecting) return;
+      links.forEach(function (link) { link.classList.toggle('active', link.getAttribute('href') === '#' + entry.target.id); });
+    });
+  }, { rootMargin: '-40% 0px -55% 0px' });
+  document.querySelectorAll('.flow-section[id]').forEach(function (section) { observer.observe(section); });
+})();
+</script>
+</body>
+</html>

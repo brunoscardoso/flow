@@ -1,0 +1,29 @@
+{
+  "probe": "palette",
+  "measurements": [
+    {
+      "name": "term \"c\"",
+      "ms": 0.88,
+      "items": 5675,
+      "note": "one keystroke"
+    },
+    {
+      "name": "term \"co\"",
+      "ms": 0.76,
+      "items": 5675,
+      "note": "one keystroke"
+    },
+    {
+      "name": "term \"comp\"",
+      "ms": 0.79,
+      "items": 5675,
+      "note": "one keystroke"
+    },
+    {
+      "name": "term \"component-4\"",
+      "ms": 0.99,
+      "items": 5675,
+      "note": "one keystroke"
+    }
+  ]
+}

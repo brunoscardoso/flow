@@ -1,0 +1,9 @@
+{
+  "comment": "THE one table of renamed .flowconfig keys: each NEW key (left) maps to the OLD key it replaced (right). Both the CLI (src/cli/state/flowconfig-aliases.ts) and the app read it, and each side has a parity test that loads this file. Old keys are read FOREVER. While both are written, the OLD key wins when both are present (a build older than the rename writes only the old one, so it is always current). A write (only when a person changes that setting) writes BOTH keys with the same value, and an unset removes both, so older Flow builds that read only the old key stay in step — a transitional dual-write until those builds are retired. Add a rename here, never on one side only.",
+  "aliases": {
+    "worktree_start": "workspace_start",
+    "worktree_cap": "workspace_cap",
+    "worktree_setup": "workspace_setup",
+    "worktree_setup_timeout_ms": "workspace_setup_timeout_ms"
+  }
+}

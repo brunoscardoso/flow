@@ -1,0 +1,10 @@
+{
+  "name": "flow-telemetry-ingest",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ingest endpoint for Flow desktop telemetry. Deployed separately; see README.md.",
+  "type": "module",
+  "dependencies": {
+    "@vercel/postgres": "^0.10.0"
+  }
+}

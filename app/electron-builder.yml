@@ -1,0 +1,220 @@
+# Flow — electron-builder config.
+#
+# Two shipped platforms, deliberately asymmetric:
+#   macOS (arm64) — Developer ID signed + notarized, dmg + zip, auto-update via
+#     latest-mac.yml. This is the reference target; nothing below may change it.
+#   Windows (x64) — UNSIGNED (no Authenticode certificate), nsis installer +
+#     portable exe, NO auto-update feed. SmartScreen warns on first launch;
+#     that is a known consequence of shipping unsigned, not a defect. Updates
+#     are a manual re-download.
+#
+# Design decisions (see app/README.md "Packaging" for the long form):
+#
+# asar: false — deliberate. Three runtime components must be spawned/dlopen'd
+# as REAL files, and `child_process.spawn` is not asar-patched by Electron:
+#   1. node-pty's per-platform native helper (darwin `spawn-helper`, exec'd for
+#      every terminal; on Windows the conpty/winpty DLLs beside pty.node)
+#   2. typescript-language-server's `lib/cli.mjs` (ESM entrypoint run as a
+#      child via ELECTRON_RUN_AS_NODE — resolved with require.resolve, which
+#      would return an app.asar path)
+#   3. @anthropic-ai/claude-agent-sdk's native binary (~240MB —
+#      claude-agent-sdk-darwin-arm64/claude, claude-agent-sdk-win32-x64/claude.exe)
+#      — the SDK resolves it with createRequire().resolve() and spawns it; the
+#      SDK has no asar awareness, so an asar path would ENOENT.
+# With asar enabled, each of those would need an `app.asar` →
+# `app.asar.unpacked` path rewrite in src/ (tsserver-adapter, agent-manager,
+# and trust in node-pty internals). asar gives us nothing for an unsigned
+# local build, so we ship plain files and keep src/ untouched.
+# If asar is ever re-enabled, asarUnpack must cover: node-pty, better-sqlite3,
+# typescript-language-server, typescript, @vscode/tree-sitter-wasm (the storyline
+# reads its .wasm files by path), @anthropic-ai/claude-agent-sdk*
+# — plus the src-side path rewrites above.
+#
+# npmRebuild: false — deliberate. better-sqlite3 in app/node_modules is
+# already rebuilt against Electron 43 headers (`npm run rebuild` redoes it);
+# node-pty ships N-API prebuilds that work as-is. Letting electron-builder
+# rebuild at package time would redo work and can trip over the sandbox's
+# allow-scripts policy.
+
+appId: com.planflow.flow
+productName: Flow
+copyright: Copyright © 2026 Plan-Flow
+
+directories:
+  output: dist
+
+asar: false
+npmRebuild: false
+
+files:
+  - out/**
+  - package.json
+  # Renderer-only deps are fully bundled into out/renderer by vite — the
+  # node_modules copies are dead weight in the app.
+  - "!node_modules/monaco-editor/**"
+  - "!node_modules/@xterm/**"
+  # Native build intermediates / vendored sources not needed at runtime.
+  - "!node_modules/better-sqlite3/deps/**"
+  - "!node_modules/better-sqlite3/bin/**"
+  - "!node_modules/better-sqlite3/build/Release/obj/**"
+  - "!node_modules/better-sqlite3/build/Release/obj.target/**"
+  - "!node_modules/better-sqlite3/build/Release/sqlite3.a"
+  # Foreign-platform payloads (node-pty prebuilds ~30MB, the SDK's native
+  # binary ~240MB) are pruned per-artifact in the mac:/win: `files` blocks
+  # below — see "PREBUILD PRUNING" there. They cannot be pruned here: this
+  # list is shared by every target, and each artifact needs a DIFFERENT
+  # subset kept.
+
+# The bundled planflow-ai CLI (built by scripts/build-cli-bundle.mjs into
+# resources/cli) ships as a real dir under Contents/Resources/cli, so the app
+# spawns it via ELECTRON_RUN_AS_NODE with no npm / PATH / system-node dependency.
+extraResources:
+  - from: resources/cli
+    to: cli
+
+mac:
+  # SIGNING (#auto-update): configured for a Developer ID-signed + notarized
+  # release build — Squirrel.Mac validates the downloaded update's signature
+  # against the running app, so auto-update only works on signed builds.
+  #
+  # No `identity` is pinned here: electron-builder auto-discovers the
+  # "Developer ID Application" cert in the Keychain (or CSC_LINK/CSC_KEY_PASSWORD).
+  # Local UNSIGNED builds still work — `npm run package[:dmg]` sets
+  # CSC_IDENTITY_AUTO_DISCOVERY=false, which skips discovery and falls back to
+  # ad-hoc signing (identity "-", required for arm64 macOS to launch at all).
+  # `npm run release` leaves discovery on and publishes.
+  #
+  # Notarization: `notarize: true` reads APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD /
+  # APPLE_TEAM_ID from the env; when they're absent electron-builder skips
+  # notarization with a warning, so unsigned local builds are unaffected.
+  # The nested claude binary + .node files are deep-signed automatically when
+  # an identity is discovered.
+  #
+  # PREBUILD PRUNING (FR7). Platform `files` entries are APPENDED to the root
+  # `files` list by electron-builder (verified against the installed 26.15.3:
+  # app-builder-lib getFileMatchers adds config.files, then
+  # platformSpecificBuildOptions.files, to the same matcher — and
+  # getNodeModuleFileMatcher takes the "!" excludes from both). `${arch}`
+  # expands to THIS artifact's arch, so each artifact keeps only its own
+  # native payloads and drops every other platform's.
+  files:
+    # THE TWO INCLUDES ARE REQUIRED HERE TOO. A platform `files` list holding
+    # only "!" exclusions made electron-builder add its default "**/*", and
+    # v0.1.10 shipped the whole app/ folder (src/, e2e/, scripts/, a dev script
+    # with the ingest key). scripts/verify-package-contents.mjs now refuses that.
+    - out/**
+    - package.json
+    - "!node_modules/node-pty/prebuilds/!(darwin-${arch})/**"
+    - "!node_modules/@anthropic-ai/claude-agent-sdk-!(darwin-${arch})/**"
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  notarize: true
+  # 1024px source; electron-builder generates the multi-resolution .icns.
+  icon: build/icon.png
+  category: public.app-category.developer-tools
+  target:
+    - target: dir
+      arch: [arm64]
+    - target: dmg
+      arch: [arm64]
+    # zip is REQUIRED for auto-update: Squirrel.Mac applies updates from the zip,
+    # not the dmg (the dmg stays the website's first-install download). This also
+    # emits latest-mac.yml + a blockmap for differential downloads.
+    - target: zip
+      arch: [arm64]
+
+dmg:
+  sign: false
+
+win:
+  # UNSIGNED — there is no Authenticode certificate for this project, so both
+  # artifacts ship unsigned and SmartScreen shows a "Windows protected your PC"
+  # warning on first launch. Accepted, not a defect: signing needs a paid EV/OV
+  # cert. `forceCodeSigning` stays at its default (false) so the build does not
+  # fail for the missing cert; electron-builder logs one skip notice.
+  #
+  # See mac: above for the PREBUILD PRUNING rationale — `${arch}` expands to
+  # this artifact's arch, so the x64 build keeps node-pty's win32-x64 prebuild
+  # (pty.node + the conpty DLLs) and the SDK's claude-agent-sdk-win32-x64
+  # binary, and drops every darwin/linux/arm64 payload.
+  #
+  # node-pty ALSO vendors per-arch ConPTY binaries outside prebuilds/, under
+  # third_party/conpty/<version>/win10-{x64,arm64} (found by inspecting a real
+  # win-unpacked tree, not from the docs). Same rule, different directory
+  # naming — hence the second pattern. This exclusion is win-only on purpose:
+  # macOS ships that directory too, but pruning it there would change the mac
+  # artifact, which this change is not allowed to do.
+  files:
+    # THE TWO INCLUDES ARE REQUIRED HERE TOO. A platform `files` list holding
+    # only "!" exclusions made electron-builder add its default "**/*", and
+    # v0.1.10 shipped the whole app/ folder (src/, e2e/, scripts/, a dev script
+    # with the ingest key). scripts/verify-package-contents.mjs now refuses that.
+    - out/**
+    - package.json
+    - "!node_modules/node-pty/prebuilds/!(win32-${arch})/**"
+    - "!node_modules/node-pty/third_party/conpty/*/!(win10-${arch})/**"
+    - "!node_modules/@anthropic-ai/claude-agent-sdk-!(win32-${arch})/**"
+  # Multi-resolution ICO (16/32/64/128/256, PNG-compressed entries) built from
+  # build/icons/icon-<size>.png by build/icons/make-ico.mjs. electron-builder
+  # requires a 256px entry and uses a .ico source verbatim (no conversion).
+  icon: build/icon.ico
+  # NO UPDATE FEED on Windows: electron-updater is wired to latest-mac.yml only,
+  # and an unsigned Windows build cannot be safely auto-updated anyway. `null`
+  # keeps a stray `--win --publish` from uploading a Windows latest.yml to the
+  # macOS release feed. Windows updates are a manual re-download.
+  publish: null
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+
+nsis:
+  # Per-user install, no elevation. An unsigned installer that opens a UAC
+  # prompt from an unknown publisher is the worst possible first impression —
+  # so Flow installs into %LOCALAPPDATA% for the current user and never asks
+  # for admin rights.
+  oneClick: false # assisted installer — prerequisite for the directory picker
+  perMachine: false # per-user install (no admin required)
+  allowElevation: false # never request elevation
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Flow
+  # No update server (see win.publish) — nothing consumes a blockmap, so skip
+  # generating one.
+  differentialPackage: false
+  artifactName: ${productName}-${version}-${arch}-setup.${ext}
+
+portable:
+  # No installer, no registry, no shortcuts — a single .exe that self-extracts
+  # to TEMP and runs. This is the escape hatch for locked-down machines where
+  # even a per-user install is blocked.
+  artifactName: ${productName}-${version}-${arch}-portable.${ext}
+
+# Update feed (#auto-update) — macOS ONLY (win.publish above is null).
+# electron-builder writes latest-mac.yml alongside the
+# artifacts and (on `--publish`) uploads the dmg + zip + blockmap + yml to a
+# GitHub release; the installed app reads this feed via electron-updater.
+# Publishing requires GH_TOKEN and a matching `version` bump in package.json
+# (`npm run release` preflights all of it).
+#
+# The feed lives in the SOURCE repo, alongside the code. It used to be a
+# separate artifacts-only repo, which existed because the source was private
+# and a public download page had to come from somewhere. Once the source went
+# public that split bought nothing and cost a second place to keep in sync, so
+# downloads, the update feed, issues and the code are now one repo.
+#
+# OWNER IS A PLACEHOLDER ON PURPOSE. This file is committed and public, and a
+# fork that builds the app must not get an update feed pointing at this
+# project's official releases — it would update a fork into the upstream build.
+# The real target is per-machine: FLOW_RELEASE_OWNER / FLOW_RELEASE_REPO in the
+# git-ignored app/.flow-build.local.json, which `release` reads and passes to
+# electron-builder on the command line. `release` refuses when neither is set,
+# so a release can never be published to the placeholder.
+publish:
+  provider: github
+  owner: dev
+  repo: flow

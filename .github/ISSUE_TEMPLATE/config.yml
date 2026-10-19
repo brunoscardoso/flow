@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://planflow.sh/docs
+    about: How Flow works — the four stages, every command and setting.

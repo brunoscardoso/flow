@@ -1,0 +1,17 @@
+# This repo is a desktop app; the only thing Vercel deploys from it is the
+# telemetry ingest function under `ingest/`. Without this, a CLI deploy from the
+# repo root uploads ~2 GB of app bundles, build output and a graph database.
+#
+# The project's Root Directory is `ingest`, which is what git-triggered builds
+# use. This file is what makes a CLI deploy from the root upload the same slice.
+#
+# DO NOT GIVE THE VERCEL PROJECT A GIT-BASED "IGNORED BUILD STEP". Vercel applies
+# this file to git-triggered builds too, and `*` removes `.git` before that step
+# runs — so `git diff …` fails with "Not a git repository" and every deployment
+# errors in ~5 s (it did, for six days, until 2026-09-30). Re-including `.git`
+# here is not the fix either: the CLI appends these rules after its own defaults,
+# so `!.git` would upload the whole history on a CLI deploy. The step is
+# `node scripts/should-build.mjs`, which asks GitHub what changed instead.
+*
+!ingest
+!ingest/**

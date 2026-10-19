@@ -1,0 +1,92 @@
+{
+  "name": "planflow-ai",
+  "version": "1.4.3",
+  "private": true,
+  "description": "Structured AI-assisted development workflows for discovery, planning, execution, code reviews, and testing",
+  "type": "module",
+  "workspaces": [
+    "app"
+  ],
+  "main": "dist/cli/index.js",
+  "bin": {
+    "planflow-ai": "./dist/cli/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brunoscardoso/flow.git"
+  },
+  "homepage": "https://github.com/brunoscardoso/flow#readme",
+  "bugs": {
+    "url": "https://github.com/brunoscardoso/flow/issues"
+  },
+  "scripts": {
+    "build": "tsc && node scripts/stamp-build.mjs",
+    "start": "node dist/cli/index.js",
+    "dev": "npm run dev -w app",
+    "dev:cli": "tsx src/cli/index.ts",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
+    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p ingest/tsconfig.json",
+    "typecheck:ingest": "tsc --noEmit -p ingest/tsconfig.json",
+    "prepare": "node scripts/prepare-guard.mjs",
+    "install-local": "npm run build && node dist/cli/index.js",
+    "app:dev": "npm run dev -w app",
+    "test:instructions": "node scripts/test-instructions.mjs",
+    "pretest": "npm run test:instructions",
+    "publish:scan": "node scripts/publish-scan.mjs",
+    "publish:public": "node scripts/publish-public.mjs"
+  },
+  "files": [
+    "dist/",
+    ".claude/commands/",
+    ".claude/rules/",
+    ".claude/resources/",
+    "templates/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "ai",
+    "cursor",
+    "claude",
+    "openclaw",
+    "codex",
+    "code-review",
+    "planning",
+    "development",
+    "structured-development",
+    "workflow",
+    "ai-assisted"
+  ],
+  "author": "Dev User",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^14.0.3",
+    "node-notifier": "^10.0.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.10.5",
+    "@types/node-notifier": "^8.0.5",
+    "@typescript-eslint/eslint-plugin": "^8.63.0",
+    "@typescript-eslint/parser": "^8.63.0",
+    "@vscode/tree-sitter-wasm": "^0.3.1",
+    "esbuild": "^0.27.0",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^10.1.8",
+    "jest": "^29.7.0",
+    "prettier": "^3.4.2",
+    "ts-jest": "^29.2.5",
+    "tsx": "^4.7.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

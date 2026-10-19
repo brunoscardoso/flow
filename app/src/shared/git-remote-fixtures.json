@@ -1,0 +1,273 @@
+{
+  "comment": "THE one list of knowledge-repo remote addresses both parsers must agree on: the CLI's (src/cli/handlers/knowledge-migration.ts) and the app's (app/src/shared/git-remote.ts). Each side has a parity test that runs every entry. Add a case here, never in only one test.",
+  "accept": [
+    {
+      "url": "https://github.com/acme/orbit-app-flow.git",
+      "host": "github.com",
+      "provider": "github"
+    },
+    {
+      "url": "https://github.com/acme/orbit-app-flow",
+      "host": "github.com",
+      "provider": "github"
+    },
+    {
+      "url": "git@github.com:acme/orbit-app-flow.git",
+      "host": "github.com",
+      "provider": "github"
+    },
+    {
+      "url": "ssh://git@github.com/acme/orbit-app-flow.git",
+      "host": "github.com",
+      "provider": "github"
+    },
+    {
+      "url": "https://dev.azure.com/acme/Orbit/_git/orbit-app-flow",
+      "host": "dev.azure.com",
+      "provider": "azure"
+    },
+    {
+      "url": "https://acme@dev.azure.com/acme/Orbit/_git/orbit-app-flow",
+      "host": "dev.azure.com",
+      "provider": "azure"
+    },
+    {
+      "url": "git@ssh.dev.azure.com:v3/acme/Orbit/orbit-app-flow",
+      "host": "ssh.dev.azure.com",
+      "provider": "azure"
+    },
+    {
+      "url": "https://acme.visualstudio.com/Orbit/_git/orbit-app-flow",
+      "host": "acme.visualstudio.com",
+      "provider": "azure"
+    },
+    {
+      "url": "https://gitlab.com/acme/platform/orbit-app-flow.git",
+      "host": "gitlab.com",
+      "provider": "gitlab"
+    },
+    {
+      "url": "git@gitlab.com:acme/platform/orbit-app-flow.git",
+      "host": "gitlab.com",
+      "provider": "gitlab"
+    },
+    {
+      "url": "https://bitbucket.org/acme/orbit-app-flow.git",
+      "host": "bitbucket.org",
+      "provider": "bitbucket"
+    },
+    {
+      "url": "https://git.acme.internal:8443/knowledge/orbit-app-flow.git",
+      "host": "git.acme.internal",
+      "provider": "other"
+    },
+    {
+      "url": "ssh://git@git.acme.internal:2222/knowledge/orbit-app-flow.git",
+      "host": "git.acme.internal",
+      "provider": "other"
+    },
+    {
+      "url": "ssh://git@ssh.github.com:443/acme/orbit-app-flow.git",
+      "host": "ssh.github.com",
+      "provider": "github"
+    },
+    {
+      "url": "git@vs-ssh.visualstudio.com:v3/acme/Orbit/orbit-app-flow",
+      "host": "vs-ssh.visualstudio.com",
+      "provider": "azure"
+    },
+    {
+      "url": "https://acme.visualstudio.com/DefaultCollection/Orbit/_git/orbit-app-flow",
+      "host": "acme.visualstudio.com",
+      "provider": "azure"
+    }
+  ],
+  "refuse": [
+    {
+      "url": "",
+      "reason": "invalid-remote"
+    },
+    {
+      "url": "--upload-pack=touch /tmp/pwned",
+      "reason": "invalid-remote"
+    },
+    {
+      "url": "-oProxyCommand=sh",
+      "reason": "invalid-remote"
+    },
+    {
+      "url": "ext::sh -c touch% /tmp/pwned",
+      "reason": "invalid-remote"
+    },
+    {
+      "url": "file:///Users/someone/repo",
+      "reason": "invalid-remote"
+    },
+    {
+      "url": "/Users/someone/repo",
+      "reason": "invalid-remote"
+    },
+    {
+      "url": "../other-repo",
+      "reason": "invalid-remote"
+    },
+    {
+      "url": "fd::17/repo",
+      "reason": "invalid-remote"
+    },
+    {
+      "url": "http://github.com/acme/orbit-app-flow.git",
+      "reason": "insecure-remote"
+    },
+    {
+      "url": "https://github.com/acme/../secret.git",
+      "reason": "invalid-remote"
+    },
+    {
+      "url": "https://github.com/acme/repo.git?x=1",
+      "reason": "invalid-remote"
+    },
+    {
+      "url": "https://github.com/acme/repo.git#main",
+      "reason": "invalid-remote"
+    },
+    {
+      "url": "https://github.com/acme/repo with space",
+      "reason": "invalid-remote"
+    },
+    {
+      "url": "https://github.com",
+      "reason": "invalid-remote"
+    },
+    {
+      "url": "ssh://-oProxyCommand=sh/repo",
+      "reason": "invalid-remote"
+    },
+    {
+      "url": "git@-oProxyCommand=sh:repo",
+      "reason": "invalid-remote"
+    },
+    {
+      "url": "https://user:secret@github.com/acme/repo.git",
+      "reason": "credentials-in-url"
+    },
+    {
+      "url": "https://ghp_0123456789abcdef0123456789abcdef0123@github.com/acme/repo.git",
+      "reason": "credentials-in-url"
+    },
+    {
+      "url": "https://github_pat_11ABCDEFG0123456789_abcdefghijklmnop@github.com/acme/repo.git",
+      "reason": "credentials-in-url"
+    },
+    {
+      "url": "https://glpat-0123456789abcdefghij@gitlab.com/acme/repo.git",
+      "reason": "credentials-in-url"
+    },
+    {
+      "url": "https://github.com/acme/repo.git?access_token=abc123",
+      "reason": "credentials-in-url"
+    },
+    {
+      "url": "https://gitlab.com/acme/repo.git?private_token=abc123",
+      "reason": "credentials-in-url"
+    },
+    {
+      "url": "git:secret@github.com:acme/repo.git",
+      "reason": "credentials-in-url"
+    },
+    {
+      "url": "git://github.com/acme/repo.git",
+      "reason": "insecure-remote"
+    }
+  ],
+  "branches": {
+    "accept": [
+      "main",
+      "master",
+      "knowledge",
+      "team/knowledge",
+      "release-2026.10"
+    ],
+    "refuse": [
+      "",
+      "-x",
+      "--upload-pack=x",
+      "/main",
+      "main/",
+      "a..b",
+      "a//b",
+      "main.lock",
+      "main.",
+      "has space",
+      "a~b",
+      "a^b",
+      "a:b",
+      "a?b",
+      "a*b",
+      "a[b",
+      "a\\b",
+      "@"
+    ]
+  },
+  "identities": {
+    "comment": "remoteIdentity — the project id a Workspace gives a repository. Every address in one group names the same repository; both sides assert each url's identity exactly. The CLI is the source of truth.",
+    "cases": [
+      {
+        "url": "https://github.com/acme/orbit-app-flow.git",
+        "identity": "github.com/acme/orbit-app-flow"
+      },
+      {
+        "url": "https://github.com/Acme/Orbit-App-Flow",
+        "identity": "github.com/acme/orbit-app-flow"
+      },
+      {
+        "url": "git@github.com:acme/orbit-app-flow.git",
+        "identity": "github.com/acme/orbit-app-flow"
+      },
+      {
+        "url": "ssh://git@github.com/acme/orbit-app-flow.git",
+        "identity": "github.com/acme/orbit-app-flow"
+      },
+      {
+        "url": "ssh://git@ssh.github.com:443/acme/orbit-app-flow.git",
+        "identity": "github.com/acme/orbit-app-flow"
+      },
+      {
+        "url": "https://dev.azure.com/acme/Orbit/_git/orbit-app-flow",
+        "identity": "dev.azure.com/acme/orbit/orbit-app-flow"
+      },
+      {
+        "url": "https://acme@dev.azure.com/acme/Orbit/_git/orbit-app-flow",
+        "identity": "dev.azure.com/acme/orbit/orbit-app-flow"
+      },
+      {
+        "url": "git@ssh.dev.azure.com:v3/acme/Orbit/orbit-app-flow",
+        "identity": "dev.azure.com/acme/orbit/orbit-app-flow"
+      },
+      {
+        "url": "git@vs-ssh.visualstudio.com:v3/acme/Orbit/orbit-app-flow",
+        "identity": "dev.azure.com/acme/orbit/orbit-app-flow"
+      },
+      {
+        "url": "https://acme.visualstudio.com/Orbit/_git/orbit-app-flow",
+        "identity": "dev.azure.com/acme/orbit/orbit-app-flow"
+      },
+      {
+        "url": "https://acme.visualstudio.com/DefaultCollection/Orbit/_git/orbit-app-flow",
+        "identity": "dev.azure.com/acme/orbit/orbit-app-flow"
+      },
+      {
+        "url": "https://gitlab.com/acme/platform/orbit-app-flow.git",
+        "identity": "gitlab.com/acme/platform/orbit-app-flow"
+      },
+      {
+        "url": "https://git.acme.internal:8443/knowledge/orbit-app-flow.git",
+        "identity": "git.acme.internal/knowledge/orbit-app-flow"
+      },
+      {
+        "url": "ssh://git@git.acme.internal:2222/knowledge/orbit-app-flow.git",
+        "identity": "git.acme.internal/knowledge/orbit-app-flow"
+      }
+    ]
+  }
+}

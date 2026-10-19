@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    // `Preserve` (implies moduleResolution: Bundler) — electron-vite bundles the
+    // main/preload, and Bundler resolution reads modern packages' `exports` maps.
+    // Classic `Node`/node10 resolution could not, so the editor showed phantom
+    // "Cannot find module" errors on exports-only deps (#37). Emit is unaffected
+    // (noEmit); ts-jest keeps CommonJS via tsconfig.test.json's override.
+    "module": "Preserve",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": ["src/shared/*"]
+    }
+  },
+  "include": [
+    "src/main/**/*",
+    "src/preload/**/*",
+    "src/shared/**/*",
+    "electron.vite.config.ts"
+  ],
+  "exclude": ["src/**/*.test.ts"]
+}

@@ -1,0 +1,202 @@
+name: E2E (Flow app)
+
+# Runs the Playwright + Electron E2E suite so autonomously-committed specs are
+# actually executed and bugs are caught before merge. Electron needs a display,
+# so the suite runs under xvfb on Linux.
+#
+# WHY IT IS SHARDED, AND WHY IT NO LONGER RUNS ON EVERY PUSH TO MAIN.
+#
+# This workflow had never once completed. Every run from 2026-10-09 onward — all
+# twelve of them, in both the private and the public repository — ended at
+# roughly 30m20s on `Run E2E under xvfb`, which is `timeout-minutes: 30`
+# expiring. GitHub reports a timed-out job as "cancelled" rather than "failed",
+# so twelve dead runs read as concurrency noise and nobody looked.
+#
+# The timeout was not marginally too small. The suite is ~1350 tests across
+# ~600 spec files and `playwright.config.ts` pins `workers: 1`, because Electron
+# tests share one OS-level app surface and cannot run concurrently on a machine.
+# Serial is therefore not a tunable here: the only way to buy wall-clock is more
+# MACHINES, which is what `--shard` does. Raising the timeout alone would have
+# bought a longer wait for the same expiry.
+#
+# `push: [main]` is gone. A gate that cannot finish is not a gate, and running
+# it on every push meant the repository's front page advertised a permanently
+# cancelled check. Pull requests (path-filtered) and `workflow_dispatch` remain,
+# so the suite still gates merges and can be run on demand against any ref.
+
+on:
+  pull_request:
+    paths:
+      - 'app/**'
+      - '.github/workflows/e2e.yml'
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: 'Machines to split the suite across'
+        default: '8'
+      only:
+        description: 'Run just this one shard (e.g. 3) — blank runs all of them'
+        default: ''
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The shard count is written ONCE and every later reference derives from it:
+  # the matrix that fans out, and the `--shard=i/N` denominator each runner
+  # passes. Written twice, a changed fan-out silently runs eight machines over
+  # four quarters of the suite and reports green on half of it.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      total: ${{ steps.plan.outputs.total }}
+    steps:
+      - id: plan
+        # `inputs.*` is empty for a pull_request, so the default lives here and
+        # nowhere else.
+        env:
+          SHARDS: ${{ inputs.shards }}
+          ONLY: ${{ inputs.only }}
+        run: |
+          set -euo pipefail
+          total="${SHARDS:-8}"
+          [ -n "$total" ] || total=8
+          case "$total" in ''|*[!0-9]*)
+            echo "e2e refused: shards must be a whole number — got '$total'" >&2; exit 1;;
+          esac
+          [ "$total" -ge 1 ] || { echo "e2e refused: shards must be at least 1" >&2; exit 1; }
+
+          if [ -n "${ONLY:-}" ]; then
+            case "$ONLY" in *[!0-9]*)
+              echo "e2e refused: only must be a whole number — got '$ONLY'" >&2; exit 1;;
+            esac
+            if [ "$ONLY" -lt 1 ] || [ "$ONLY" -gt "$total" ]; then
+              echo "e2e refused: only must be between 1 and $total — got '$ONLY'" >&2; exit 1
+            fi
+            shards="[$ONLY]"
+            echo "Running shard $ONLY of $total only."
+          else
+            # Built by hand rather than with `seq -s,`: BSD seq appends the
+            # separator AFTER the last number and GNU seq does not, so that
+            # spelling emits `[1,2,3,]` — invalid JSON — on a Mac and valid JSON
+            # on this runner. A line that only parses on the platform nobody
+            # edits it from is a line nobody can test before pushing it.
+            shards='['
+            n=1
+            while [ "$n" -le "$total" ]; do
+              [ "$n" -eq 1 ] || shards="$shards,"
+              shards="$shards$n"
+              n=$((n + 1))
+            done
+            shards="$shards]"
+            echo "Running all $total shards."
+          fi
+
+          echo "matrix={\"shard\":$shards}" >> "$GITHUB_OUTPUT"
+          echo "total=$total" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    needs: plan
+    runs-on: ubuntu-latest
+    # Generous ON PURPOSE. The suite's real per-shard cost has never been
+    # measured, because no run has ever reached the end of one. A timeout is a
+    # backstop against a hung Electron, not a budget: set it below the real cost
+    # and it becomes the thing that fails, which is the bug this file had.
+    timeout-minutes: 90
+    strategy:
+      # One shard's failures must not cancel the rest, or a single broken spec
+      # hides the state of the other seven eighths of the suite.
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # System libraries Electron 43 needs to launch a window on Linux.
+      - name: Install Electron runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+            libgbm1 libgtk-3-0 libasound2t64 libxkbcommon0 libxdamage1 \
+            libxrandr2 libxcomposite1 libxfixes3 libxext6 libx11-xcb1 \
+          || sudo apt-get install -y \
+            xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+            libgbm1 libgtk-3-0 libasound2 libxkbcommon0 libxdamage1 \
+            libxrandr2 libxcomposite1 libxfixes3 libxext6 libx11-xcb1
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Native modules (better-sqlite3) must match the Electron ABI.
+      - name: Rebuild native modules for Electron
+        run: npm run rebuild -w app
+
+      - name: Build the app
+        run: npm run build -w app
+
+      # `list` keeps the live log, so a shard that stalls shows WHERE; `blob` is
+      # the machine-readable half the report job merges. Dropping `list` for
+      # `blob` alone is how a timeout becomes opaque again.
+      - name: Run E2E under xvfb
+        run: >
+          xvfb-run -a --server-args="-screen 0 1280x1024x24"
+          npm run e2e:run -w app --
+          --shard=${{ matrix.shard }}/${{ needs.plan.outputs.total }}
+          --reporter=blob,list
+
+      # The name MUST carry the shard. `actions/upload-artifact@v4` refuses a
+      # second upload under a name that already exists, so one fixed name across
+      # a matrix means seven failed uploads and one report.
+      - name: Upload this shard's results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: blob-report-${{ matrix.shard }}
+          path: app/blob-report/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # One HTML report for the whole suite, merged from whatever shards produced a
+  # blob. `!cancelled()` rather than `success()`: the run everybody needs the
+  # report for is the one that failed.
+  report:
+    needs: [plan, e2e]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Collect every shard's results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: blob-report-*
+          merge-multiple: true
+          path: app/all-blob-reports
+
+      - name: Merge them into one report
+        working-directory: app
+        run: npx playwright merge-reports --reporter=html ./all-blob-reports
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: app/playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore

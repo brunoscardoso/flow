@@ -1,0 +1,45 @@
+{
+  "comment": "THE one alias-parity fixture: three .flowconfig shapes (old keys only, new keys only, both \u2014 in both orders) and the value every renamed key must read as. The CLI (src/cli/state/flowconfig-aliases.test.ts) and the app (app/src/main/flow/worktree-config-aliases.test.ts) both load this file and assert the same expected values, so the two readers cannot drift apart.",
+  "cases": [
+    {
+      "name": "old keys only",
+      "text": "workspace_start: trunk\nworkspace_cap: 4\nworkspace_setup: uv sync\nworkspace_setup_timeout_ms: 60000\n",
+      "expected": {
+        "worktree_start": "trunk",
+        "worktree_cap": "4",
+        "worktree_setup": "uv sync",
+        "worktree_setup_timeout_ms": "60000"
+      }
+    },
+    {
+      "name": "new keys only",
+      "text": "worktree_start: branch:release/2.0\nworktree_cap: 12\nworktree_setup: npm ci\nworktree_setup_timeout_ms: 90000\n",
+      "expected": {
+        "worktree_start": "branch:release/2.0",
+        "worktree_cap": "12",
+        "worktree_setup": "npm ci",
+        "worktree_setup_timeout_ms": "90000"
+      }
+    },
+    {
+      "name": "both present, old lines first",
+      "text": "workspace_start: trunk\nworkspace_cap: 4\nworkspace_setup: uv sync\nworkspace_setup_timeout_ms: 60000\nworktree_start: branch:release/2.0\nworktree_cap: 12\nworktree_setup: npm ci\nworktree_setup_timeout_ms: 90000\n",
+      "expected": {
+        "worktree_start": "trunk",
+        "worktree_cap": "4",
+        "worktree_setup": "uv sync",
+        "worktree_setup_timeout_ms": "60000"
+      }
+    },
+    {
+      "name": "both present, new lines first",
+      "text": "worktree_start: branch:release/2.0\nworktree_cap: 12\nworktree_setup: npm ci\nworktree_setup_timeout_ms: 90000\nworkspace_start: trunk\nworkspace_cap: 4\nworkspace_setup: uv sync\nworkspace_setup_timeout_ms: 60000\n",
+      "expected": {
+        "worktree_start": "trunk",
+        "worktree_cap": "4",
+        "worktree_setup": "uv sync",
+        "worktree_setup_timeout_ms": "60000"
+      }
+    }
+  ]
+}

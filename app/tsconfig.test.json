@@ -1,0 +1,14 @@
+{
+  "// why": "ts-jest config for *.test.ts — same compiler settings as the main process (tsconfig.node.json) plus jest globals. Production typecheck (tsconfig.node.json) excludes test files; this config re-includes them.",
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "types": ["node", "jest"],
+    // ts-jest transpiles per-file for Jest, which runs as CommonJS under
+    // Electron-as-Node — so pin CommonJS emit here rather than inherit the base
+    // config's `Preserve` (which would leave `import` syntax Jest can't run).
+    "module": "CommonJS",
+    "moduleResolution": "Node"
+  },
+  "include": ["src/main/**/*", "src/preload/**/*", "src/shared/**/*"],
+  "exclude": ["node_modules"]
+}

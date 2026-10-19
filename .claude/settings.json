@@ -1,0 +1,51 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "test -f .claude/hooks/cost-tracker.cjs && node .claude/hooks/cost-tracker.cjs || true",
+            "async": true
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "test -f .claude/hooks/cost-display.cjs && node .claude/hooks/cost-display.cjs || true"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "test -f .claude/hooks/suggest-compact.cjs && node .claude/hooks/suggest-compact.cjs || true"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "test -f .claude/hooks/pre-compact-save.cjs && node .claude/hooks/pre-compact-save.cjs || true"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "test -f .claude/hooks/session-summary.cjs && node .claude/hooks/session-summary.cjs || true"
+          }
+        ]
+      }
+    ]
+  }
+}

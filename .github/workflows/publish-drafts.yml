@@ -1,0 +1,42 @@
+# Scheduled draft publisher — releases go public at a FIXED neutral slot
+# (weekdays 12:00 UTC = 09:00 São Paulo), so the public timestamp reveals the
+# schedule, never working hours. `npm run ship -- --draft` leaves the release
+# as a draft; this flips the oldest draft, normalizes latest-mac.yml's
+# releaseDate to the slot, and republishes the feed file.
+#
+# This workflow used to live in the separate artifacts-only releases repo. It
+# moved here when the release feed was centralized into the source repo, and it
+# is deliberately repo-relative: GH_REPO is this repository, so it only ever
+# touches the releases of the repo it is checked out in.
+#
+# A FORK INHERITS THIS FILE AND THAT IS SAFE. GitHub does not run `schedule`
+# events in forks, and a fork that dispatches it by hand operates on its own
+# releases, never upstream's — the same reasoning as the placeholder publish
+# target in app/electron-builder.yml.
+name: publish-drafts
+on:
+  schedule:
+    - cron: '0 12 * * 1-5'
+  workflow_dispatch: {}
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish oldest draft at the slot
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          draft_tag=$(gh api "repos/$GH_REPO/releases" --jq '[.[] | select(.draft)] | sort_by(.created_at) | .[0].tag_name // empty')
+          if [ -z "$draft_tag" ]; then echo "no drafts pending"; exit 0; fi
+          echo "publishing $draft_tag"
+          gh release download "$draft_tag" -p 'latest-mac.yml' --clobber || true
+          if [ -f latest-mac.yml ]; then
+            slot=$(date -u +%Y-%m-%dT12:00:00.000Z)
+            sed -i "s/releaseDate: '.*'/releaseDate: '$slot'/" latest-mac.yml
+            gh release upload "$draft_tag" latest-mac.yml --clobber
+          fi
+          gh release edit "$draft_tag" --draft=false --latest

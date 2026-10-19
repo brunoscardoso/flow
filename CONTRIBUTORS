@@ -1,0 +1,11 @@
+# Contributors
+
+Plan-Flow is the work of more than one person. This file records who, by name
+only — no addresses, no affiliations — because the published history is a single
+squashed commit and would otherwise credit nobody.
+
+- Bruno Cardoso
+- Fábio da Silva Takaki
+
+Automation accounts that appear in the pre-publication history (`flow-qa`) are
+not listed: they are this project's own tooling, not people.

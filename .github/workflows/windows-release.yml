@@ -1,0 +1,132 @@
+name: Windows build
+
+# Builds the Windows x64 installer and portable exe, and attaches them to a
+# release. Runs automatically whenever a release is published, so the macOS
+# release and the Windows artifacts stop being two separate acts of memory.
+#
+# WHY THIS CANNOT BE BUILT ON THE MAC THAT CUTS THE RELEASE.
+#
+# `npm` installs only the HOST's optional platform package, so a machine
+# running macOS has no `@anthropic-ai/claude-agent-sdk-win32-x64` on disk and
+# `electron-builder --win` there packs a Windows app with no agent binary in
+# it. That is not hypothetical: v0.1.10's Windows installer shipped that way —
+# 124 MB instead of ~175 MB — and every chat in it failed with "Native CLI
+# binary for win32-x64 not found". `scripts/verify-agent-binary.mjs --target`
+# exists because of that incident. The only honest fix is to build Windows on
+# Windows, which is what this file does.
+#
+# NOTHING HERE TOUCHES THE UPDATE FEED. `electron-builder.yml` sets
+# `win.publish: null` so no Windows `latest.yml` is ever generated, and the
+# upload step below names its two files explicitly rather than globbing the
+# dist directory — a glob is how a stray yml ends up in the macOS feed and
+# starts answering for a platform it knows nothing about. Windows updates
+# remain a manual re-download; this workflow is about there being something to
+# download at all.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to attach to (e.g. v0.1.12) — blank builds without attaching'
+        default: ''
+
+# Only to attach assets to an existing release; this workflow never creates one.
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      # Build the tag's code, not whatever main happens to be. A release
+      # published from an older tag must produce that tag's Windows build.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # better-sqlite3 must match Electron's ABI, exactly as on macOS.
+      - name: Rebuild native modules for Electron
+        run: npm run rebuild -w app
+
+      # Runs verify-agent-binary --target win32-x64 on both sides of the build:
+      # once on the dev tree before packing, once on dist/win-unpacked after.
+      - name: Build the Windows artifacts
+        run: npm run package:win -w app
+
+      # The unpacked tree is not the installer. The agent-binary check above
+      # proves the binary reached dist/win-unpacked; this proves the payload
+      # electron-builder then assembled holds only what it may ship.
+      - name: Verify what the package contains
+        run: node app/scripts/verify-package-contents.mjs app/dist/win-unpacked
+
+      - name: Name and size the artifacts
+        id: art
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./app/package.json').version")"
+          setup="app/dist/Flow-${version}-x64-setup.exe"
+          portable="app/dist/Flow-${version}-x64-portable.exe"
+
+          for f in "$setup" "$portable"; do
+            [ -f "$f" ] || { echo "windows refused: $f was not built" >&2; exit 1; }
+          done
+
+          # A crude second net under the agent-binary check, aimed at the one
+          # failure that has actually happened: a build that packs everything
+          # EXCEPT the ~175 MB agent binary still succeeds, and the only visible
+          # difference is the installer's size. The bad v0.1.10 installer was
+          # 124 MB; a good one is ~175 MB. 150 MB sits between the two facts.
+          floor=$((150 * 1024 * 1024))
+          size=$(wc -c < "$setup")
+          if [ "$size" -lt "$floor" ]; then
+            echo "windows refused: the installer is $((size / 1048576)) MB, under the $((floor / 1048576)) MB floor —" >&2
+            echo "  this is what a build missing the agent binary looks like (v0.1.10 shipped at 124 MB)" >&2
+            exit 1
+          fi
+
+          echo "installer $((size / 1048576)) MB · portable $(( $(wc -c < "$portable") / 1048576 )) MB"
+          {
+            echo "version=$version"
+            echo "setup=$setup"
+            echo "portable=$portable"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload the artifacts to this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-${{ steps.art.outputs.version }}
+          path: |
+            ${{ steps.art.outputs.setup }}
+            ${{ steps.art.outputs.portable }}
+          retention-days: 14
+          if-no-files-found: error
+
+      # Named files only — never `app/dist/*`. See the header: a glob is how a
+      # Windows latest.yml reaches the macOS update feed.
+      - name: Attach them to the release
+        if: ${{ github.event.release.tag_name || inputs.tag }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" \
+            "${{ steps.art.outputs.setup }}" \
+            "${{ steps.art.outputs.portable }}" \
+            --clobber
+          echo "Attached the Windows x64 build to $TAG."

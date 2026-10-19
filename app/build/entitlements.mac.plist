@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <!--
+    Hardened-runtime entitlements for the signed release build (#auto-update).
+    The standard Electron set:
+      - allow-jit + allow-unsigned-executable-memory: V8 JIT pages
+      - disable-library-validation: native .node modules (better-sqlite3,
+        node-pty) are ad-hoc/third-party signed relative to our team
+    Used as both `entitlements` and `entitlementsInherit` so every nested
+    helper/binary (node-pty spawn-helper, bundled claude binary, CLI) inherits.
+  -->
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+  </dict>
+</plist>

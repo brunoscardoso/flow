@@ -1,0 +1,36 @@
+name: Feature request
+description: Something Flow should do, or do differently.
+title: "[Feature] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Issues are public.** Leave out API keys, private code and anything else you would not post openly.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you were trying to do, and what got in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: How it could work. A rough idea is fine.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today instead
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Flow version
+      placeholder: 0.1.10
+    validations:
+      required: false

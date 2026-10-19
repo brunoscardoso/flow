@@ -1,0 +1,21 @@
+{
+  "probe": "learn machinery",
+  "measurements": [
+    {
+      "name": "365 modules, end to end",
+      "ms": 6390,
+      "items": 365,
+      "note": "queue + transitions + events, model stubbed"
+    },
+    {
+      "name": "per module",
+      "ms": 17.51,
+      "note": "what the machinery costs each time, on the main process"
+    },
+    {
+      "name": "CPU spent",
+      "ms": 2189,
+      "note": "learning-state.jsonl: 365 lines, 30550 bytes"
+    }
+  ]
+}

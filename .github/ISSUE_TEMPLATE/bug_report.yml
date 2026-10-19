@@ -1,0 +1,79 @@
+name: Bug report
+description: Something in Flow is broken or behaves unexpectedly.
+title: "[Bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. A bug that can be reproduced is one that can be fixed.
+
+        **Issues are public.** Leave out API keys, private code, file contents and anything else you would not post openly.
+  - type: input
+    id: version
+    attributes:
+      label: Flow version
+      description: The version you are running, e.g. 0.1.10.
+      placeholder: 0.1.10
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS (Apple Silicon)
+        - Windows x64 — installer
+        - Windows x64 — portable
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: AI runtime
+      description: Which runtime the project uses, if the bug involves an agent.
+      options:
+        - Claude
+        - OpenAI Codex
+        - GitHub Copilot CLI
+        - Not related to a runtime
+    validations:
+      required: false
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Starting from a fresh launch if you can.
+      placeholder: |
+        1. Open a project
+        2. …
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+    validations:
+      required: true
+  - type: textarea
+    id: errors
+    attributes:
+      label: Error text or logs
+      description: Copied as text rather than a screenshot. Redact anything private.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: How often it happens, whether it started in a recent version, screenshots.
+    validations:
+      required: false

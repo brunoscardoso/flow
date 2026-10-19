@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Network probe</title>
+<body style="font:14px system-ui;padding:24px">
+<h1>Network probe</h1>
+<button id="go">Save template</button>
+<script>
+  console.log('loaded the templates page')
+  console.error('Validation failed\n  at validate (form.ts:42)\n  at submit (form.ts:88)')
+  document.getElementById('go').addEventListener('click', () => {
+    fetch('http://127.0.0.1:8099/api/templates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Request-Id': 'abc-123' },
+      body: JSON.stringify({ name: "O'Brien", kind: 'invoice' }),
+    }).catch(() => {})
+  })
+</script>
+</body>

@@ -1,0 +1,9 @@
+
+# Bundled planflow-ai CLI (built by scripts/build-cli-bundle.mjs)
+resources/cli/
+
+# Playwright E2E artifacts
+/test-results/
+/playwright-report/
+/blob-report/
+/.playwright/

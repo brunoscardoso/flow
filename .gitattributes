@@ -1,0 +1,5 @@
+# >>> plan-flow
+# Append-only knowledge stores: a merge must keep BOTH sides' entries, never
+# pick one. Identical entries are deduped when the store is read.
+flow/**/*.jsonl merge=union
+# <<< plan-flow

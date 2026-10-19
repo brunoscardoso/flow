@@ -1,0 +1,20 @@
+{
+  "probe": "agent turn",
+  "measurements": [
+    {
+      "name": "a 200-tool turn",
+      "ms": 33.18,
+      "items": 200,
+      "note": "9200 SDK messages"
+    },
+    {
+      "name": "per SDK message",
+      "ms": 0.0036,
+      "note": "main-process time, per streamed event"
+    },
+    {
+      "name": "1,000 text deltas",
+      "ms": 0.12
+    }
+  ]
+}

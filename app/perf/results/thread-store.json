@@ -1,0 +1,100 @@
+{
+  "probe": "thread store",
+  "measurements": [
+    {
+      "name": "threads:list (sidebar)",
+      "ms": 0.17,
+      "bytes": 72655,
+      "items": 201
+    },
+    {
+      "name": "threads:get (bounded)",
+      "ms": 0.02,
+      "bytes": 363
+    },
+    {
+      "name": "messages:list (all)",
+      "ms": 0.31,
+      "bytes": 226291,
+      "items": 1200,
+      "note": "what an unbounded read would cost"
+    },
+    {
+      "name": "messages:list (60)",
+      "ms": 0.03,
+      "bytes": 11371
+    },
+    {
+      "name": "toolCalls:list (unbounded)",
+      "ms": 1.79,
+      "bytes": 6817713,
+      "items": 600,
+      "note": "the 4.96 MB that started this"
+    },
+    {
+      "name": "toolCalls:list (bounded)",
+      "ms": 1.95,
+      "bytes": 849417,
+      "note": "what crosses IPC today"
+    },
+    {
+      "name": "sqlite: bounded in the query",
+      "ms": 1.38,
+      "bytes": 2397273,
+      "items": 600,
+      "note": "what main allocates to answer it"
+    },
+    {
+      "name": "toolCalls:get (one)",
+      "ms": 0.01,
+      "bytes": 8489,
+      "note": "what a card costs when the reader opens it"
+    },
+    {
+      "name": "sqlite: every row, every blob",
+      "ms": 1.38,
+      "bytes": 6821913,
+      "items": 600,
+      "note": "the read behind the bounded answer"
+    },
+    {
+      "name": "sqlite: outputs, no inputs",
+      "ms": 1.01,
+      "bytes": 5064121,
+      "items": 600,
+      "note": "how much of the read is the outputs"
+    },
+    {
+      "name": "sqlite: metadata only",
+      "ms": 0.23,
+      "bytes": 127921,
+      "items": 600,
+      "note": "the same rows without their outputs"
+    },
+    {
+      "name": "capture: every input (per turn)",
+      "ms": 0.39,
+      "bytes": 1769313,
+      "items": 600,
+      "note": "what the capture used to read on every successful turn"
+    },
+    {
+      "name": "capture: just the paths",
+      "ms": 0.54,
+      "bytes": 34353,
+      "items": 600,
+      "note": "what it reads now — the one field it looks at"
+    },
+    {
+      "name": "threads:search",
+      "ms": 0.56,
+      "bytes": 365
+    },
+    {
+      "name": "threads:search (fts, common word)",
+      "ms": 0.26,
+      "bytes": 2,
+      "note": "a word that hits every thread — the worst case for the index"
+    }
+  ]
+}

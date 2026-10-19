@@ -1,0 +1,360 @@
+/**
+ * Flow — design tokens (dark-first), VS Code Dark Modern-inspired.
+ *
+ * Personality: minimal, high-density, content-first, polished. NEUTRAL greys
+ * (no blue tint) with one restrained blue accent used only for focus / active
+ * / selection — the editor-tool look, not a washed-blue theme.
+ *
+ * Fonts are bundled (woff2, variable weight) so the strict CSP
+ * (font-src 'self' data:) never reaches out to a remote host. If a bundled
+ * font fails to load, the stacks below fall back to locally installed or
+ * system fonts.
+ */
+
+@font-face {
+  font-family: 'Inter Variable';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/inter-variable.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono Variable';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('./fonts/jetbrains-mono-variable.woff2') format('woff2');
+}
+
+:root {
+  color-scheme: dark;
+
+  /* ── Palette (neutral dark, VS Code Dark Modern) ──────────────────── */
+  /* PROJECT HUES — one per project, everywhere a project is named (the file
+     tree's bar, the switcher's folder, tabs, the Workspace map). Slot = the
+     project's position in its Workspace unless a person picked a colour. */
+  --fl-project-hue-0: #5AA8FF;
+  --fl-project-hue-1: #45C4B0;
+  --fl-project-hue-2: #A98BF5;
+  --fl-project-hue-3: #E0A458;
+  --fl-project-hue-4: #E07A9A;
+  --fl-project-hue-5: #7CC46A;
+  --fl-project-hue-6: #4FC3E0;
+  --fl-project-hue-7: #C9A27A;
+  --fl-color-bg: #181818;              /* chrome / sidebars / activity */
+  --fl-color-surface: #1f1f1f;         /* panels / editor */
+  --fl-color-surface-raised: #2a2a2b;  /* active tabs / cards / hover */
+  /*
+   * The row a list is ON — one step past hover, and neutral.
+   *
+   * A step rather than a colour because that is how Cursor's sidebar says
+   * it, and because an accent-tinted fill on a resting list reads as an
+   * alert: the sidebar's whole surface went blue for the one row a person
+   * happened to have open. Selection is not an event. It has to stay
+   * legible beside a hovered row without competing with anything.
+   */
+  --fl-color-surface-selected: #333336;
+  --fl-color-border: #2b2b2b;          /* object edges: cards, inputs, dialogs */
+  /*
+   * REGION boundaries — the seams between the titlebar, the sidebar, the chat,
+   * the editor, the terminal and the status bar. A separate token from
+   * --fl-color-border because the two want opposite things from the same
+   * ground: an object's edge is READ against the surface it sits on and wants
+   * to be lighter than it; a seam between two surfaces wants to disappear into
+   * the step between them.
+   *
+   * On this palette #2b2b2b was doing both, and as a seam it was LIGHTER than
+   * the surfaces on either side (#181818 chrome, #1f1f1f content) — a bright
+   * rule drawn over a boundary the fills already express. Darker than both, it
+   * reads as depth instead: the eye takes the fill step as the boundary and
+   * the seam as its shadow.
+   */
+  --fl-color-separator: #141414;
+  /*
+   * The window header. It used to BE --fl-color-bg, which is also the sidebar
+   * and the status bar, so the three ran together as one unbroken field once
+   * the rule between them came off. A band of its own is how Cursor separates
+   * the header — a fill, not a line — and it is the same move as every other
+   * seam here: say it with colour.
+   */
+  --fl-color-titlebar: #212122;
+  --fl-color-text: #cccccc;            /* text primary */
+  --fl-color-text-secondary: #9d9d9d;
+  --fl-color-accent: #3794ff;          /* restrained VS Code blue */
+  --fl-color-success: #89d185;
+  --fl-color-error: #f14c4c;
+  --fl-color-warning: #cca700;
+  --fl-color-danger: #d9534f;
+
+  /* Derived interaction tints — subtle blue for selection/focus only */
+  --fl-color-accent-muted: rgba(55, 148, 255, 0.16);
+  --fl-color-focus-ring: rgba(55, 148, 255, 0.6);
+
+  /* Commands and @-file mentions, wherever text is typed or read (the
+   * composer while typing, a sent message, a queued preview). A command wears
+   * the accent like the slash list does; a file is a quiet neutral grey so
+   * the two never look alike. The -soft grounds sit behind the run as a pill. */
+  --fl-color-accent-soft: rgba(55, 148, 255, 0.14);
+  --fl-color-mention: var(--fl-color-text-secondary);
+  --fl-color-mention-soft: rgba(255, 255, 255, 0.08);
+
+  /* ── Conflict two-side accents (conflict-UX Phase 4) ───────────────────
+   * A neutral pair for the two sides of a merge conflict (side A = the ours
+   * stage, side B = the theirs stage). Deliberately NOT success/error — those
+   * carry accept/reject meaning elsewhere. Teal vs mauve read as "two peers",
+   * not "good vs bad", and stay legible on the dark ground. */
+  --fl-color-conflict-side-a: #4ec9b0;
+  --fl-color-conflict-side-b: #c586c0;
+  --fl-color-conflict-side-a-bg: rgba(78, 201, 176, 0.14);
+  --fl-color-conflict-side-b-bg: rgba(197, 134, 192, 0.16);
+
+  /* ── Typography ───────────────────────────────────────────────────── */
+  --fl-font-ui: 'Inter Variable', 'Inter', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', sans-serif;
+  --fl-font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace,
+    'SF Mono', Menlo, Consolas, monospace;
+
+  --fl-text-ui-size: 13px;        /* UI chrome */
+  --fl-text-ui-weight: 400;
+  --fl-text-ui-weight-medium: 500;
+  --fl-text-prose-size: 14px;     /* chat prose */
+  --fl-text-mono-size: 13px;      /* editor / terminal / code */
+  --fl-text-caption-size: 11px;   /* captions */
+  --fl-line-height: 1.5;
+  --fl-line-height-dense: 1.35;
+
+  /* ── Spacing scale ────────────────────────────────────────────────── */
+  --fl-space-xs: 4px;
+  --fl-space-sm: 8px;
+  --fl-space-md: 12px;
+  --fl-space-lg: 16px;
+  --fl-space-xl: 24px;
+
+  /* ── Component metrics ────────────────────────────────────────────── */
+  /* The conversation's reading column: the message feed, the activity line
+     and the composer all cap and centre on this one track, so what you type
+     lines up with what you read (#1905). */
+  --fl-conv-column: 820px;
+  --fl-list-row-height: 28px;     /* dense lists */
+  --fl-tab-height: 32px;
+  --fl-border-width: 1px;
+  --fl-radius-sm: 4px;
+  /*
+   * A list row's highlight — the rounded pill a hovered or selected row
+   * paints, inset from the panel's edges rather than bled to them.
+   *
+   * Its own token because a row is neither a small control (sm reads as a
+   * square corner merely nicked, at this height) nor a block container
+   * (md is a chip). 6px on a 28px row is the curve Cursor's sidebar draws.
+   */
+  --fl-radius-row: 6px;
+  /* Block-level containers: cards, dialogs, menus, code blocks, chat bubbles.
+     6px on a container as wide as a chat message reads as a square corner with
+     the edge merely nicked — the radius has to grow with the box for the corner
+     to be seen as a curve at all. */
+  --fl-radius-md: 8px;
+  --fl-radius-lg: 12px;
+  --fl-split-handle-size: 5px;    /* hit area; visual line stays 1px */
+
+  /* ── Elevation ────────────────────────────────────────────────────── */
+  /* #1473: nine surfaces across the app already say `box-shadow:
+     var(--fl-shadow-md)` — the jump-to-latest pill, the reveal menu, the kanban
+     board, the terminal menu, the shell, the conversation pane, the image
+     viewer and the file tree — and the token was defined NOWHERE, so every one
+     of them resolved to nothing and floated with no elevation at all. Tuned for
+     the dark base; the light block below restates it. */
+  --fl-shadow-md: 0 4px 14px rgba(0, 0, 0, 0.45);
+
+  /* ── Motion ───────────────────────────────────────────────────────── */
+  --fl-transition-fast: 80ms ease-out;
+  --fl-transition-medium: 160ms ease-out;
+}
+
+/*
+ * ── Light theme (#399) ────────────────────────────────────────────────────
+ * Warm / soft light — warm off-white grounds and a warm near-black text, softer
+ * than a clinical VS Code Light. Only the COLOR tokens change; typography,
+ * spacing, metrics, and motion are shared. The controller (theme-controller.ts)
+ * stamps `<html data-theme="light">` BEFORE first paint (from the persisted mode,
+ * resolving 'system' against the OS), so there is no flash and no need for a
+ * prefers-color-scheme fallback — the base :root above is the Dark default.
+ * Monaco and xterm can't read these vars; they follow the same data-theme signal.
+ */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  /* Project hues, darkened for the light ground. */
+  --fl-project-hue-0: #2F6FB8;
+  --fl-project-hue-1: #1F8A78;
+  --fl-project-hue-2: #6E54C2;
+  --fl-project-hue-3: #A0661C;
+  --fl-project-hue-4: #B44A6E;
+  --fl-project-hue-5: #4A8A3A;
+  --fl-project-hue-6: #1C7F99;
+  --fl-project-hue-7: #8A6A44;
+  --fl-color-bg: #f2efe9;              /* chrome / sidebars / activity (warm grey) */
+  --fl-color-surface: #fdfbf7;         /* panels / editor (warm near-white) */
+  --fl-color-surface-raised: #e9e5dd;  /* active tabs / cards / hover */
+  --fl-color-surface-selected: #ded9cf;  /* the row the list is on */
+  --fl-color-border: #e2ddd3;          /* object edges: cards, inputs, dialogs */
+  /* Same rule as dark, same direction: a seam darker than both grounds. */
+  --fl-color-separator: #e4dfd5;
+  /* Same idea on paper, stepped the other way: on a light ground the header
+     reads as its own band by going slightly deeper, not lighter. */
+  --fl-color-titlebar: #e9e5dd;
+  /* A dark-ground shadow reads as soot on paper — same elevation, less ink. */
+  --fl-shadow-md: 0 4px 14px rgba(60, 50, 35, 0.18);
+  --fl-color-text: #37352f;            /* warm near-black */
+  --fl-color-text-secondary: #6b6659;  /* warm grey */
+  --fl-color-accent: #2f74c0;          /* deeper blue for contrast on light */
+  --fl-color-success: #2e8b57;
+  --fl-color-error: #d13438;
+  --fl-color-warning: #b58900;         /* warm amber */
+  --fl-color-danger: #c9302c;
+
+  --fl-color-accent-muted: rgba(47, 116, 192, 0.14);
+  --fl-color-focus-ring: rgba(47, 116, 192, 0.55);
+
+  --fl-color-accent-soft: rgba(47, 116, 192, 0.12);
+  --fl-color-mention: var(--fl-color-text-secondary);
+  --fl-color-mention-soft: rgba(55, 53, 47, 0.08);
+
+  /* Conflict two-side accents — deepened for contrast on the warm off-white. */
+  --fl-color-conflict-side-a: #0f7a70;
+  --fl-color-conflict-side-b: #9c4d94;
+  --fl-color-conflict-side-a-bg: rgba(15, 122, 112, 0.12);
+  --fl-color-conflict-side-b-bg: rgba(156, 77, 148, 0.12);
+}
+
+/* Scrollbar thumb: the default rgba grey is tuned for dark; darken it on light so
+ * it stays visible on the warm off-white ground.
+ *
+ * A VARIABLE, BECAUSE ::-webkit-scrollbar RULES DO NOT CROSS A SHADOW BOUNDARY.
+ * The rules below style every scroller in the document and reach none of the
+ * ones inside a component's shadow root — which is why <fl-list>, the app's own
+ * list, scrolled with the platform's default bar beside Flow's own everywhere
+ * else (user, 2026-09-18). Custom properties DO inherit through the boundary,
+ * so the colour is declared once here and the component restates the rules. */
+:root[data-theme='light'] {
+  --fl-scrollbar-thumb: rgba(90, 84, 74, 0.32);
+  --fl-scrollbar-thumb-hover: rgba(90, 84, 74, 0.5);
+}
+
+/* ── Base document styles ─────────────────────────────────────────────── */
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+body {
+  background-color: var(--fl-color-bg);
+  color: var(--fl-color-text);
+  font-family: var(--fl-font-ui);
+  font-size: var(--fl-text-ui-size);
+  font-weight: var(--fl-text-ui-weight);
+  line-height: var(--fl-line-height);
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/*
+ * The `hidden` attribute must always win. Many component styles set an explicit
+ * `display` (flex/inline-flex) on a class, which ties the UA `[hidden]{display:
+ * none}` on specificity and beats it by source order — leaving elements toggled
+ * via `.hidden = true` stuck visible (e.g. the "Thinking…" spinner, the empty
+ * "No terminals" hint). `!important` makes `hidden` authoritative everywhere.
+ */
+[hidden] {
+  display: none !important;
+}
+
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--fl-font-mono);
+  font-size: var(--fl-text-mono-size);
+}
+
+:focus-visible {
+  outline: 1px solid var(--fl-color-focus-ring);
+  outline-offset: -1px;
+}
+
+::selection {
+  background-color: var(--fl-color-accent-muted);
+}
+
+/* Stark scrollbars: thin, chromeless, visible on hover/scroll only */
+:root {
+  --fl-scrollbar-thumb: rgba(121, 121, 121, 0.35);
+  --fl-scrollbar-thumb-hover: rgba(121, 121, 121, 0.55);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--fl-scrollbar-thumb);
+  border-radius: 6px;
+  /* CLEAR OF BOTH ENDS. Without the inset the thumb runs flush into the top of
+     its container, and its rounded cap is cut off against the edge — which is
+     what reads as a hard corner where a list begins. The border is transparent
+     and clipped away, so the bar keeps its width and simply stops short. */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--fl-scrollbar-thumb-hover);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Monaco's collapsed-region control, in Flow's own hand.
+ *
+ * `hideUnchangedRegions` is on for every diff surface here — the Changes tab's
+ * inline diffs and the shared diff overlay — and it labels each collapsed band
+ * with a codicon `unfold` glyph: four arrows pointing out of a box. At the 12px
+ * these bands render at, it reads as a smudge rather than a control ("this icon
+ * is really bad"), and it sits directly beside the words "97 hidden lines",
+ * which already say what it does.
+ *
+ * One rule for every Monaco diff in the app rather than one per surface: the
+ * control means the same thing wherever it appears, and two surfaces drawing
+ * the same action differently is worse than one drawing it plainly.
+ *
+ * The glyph is replaced, not hidden — it is the click target that expands the
+ * band, and its `title` ("Show Unchanged Region") is the accessible name.
+ */
+.monaco-diff-editor .diff-hidden-lines .codicon-unfold::before {
+  content: '⋯';
+  font-family: var(--fl-font-ui, system-ui), sans-serif;
+  font-size: 15px;
+  line-height: 1;
+  letter-spacing: 0;
+}
+.monaco-diff-editor .diff-hidden-lines a {
+  opacity: 0.75;
+  transition: opacity 0.12s ease;
+}
+.monaco-diff-editor .diff-hidden-lines a:hover {
+  opacity: 1;
+}

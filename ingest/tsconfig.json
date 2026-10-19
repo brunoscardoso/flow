@@ -1,0 +1,18 @@
+{
+  "//": "SELF-CONTAINED ON PURPOSE. This extended ../tsconfig.json, which is not in the deployed tree — Vercel's Root Directory is `ingest`, so the parent is simply absent at build time. The compiler then lost `strict`, narrowing broke, and the build failed on code that typechecks perfectly at the repo root. A config that only resolves on a developer's machine is not a config.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "types": ["node", "jest"]
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"]
+}

@@ -1,0 +1,49 @@
+{
+  "probe": "blueprint read",
+  "measurements": [
+    {
+      "name": "read graph.json (fs)",
+      "ms": 0.4,
+      "note": "1187 KB on disk"
+    },
+    {
+      "name": "JSON.parse the graph",
+      "ms": 0.41
+    },
+    {
+      "name": "read annotations.jsonl",
+      "ms": 0.1,
+      "note": "123 KB"
+    },
+    {
+      "name": "read investigations.jsonl",
+      "ms": 0.15,
+      "note": "178 KB"
+    },
+    {
+      "name": "read file-tiers.json",
+      "ms": 0.16,
+      "note": "206 KB"
+    },
+    {
+      "name": "read learning-state.jsonl",
+      "ms": 0.02,
+      "note": "5 KB"
+    },
+    {
+      "name": "read proposals.jsonl",
+      "ms": 0.04,
+      "note": "36 KB"
+    },
+    {
+      "name": "read status-events.jsonl",
+      "ms": 0.02,
+      "note": "3 KB"
+    },
+    {
+      "name": "enrichCrossLinks 200×2000",
+      "ms": 13.51,
+      "note": "the federation evidence join"
+    }
+  ]
+}
