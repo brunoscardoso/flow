@@ -14,6 +14,7 @@ import {
   planCommandFor,
   planPhaseCount,
   planSlugOf,
+  planWrittenFromDocument,
   PLAN_CREATE_LABEL,
   PLAN_EXECUTE_LABEL,
   PLAN_REVIEW_LABEL,
@@ -735,6 +736,64 @@ describe('selectedDocOf — which document the row is about', () => {
   })
 })
 
+describe('planWrittenFromDocument — which document a plan was written from', () => {
+  const DISC_V1 = 'flow/discovery/discovery_widget_v1.md'
+  const DISC_V2 = 'flow/discovery/discovery_widget_v2.md'
+  const PLAN_V1 = 'flow/plans/plan_widget_v1.md'
+  const PLAN_V2 = 'flow/plans/plan_widget_v2.md'
+  const PLAN_V3 = 'flow/plans/plan_widget_v3.md'
+
+  // THE BUG. `deriveFeatureName` strips `_vN`, so both sides derived `widget`
+  // and the v1 plan answered for a v2 discovery nobody had planned — taking
+  // Create the plan off the v2 card.
+  it('a v1 plan was NOT written from a v2 discovery', () => {
+    // Positive first (allowed-pattern #28): the rule DOES answer true for the
+    // document that plan really came from…
+    expect(planWrittenFromDocument(DISC_V1, [PLAN_V1])).toBe(true)
+    // …so the false below is the version comparison, not a dead function.
+    expect(planWrittenFromDocument(DISC_V2, [PLAN_V1])).toBe(false)
+  })
+
+  it('a v2 discovery is answered by its own v2 plan', () => {
+    expect(planWrittenFromDocument(DISC_V2, [PLAN_V2])).toBe(true)
+  })
+
+  it('a v2 discovery is answered by a LATER plan, which supersedes it', () => {
+    expect(planWrittenFromDocument(DISC_V2, [PLAN_V3])).toBe(true)
+  })
+
+  it('a v1 discovery is answered by its v1 plan', () => {
+    expect(planWrittenFromDocument(DISC_V1, [PLAN_V1])).toBe(true)
+  })
+
+  it('an unversioned name reads as v1 on either side', () => {
+    expect(planWrittenFromDocument('flow/discovery/discovery_widget.md', ['flow/plans/plan_widget.md'])).toBe(true)
+    expect(planWrittenFromDocument('flow/discovery/discovery_widget.md', [PLAN_V1])).toBe(true)
+    expect(planWrittenFromDocument(DISC_V1, ['flow/plans/plan_widget.md'])).toBe(true)
+    // …and an unversioned plan is the FIRST version, so it never answers for v2.
+    expect(planWrittenFromDocument(DISC_V2, ['flow/plans/plan_widget.md'])).toBe(false)
+  })
+
+  it('finds the answering plan anywhere in the list', () => {
+    expect(planWrittenFromDocument(DISC_V2, [PLAN_V1, PLAN_V2])).toBe(true)
+    expect(planWrittenFromDocument(DISC_V2, [PLAN_V1, 'flow/plans/plan_other_v9.md'])).toBe(false)
+  })
+
+  it('another feature’s plan never answers, whatever its version', () => {
+    expect(planWrittenFromDocument(DISC_V1, ['flow/plans/plan_gadget_v1.md'])).toBe(false)
+    expect(planWrittenFromDocument(DISC_V1, ['flow/plans/plan_gadget_v9.md'])).toBe(false)
+  })
+
+  it('a path outside the naming convention is false on either side', () => {
+    expect(planWrittenFromDocument('flow/discovery/notes.md', [PLAN_V1])).toBe(false)
+    expect(planWrittenFromDocument(DISC_V1, ['flow/plans/notes.md'])).toBe(false)
+  })
+
+  it('no plans at all is false', () => {
+    expect(planWrittenFromDocument(DISC_V1, [])).toBe(false)
+  })
+})
+
 describe('artifactRowActions — the row follows the selected chip', () => {
   it('a discovery with no plan offers Create the plan, Open md file, the artifact door', () => {
     expect(
@@ -766,6 +825,134 @@ describe('artifactRowActions — the row follows the selected chip', () => {
 
   it('a brainstorm is unchanged — no next-step buttons', () => {
     expect(artifactRowActions({ selected: 'brainstorm', holds: ['brainstorm'], openDoc: false, artifact: false, notes: null })).toEqual([])
+  })
+
+  // THE V2 BUG, at the row. With `selectedPath` the row asks the DOCUMENT's
+  // question — is there a plan written from THIS version — instead of the
+  // feature's.
+  describe('a v2 discovery whose only plan is v1', () => {
+    const DISC_V2 = 'flow/discovery/discovery_widget_v2.md'
+    const DISC_V1 = 'flow/discovery/discovery_widget_v1.md'
+    const PLAN_V1 = 'flow/plans/plan_widget_v1.md'
+    const PLAN_V2 = 'flow/plans/plan_widget_v2.md'
+
+    it('offers Create the plan — the v1 plan was written from the v1 document', () => {
+      const row = artifactRowActions({
+        selected: 'discovery',
+        holds: ['discovery'],
+        openDoc: true,
+        artifact: true,
+        notes: null,
+        selectedPath: DISC_V2,
+        planPaths: [PLAN_V1],
+      })
+      expect(row).toEqual(['create-plan', 'open-doc', 'artifact'])
+    })
+
+    it('the v1 document in the same thread does NOT offer it', () => {
+      // Positive first (allowed-pattern #28): the v2 row above HAS the button,
+      // so its absence here is the version rule and not an empty row.
+      const row = artifactRowActions({
+        selected: 'discovery',
+        holds: ['discovery'],
+        openDoc: true,
+        artifact: true,
+        notes: null,
+        selectedPath: DISC_V1,
+        planPaths: [PLAN_V1],
+      })
+      expect(row).toEqual(['open-doc', 'artifact'])
+      expect(row).not.toContain('create-plan')
+    })
+
+    it('once the v2 document has its OWN plan, Create the plan is gone', () => {
+      const row = artifactRowActions({
+        selected: 'discovery',
+        holds: ['discovery'],
+        openDoc: true,
+        artifact: true,
+        notes: null,
+        selectedPath: DISC_V2,
+        planPaths: [PLAN_V1, PLAN_V2],
+      })
+      expect(row).toEqual(['open-doc', 'artifact'])
+      expect(row).not.toContain('create-plan')
+    })
+
+    it('a selected PLAN is unaffected by the document question', () => {
+      expect(
+        artifactRowActions({
+          selected: 'plan',
+          holds: ['discovery', 'plan'],
+          openDoc: true,
+          artifact: true,
+          notes: counts(),
+          selectedPath: PLAN_V1,
+          planPaths: [PLAN_V1],
+        }),
+      ).toEqual(['review-change', 'execute-plan', 'open-doc', 'artifact'])
+    })
+  })
+
+  // THE BACKWARD-COMPATIBILITY PROMISE: a caller that passes no `selectedPath`
+  // gets exactly the old `holds` question, with or without plan paths.
+  describe('without selectedPath — the old holds rule, unchanged', () => {
+    it('a discovery that holds no plan offers Create the plan', () => {
+      expect(
+        artifactRowActions({ selected: 'discovery', holds: ['discovery'], openDoc: true, artifact: true, notes: null }),
+      ).toEqual(['create-plan', 'open-doc', 'artifact'])
+    })
+
+    it('a discovery that holds a plan does not, even though no path was given', () => {
+      const row = artifactRowActions({
+        selected: 'discovery',
+        holds: ['discovery', 'plan'],
+        openDoc: true,
+        artifact: true,
+        notes: null,
+      })
+      expect(row).toEqual(['open-doc', 'artifact'])
+      expect(row).not.toContain('create-plan')
+    })
+
+    it('planPaths alone changes nothing — it is read only with selectedPath', () => {
+      expect(
+        artifactRowActions({
+          selected: 'discovery',
+          holds: ['discovery', 'plan'],
+          openDoc: true,
+          artifact: true,
+          notes: null,
+          planPaths: ['flow/plans/plan_widget_v2.md'],
+        }),
+      ).toEqual(['open-doc', 'artifact'])
+      expect(
+        artifactRowActions({
+          selected: 'discovery',
+          holds: ['discovery'],
+          openDoc: true,
+          artifact: true,
+          notes: null,
+          planPaths: ['flow/plans/plan_widget_v2.md'],
+        }),
+      ).toEqual(['create-plan', 'open-doc', 'artifact'])
+    })
+  })
+
+  // A `selectedPath` with no plans anywhere still offers the button, so the new
+  // branch cannot hide it by being taken.
+  it('a discovery with a path and no plans at all offers Create the plan', () => {
+    expect(
+      artifactRowActions({
+        selected: 'discovery',
+        holds: ['discovery'],
+        openDoc: true,
+        artifact: false,
+        notes: null,
+        selectedPath: 'flow/discovery/discovery_widget_v2.md',
+        planPaths: [],
+      }),
+    ).toEqual(['create-plan', 'open-doc'])
   })
 })
 

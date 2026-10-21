@@ -179,6 +179,115 @@ describe('UserDialogBroker', () => {
     })
   })
 
+  // The hang this fixes: main parks on `canUseTool` with NO timeout, so a
+  // question whose only copy was the renderer's in-memory queue became
+  // unrecoverable the moment that copy died (a reload, a window recreate).
+  // Measured live: a thread sat at `needs-decision` for 7h13m with nothing to
+  // click. `listPending` is what a rebuilt renderer reads back.
+  describe('listPending — what main still holds', () => {
+    const answer = [{ header: 'Insert sites', selected: ['One place'] }]
+
+    it('lists a parked question — as the SAME payload that was emitted', async () => {
+      const broker = new UserDialogBroker()
+      const req = capture(broker)
+      const pending = broker.askForToolInput('t1', TOOL_INPUT, new AbortController().signal)
+
+      const listed = broker.listPending('t1')
+      expect(listed).toHaveLength(1)
+      // Not merely equal: the object the renderer missed IS the object it reads
+      // back, so a re-drawn card carries the requestId `respond` answers to.
+      expect(listed[0]).toBe(req())
+      expect(listed[0]?.requestId).toBe(req().requestId)
+      expect(listed[0]?.threadId).toBe('t1')
+      expect(listed[0]?.questions).toEqual(req().questions)
+
+      broker.respond(req().requestId, answer)
+      await pending
+    })
+
+    it('stops listing a question once it is answered', async () => {
+      const broker = new UserDialogBroker()
+      const req = capture(broker)
+      const pending = broker.askForToolInput('t1', TOOL_INPUT, new AbortController().signal)
+      // Positive first (allowed-pattern #28): it WAS listed, and the answer
+      // reached a real parked dialog…
+      expect(broker.listPending('t1').map((r) => r.requestId)).toEqual([req().requestId])
+      expect(broker.respond(req().requestId, answer)).toBe(true)
+      await pending
+      // …so the empty list is evidence of the answer, not of an empty broker.
+      expect(broker.listPending('t1')).toEqual([])
+    })
+
+    it('stops listing a question once the user moves on and it is cancelled', async () => {
+      const broker = new UserDialogBroker()
+      const req = capture(broker)
+      const pending = broker.askForToolInput('t1', TOOL_INPUT, new AbortController().signal)
+      expect(broker.listPending('t1').map((r) => r.requestId)).toEqual([req().requestId])
+
+      broker.cancelThreadQuestions('t1')
+      expect(await pending).toBeNull()
+      expect(broker.listPending('t1')).toEqual([])
+    })
+
+    it('stops listing a question once its thread is disposed (session crash)', async () => {
+      const broker = new UserDialogBroker()
+      const req = capture(broker)
+      const pending = broker.askForToolInput('t1', TOOL_INPUT, new AbortController().signal)
+      expect(broker.listPending('t1').map((r) => r.requestId)).toEqual([req().requestId])
+
+      broker.disposeThread('t1')
+      expect(await pending).toBeNull()
+      expect(broker.listPending('t1')).toEqual([])
+    })
+
+    it('keeps two threads apart — neither leaks into the other', async () => {
+      const broker = new UserDialogBroker()
+      const a = capture(broker)
+      const pendingA = broker.askForToolInput('tA', TOOL_INPUT, new AbortController().signal)
+      a() // force-capture A before B overwrites the once-listener
+      const b = capture(broker)
+      const pendingB = broker.askForToolInput('tB', TOOL_INPUT, new AbortController().signal)
+
+      expect(broker.listPending('tA').map((r) => r.requestId)).toEqual([a().requestId])
+      expect(broker.listPending('tB').map((r) => r.requestId)).toEqual([b().requestId])
+      expect(broker.listPending('tC')).toEqual([])
+
+      // Answering tA leaves tB listed — a re-sync of one thread cannot clear another.
+      expect(broker.respond(a().requestId, answer)).toBe(true)
+      await pendingA
+      expect(broker.listPending('tA')).toEqual([])
+      expect(broker.listPending('tB').map((r) => r.requestId)).toEqual([b().requestId])
+
+      broker.respond(b().requestId, answer)
+      await pendingB
+    })
+
+    it('lists every question a thread has parked, in park order', async () => {
+      const broker = new UserDialogBroker()
+      const first = capture(broker)
+      const pendingFirst = broker.askForToolInput('t1', TOOL_INPUT, new AbortController().signal)
+      first()
+      const second = capture(broker)
+      const pendingSecond = broker.askForToolInput('t1', TOOL_INPUT, new AbortController().signal)
+
+      expect(broker.listPending('t1').map((r) => r.requestId)).toEqual([
+        first().requestId,
+        second().requestId,
+      ])
+      // The count the status gate reads agrees with the list the renderer reads.
+      expect(broker.pendingDialogs('t1')).toBe(2)
+
+      broker.respond(first().requestId, answer)
+      broker.respond(second().requestId, answer)
+      await Promise.all([pendingFirst, pendingSecond])
+    })
+
+    it('lists nothing for a thread that never asked', () => {
+      const broker = new UserDialogBroker()
+      expect(broker.listPending('never-asked')).toEqual([])
+    })
+  })
+
   describe('createOnUserDialog (fallback)', () => {
     it('resolves an allow result carrying the answers on updatedInput', async () => {
       const broker = new UserDialogBroker()

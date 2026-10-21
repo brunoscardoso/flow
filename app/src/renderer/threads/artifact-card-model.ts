@@ -156,6 +156,36 @@ export function deriveStoryStatus(
   return sameDocPath(source, path) ? 'compiled' : 'uncompiled'
 }
 
+/** The `_vN` of a doc filename as a number; an unversioned name reads as 1, the first version. */
+function docVersionNumber(path: string): number {
+  const match = /_v(\d+)(?:\.md|\.walkthrough\.html)?$/i.exec(path.replace(/^.*[\\/]/, ''))
+  return match === null ? 1 : Number(match[1])
+}
+
+/**
+ * Whether a plan was written from THIS discovery document. `deriveFeatureName`
+ * strips `_vN`, so `plan_x_v1` and `discovery_x_v2` both derive `x`; deciding
+ * "has a plan" on the feature alone lets a v1 plan answer for a v2 discovery
+ * that nobody has planned yet, and hides Create the plan.
+ *
+ * A plan is written from a discovery when it belongs to the same feature AND
+ * its version is not older than the discovery's (a v2 plan follows v2, and a
+ * later plan supersedes it). An older plan was written from an older document,
+ * so it never answers. An absent `_vN` reads as v1 on either side, the first
+ * version, so `plan_x.md` answers for `discovery_x.md` and `discovery_x_v1.md`
+ * but not for `discovery_x_v2.md`. A path outside the naming convention has no
+ * feature and matches nothing. The feature is the coarse filter, the version
+ * is the identity, as in `storyHostIndex`.
+ */
+export function planWrittenFromDocument(discoveryPath: string, planPaths: readonly string[]): boolean {
+  const feature = deriveFeatureName(discoveryPath)
+  if (feature === null) return false
+  const discoveryVersion = docVersionNumber(discoveryPath)
+  return planPaths.some(
+    (planPath) => deriveFeatureName(planPath) === feature && docVersionNumber(planPath) >= discoveryVersion,
+  )
+}
+
 /**
  * Map a story status to the card's narrate action — PLANS ONLY. Narration is
  * the plan-review surface; discovery and brainstorm docs are working notes, so
@@ -678,6 +708,18 @@ export interface ArtifactRowInput {
   artifact: boolean
   /** The selected plan's note counts, or null while unknown / unreadable. */
   notes: PlanNoteCounts | null
+  /**
+   * The selected document's path. With it, the row rule can ask whether the card
+   * holds a plan written from THIS document (`planWrittenFromDocument`) rather
+   * than any plan of the feature, which a v1 plan would satisfy for a v2
+   * discovery. Absent keeps the old question, "holds a plan".
+   */
+  selectedPath?: string
+  /**
+   * Every plan path the card holds or its thread knows. Read only with
+   * `selectedPath`; absent counts as none.
+   */
+  planPaths?: readonly string[]
 }
 
 /**
@@ -685,9 +727,10 @@ export interface ArtifactRowInput {
  *
  *   - a PLAN: Review the change (only when it carries notes — there is
  *     nothing to review in a plan without them), Execute the plan, Open md file.
- *   - a DISCOVERY: Create the plan while the card holds no plan (once it does,
- *     the Plan chip already says so and the button is gone), Open md file, the
- *     artifact door.
+ *   - a DISCOVERY: Create the plan, unless a plan written from the SELECTED
+ *     document exists (`planWrittenFromDocument` — a v1 plan does not hide it on
+ *     a v2 discovery); without `selectedPath`, unless the card holds any plan at
+ *     all. Then Open md file, then the artifact door.
  *   - a brainstorm: whatever it had (Open md file / artifact rules decide).
  */
 export function artifactRowActions(input: ArtifactRowInput): ArtifactRowAction[] {
@@ -701,7 +744,13 @@ export function artifactRowActions(input: ArtifactRowInput): ArtifactRowAction[]
     return row
   }
   const row: ArtifactRowAction[] = []
-  if (input.selected === 'discovery' && !input.holds.includes('plan')) row.push('create-plan')
+  if (input.selected === 'discovery') {
+    const planWritten =
+      input.selectedPath !== undefined
+        ? planWrittenFromDocument(input.selectedPath, input.planPaths ?? [])
+        : input.holds.includes('plan')
+    if (!planWritten) row.push('create-plan')
+  }
   if (input.openDoc) row.push('open-doc')
   if (input.selected === 'discovery' && input.artifact) row.push('artifact')
   return row

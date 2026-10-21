@@ -5399,6 +5399,13 @@ export interface IpcInvokeMap {
     request: { threadId: string }
     response: PermissionRequest[]
   }
+  /** AskUserQuestion dialogs still parked in main for a thread — the same
+   *  re-sync as pendingPermissions, so a question card can be REBUILT after a
+   *  thread switch, a background arrival, or a renderer reload. */
+  'threads:pendingDialogs': {
+    request: { threadId: string }
+    response: UserQuestionRequest[]
+  }
   /** Answer an AskUserQuestion dialog the agent raised (onUserDialog bridge). */
   'threads:respondDialog': {
     request: { requestId: string; answers: UserQuestionAnswer[] }
@@ -7558,6 +7565,7 @@ export const IPC_INVOKE_CHANNELS = [
   'threads:contextUsage',
   'threads:respondPermission',
   'threads:pendingPermissions',
+  'threads:pendingDialogs',
   'threads:respondDialog',
   'threads:importClaude',
   'threads:brainSavings',
@@ -7971,6 +7979,9 @@ export interface FlowThreadsApi {
   pendingPermissions(
     request: IpcRequest<'threads:pendingPermissions'>,
   ): Promise<IpcResponse<'threads:pendingPermissions'>>
+  pendingDialogs(
+    request: IpcRequest<'threads:pendingDialogs'>,
+  ): Promise<IpcResponse<'threads:pendingDialogs'>>
   respondDialog(request: IpcRequest<'threads:respondDialog'>): Promise<void>
   importClaude(
     request: IpcRequest<'threads:importClaude'>,

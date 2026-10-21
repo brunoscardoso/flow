@@ -1218,6 +1218,11 @@ export class AgentManager extends EventEmitter {
     return this.permissions.listPending().filter((request) => request.threadId === threadId)
   }
 
+  /** Questions parked in the dialog broker for a thread (re-sync after a reload). */
+  parkedQuestions(threadId: string): UserQuestionRequest[] {
+    return this.dialogs.listPending(threadId)
+  }
+
   /**
    * Renderer answers for a pending AskUserQuestion dialog. Returns `false` when
    * the dialog is no longer pending (session crashed/disposed, #290), so the IPC

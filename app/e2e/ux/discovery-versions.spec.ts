@@ -136,3 +136,79 @@ test('each discovery version is its own card at its own position; a plan joins t
   await window.screenshot({ path: 'e2e/ux/__screens/discovery-versions.png' })
   expect(errors, `uncaught errors:\n${errors.join('\n')}`).toEqual([])
 })
+
+
+/**
+ * A v2 DISCOVERY KEEPS ITS "Create the plan" BUTTON while the only plan in the
+ * thread was written from v1.
+ *
+ * `deriveFeatureName` strips `_vN`, so `plan_widget_v1.md` and
+ * `discovery_widget_v2.md` both derive `widget`. The suppressor compared those
+ * stripped names, so the v1 plan answered for a v2 discovery nobody had planned
+ * and the button was gone — the only way forward was to type the command by
+ * hand. The row now asks the DOCUMENT's question (`planWrittenFromDocument`):
+ * same feature AND a plan version not older than the discovery's.
+ *
+ * Fails before the fix: both discovery cards had `create-plan` suppressed, so
+ * the v2 card below carried Open md file and Open artifact and nothing else.
+ */
+test('a v2 discovery still offers Create the plan while only a v1 plan exists', async ({ window }) => {
+  const errors: string[] = []
+  window.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`))
+
+  const SLUG2 = 'gizmo'
+  const D1 = `flow/discovery/discovery_${SLUG2}_v1.md`
+  const D2 = `flow/discovery/discovery_${SLUG2}_v2.md`
+  const P1 = `flow/plans/plan_${SLUG2}_v1.md`
+
+  const root = await seedProject(window, 'flow-ux-v2-create-plan-', (dir) => {
+    mkdirSync(join(dir, 'flow', 'discovery'), { recursive: true })
+    mkdirSync(join(dir, 'flow', 'plans'), { recursive: true })
+    writeFileSync(join(dir, D1), '# Gizmo discovery one\n\nFirst pass.\n')
+    writeFileSync(join(dir, D2), '# Gizmo discovery two\n\nSecond pass.\n')
+    writeFileSync(join(dir, P1), '# Gizmo plan\n\nBuild the first pass.\n')
+  })
+  await activateProject(window, root)
+
+  const thread = await api<{ id: string }>(window, 'threads.create', { projectRoot: root, title: 'Replan thread' })
+  const append = (role: string, content: string): Promise<unknown> =>
+    api(window, 'messages.append', { threadId: thread.id, role, content })
+  await append('user', 'write the discovery')
+  await append('system', `[artifact] discovery ${D1}`)
+  await append('user', 'now plan it')
+  await append('system', `[artifact] plan ${P1}`)
+  await append('user', 'the discovery needs another pass')
+  await append('system', `[artifact] discovery ${D2}`)
+  await append('user', 'done')
+
+  await window.getByText('Replan thread', { exact: true }).first().click()
+  await expect(window.locator(sel.conversation)).toBeVisible()
+  await expect(window.getByText('done', { exact: true })).toBeVisible()
+
+  const d1Card = window.locator(`.fl-artifact-card[data-doc-path="${D1}"]`)
+  const d2Card = window.locator(`.fl-artifact-card[data-doc-path="${D2}"]`)
+  const planCard = window.locator(`.fl-artifact-card[data-doc-path="${P1}"]`)
+
+  // THE ALTERNATIVE WAS REACHABLE (allowed-pattern #28). All three documents
+  // have their card, the thread really does hold a v1 plan, and the v1
+  // discovery's row really is built — so neither absence below is an absent
+  // card or an unbuilt row.
+  await expect(window.locator('.fl-artifact-card')).toHaveCount(3)
+  await expect(planCard.locator('.fl-artifact-eyebrow')).toHaveText('PLAN')
+  await expect(d2Card.locator('.fl-artifact-sub')).toContainText(`${SLUG2} · v2`)
+  await expect(d1Card.getByRole('button', { name: 'Open md file' })).toBeVisible()
+
+  // THE FIX: the v2 document has no plan of its own, so it can still be planned.
+  const create = d2Card.getByRole('button', { name: 'Create the plan' })
+  await expect(create).toBeVisible()
+  await expect(create).toBeEnabled()
+
+  // …and the v1 document, which that plan WAS written from, does not offer it.
+  await expect(d1Card.getByRole('button', { name: 'Create the plan' })).toHaveCount(0)
+  // Nor does the plan card itself (it executes, it does not re-plan).
+  await expect(planCard.getByRole('button', { name: 'Execute the plan' })).toBeVisible()
+  await expect(planCard.getByRole('button', { name: 'Create the plan' })).toHaveCount(0)
+
+  await window.screenshot({ path: 'e2e/ux/__screens/discovery-v2-create-plan.png' })
+  expect(errors, `uncaught errors:\n${errors.join('\n')}`).toEqual([])
+})

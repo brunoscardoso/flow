@@ -1,4 +1,4 @@
-import { test, expect, type ElectronApplication } from '../fixtures/electron'
+import { test, expect, dismissOnboarding, type ElectronApplication } from '../fixtures/electron'
 import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import type { Page } from '@playwright/test'
@@ -415,4 +415,182 @@ test('the recommendation reads as a badge, and the answer keeps the label it was
   ])
 
   expect(errors).toEqual([])
+})
+
+
+/**
+ * A PARKED QUESTION SURVIVES THE RENDERER LOSING ITS COPY (the 7h13m hang).
+ *
+ * Main parks the agent's `canUseTool` on a promise with NO timeout — that is
+ * deliberate; a question answers whenever the person gets to it. The only copy
+ * of that question, though, was the renderer's in-memory `QuestionQueue`. A
+ * View ▸ Reload (⌘R), a window recreate, a renderer crash — any of them threw
+ * the card away while main kept waiting. Measured on a real thread: it sat at
+ * `needs-decision` for 7 hours 13 minutes with nothing on screen to click and
+ * no way to reach the parked call.
+ *
+ * The fix is a re-sync: the rebuilt pane asks main what it still holds
+ * (`threads:pendingDialogs` → `AgentManager.parkedQuestions` →
+ * `UserDialogBroker.listPending`) and re-draws every question through the same
+ * never-drop queue, so a live event cannot double-draw it.
+ *
+ * WHAT IS REAL HERE AND WHAT STANDS IN. Real: the card, the queue, the reload,
+ * the rebuilt pane's re-sync, the answer's trip across IPC, and a genuine
+ * parked promise in MAIN that only the answer resolves. Stood in: the two main
+ * handlers, because the broker is only reachable through `canUseTool` —
+ * AskUserQuestion is raised by a model, and a hidden run reaches no model (the
+ * runtime seam never wires `canUseTool`). The main side those stand-ins cover
+ * is pinned where a real question CAN be parked: `dialogs.test.ts`
+ * (`listPending` — what it lists, what it stops listing, two threads kept
+ * apart) and `agent-manager.test.ts` (`parkedQuestions`, through the genuine
+ * `canUseTool` channel).
+ *
+ * Fails before the fix at "the card is back": the rebuilt pane never asked
+ * main, so the feed came back with the question gone and the parked promise
+ * unreachable.
+ */
+
+interface ParkedState {
+  answers: unknown
+  resolved: boolean
+  listCalls: string[]
+}
+
+/**
+ * Park a question in MAIN: a promise nothing but the answer resolves, plus
+ * stand-ins for the two channels the re-sync and the answer travel on.
+ */
+async function parkQuestionInMain(
+  app: ElectronApplication,
+  request: { requestId: string; threadId: string; questions: unknown[] },
+): Promise<void> {
+  await app.evaluate(({ ipcMain }, req) => {
+    const g = globalThis as unknown as {
+      __parkedQuestions?: { requestId: string; threadId: string }[]
+      __parkedState?: { answers: unknown; resolved: boolean; listCalls: string[] }
+      __resolveParked?: (answers: unknown) => void
+    }
+    g.__parkedQuestions = [req]
+    g.__parkedState = { answers: null, resolved: false, listCalls: [] }
+    // The agent's call, parked exactly as `canUseTool` leaves it: no timeout,
+    // no default, nothing but an answer finishes it.
+    void new Promise<unknown>((resolve) => {
+      g.__resolveParked = resolve
+    }).then((answers) => {
+      if (g.__parkedState) {
+        g.__parkedState.answers = answers
+        g.__parkedState.resolved = true
+      }
+    })
+    ipcMain.removeHandler('threads:pendingDialogs')
+    ipcMain.handle('threads:pendingDialogs', (_event, payload: unknown) => {
+      const threadId = (payload as { threadId: string }).threadId
+      g.__parkedState?.listCalls.push(threadId)
+      return (g.__parkedQuestions ?? []).filter((parked) => parked.threadId === threadId)
+    })
+    ipcMain.removeHandler('threads:respondDialog')
+    ipcMain.handle('threads:respondDialog', (_event, payload: unknown) => {
+      const { requestId, answers } = payload as { requestId: string; answers: unknown }
+      const parked = g.__parkedQuestions ?? []
+      // The real miss path (#290): no parked dialog → the renderer must say so,
+      // never flip to a lying "Answered".
+      if (!parked.some((p) => p.requestId === requestId)) throw new Error('no parked dialog')
+      g.__parkedQuestions = parked.filter((p) => p.requestId !== requestId)
+      g.__resolveParked?.(answers)
+    })
+  }, request)
+}
+
+const parkedState = (app: ElectronApplication): Promise<ParkedState> =>
+  app.evaluate(
+    () =>
+      (globalThis as unknown as { __parkedState: ParkedState }).__parkedState,
+  ) as Promise<ParkedState>
+
+/** Exactly what View ▸ Reload (⌘R) invokes — the renderer is rebuilt from zero. */
+async function reloadRenderer(app: ElectronApplication, window: Page): Promise<void> {
+  await app.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0]?.webContents.reload()
+  })
+  await window.waitForLoadState('domcontentloaded')
+  await expect(window.locator(sel.flowLine)).toBeVisible({ timeout: 30_000 })
+  // The rebuilt renderer re-runs first-run onboarding (this userData dir has no
+  // Claude account) and its overlay would swallow every click below. Harness
+  // bookkeeping, not the behaviour under test.
+  const overlay = window.locator('.fl-settings-overlay:not([hidden])')
+  await overlay
+    .first()
+    .waitFor({ state: 'attached', timeout: 5_000 })
+    .catch(() => undefined)
+  await dismissOnboarding(window)
+  for (let attempt = 0; attempt < 5 && (await overlay.count()) > 0; attempt++) {
+    await window.keyboard.press('Escape')
+    await window.waitForTimeout(150)
+  }
+  await expect(overlay).toHaveCount(0)
+}
+
+test('a parked question comes back after View ▸ Reload, and answering it un-parks the agent', async ({
+  window,
+  app,
+}) => {
+  const errors: string[] = []
+  window.on('pageerror', (e) => errors.push(e.message))
+
+  const dir = await seedProject(window, 'flow-ux-ask-reload-', undefined, { onboarded: true })
+  await activateProject(window, dir)
+  const threadId = await createThread(window, dir, 'Parked Thread')
+  await appendMessage(window, threadId, 'user', 'Plan the rollout.')
+  await openThread(window, 'Parked Thread')
+
+  const requestId = 'ask-reload-1'
+  await parkQuestionInMain(app, { requestId, threadId, questions: rolloutQuestions })
+  await emitDialog(app, { requestId, threadId, questions: rolloutQuestions })
+
+  // IT IS REALLY PARKED (allowed-pattern #28). The card is on screen, it is
+  // the agent's question, it is answerable — and main is still waiting on it.
+  await expect(card(window)).toHaveCount(1)
+  await expect(card(window).locator('.fl-qcard-q').nth(0)).toContainText(
+    'Which rollout strategy should I use?',
+  )
+  await expect(card(window).locator('.fl-qcard-pager-label')).toHaveText('1 of 2')
+  expect((await parkedState(app)).resolved, 'the agent is parked, not answered').toBe(false)
+
+  // THE RENDERER LOSES ITS ONLY COPY — the real seam, not a simulated one.
+  await reloadRenderer(app, window)
+  await openThread(window, 'Parked Thread')
+
+  // THE FIX: the rebuilt pane asked main what it still holds, and the card is
+  // back — with its questions, not a husk.
+  await expect(card(window)).toHaveCount(1, { timeout: 15_000 })
+  await expect(card(window).locator('.fl-qcard-q').nth(0)).toContainText(
+    'Which rollout strategy should I use?',
+  )
+  await expect(card(window).locator('.fl-qcard-pager-label')).toHaveText('1 of 2')
+  // It was ASKED FOR, for this thread — the card is a re-sync, not a leftover.
+  expect((await parkedState(app)).listCalls).toContain(threadId)
+  // One card, not two: the re-sync goes through the never-drop queue, so a
+  // question the live event also delivered is never drawn twice.
+  await expect(card(window).locator('.fl-qcard-q')).toHaveCount(2)
+
+  // AND IT STILL ANSWERS THE PARKED CALL.
+  const q = card(window).locator('.fl-qcard-q')
+  await q.nth(0).locator('.fl-qcard-option').nth(0).click()
+  await expect(card(window).locator('.fl-qcard-pager-label')).toHaveText('2 of 2')
+  await q.nth(1).locator('.fl-qcard-option').nth(1).click()
+  const submit = card(window).locator('.fl-qcard-submit').first()
+  await expect(submit).toBeEnabled()
+  await submit.click()
+  await expect(submit).toHaveText('Answered')
+
+  await expect
+    .poll(async () => (await parkedState(app)).resolved, { timeout: 10_000 })
+    .toBe(true)
+  expect((await parkedState(app)).answers).toEqual([
+    { header: 'Rollout', selected: ['Canary'] },
+    { header: 'Environments', selected: ['Production'] },
+  ])
+
+  await window.screenshot({ path: `${SCREENS}/qcard-05-recovered-after-reload.png` })
+  expect(errors, errors.join(', ')).toHaveLength(0)
 })

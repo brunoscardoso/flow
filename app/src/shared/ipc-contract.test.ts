@@ -45,6 +45,7 @@ const INVOKE_MAP_KEYS: Record<IpcInvokeChannel, true> = {
   'threads:contextUsage': true,
   'threads:respondPermission': true,
   'threads:pendingPermissions': true,
+  'threads:pendingDialogs': true,
   'threads:respondDialog': true,
   'threads:importClaude': true,
   'threads:brainSavings': true,

@@ -83,9 +83,10 @@ export interface ArtifactCardCallbacks {
   /** The card holds this plan now — the pane answers with `setPlanNotes` /
    *  `setRunning` (from what it already knows, or after reading it once). */
   onPlanDoc?: (card: ArtifactCard, planPath: string) => void
-  /** Whether a plan for this feature has been written (it has its own card, so
-   *  the discovery's card cannot see it) — Create the plan is then not offered. */
-  planWrittenFor?: (feature: string | null) => boolean
+  /** Every plan path the thread knows (a plan has its own card, so the
+   *  discovery's card cannot see it). The row asks `planWrittenFromDocument`
+   *  of the selected document against these and its own plans. */
+  knownPlanPaths?: () => readonly string[]
 }
 
 /** What the pane knows about a plan the card holds. */
@@ -434,9 +435,13 @@ export class ArtifactCard {
     const feature = this.#model.featureViewAction
     const row = artifactRowActions({
       selected: selected.kind,
-      holds: [
-        ...this.#docRefs.map((doc) => doc.kind),
-        ...(this.#callbacks.planWrittenFor?.(this.#model.feature) === true ? (['plan'] as const) : []),
+      holds: this.#docRefs.map((doc) => doc.kind),
+      // The document-level question: a plan written from THIS document, not any
+      // plan of the feature (a v1 plan does not answer for a v2 discovery).
+      selectedPath: selected.path,
+      planPaths: [
+        ...this.#docRefs.filter((doc) => doc.kind === 'plan').map((doc) => doc.path),
+        ...(this.#callbacks.knownPlanPaths?.() ?? []),
       ],
       openDoc: showsOpenDocButton(this.#model) || (selected.kind === 'plan' && this.#model.feature !== null),
       artifact: feature !== null,

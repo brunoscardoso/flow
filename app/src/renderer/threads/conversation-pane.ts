@@ -53,7 +53,7 @@ import {
   artifactCommandFor,
   artifactRenderDecision,
   buildArtifactModel,
-  deriveFeatureName,
+  planWrittenFromDocument,
   deriveFeatureViewAction,
   executeCommandFor,
   foldHostIndex,
@@ -1227,9 +1227,35 @@ export class ConversationPane {
   }
 
   /** Render any questions that arrived for `threadId` while it was inactive or
-   *  loading (so the agent un-parks when the user returns to the thread). */
+   *  loading (so the agent un-parks when the user returns to the thread), then
+   *  ask main what it still holds — the pane's buffer is the only copy otherwise,
+   *  and a renderer that lost it (reload, recreate) would leave the agent parked
+   *  forever with no card to answer. */
   #flushPendingQuestions(threadId: string): void {
     for (const request of this.#questionQueue.flush(threadId)) this.#renderQuestionCard(request)
+    void this.#syncBrokerQuestions(threadId)
+  }
+
+  /** Fetch the broker's still-parked questions for `threadId` and render any the
+   *  pane doesn't already show. Fail-soft — a fetch error just means the live
+   *  event path is the only source. Every request goes through the queue so a
+   *  question the live event already delivered is never drawn twice. */
+  async #syncBrokerQuestions(threadId: string): Promise<void> {
+    let parked: UserQuestionRequest[]
+    try {
+      parked = await window.flow.threads.pendingDialogs({ threadId })
+    } catch (error) {
+      console.warn('flow: failed to fetch pending questions', { threadId, error })
+      return
+    }
+    if (this.#threadId !== threadId || this.#historyLoading) return
+    for (const request of parked) {
+      const toRender = this.#questionQueue.incoming(request, {
+        activeThreadId: this.#threadId,
+        loading: false,
+      })
+      if (toRender) this.#renderQuestionCard(toRender)
+    }
   }
 
   get threadId(): string | null {
@@ -3953,7 +3979,7 @@ export class ConversationPane {
     onReviewChange: (plan: ArtifactDocRef) => void
     onExecutePlan: (plan: ArtifactDocRef) => void
     onPlanDoc: (card: ArtifactCard, planPath: string) => void
-    planWrittenFor: (feature: string | null) => boolean
+    knownPlanPaths: () => readonly string[]
   } {
     return {
       onCreatePlan: (path) => {
@@ -3965,26 +3991,35 @@ export class ConversationPane {
         return true
       },
       planRequested: (path) =>
-        this.#planRequests.isRequested(this.#threadId, path, this.#planWrittenFor(deriveFeatureName(path))),
+        this.#planRequests.isRequested(this.#threadId, path, this.#planWrittenFor(path)),
       onReviewChange: (plan) => this.#onPlanReview(plan),
       onExecutePlan: (plan) => this.#onPlanExecute(plan),
       onPlanDoc: (card, path) => this.#onPlanDoc(card, path),
-      planWrittenFor: (feature) => this.#planWrittenFor(feature),
+      knownPlanPaths: () => this.#knownPlanPaths(),
     }
   }
 
   /**
-   * Whether this thread knows a plan for `feature` — from a plan marker in its
-   * transcript or a live plan event this session. The plan has its own card,
-   * so the discovery's card asks here before offering Create the plan.
+   * Whether this thread knows a plan written from THIS discovery document. It
+   * asks `planWrittenFromDocument`, the one rule the card's action row also
+   * uses, so Create the plan and the double-press guard cannot disagree. The
+   * old question compared version-stripped feature names, so a v1 plan hid
+   * Create the plan on a v2 discovery.
    */
-  #planWrittenFor(feature: string | null): boolean {
-    if (feature === null) return false
-    const plans = [
+  #planWrittenFor(discoveryPath: string): boolean {
+    return planWrittenFromDocument(discoveryPath, this.#knownPlanPaths())
+  }
+
+  /**
+   * Every plan path this thread knows — from a plan marker in its transcript or
+   * a live plan event this session. A plan has its own card, so the discovery's
+   * card cannot see it and asks here.
+   */
+  #knownPlanPaths(): string[] {
+    return [
       ...[...this.#markerPaths].filter((path) => path.startsWith('flow/plans/')),
       ...[...this.#artifactSources.values()].filter((source) => source.event.kind === 'plan').map((source) => source.event.path),
     ]
-    return plans.some((path) => deriveFeatureName(path) === feature)
   }
 
   /**

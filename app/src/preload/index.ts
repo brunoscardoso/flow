@@ -216,6 +216,7 @@ const flowApi: FlowApi = {
     contextUsage: (request) => invoke('threads:contextUsage', request),
     respondPermission: (request) => invoke('threads:respondPermission', request),
     pendingPermissions: (request) => invoke('threads:pendingPermissions', request),
+    pendingDialogs: (request) => invoke('threads:pendingDialogs', request),
     respondDialog: (request) => invoke('threads:respondDialog', request),
     importClaude: (request) => invoke('threads:importClaude', request),
     brainSavings: (request) => invoke('threads:brainSavings', request),

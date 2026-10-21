@@ -1381,6 +1381,108 @@ describe('AgentManager', () => {
     })
   })
 
+  // THE 7h13m HANG. `canUseTool` parks with NO timeout — deliberately; a
+  // question answers whenever the person gets to it. But the only copy of that
+  // question was the RENDERER's in-memory queue, so a reload / window recreate
+  // left the agent parked with nothing on screen to answer. Measured on a real
+  // thread: `needs-decision` for 7 hours 13 minutes. `parkedQuestions` is what
+  // a rebuilt renderer reads back over `threads:pendingDialogs`.
+  describe('parkedQuestions — what a rebuilt renderer reads back', () => {
+    /** Park a REAL AskUserQuestion through canUseTool (the SDK-mode channel)
+     *  and return the request the manager re-emitted. Each call needs its own
+     *  `toolUseID` — the permission broker keys a parked ask by it. */
+    async function parkQuestion(
+      manager: AgentManager,
+      threadId: string,
+      toolUseID: string,
+      question = 'Ship it?',
+    ): Promise<UserQuestionRequest> {
+      const parked: UserQuestionRequest[] = []
+      const listener = (request: UserQuestionRequest): void => {
+        parked.push(request)
+      }
+      manager.on(DIALOG_REQUEST_EVENT, listener)
+      const canUseTool = broker.createCanUseTool(threadId, [tempDir])
+      void canUseTool(
+        'AskUserQuestion',
+        {
+          questions: [
+            {
+              question,
+              header: 'Ship',
+              multiSelect: false,
+              options: [{ label: 'Yes', description: '' }],
+            },
+          ],
+        },
+        {
+          signal: new AbortController().signal,
+          toolUseID,
+        } as Parameters<typeof canUseTool>[2],
+      )
+      await new Promise((resolve) => setImmediate(resolve))
+      manager.off(DIALOG_REQUEST_EVENT, listener)
+      expect(parked).toHaveLength(1)
+      return parked[0]
+    }
+
+    it('lists a parked question — the same payload the renderer was sent', async () => {
+      const manager = makeManager(jest.fn())
+      const thread = store.createThread({ projectRoot: tempDir })
+      store.updateThread(thread.id, { status: 'working' })
+      const emitted = await parkQuestion(manager, thread.id, 'tu-park-1')
+
+      // The thread really is waiting on a person…
+      expect(store.getThread(thread.id)?.status).toBe('needs-decision')
+      // …and main can still name the question, so the card is rebuildable.
+      const listed = manager.parkedQuestions(thread.id)
+      expect(listed).toHaveLength(1)
+      expect(listed[0]?.requestId).toBe(emitted.requestId)
+      expect(listed[0]?.threadId).toBe(thread.id)
+      expect(listed[0]?.questions).toEqual(emitted.questions)
+      expect(listed[0]?.questions[0]?.question).toBe('Ship it?')
+    })
+
+    it('stops listing it once the renderer answers', async () => {
+      const manager = makeManager(jest.fn())
+      const thread = store.createThread({ projectRoot: tempDir })
+      store.updateThread(thread.id, { status: 'working' })
+      const request = await parkQuestion(manager, thread.id, 'tu-park-2')
+      // Positive first (allowed-pattern #28): it WAS listed, and the answer
+      // reached a real parked dialog…
+      expect(manager.parkedQuestions(thread.id)).toHaveLength(1)
+      expect(manager.respondDialog(request.requestId, [{ header: 'Ship', selected: ['Yes'] }])).toBe(
+        true,
+      )
+      // …so the empty list below is the answer, not an empty broker.
+      expect(manager.parkedQuestions(thread.id)).toEqual([])
+      expect(store.getThread(thread.id)?.status).toBe('working')
+    })
+
+    it('answers per thread — one thread’s re-sync never shows another’s question', async () => {
+      const manager = makeManager(jest.fn())
+      const threadA = store.createThread({ projectRoot: tempDir })
+      const threadB = store.createThread({ projectRoot: tempDir })
+      const a = await parkQuestion(manager, threadA.id, 'tu-park-a', 'Ship A?')
+      const b = await parkQuestion(manager, threadB.id, 'tu-park-b', 'Ship B?')
+
+      expect(manager.parkedQuestions(threadA.id).map((r) => r.requestId)).toEqual([a.requestId])
+      expect(manager.parkedQuestions(threadB.id).map((r) => r.requestId)).toEqual([b.requestId])
+
+      // Answering A leaves B parked — B's own reload still finds its card.
+      manager.respondDialog(a.requestId, [{ header: 'Ship', selected: ['Yes'] }])
+      expect(manager.parkedQuestions(threadA.id)).toEqual([])
+      expect(manager.parkedQuestions(threadB.id).map((r) => r.requestId)).toEqual([b.requestId])
+      expect(store.getThread(threadB.id)?.status).toBe('needs-decision')
+    })
+
+    it('lists nothing for a thread with no question parked', () => {
+      const manager = makeManager(jest.fn())
+      const thread = store.createThread({ projectRoot: tempDir })
+      expect(manager.parkedQuestions(thread.id)).toEqual([])
+    })
+  })
+
   describe('auto-attach on agent writes (multi-project threads, phase 6)', () => {
     let primaryDir: string
     let siblingDir: string

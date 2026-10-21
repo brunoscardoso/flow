@@ -510,6 +510,7 @@ export function registerAgentChannels(deps: AgentIpcDependencies): () => void {
   handle('threads:pendingPermissions', ({ threadId }) =>
     agentManager.pendingPermissions(threadId),
   )
+  handle('threads:pendingDialogs', ({ threadId }) => agentManager.parkedQuestions(threadId))
   handle('threads:respondDialog', ({ requestId, answers }) => {
     // A miss means the dialog was disposed (session crashed/ended) before the
     // user submitted — throw so the renderer's respondDialog REJECTS and the

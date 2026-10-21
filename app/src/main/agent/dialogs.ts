@@ -55,6 +55,8 @@ export const ASK_USER_QUESTION_KIND = ASK_USER_QUESTION_KINDS[0]
 
 interface PendingDialog {
   threadId: string
+  /** The payload announced to the renderer, kept so a re-sync can read it back. */
+  request: UserQuestionRequest
   /** Resolves with the user's answers, or null on cancel / dispose / abort. */
   resolve: (answers: UserQuestionAnswer[] | null) => void
   cleanup: () => void
@@ -82,12 +84,13 @@ export class UserDialogBroker extends EventEmitter {
         resolve(null)
       }
       signal?.addEventListener('abort', onAbort, { once: true })
+      const payload: UserQuestionRequest = { requestId, threadId, questions }
       this.pending.set(requestId, {
         threadId,
+        request: payload,
         resolve,
         cleanup: () => signal?.removeEventListener('abort', onAbort),
       })
-      const payload: UserQuestionRequest = { requestId, threadId, questions }
       this.emit(DIALOG_REQUEST_EVENT, payload)
     })
   }
@@ -167,6 +170,16 @@ export class UserDialogBroker extends EventEmitter {
       if (pending.threadId === threadId) count += 1
     }
     return count
+  }
+
+  /** The questions still parked for a thread, so a renderer that missed the
+   *  emit (reload, window re-open) can re-draw them. */
+  listPending(threadId: string): UserQuestionRequest[] {
+    const requests: UserQuestionRequest[] = []
+    for (const pending of this.pending.values()) {
+      if (pending.threadId === threadId) requests.push(pending.request)
+    }
+    return requests
   }
 
   /** Cancel every question parked for a thread (session ended/crashed). Silent —
