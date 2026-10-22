@@ -333,6 +333,9 @@ describe('parts become nodes', () => {
       active: false,
       anchorCount: 2,
       summary: 'Streams live events to the browser.',
+      // One API anchor, one helper anchor: a tie, so the guess is neutral.
+      role: 'neutral',
+      roleSource: 'guess',
     });
   });
 
@@ -1056,5 +1059,51 @@ describe('folders — where a node lives (plan feature-home-folders, phase 2)', 
     expect(graph.nodes.filter((n) => n.kind === 'part').map((n) => n.id)).toEqual(
       addressPartNames('feature:chats', ['Live stream', 'Live stream', 'Other']),
     );
+  });
+});
+
+describe('role — resolved once, in the graph (plan feature-type-icons, phase 2)', () => {
+  const features = [
+    feature('chats', { anchors: ['module:src/renderer/chat'], extra: { role: 'api', learnedRole: 'data' } }),
+    feature('billing', { anchors: ['module:src/renderer/billing'], extra: { learnedRole: 'integration' } }),
+    feature('jobs', { anchors: ['module:src/workers', 'module:src/cron'] }),
+    feature('odd', { anchors: ['endpoint:GET /x'], extra: { role: 'widget', learnedRole: 'nope' } }),
+    feature('plan-x', { kind: 'child', parent: 'feature:chats', anchors: ['module:src/renderer/chat'] }),
+  ];
+  const parts = new Map<string, FeaturePart[]>([
+    [
+      'chats',
+      [
+        part('Person', { anchors: ['src/db/a.ts'], role: 'ui', learnedRole: 'data' }),
+        part('Learned', { anchors: ['src/db/a.ts'], learnedRole: 'service' }),
+        part('Guessed', { anchors: ['src/db/a.ts', 'src/db/b.ts'] }),
+        part('Off list', { anchors: [], role: 'widget' }),
+      ],
+    ],
+  ]);
+  const built = buildFeatureGraph(features, learning, new Set(), new Set(), parts);
+  const byId = new Map(built.nodes.map((n) => [n.id, n]));
+  const roleOf = (id: string): [unknown, unknown] => [byId.get(id)?.role, byId.get(id)?.roleSource];
+
+  it('a feature takes the person\'s role, else the learned one, else the guess', () => {
+    expect(roleOf('feature:chats')).toEqual(['api', 'person']);
+    expect(roleOf('feature:billing')).toEqual(['integration', 'learn']);
+    expect(roleOf('feature:jobs')).toEqual(['jobs', 'guess']);
+    // Off-list values read as absent — the guess answers.
+    expect(roleOf('feature:odd')).toEqual(['api', 'guess']);
+  });
+
+  it('a part follows the same precedence over its own keys and anchors', () => {
+    expect(roleOf('feature:chats/person')).toEqual(['ui', 'person']);
+    expect(roleOf('feature:chats/learned')).toEqual(['service', 'learn']);
+    expect(roleOf('feature:chats/guessed')).toEqual(['data', 'guess']);
+    expect(roleOf('feature:chats/off-list')).toEqual(['neutral', 'guess']);
+  });
+
+  it('a change gets no role — it gets no rectangle to draw one on', () => {
+    const change = built.nodes.find((n) => n.kind === 'child');
+    expect(change?.id).toBe('feature:plan-x'); // the change IS in the graph
+    expect(change).not.toHaveProperty('role');
+    expect(change).not.toHaveProperty('roleSource');
   });
 });

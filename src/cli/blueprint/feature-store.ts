@@ -34,6 +34,7 @@ import { knowledgeAuthor } from '../handlers/knowledge-authorship.js';
 import { locateWorkspaceProject } from '../handlers/workspace-locate.js';
 import { withFileLock, type FileLockLimits } from '../loop/file-lock.js';
 import { atomicWriteFile } from '../utils/atomic-write.js';
+import { FEATURE_ROLES, isFeatureRole, type FeatureRole } from './feature-role.js';
 import { BLUEPRINT_DIRNAME } from './store.js';
 
 /** Directory holding the feature store, relative to `flow/`. */
@@ -229,6 +230,33 @@ export function homeValueOf(raw: string | undefined): string | null {
 /** A feature's person-owned home folder, or null. */
 export function featureHome(node: Pick<FeatureNode, 'extra'>): string | null {
   return homeValueOf(node.extra[HOME_KEY]);
+}
+
+/**
+ * A feature's ROLE, under two keys with two writers (plan `feature-type-icons`,
+ * FR-2). `role:` is the PERSON'S word and no machine path writes it; `learnedRole:`
+ * is what a learn pass concluded, and its one writer is `writeLearnedRole`
+ * (`blueprint features role`). Both stay in `extra`, like `home:`, so every
+ * other machine write carries them through verbatim. The readers return the raw
+ * value: the vocabulary check and the precedence live in ONE place,
+ * `resolveFeatureRole` (`feature-role.ts`), where an off-list value reads as absent.
+ */
+export const ROLE_KEY = 'role';
+export const LEARNED_ROLE_KEY = 'learnedRole';
+
+/** A raw role value with person-typed quotes dropped, or null when blank / `null`. Not validated. */
+export function roleValueOf(raw: string | undefined): string | null {
+  return homeValueOf(raw);
+}
+
+/** A feature's person-owned `role:` as written, or null. */
+export function featureRole(node: Pick<FeatureNode, 'extra'>): string | null {
+  return roleValueOf(node.extra[ROLE_KEY]);
+}
+
+/** A feature's learn-owned `learnedRole:` as written, or null. */
+export function featureLearnedRole(node: Pick<FeatureNode, 'extra'>): string | null {
+  return roleValueOf(node.extra[LEARNED_ROLE_KEY]);
 }
 
 /** Kebab-slug of a feature name (fallback `feature`). Mirrors the story slug rule. */
@@ -1586,6 +1614,16 @@ export interface FeaturePart {
    * through and never takes it from its caller.
    */
   home?: string;
+  /**
+   * The person-owned role of this part (its entry's `role:` line). No machine
+   * path writes it; `writeParts` carries the one on disk through, like `home`.
+   */
+  role?: string;
+  /**
+   * The learn-owned role of this part (its entry's `learnedRole:` line). Written
+   * by `writeLearnedRole`, or by `writeParts` when its caller passes one.
+   */
+  learnedRole?: string;
 }
 
 /** A body cut into human prose, learnings and parts. */
@@ -1651,6 +1689,16 @@ export function parseParts(section: string | null): FeaturePart[] {
       if (home !== null) current.home = home;
       continue;
     }
+    if (trimmed.startsWith(`${LEARNED_ROLE_KEY}:`)) {
+      const learned = roleValueOf(trimmed.slice(LEARNED_ROLE_KEY.length + 1));
+      if (learned !== null) current.learnedRole = learned;
+      continue;
+    }
+    if (trimmed.startsWith(`${ROLE_KEY}:`)) {
+      const role = roleValueOf(trimmed.slice(ROLE_KEY.length + 1));
+      if (role !== null) current.role = role;
+      continue;
+    }
     if (trimmed.startsWith('anchors:')) {
       current.anchors = trimmed
         .slice('anchors:'.length)
@@ -1677,9 +1725,12 @@ export function serializeParts(parts: readonly FeaturePart[]): string {
       const summary = part.summary.trim().length > 0 ? `\n${part.summary.trim()}` : '';
       const anchors = part.anchors.length > 0 ? `\nanchors: ${part.anchors.join(', ')}` : '';
       const home = part.home !== undefined && part.home.length > 0 ? `\n${HOME_KEY}: ${part.home}` : '';
+      const role = part.role !== undefined && part.role.length > 0 ? `\n${ROLE_KEY}: ${part.role}` : '';
+      const learnedRole =
+        part.learnedRole !== undefined && part.learnedRole.length > 0 ? `\n${LEARNED_ROLE_KEY}: ${part.learnedRole}` : '';
       const learned =
         part.learnings.length > 0 ? `\n\n${serializeLearnings(part.learnings)}`.replace(/\n+$/, '\n') : '\n';
-      return `${head}${summary}${anchors}${home}\n${learned}`.replace(/\n{3,}/g, '\n\n');
+      return `${head}${summary}${anchors}${home}${role}${learnedRole}\n${learned}`.replace(/\n{3,}/g, '\n\n');
     })
     .join('\n');
 }
@@ -1703,14 +1754,26 @@ export function writeParts(flowDir: string, slug: string, parts: readonly Featur
     // A part's `home:` is PERSON-OWNED: the one on disk survives this machine
     // write, matched by the part's address (its slugified name), and whatever
     // the caller passed is ignored.
-    const homes = new Map<string, string>();
+    //
+    // A part's `role:` is person-owned on exactly the same terms. Its
+    // `learnedRole:` is the caller's to give — a learn pass that decided one
+    // replaces it — but a caller that passes NONE keeps the one on disk: a
+    // re-derive of parts from an old view knows nothing about roles, and
+    // knowing nothing is not a reason to erase what learn concluded.
+    const onDisk = new Map<string, FeaturePart>();
     for (const part of parseParts(split.parts)) {
-      if (part.home !== undefined) homes.set(slugifyFeatureName(part.name.trim()), part.home);
+      onDisk.set(slugifyFeatureName(part.name.trim()), part);
     }
     const written = parts.map((part) => {
       const kept: FeaturePart = { name: part.name, summary: part.summary, anchors: part.anchors, learnings: part.learnings };
-      const home = homes.get(slugifyFeatureName(part.name.trim()));
-      return home === undefined ? kept : { ...kept, home };
+      const disk = onDisk.get(slugifyFeatureName(part.name.trim()));
+      const learnedRole = part.learnedRole ?? disk?.learnedRole;
+      return {
+        ...kept,
+        ...(disk?.home === undefined ? {} : { home: disk.home }),
+        ...(disk?.role === undefined ? {} : { role: disk.role }),
+        ...(learnedRole === undefined ? {} : { learnedRole }),
+      };
     });
     const above =
       split.learned === null
@@ -1787,8 +1850,6 @@ export interface HomeTextEdit {
   found: boolean;
 }
 
-const HOME_LINE_RE = new RegExp(`^${HOME_KEY}:`);
-
 /**
  * Set (or, with `home` null, clear) the `home:` line of a note's text. Pure.
  *
@@ -1800,6 +1861,17 @@ const HOME_LINE_RE = new RegExp(`^${HOME_KEY}:`);
  * board handed out names the same entry here.
  */
 export function setHomeInText(raw: string, target: HomeLineTarget, home: string | null): HomeTextEdit {
+  return setKeyLineInText(raw, HOME_KEY, target, home);
+}
+
+/**
+ * The one-line, in-place edit behind `setHomeInText`, for any person- or
+ * learn-owned key that lives in `extra` and on a part's entry (`home:`,
+ * `learnedRole:`). Same placement rules; `key` must be a plain word.
+ */
+function setKeyLineInText(raw: string, key: string, target: HomeLineTarget, value: string | null): HomeTextEdit {
+  const home = value;
+  const keyLine = new RegExp(`^${key}:`);
   const lines = raw.split('\n');
   const eol = (index: number): string => (lines[index]?.endsWith('\r') === true ? '\r' : '');
   const bare = (index: number): string => lines[index].replace(/\r$/, '');
@@ -1817,16 +1889,16 @@ export function setHomeInText(raw: string, target: HomeLineTarget, home: string 
 
   /** Replace, delete or insert one line; null `at` means insert at `insertAt`. */
   const edit = (at: number, insertAt: number): HomeTextEdit => {
-    const previous = at < 0 ? null : homeValueOf(bare(at).trim().slice(HOME_KEY.length + 1));
+    const previous = at < 0 ? null : homeValueOf(bare(at).trim().slice(key.length + 1));
     const next = [...lines];
     if (home === null) {
       if (at < 0) return { text: raw, previous: null, found: true };
       next.splice(at, 1);
     } else if (at >= 0) {
       const indent = /^\s*/.exec(lines[at])?.[0] ?? '';
-      next[at] = `${indent}${HOME_KEY}: ${home}${eol(at)}`;
+      next[at] = `${indent}${key}: ${home}${eol(at)}`;
     } else {
-      next.splice(insertAt, 0, `${HOME_KEY}: ${home}${crlf}`);
+      next.splice(insertAt, 0, `${key}: ${home}${crlf}`);
     }
     return { text: next.join('\n'), previous, found: true };
   };
@@ -1834,10 +1906,10 @@ export function setHomeInText(raw: string, target: HomeLineTarget, home: string 
   if (target.kind === 'feature') {
     if (!fenceOpen || fenceClose < 0) {
       if (home === null) return { text: raw, previous: null, found: true };
-      return { text: `${FRONTMATTER_FENCE}${crlf}\n${HOME_KEY}: ${home}${crlf}\n${FRONTMATTER_FENCE}${crlf}\n${raw}`, previous: null, found: true };
+      return { text: `${FRONTMATTER_FENCE}${crlf}\n${key}: ${home}${crlf}\n${FRONTMATTER_FENCE}${crlf}\n${raw}`, previous: null, found: true };
     }
     let at = -1;
-    for (let index = 1; index < fenceClose; index += 1) if (HOME_LINE_RE.test(bare(index))) at = index;
+    for (let index = 1; index < fenceClose; index += 1) if (keyLine.test(bare(index))) at = index;
     return edit(at, fenceClose);
   }
 
@@ -1871,7 +1943,7 @@ export function setHomeInText(raw: string, target: HomeLineTarget, home: string 
   let anchorsAt = -1;
   for (let index = start + 1; index < end; index += 1) {
     const trimmed = bare(index).trim();
-    if (HOME_LINE_RE.test(trimmed)) at = index;
+    if (keyLine.test(trimmed)) at = index;
     else if (trimmed.startsWith('anchors:') && anchorsAt < 0) anchorsAt = index;
   }
   return edit(at, (anchorsAt < 0 ? start : anchorsAt) + 1);
@@ -1911,6 +1983,55 @@ export function writeFeatureHome(
     const raw = readFileSync(filePath, 'utf-8');
     const edited = setHomeInText(raw, target, home);
     if (!edited.found) throw new Error(`no part '${target.kind === 'part' ? target.partId : slug}' in '${slug}'`);
+    if (edited.text !== raw) atomicWriteFile(filePath, edited.text);
+    return { previous: edited.previous };
+  });
+}
+
+// ── The learn-owned `learnedRole:` ──────────────────────────────────────────
+//
+// THE ONE WRITER of `learnedRole:` (plan `feature-type-icons`, FR-3), beside the
+// one writer of `home:`. A learn pass decides a role and records it here; the
+// vocabulary is checked in code, not in the prompt (allowed-pattern #14), and
+// the person's `role:` is never read for writing, never cleared, never moved.
+
+/**
+ * Write a feature's — or, with `part`, one part's — `learnedRole:`. Holds the
+ * store lock and re-reads the note from disk. Refuses (throws) a role off the
+ * list, a missing note, and a part the note does not have. `part` is the part's
+ * name or its slugified address segment; the first part it names is written.
+ * Returns the learned role that was there before.
+ */
+export function writeLearnedRole(
+  flowDir: string,
+  slug: string,
+  role: FeatureRole,
+  part?: string,
+): { previous: string | null } {
+  if (!isFeatureRole(role)) {
+    throw new Error(`'${String(role)}' is not a feature role — use one of ${FEATURE_ROLES.join(', ')}`);
+  }
+  const filePath = join(featuresDir(flowDir), `${slug}.md`);
+  return withFeatureStoreLock(flowDir, () => {
+    if (!existsSync(filePath)) throw new Error(`no feature '${slug}' to write a role to`);
+    const raw = readFileSync(filePath, 'utf-8');
+    let target: HomeLineTarget = { kind: 'feature' };
+    if (part !== undefined) {
+      // The part's entry, found by the same address rule the home writer uses;
+      // the owner id is only a prefix both sides share, so the slug's own serves.
+      const wanted = slugifyFeatureName(part.trim());
+      const names = parseParts(splitParts(parseFeatureFile(slug, raw).body).parts)
+        .map((entry) => entry.name)
+        .filter((name) => name.trim().length > 0);
+      const at = names.findIndex((name) => slugifyFeatureName(name.trim()) === wanted);
+      if (wanted.length === 0 || at < 0) throw new Error(`no part '${part}' in '${slug}'`);
+      const featureId = mintFeatureId(slug);
+      target = { kind: 'part', featureId, partId: addressPartNames(featureId, names)[at] };
+    }
+    // ONE LINE, IN PLACE — like `home:`. Every other byte of the precious note
+    // stays as it was, the person's `role:` line included.
+    const edited = setKeyLineInText(raw, LEARNED_ROLE_KEY, target, role);
+    if (!edited.found) throw new Error(`no part '${part ?? slug}' in '${slug}'`);
     if (edited.text !== raw) atomicWriteFile(filePath, edited.text);
     return { previous: edited.previous };
   });

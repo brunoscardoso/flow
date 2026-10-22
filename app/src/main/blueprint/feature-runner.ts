@@ -18,6 +18,7 @@ import type {
   BlueprintMissingHome,
   BlueprintViewFailure,
 } from '../../shared/ipc-contract'
+import { isFeatureRole, type FeatureRole, type FeatureRoleSource } from '../../shared/feature-role'
 
 const FEATURES_TIMEOUT_MS = 30_000
 
@@ -232,9 +233,20 @@ export function narrowFeatureNodes(rawNodes: unknown): BlueprintFeatureNode[] {
       // The board's root-ring grouping. Absent stays absent — a synthesised
       // default here would be indistinguishable from a human-written domain.
       ...(typeof n.domain === 'string' && n.domain.trim().length > 0 ? { domain: n.domain } : {}),
+      // WHAT KIND OF THING IT IS. Both fields or neither, each on its list: an
+      // off-list role from a newer or a broken bundle is dropped, so the board
+      // draws no icon rather than one it cannot name.
+      ...withRole(n.role, n.roleSource),
     })
   }
   return nodes
+}
+
+const ROLE_SOURCES: ReadonlySet<string> = new Set<FeatureRoleSource>(['person', 'learn', 'guess'])
+
+function withRole(role: unknown, source: unknown): { role?: FeatureRole; roleSource?: FeatureRoleSource } {
+  if (!isFeatureRole(role) || typeof source !== 'string' || !ROLE_SOURCES.has(source)) return {}
+  return { role, roleSource: source as FeatureRoleSource }
 }
 
 function withFolders(raw: unknown): { folders?: BlueprintFeatureFolders } {

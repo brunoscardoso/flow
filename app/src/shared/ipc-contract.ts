@@ -26,6 +26,7 @@ import type { ContextUsageSnapshot } from './context-usage'
 import type { SideIdentity } from './side-identity'
 import type { ConflictHunkChoice, ConflictHunkOrder } from './conflict-hunks'
 import type { UpdateStatus } from './updater'
+import type { FeatureRole, FeatureRoleSource } from './feature-role'
 import type {
   BrowserBufferCounts,
   BrowserCapabilities,
@@ -3070,6 +3071,14 @@ export interface BlueprintFeatureNode {
    * from a bundle that predates the field: no rows, never a guessed folder.
    */
   folders?: BlueprintFeatureFolders
+  /**
+   * WHAT KIND OF THING it is — the icon the board draws. Resolved once by the
+   * CLI (the person's role, else the learned one, else the guess); the board
+   * never re-derives it. Absent on a change, and from a bundle that predates it.
+   */
+  role?: FeatureRole
+  /** Who answered `role`: a person, a learn pass, or the guess. Present exactly when `role` is. */
+  roleSource?: FeatureRoleSource
 }
 
 /** One folder a feature or part lives in. Mirrors the CLI's `FolderRow`. */

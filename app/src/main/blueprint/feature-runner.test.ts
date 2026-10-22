@@ -322,3 +322,43 @@ describe('folders — where a feature lives (feature-home-folders Phase 3)', () 
     ])
   })
 })
+
+describe('role — what kind of thing a node is (feature-type-icons Phase 2)', () => {
+  const node = (id: string, extra: Record<string, unknown>) => ({
+    id,
+    slug: id,
+    name: id,
+    kind: 'core',
+    understanding: 'none',
+    active: false,
+    anchorCount: 1,
+    ...extra,
+  })
+
+  it('carries a valid role and its source through, and drops either half when it is off its list', async () => {
+    const { spawnFn } = fakeSpawn(
+      JSON.stringify({
+        nodes: [
+          node('a', { role: 'ui', roleSource: 'person' }),
+          node('b', { role: 'data', roleSource: 'guess' }),
+          node('c', { role: 'widget', roleSource: 'learn' }),
+          node('d', { role: 'api', roleSource: 'oracle' }),
+          node('e', { role: 'api' }),
+          node('f', {}),
+        ],
+        edges: [],
+      }),
+    )
+    const nodes = (await runFeatures(cli, '/r', { spawnFn })).nodes
+    expect(nodes.map((n) => n.id)).toEqual(['a', 'b', 'c', 'd', 'e', 'f']) // every node survived
+    expect(nodes.map((n) => [n.role, n.roleSource])).toEqual([
+      ['ui', 'person'],
+      ['data', 'guess'],
+      [undefined, undefined],
+      [undefined, undefined],
+      [undefined, undefined],
+      [undefined, undefined],
+    ])
+    expect(nodes[2]).not.toHaveProperty('role')
+  })
+})
