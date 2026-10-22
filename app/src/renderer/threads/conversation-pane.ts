@@ -99,7 +99,7 @@ import { groupPresentation, planToolGroups, toolCallGroupKey } from './tool-grou
 import { TurnRow } from './turn-row'
 import { turnSummary, type TurnRole } from './turn-summary'
 import { requestSummary, type Request, type RequestRole } from './request-summary'
-import { RequestRow } from './request-row'
+import { RequestRow, sentWhileWorkingNote } from './request-row'
 import { liveRequestSummary, type RequestRowStepInput } from './request-row-model'
 import {
   DEFAULT_FEED_DENSITY,
@@ -2048,7 +2048,11 @@ export class ConversationPane {
    */
   #buildRequest(request: Request<HistoryEntry>, liveTail: boolean): HTMLElement[] {
     const out: HTMLElement[] = []
-    if (request.user !== null) out.push(this.#buildHistoryEntry(request.user))
+    if (request.user !== null) {
+      out.push(this.#buildHistoryEntry(request.user))
+      // A message that went into a running turn says so (plan_mid-run-subtasks).
+      if (request.sentWhileWorking) out.push(entryWrapper('midrun-note', sentWhileWorkingNote()))
+    }
     const live = request.live && liveTail
     if (request.steps.length > 0 || live) out.push(this.#buildRequestRow(request, live))
     if (request.answer !== null) {

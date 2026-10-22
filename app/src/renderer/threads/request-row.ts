@@ -281,11 +281,32 @@ export class RequestRow {
 
 let requestRowStylesInjected = false
 
+/** The text under a person's message that went into a running turn. */
+export const SENT_WHILE_WORKING_TEXT = 'Sent while the agent works'
+
+/**
+ * The small note under a message the person sent while the agent was working
+ * (plan_mid-run-subtasks): the message went into the running turn, so the
+ * request above it reads as continued rather than answered.
+ */
+export function sentWhileWorkingNote(): HTMLElement {
+  injectRequestRowStyles()
+  const note = document.createElement('div')
+  note.className = 'fl-request-midrun-note'
+  note.textContent = SENT_WHILE_WORKING_TEXT
+  return note
+}
+
 function injectRequestRowStyles(): void {
   if (requestRowStylesInjected) return
   requestRowStylesInjected = true
   const style = document.createElement('style')
   style.textContent = `
+    .fl-request-midrun-note {
+      padding: 2px var(--fl-space-sm) 0;
+      font-size: var(--fl-text-caption-size);
+      color: var(--fl-color-text-secondary);
+    }
     .fl-request-row {
       display: flex;
       flex-direction: column;

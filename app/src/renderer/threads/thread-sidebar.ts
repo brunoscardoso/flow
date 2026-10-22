@@ -1445,18 +1445,51 @@ export class ThreadSidebar {
   }
 
   /**
-   * The status a ROW should draw for a thread — its turn status, unless
-   * something it started is still running.
+   * The status a ROW should draw for a thread — its TURN status.
    *
-   * Only ever promotes a RESTING status. A thread waiting on a person
-   * (`needs-decision`) or one whose turn failed keeps its own mark: those are
-   * the two states worth spotting across the list, and dressing either as
-   * "working" because a stray agent is still going would hide the thing the
-   * person actually has to act on.
+   * It used to promote a resting thread to `working` while anything it
+   * started still ran. With mid-run subtasks (plan_mid-run-subtasks FR-17)
+   * the turn ends with its answer while subtasks keep going: the answer is
+   * there, so the thread reads done, and the work still out is said by its
+   * own mark — `#backgroundRunning` and the row's "N running" tag. A thread
+   * waiting on a person or one whose turn failed keeps its own mark, as before.
+   *
+   * `threadIsLive` still answers "is anything live here" for the surfaces that
+   * need that (the Kanban card's working dot); only the row's glyph changed.
    */
   #liveStatus(thread: ThreadSummary): ThreadStatus {
+    return thread.status
+  }
+
+  /**
+   * How many background tasks of this thread still run while its turn is NOT
+   * working — the count the row's tag draws. Zero while the turn works (the
+   * working glyph already says it) and when nothing runs.
+   */
+  #backgroundRunning(thread: ThreadSummary): number {
     const running = this.#backgroundTasks.get(thread.id)?.length ?? 0
-    return threadIsLive(thread.status, running) ? 'working' : thread.status
+    if (!threadIsLive(thread.status, running) || thread.status === 'working') return 0
+    return running
+  }
+
+  /** The small `2 running` tag, or null when nothing runs past the turn. */
+  #runningTag(thread: ThreadSummary): HTMLElement | null {
+    const running = this.#backgroundRunning(thread)
+    if (running === 0) return null
+    const tag = document.createElement('span')
+    tag.className = 'fl-row-running'
+    tag.textContent = `${String(running)} running`
+    tag.title = `${String(running)} background ${running === 1 ? 'task' : 'tasks'} still running`
+    tag.style.cssText = [
+      'flex:none',
+      'padding:0 6px',
+      'border-radius:999px',
+      'font-size:var(--fl-text-caption-size)',
+      'color:var(--fl-color-accent)',
+      'background:var(--fl-color-accent-muted)',
+      'white-space:nowrap',
+    ].join(';')
+    return tag
   }
 
   /**
@@ -2095,6 +2128,8 @@ export class ThreadSidebar {
     // archived it instead, with no confirmation. At the edge they sit where
     // nobody presses to open, and the date (a resting fact) yields to them.
     rowEl.appendChild(title)
+    const runningTag = this.#runningTag(thread)
+    if (runningTag !== null) rowEl.appendChild(runningTag)
     const threadTag = this.#projectTag(thread.projectRoot)
     if (threadTag !== null) rowEl.appendChild(threadTag)
     const mark = this.#contextIndicator(thread)
@@ -2525,6 +2560,9 @@ export class ThreadSidebar {
     title.textContent = task.title || 'Untitled task'
     title.title = task.externalKey ? `${task.externalKey} — ${task.title}` : task.title
     rowEl.appendChild(title)
+    // Work still running past the task's turn reads as a count, not as working.
+    const taskRunningTag = thread === null ? null : this.#runningTag(thread)
+    if (taskRunningTag !== null) rowEl.appendChild(taskRunningTag)
 
     // NO "Done?" CHIP HERE (user call 2026-08-26: "remove it from the threads,
     // we don't need that"). The suggestion is unchanged and still offered on

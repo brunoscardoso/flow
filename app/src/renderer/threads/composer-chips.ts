@@ -136,3 +136,43 @@ export function serializeChips(
   const head = chips.map(chipLine).join('\n')
   return userText.length === 0 ? head : `${head}\n\n${userText}`
 }
+
+// ── Subtask target chip (plan_mid-run-subtasks FR-13) ──────────────────────
+
+/**
+ * The subtask a message is steered to. Set by the panel's Steer
+ * (`flow:steer-subtask`); while set, the next send goes to that subtask, and
+ * removing it sends to the main agent again.
+ */
+export interface SubtaskTargetRef {
+  threadId: string
+  ticket: string
+  title: string
+}
+
+/** The line under the chip — what the tag does, in the person's terms. */
+export const SUBTASK_TARGET_HINT = 'Goes to this subtask only. Remove the tag to talk to the main agent.'
+
+/**
+ * A Steer event's detail as a target for THIS thread, or null. A press from
+ * another thread's panel never steers this composer.
+ */
+export function subtaskTargetFrom(detail: unknown, threadId: string | null): SubtaskTargetRef | null {
+  if (threadId === null || typeof detail !== 'object' || detail === null) return null
+  const record = detail as Record<string, unknown>
+  if (record.threadId !== threadId) return null
+  const ticket = typeof record.ticket === 'string' ? record.ticket.trim() : ''
+  const title = typeof record.title === 'string' ? sanitizeLabel(record.title) : ''
+  if (ticket === '') return null
+  return { threadId, ticket, title: title === '' ? ticket : title }
+}
+
+/**
+ * The message as the agent receives it: `To subtask <ticket> (“<title>”): …`.
+ * The agent forwards it to that sub-agent (its tool description says so). No
+ * target → the content unchanged.
+ */
+export function serializeSubtaskTarget(target: SubtaskTargetRef | null, content: string): string {
+  if (target === null) return content
+  return `To subtask ${target.ticket} (“${target.title}”): ${content}`
+}

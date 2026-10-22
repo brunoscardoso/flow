@@ -6,6 +6,8 @@ import {
   clearChips,
   dismissChip,
   serializeChips,
+  serializeSubtaskTarget,
+  subtaskTargetFrom,
   type BlueprintChipRef,
 } from './composer-chips'
 
@@ -444,5 +446,30 @@ describe('browser chip serialization round-trip', () => {
       { captureKind: 'console', label: 'TypeError: undefined is not a function' },
       { captureKind: 'network', label: 'POST /api/login' },
     ])
+  })
+})
+
+describe('subtask target chip', () => {
+  it('reads a Steer for this thread only', () => {
+    expect(subtaskTargetFrom({ threadId: 't1', ticket: 'st-1', title: 'Fix sign-in' }, 't1')).toEqual({
+      threadId: 't1',
+      ticket: 'st-1',
+      title: 'Fix sign-in',
+    })
+    expect(subtaskTargetFrom({ threadId: 't2', ticket: 'st-1', title: 'Fix' }, 't1')).toBeNull()
+    expect(subtaskTargetFrom({ threadId: 't1', ticket: '', title: 'Fix' }, 't1')).toBeNull()
+    expect(subtaskTargetFrom({ threadId: 't1', ticket: 'st-1' }, null)).toBeNull()
+  })
+
+  it('keeps the title on one line', () => {
+    expect(subtaskTargetFrom({ threadId: 't1', ticket: 'st-1', title: 'Fix\nsign-in' }, 't1')?.title).toBe('Fix sign-in')
+  })
+
+  it('addresses the message to the subtask, and leaves it alone without one', () => {
+    const target = { threadId: 't1', ticket: 'st-1', title: 'Fix sign-in' }
+    expect(serializeSubtaskTarget(target, 'check the token refresh too')).toBe(
+      'To subtask st-1 (“Fix sign-in”): check the token refresh too',
+    )
+    expect(serializeSubtaskTarget(null, 'hello')).toBe('hello')
   })
 })

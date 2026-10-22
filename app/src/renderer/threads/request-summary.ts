@@ -28,6 +28,14 @@
  *     before the mark existed) falls back to its last assistant message.
  *   - A request part that a card ended gets no fallback: its turn was waiting
  *     on the person, not finished.
+ *   - A request that a LATER person's message ended while its turn was still
+ *     running gets no fallback either (plan_mid-run-subtasks): a mid-run
+ *     message goes into the live turn, so no turn-end mark falls between the
+ *     two messages and the turn's answer lands in the later request. It is
+ *     recognised from the marks alone — it has none, and the requests after it
+ *     either carry one or are the running one — and it is `continued`; the
+ *     message that ended it is `sentWhileWorking`. A thread with no marks at
+ *     all (stored before the mark existed) keeps the old fallback.
  *   - A wake-up turn ending `No change.` is hidden; one ending with a real
  *     reply replaces the shown answer (FR-9, FR-10).
  */
@@ -86,6 +94,12 @@ export interface Request<T> {
   hiddenNoChange: number
   /** True for the last request of the slice while its work is not done. */
   live: boolean
+  /** A later message of the person's ended this request while its turn was
+   *  still running, so its answer is in a request after it. */
+  continued: boolean
+  /** The person sent this request's message while the agent was working on
+   *  the request before it. */
+  sentWhileWorking: boolean
   /** System rows of the request, shown after the answer in their order. */
   trailing: T[]
   /** Every entry the request covers, in the original order — the inverse of
@@ -132,6 +146,8 @@ interface Open<T> {
   /** A card ended this part: the turn was waiting on the person, not done,
    *  so the unmarked fallback must not crown a step as the answer. */
   endedByCard: boolean
+  /** A later person's message ended this part (not a card, not the slice). */
+  endedByUser: boolean
 }
 
 /**
@@ -150,7 +166,7 @@ export function planRequests<T>(
 
   const ensureOpen = (): Open<T> => {
     if (open === null) {
-      open = { user: null, items: [], entries: [], endedByCard: false }
+      open = { user: null, items: [], entries: [], endedByCard: false, endedByUser: false }
       pending.push(open)
     }
     return open
@@ -160,7 +176,8 @@ export function planRequests<T>(
     const role = classify(entry)
     switch (role.kind) {
       case 'user':
-        open = { user: entry, items: [], entries: [entry], endedByCard: false }
+        if (open !== null) open.endedByUser = true
+        open = { user: entry, items: [], entries: [entry], endedByCard: false, endedByUser: false }
         pending.push(open)
         break
       case 'card':
@@ -202,18 +219,65 @@ export function planRequests<T>(
     if (!('request' in unit)) lastIndex = index
   })
 
+  const continued = continuedRequests(pending, lastIndex, options.running === true)
+
+  let previousContinued = false
   return pending.map((unit, index): RequestUnit<T> => {
-    if ('request' in unit) return unit
+    if ('request' in unit) {
+      previousContinued = false
+      return unit
+    }
     const isLast = index === lastIndex
+    const isContinued = continued.has(unit)
     // A running request has no fallback answer: its unmarked messages are the
-    // steps of a turn that has not ended yet.
-    const request = settle(unit, unit.endedByCard || (isLast && options.running === true))
+    // steps of a turn that has not ended yet. A continued one has none either:
+    // its turn's answer is in a later request.
+    const request = settle(
+      unit,
+      unit.endedByCard || isContinued || (isLast && options.running === true),
+    )
+    request.continued = isContinued
+    request.sentWhileWorking = previousContinued && unit.user !== null
+    previousContinued = isContinued
     if (isLast) {
       request.live =
         options.running ?? (request.answer === null && request.hiddenNoChange === 0)
     }
     return request
   })
+}
+
+function hasMark<T>(open: Open<T>): boolean {
+  return open.items.some((item) => item.kind === 'assistant' && item.endsTurn)
+}
+
+/**
+ * The requests a later person's message ended mid-turn. Walked from the end:
+ * a request with no mark is continued when the request right after it (with
+ * no card between) has a mark, is itself continued, or is the last one while
+ * a turn runs. A slice with no mark at all continues nothing — it predates
+ * the mark, and the fallback answer is the only one it has.
+ */
+function continuedRequests<T>(
+  pending: ReadonlyArray<{ request: false; entry: T } | Open<T>>,
+  lastIndex: number,
+  running: boolean,
+): Set<Open<T>> {
+  const out = new Set<Open<T>>()
+  // Does the request after the one being judged carry the turn on?
+  let nextCarries: boolean = false
+  for (let index = pending.length - 1; index >= 0; index -= 1) {
+    const unit = pending[index]
+    if ('request' in unit) {
+      nextCarries = false
+      continue
+    }
+    const marked: boolean = hasMark(unit)
+    const isContinued: boolean = !marked && unit.endedByUser && !unit.endedByCard && nextCarries
+    if (isContinued) out.add(unit)
+    nextCarries = marked || isContinued || (index === lastIndex && running)
+  }
+  return out
 }
 
 /** Choose the answer, hide the `No change.` replies, and build the steps. */
@@ -265,6 +329,8 @@ function settle<T>(open: Open<T>, noFallback = false): Request<T> {
     answer: answerItem === null ? null : answerItem.entry,
     hiddenNoChange: hidden.size,
     live: false,
+    continued: false,
+    sentWhileWorking: false,
     trailing,
     entries: open.entries,
   }
@@ -284,6 +350,9 @@ export interface RequestSummary {
   filesEdited: number
   /** The answer's model, else the newest step's model with one. */
   model: string | null
+  /** The request was ended by a later message while its turn ran — its row
+   *  reads as continued, not as a finished answer. Absent = false. */
+  continued?: boolean
 }
 
 export interface RequestSummaryDeps<T> {
@@ -346,10 +415,13 @@ export function requestSummary<T>(request: Request<T>, deps: RequestSummaryDeps<
     failed: counts.failed,
     filesEdited: counts.filesEdited,
     model: answerModel ?? model,
+    ...(request.continued ? { continued: true } : {}),
   }
 }
 
 const SEPARATOR = ' ' + String.fromCharCode(183) + ' '
+/** The closing fact of a request a mid-run message ended. */
+export const CONTINUED_TEXT = 'continued below'
 const MINUTE_MS = 60_000
 const MINUTES_PER_HOUR = 60
 
@@ -391,6 +463,7 @@ export function requestRowSegments(summary: RequestSummary, live: boolean): Requ
   const failedText = summary.failed > 0 ? summary.failed + ' failed' : null
   if (failedText !== null) texts.push(failedText)
   if (summary.filesEdited > 0) texts.push(plural(summary.filesEdited, 'file') + ' edited')
+  if (!live && summary.continued === true) texts.push(CONTINUED_TEXT)
   return texts.map((text) => ({ text, failed: text === failedText }))
 }
 

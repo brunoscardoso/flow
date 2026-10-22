@@ -48,6 +48,10 @@ export interface BackgroundActivityRow {
   running: boolean
   /** The live task behind a source 'task' row — passed to the progress tab. */
   task?: BackgroundTaskInfo
+  /** When the work started: the tool call's start, or the live task's. */
+  startedAt?: string
+  /** When it ended, or null while it runs. Absent on a live task row. */
+  endedAt?: string | null
 }
 
 /**
@@ -127,7 +131,18 @@ export function toActivityRow(record: ToolCallRecord): BackgroundActivityRow | n
   if (kind === 'subagent') {
     const agentType = str(input.subagent_type)
     const label = description.length > 0 ? description : agentType.length > 0 ? agentType : 'Sub-agent'
-    return { id: record.id, threadId: record.threadId, kind, source: 'toolcall', label, detail: agentType, status: record.status, running }
+    return {
+      id: record.id,
+      threadId: record.threadId,
+      kind,
+      source: 'toolcall',
+      label,
+      detail: agentType,
+      status: record.status,
+      running,
+      startedAt: record.startedAt,
+      endedAt: record.completedAt,
+    }
   }
 
   const command = str(input.command)
@@ -178,6 +193,7 @@ export function taskActivityRows(
       status: 'running',
       running: true,
       task,
+      startedAt: task.startedAt,
     })
   }
   return rows
@@ -403,43 +419,66 @@ export function subagentSpawnChip(
   return { label, detail: agentType, state: tone === 'done' ? 'finished' : 'failed' }
 }
 
+/**
+ * The pill's three counts (plan_mid-run-subtasks FR-9), for the current
+ * request: work running now, subtasks waiting for a slot, and failures not yet
+ * retried. `background-work-model.workCounts` derives them; the pill only
+ * reads them.
+ */
+export interface WorkCounts {
+  running: number
+  queued: number
+  failed: number
+}
+
+/** One piece of the pill's line; `failed` marks the one in the error colour. */
+export interface StripSegment {
+  text: string
+  failed: boolean
+}
+
 export interface ActivityStripState {
   /**
-   * Shown only while a sub-agent is actually RUNNING (user, 2026-10-13: "even
-   * when the sub agents already finished, we are still showing this sub agents
-   * activity here … that looks like something that still running").
+   * Shown while anything is running, queued or failed in the current request
+   * (plan_mid-run-subtasks FR-9).
    *
-   * It used to show whenever the thread had ever spawned one, so a strip with
-   * two green dots in it sat above the composer for the rest of the
-   * conversation — a live indicator reporting something that finished minutes
-   * ago. The finished runs are not lost with it: every spawn is already a
-   * one-line chip in the transcript (`subagentSpawnChip`, right above), at the
-   * point in the conversation where it happened, and pressing either one goes
-   * through the same `flow:open-subagent-thread` — so the strip was the second
-   * door to a room the chat already opens onto.
+   * It used to show only while a sub-agent RAN (user, 2026-10-13: a strip
+   * with two green dots in it sat above the composer long after the work
+   * ended). Finished work still hides it. A failure in the current request now
+   * keeps it up, because a failure is something the person can act on (Retry)
+   * — the strip is the way to it. Done work stays reachable as a chip in the
+   * transcript (`subagentSpawnChip`) and in the panel's Done section.
    */
   show: boolean
-  count: number
-  runningCount: number
+  running: number
+  queued: number
+  failed: number
+  /** `4 running`, `1 queued`, `1 failed` — zero counts omitted. */
+  segments: StripSegment[]
+  /** The whole line, `4 running · 1 queued · 1 failed`. */
   label: string
   title: string
 }
 
+const STRIP_SEPARATOR = ' ' + String.fromCharCode(183) + ' '
+
 /**
- * What the footer button shows — pure, so the button and any other surface that
- * carries the same count can never disagree.
+ * What the footer pill shows — pure, so the pill and the panel it opens can
+ * never disagree about the counts.
  */
-export function activityStripState(rows: readonly BackgroundActivityRow[]): ActivityStripState {
-  const count = rows.length
-  const runningCount = rows.filter((row) => row.running).length
-  const noun = count === 1 ? 'activity' : 'activities'
-  const title =
-    runningCount > 0
-      ? `${String(runningCount)} of ${String(count)} sub-agent ${noun} running`
-      : `${String(count)} sub-agent ${noun}`
-  // THE COUNT STILL COUNTS EVERYTHING, because it is the number of rows the
-  // popover lists and the two must not disagree. Only the showing is live: a
-  // strip that appears while one of four runs says "4", and its title says
-  // which of them is running.
-  return { show: runningCount > 0, count, runningCount, label: 'Sub-agents activity', title }
+export function activityStripState(counts: WorkCounts): ActivityStripState {
+  const segments: StripSegment[] = []
+  if (counts.running > 0) segments.push({ text: `${String(counts.running)} running`, failed: false })
+  if (counts.queued > 0) segments.push({ text: `${String(counts.queued)} queued`, failed: false })
+  if (counts.failed > 0) segments.push({ text: `${String(counts.failed)} failed`, failed: true })
+  const label = segments.map((segment) => segment.text).join(STRIP_SEPARATOR)
+  return {
+    show: segments.length > 0,
+    running: counts.running,
+    queued: counts.queued,
+    failed: counts.failed,
+    segments,
+    label,
+    title: segments.length > 0 ? `Background work: ${segments.map((segment) => segment.text).join(', ')}` : 'Background work',
+  }
 }

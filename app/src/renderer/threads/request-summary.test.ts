@@ -274,6 +274,93 @@ describe('planRequests — old threads and live requests', () => {
   })
 })
 
+describe('planRequests — a message sent while the agent works (mid-run)', () => {
+  it('gives a request a later message ended mid-turn no fallback answer', () => {
+    const feed: Entry[] = [
+      user('u0'),
+      say('m0', 'Earlier answer.', { ends: true }),
+      user('u1'),
+      say('m1', 'Reading the sidebar.'),
+      tool('t1', 'm1'),
+      say('m2', 'Matching the spacing.'),
+      user('u2'),
+      say('m3', 'Started the sign-in fix as a subtask.'),
+      say('m4', 'Both are in hand.', { ends: true }),
+    ]
+    const [, first, second] = requests(planRequests(feed, classify))
+    expect(first.answer).toBeNull()
+    expect(first.continued).toBe(true)
+    // The last step stays a step: nothing is hidden, nothing crowned.
+    expect(stepShape(first)).toEqual([
+      ['m1', ['t1']],
+      ['m2', []],
+    ])
+    expect(second.sentWhileWorking).toBe(true)
+    expect(second.continued).toBe(false)
+    expect(id(second.answer)).toBe('m4')
+    const summary = requestSummary(first, { classify })
+    expect(requestRowLabel(summary, false)).toBe('Worked <1 min · 1 tool · continued below')
+  })
+
+  it('continues a chain of mid-run messages to the request that holds the mark', () => {
+    const feed: Entry[] = [
+      user('u0'),
+      say('m0', 'Earlier answer.', { ends: true }),
+      user('u1'),
+      say('m1', 'Working on one.'),
+      user('u2'),
+      say('m2', 'Working on two.'),
+      user('u3'),
+      say('m3', 'All done.', { ends: true }),
+    ]
+    const [, a, b, c] = requests(planRequests(feed, classify))
+    expect([a.continued, b.continued, c.continued]).toEqual([true, true, false])
+    expect([a.answer, b.answer]).toEqual([null, null])
+    expect([a.sentWhileWorking, b.sentWhileWorking, c.sentWhileWorking]).toEqual([false, true, true])
+  })
+
+  it('continues into the running request', () => {
+    const feed: Entry[] = [user('u1'), say('m1', 'Reading.'), user('u2'), say('m2', 'Still going.')]
+    const [first, last] = requests(planRequests(feed, classify, { running: true }))
+    expect(first.continued).toBe(true)
+    expect(first.answer).toBeNull()
+    expect(last.sentWhileWorking).toBe(true)
+    expect(last.live).toBe(true)
+  })
+
+  it('keeps the old fallback for a request answered before the next message', () => {
+    // u1's turn ended with a mark: u2 was sent after it, not into it.
+    const feed: Entry[] = [user('u1'), say('m1', 'Answer.', { ends: true }), user('u2'), say('m2', 'Two.', { ends: true })]
+    const [first, second] = requests(planRequests(feed, classify))
+    expect(first.continued).toBe(false)
+    expect(second.sentWhileWorking).toBe(false)
+    expect(id(first.answer)).toBe('m1')
+  })
+
+  it('keeps the fallback in a thread stored before the mark existed', () => {
+    const feed: Entry[] = [user('u1'), say('m1', 'Old answer.'), user('u2'), say('m2', 'Old two.')]
+    const [first, second] = requests(planRequests(feed, classify))
+    expect(first.continued).toBe(false)
+    expect(id(first.answer)).toBe('m1')
+    expect(id(second.answer)).toBe('m2')
+    expect(second.sentWhileWorking).toBe(false)
+  })
+
+  it('does not continue across a card', () => {
+    const feed: Entry[] = [
+      user('u1'),
+      say('m1', 'Asking.'),
+      card('c1'),
+      say('m2', 'Thanks.', { ends: true }),
+      user('u2'),
+      say('m3', 'Two.', { ends: true }),
+    ]
+    const units = planRequests(feed, classify)
+    expect(requests(units).every((request) => !request.continued)).toBe(true)
+    expect(flatten(units)).toEqual(['u1', 'm1', 'c1', 'm2', 'u2', 'm3'])
+  })
+})
+
 // ── requestSummary and the row's line ──────────────────────────────────────
 
 describe('requestSummary', () => {

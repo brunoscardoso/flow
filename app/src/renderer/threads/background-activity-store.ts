@@ -14,7 +14,7 @@
  * together cost nothing. The list read is metadata only (`outputLimit: 0`): a
  * row's output is fetched when the reader opens its tab, never for the list.
  */
-import type { ToolCallRecord, Unsubscribe } from '../../shared/ipc-contract'
+import type { SubtaskRecord, ThreadMessage, ToolCallRecord, Unsubscribe } from '../../shared/ipc-contract'
 import {
   activityKind,
   activityRows,
@@ -22,6 +22,7 @@ import {
   taskActivityRows,
   type BackgroundActivityRow,
 } from './background-activity-model'
+import type { SourceMessage } from './background-work-model'
 
 const REFRESH_DEBOUNCE_MS = 300
 /**
@@ -33,12 +34,23 @@ const REFRESH_DEBOUNCE_MS = 300
  * list also ignores — the smallest read `toolCalls:list` can be asked for.
  */
 const OUTPUT_LIMIT = 1
+/**
+ * The person's recent messages, read to name a subtask's source ("from …")
+ * and to find where the current request starts. Bounded: the newest few
+ * messages, re-read only when a message is created on the active thread while
+ * a surface is on screen. Earlier ones stay known for the thread's lifetime.
+ */
+const MESSAGE_WINDOW = 20
 
 export interface BackgroundActivitySnapshot {
   /** The conversation the activity belongs to, or null when none is open. */
   threadId: string | null
   /** Its background rows, oldest-first (the popover reverses for display). */
   rows: BackgroundActivityRow[]
+  /** Its subtasks (plan_mid-run-subtasks), oldest first. */
+  subtasks: SubtaskRecord[]
+  /** The person's messages known so far — sources and the request boundary. */
+  userMessages: SourceMessage[]
 }
 
 interface Subscriber {
@@ -64,6 +76,14 @@ class BackgroundActivityStore {
    *  drops off the live set (marked done) so the chip still lists it and you can
    *  revisit what it ran (#1931). Cleared on thread switch. */
   readonly #retained = new Map<string, BackgroundActivityRow>()
+  /** The active thread's subtasks by ticket — loaded on read, then kept
+   *  current by `subtask` events alone (no re-read per change). */
+  readonly #subtasks = new Map<string, SubtaskRecord>()
+  /** The active thread's person's messages seen so far, by id. */
+  readonly #userMessages = new Map<string, SourceMessage>()
+  #messageTimer: ReturnType<typeof setTimeout> | null = null
+  /** The thread whose messages were read at least once. */
+  #messagesReadFor: string | null = null
   #timer: ReturnType<typeof setTimeout> | null = null
   #started = false
   readonly #subscribers = new Set<Subscriber>()
@@ -87,11 +107,24 @@ class BackgroundActivityStore {
     // here (allowed-pattern #17).
     this.#unsubscribers.push(
       api.threads.onUpdated((events) => {
-        if (this.#threadId === null) return
-        if (!events.some((event) => event.entity === 'tool_call' && event.threadId === this.#threadId)) {
-          return
+        const threadId = this.#threadId
+        if (threadId === null) return
+        let toolCalls = false
+        let messages = false
+        let subtasks = false
+        for (const event of events) {
+          if (event.threadId !== threadId) continue
+          if (event.entity === 'tool_call') toolCalls = true
+          else if (event.entity === 'message' && event.action === 'created') messages = true
+          else if (event.entity === 'subtask' && event.subtask !== undefined) {
+            // The row rides the event: applied as it is, no read.
+            this.#subtasks.set(event.subtask.ticket, event.subtask)
+            subtasks = true
+          }
         }
-        this.#queueRefresh()
+        if (subtasks) this.#emit()
+        if (toolCalls) this.#queueRefresh()
+        if (messages) this.#queueMessages()
       }),
     )
     // The prompt signal: a sub-agent or shell announced itself to the runtime,
@@ -112,7 +145,12 @@ class BackgroundActivityStore {
   }
 
   get snapshot(): BackgroundActivitySnapshot {
-    return { threadId: this.#threadId, rows: mergeActivityRows(this.#rows, this.#taskRows) }
+    return {
+      threadId: this.#threadId,
+      rows: mergeActivityRows(this.#rows, this.#taskRows),
+      subtasks: [...this.#subtasks.values()],
+      userMessages: [...this.#userMessages.values()],
+    }
   }
 
   subscribe(subscriber: Subscriber): Unsubscribe {
@@ -133,14 +171,26 @@ class BackgroundActivityStore {
     const threadId = this.#threadId
     if (threadId === null) return
     let records: ToolCallRecord[]
+    let subtasks: SubtaskRecord[] | null
     try {
-      records = await window.flow.toolCalls.list({ threadId, outputLimit: OUTPUT_LIMIT })
+      const [calls, rows] = await Promise.all([
+        window.flow.toolCalls.list({ threadId, outputLimit: OUTPUT_LIMIT }),
+        this.#readSubtasks(threadId),
+        // Messages once per thread; after that, message events keep them.
+        this.#messagesReadFor === threadId ? Promise.resolve() : this.#readMessages(threadId),
+      ])
+      records = calls
+      subtasks = rows
     } catch (error) {
       console.error('flow: background activity fetch failed', { threadId, error })
       return
     }
     // A late response for a thread the user already left must not paint.
     if (threadId !== this.#threadId) return
+    if (subtasks !== null) {
+      this.#subtasks.clear()
+      for (const record of subtasks) this.#subtasks.set(record.ticket, record)
+    }
     this.#rows = activityRows(records)
     this.#spawnRecords = records.filter((record) => activityKind(record.toolName) === 'subagent')
     this.#emit()
@@ -159,6 +209,49 @@ class BackgroundActivityStore {
     return this.#spawnRecords
   }
 
+  /** A thread's subtasks, or null when this build has no subtasks or the
+   *  read failed — the rows already known are then kept. */
+  async #readSubtasks(threadId: string): Promise<SubtaskRecord[] | null> {
+    const api = window.flow.subtasks
+    if (api === undefined) return null
+    try {
+      return await api.list({ threadId })
+    } catch (error) {
+      console.warn('flow: subtask read failed', { threadId, error })
+      return null
+    }
+  }
+
+  /** Fold the newest person's messages into the known set. Never throws. */
+  async #readMessages(threadId: string): Promise<void> {
+    let messages: ThreadMessage[]
+    try {
+      messages = await window.flow.messages.list({ threadId, limit: MESSAGE_WINDOW })
+    } catch (error) {
+      console.warn('flow: message read for background work failed', { threadId, error })
+      return
+    }
+    if (threadId !== this.#threadId) return
+    this.#messagesReadFor = threadId
+    for (const message of messages) {
+      if (message.role !== 'user') continue
+      this.#userMessages.set(message.id, { id: message.id, content: message.content, createdAt: message.createdAt })
+    }
+  }
+
+  #queueMessages(): void {
+    if (![...this.#subscribers].some((subscriber) => subscriber.onScreen())) return
+    if (this.#messageTimer !== null) clearTimeout(this.#messageTimer)
+    this.#messageTimer = setTimeout(() => {
+      this.#messageTimer = null
+      const threadId = this.#threadId
+      if (threadId === null) return
+      void this.#readMessages(threadId).then(() => {
+        if (threadId === this.#threadId) this.#emit()
+      })
+    }, REFRESH_DEBOUNCE_MS)
+  }
+
   #setActiveThread(threadId: string | null): void {
     if (threadId === this.#threadId) return
     this.#threadId = threadId
@@ -166,6 +259,9 @@ class BackgroundActivityStore {
     this.#spawnRecords = null
     this.#taskRows = []
     this.#retained.clear()
+    this.#subtasks.clear()
+    this.#userMessages.clear()
+    this.#messagesReadFor = null
     this.#emit()
     if (threadId !== null) {
       void this.refresh()

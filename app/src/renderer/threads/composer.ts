@@ -46,7 +46,11 @@ import {
   clearChips,
   dismissChip,
   serializeChips,
+  serializeSubtaskTarget,
+  subtaskTargetFrom,
+  SUBTASK_TARGET_HINT,
   type BlueprintChipRef,
+  type SubtaskTargetRef,
 } from './composer-chips'
 import {
   addContextChip,
@@ -237,6 +241,10 @@ export class Composer {
   #commandRange: { start: number; end: number } | null = null
   /** Attached blueprint references (Board→Chat), in insertion order. */
   #chips: readonly BlueprintChipRef[] = []
+  /** The subtask the next message is steered to (plan_mid-run-subtasks
+   *  FR-13), or null to talk to the main agent. Per thread: cleared on a
+   *  switch and after a send. */
+  #subtaskTarget: SubtaskTargetRef | null = null
   /** Context selections attached via cmd+L (terminal/file) — #152. */
   #contextChips: readonly ContextChipRef[] = []
   /** Pending image attachments (paste/drag/picker/capture) — #456. */
@@ -360,6 +368,16 @@ export class Composer {
     document.addEventListener('flow:send-prompt', (event) => {
       const text = composedPromptFor((event as CustomEvent<unknown>).detail, this.#thread?.id ?? null)
       if (text !== null) this.#sendComposed(text)
+    })
+
+    // ── Steer a subtask (plan_mid-run-subtasks FR-13) ─────────────────────
+    // The Background work panel's Steer: a removable target chip. The next
+    // message goes to that subtask; removing the chip talks to the main agent.
+    document.addEventListener('flow:steer-subtask', (event) => {
+      const target = subtaskTargetFrom((event as CustomEvent<unknown>).detail, this.#thread?.id ?? null)
+      if (target === null) return
+      this.#setSubtaskTarget(target)
+      this.#textarea.focus()
     })
 
     // ── Composer prefill (Resolve-with-AI, #66) ──────────────────────────
@@ -936,6 +954,8 @@ export class Composer {
       // own saved draft (if any) is restored here (#1067).
       this.#textarea.value = thread ? this.#loadDraft(thread.id) : ''
       this.#setChips(clearChips())
+      // A steer belongs to the thread it was set on.
+      this.#setSubtaskTarget(null)
       this.#setContextChips([])
       this.#setAttachments([])
       this.#autoGrow()
@@ -1142,7 +1162,12 @@ export class Composer {
     // Chips fold into the CONTENT (the sendMessage IPC shape stays { threadId,
     // content }): blueprint one-line references, then context fenced blocks, then
     // the user's text.
-    const content = serializeChips(chips, serializeContextChips(contextChips, text))
+    const subtaskTarget = this.#subtaskTarget
+    // A steered message is addressed to its subtask; the agent forwards it.
+    const content = serializeSubtaskTarget(
+      subtaskTarget,
+      serializeChips(chips, serializeContextChips(contextChips, text)),
+    )
     // The agent is busy — one turn at a time. Instead of refusing, QUEUE the message
     // (#472): it auto-sends when the turn finishes; the user can remove it or send it
     // now. Clear the composer (the message is committed to the queue) and stop here.
@@ -1167,6 +1192,7 @@ export class Composer {
       this.#setChips(clearChips())
       this.#setContextChips([])
       this.#setAttachments([])
+      this.#setSubtaskTarget(null)
       this.#enqueue(content, attachments)
       return
     }
@@ -1180,6 +1206,7 @@ export class Composer {
     this.#setChips(clearChips())
     this.#setContextChips([])
     this.#setAttachments([])
+    this.#setSubtaskTarget(null)
     this.#dispatchContent(
       content,
       attachments,
@@ -1189,6 +1216,10 @@ export class Composer {
         this.#setChips(chips)
         this.#setContextChips(contextChips)
         this.#setAttachments(attachments)
+        // Restored only if the composer still shows the thread it was for.
+        if (subtaskTarget !== null && this.#thread?.id === subtaskTarget.threadId) {
+          this.#setSubtaskTarget(subtaskTarget)
+        }
         this.#autoGrow()
       },
       // The user just pressed Enter/Send in the composer — refocusing it is correct.
@@ -1712,12 +1743,51 @@ export class Composer {
     }
   }
 
+  #setSubtaskTarget(target: SubtaskTargetRef | null): void {
+    if (target === this.#subtaskTarget) return
+    this.#subtaskTarget = target
+    this.#renderChips()
+  }
+
+  /** The steer chip and its hint, first in the chip bar. */
+  #renderSubtaskTarget(): void {
+    const target = this.#subtaskTarget
+    if (target === null) return
+    const pill = document.createElement('span')
+    pill.className = 'fl-composer-chip fl-composer-target'
+    pill.title = target.title
+    const label = document.createElement('span')
+    label.className = 'fl-composer-chip-label'
+    label.textContent = `To subtask: ${target.title}`
+    const dismiss = document.createElement('button')
+    dismiss.type = 'button'
+    dismiss.className = 'fl-composer-chip-dismiss'
+    dismiss.setAttribute('aria-label', 'Remove the subtask tag and talk to the main agent')
+    const icon = document.createElement('fl-icon')
+    icon.setAttribute('name', 'close')
+    icon.setAttribute('size', '10')
+    dismiss.appendChild(icon)
+    dismiss.addEventListener('click', () => {
+      this.#setSubtaskTarget(null)
+      this.#textarea.focus()
+    })
+    pill.append(label, dismiss)
+    const hint = document.createElement('span')
+    hint.className = 'fl-composer-target-hint'
+    hint.textContent = SUBTASK_TARGET_HINT
+    this.#chipBar.append(pill, hint)
+  }
+
   #renderChips(): void {
     this.#chipBar.textContent = ''
     this.#chipBar.hidden =
-      this.#chips.length === 0 && this.#contextChips.length === 0 && this.#attachments.length === 0
+      this.#chips.length === 0 &&
+      this.#contextChips.length === 0 &&
+      this.#attachments.length === 0 &&
+      this.#subtaskTarget === null
     // A chip is sendable content, so chip add/remove must refresh Send (#430).
     this.#syncEnabled()
+    this.#renderSubtaskTarget()
     for (const chip of this.#chips) {
       const pill = document.createElement('span')
       pill.className = 'fl-composer-chip'
@@ -2675,6 +2745,12 @@ function injectComposerStyles(): void {
       color: var(--fl-color-text);
     }
     .fl-composer-chip.proposal { border-style: dashed; }
+    .fl-composer-target { border-color: var(--fl-color-accent); }
+    .fl-composer-target-hint {
+      align-self: center;
+      font-size: var(--fl-text-caption-size);
+      color: var(--fl-color-text-secondary);
+    }
     .fl-composer-chip-kind {
       flex: none;
       font-family: var(--fl-font-mono);

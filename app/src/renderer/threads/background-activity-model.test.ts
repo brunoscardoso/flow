@@ -115,60 +115,32 @@ describe('activityRows', () => {
 })
 
 describe('activityStripState', () => {
-  it('hides when there is nothing', () => {
-    expect(activityStripState([]).show).toBe(false)
+  it('hides when there is nothing running, queued or failed', () => {
+    expect(activityStripState({ running: 0, queued: 0, failed: 0 }).show).toBe(false)
   })
 
-  it('counts rows and running rows, and titles them', () => {
-    const rows = activityRows([
-      call({ id: 'a', toolName: 'Agent', status: 'running' }),
-      call({ id: 'b', toolName: 'Agent', status: 'success' }),
+  it('says the live counts, failed marked for the error colour', () => {
+    const state = activityStripState({ running: 4, queued: 1, failed: 1 })
+    expect(state.show).toBe(true)
+    expect(state.label).toBe('4 running · 1 queued · 1 failed')
+    expect(state.segments).toEqual([
+      { text: '4 running', failed: false },
+      { text: '1 queued', failed: false },
+      { text: '1 failed', failed: true },
     ])
-    const state = activityStripState(rows)
-    expect(state).toMatchObject({ show: true, count: 2, runningCount: 1, label: 'Sub-agents activity' })
-    expect(state.title).toBe('1 of 2 sub-agent activities running')
+    expect(state.title).toBe('Background work: 4 running, 1 queued, 1 failed')
   })
 
-  it('titles a single finished activity without a running clause', () => {
-    const state = activityStripState(activityRows([call({ id: 'a', toolName: 'Agent', status: 'success' })]))
-    expect(state.title).toBe('1 sub-agent activity')
+  it('omits zero counts', () => {
+    expect(activityStripState({ running: 2, queued: 0, failed: 0 }).label).toBe('2 running')
   })
 
-  // ── It is a LIVE indicator (user, 2026-10-13) ────────────────────────────
-
-  it('goes away once every sub-agent has finished', () => {
-    // POSITIVE FIRST (allowed-pattern #28): the same two rows DO show the
-    // strip while one of them runs, so the hiding below is the finishing's
-    // doing and not an empty list.
-    const running = activityRows([
-      call({ id: 'a', toolName: 'Agent', status: 'running' }),
-      call({ id: 'b', toolName: 'Agent', status: 'success' }),
-    ])
-    expect(activityStripState(running).show).toBe(true)
-
-    const finished = activityRows([
-      call({ id: 'a', toolName: 'Agent', status: 'success' }),
-      call({ id: 'b', toolName: 'Agent', status: 'success' }),
-    ])
-    expect(activityStripState(finished).show).toBe(false)
-  })
-
-  it('goes away when the sub-agents failed, too', () => {
-    // Failed is finished. A strip pulsing over a run that died is the same
-    // false "still working" the live dots were reported for.
-    const failed = activityRows([call({ id: 'a', toolName: 'Agent', status: 'error' })])
-    expect(activityStripState(failed).show).toBe(false)
-  })
-
-  it('still counts the finished ones while something runs, so the pill and the list agree', () => {
-    const rows = activityRows([
-      call({ id: 'a', toolName: 'Agent', status: 'running' }),
-      call({ id: 'b', toolName: 'Agent', status: 'success' }),
-      call({ id: 'c', toolName: 'Agent', status: 'success' }),
-    ])
-    const state = activityStripState(rows)
-    expect(state).toMatchObject({ show: true, count: 3, runningCount: 1 })
-    expect(state.title).toBe('1 of 3 sub-agent activities running')
+  it('stays up for a failure alone — the person can retry it from the panel', () => {
+    // POSITIVE FIRST (allowed-pattern #28): no failure, no pill.
+    expect(activityStripState({ running: 0, queued: 0, failed: 0 }).show).toBe(false)
+    const state = activityStripState({ running: 0, queued: 0, failed: 1 })
+    expect(state.show).toBe(true)
+    expect(state.label).toBe('1 failed')
   })
 
   it('leaves every finished spawn reachable as a chip in the transcript', () => {
