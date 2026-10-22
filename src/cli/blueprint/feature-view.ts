@@ -32,6 +32,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { FEATURE_ROLES, isFeatureRole, type FeatureRole } from './feature-role.js';
 import { readFeatures } from './feature-store.js';
 import { VIEW_PORT_CROSSES_MAX } from './feature-view-ports-prompt.js';
 
@@ -88,6 +89,12 @@ export interface ViewNode {
   code?: ViewCode;
   /** Verified references: `[ref, what it shows]`. */
   refs?: Array<[string, string]>;
+  /**
+   * What kind of thing this component is (plan `feature-type-icons`, FR-5) —
+   * drawn as the box's icon, and carried to the derived part's `learnedRole`.
+   * Optional; one off the list refuses the view.
+   */
+  role?: FeatureRole;
 }
 
 /** One labelled connection. The label is what makes the picture explain. */
@@ -262,6 +269,12 @@ export function validateFeatureView(
       }
       if (!VIEW_NODE_KINDS.includes(raw.kind as ViewNodeKind)) {
         errors.push(`component '${id}' has kind '${String(raw.kind)}' — expected ${VIEW_NODE_KINDS.join('|')}`);
+      }
+      // A role is optional, but one off the list is refused HERE — the opened
+      // feature's boxes are drawn from this view, so the box's role is checked
+      // where the view is checked (FR-5), never trusted by the board.
+      if (raw.role !== undefined && !isFeatureRole(raw.role)) {
+        errors.push(`component '${id}' has role '${String(raw.role)}' — expected ${FEATURE_ROLES.join('|')}`);
       }
       if (!VIEW_DELTAS.includes(raw.delta as ViewDelta)) {
         errors.push(`component '${id}' has delta '${String(raw.delta)}' — expected ${VIEW_DELTAS.join('|')}`);

@@ -151,6 +151,7 @@ import { StorylineReaders } from '../blueprint/storyline-reader.js';
 import { runFeaturePortsVerb } from '../blueprint/feature-ports.js';
 import { runFeatureHomeVerb } from '../blueprint/feature-home.js';
 import { runFeatureRoleVerb } from '../blueprint/feature-learned-role.js';
+import { FEATURE_ROLES, isFeatureRole } from '../blueprint/feature-role.js';
 import { computeDrift } from '../blueprint/drift-check.js';
 import { advanceFileStamps, computeFileStamps, establishFileStampsIfMissing, readFileStamps, stampEdgeVias, writeFileStamps, type FileStamp } from '../blueprint/file-stamps.js';
 import { walkRepo } from '../blueprint/extractors/scan.js';
@@ -2488,11 +2489,22 @@ function runFeaturesParts(repoRoot: string, options: BlueprintCommandOptions): n
           ];
         })
       : [];
+    // `learnedRole` is the learn-owned role a pass decided for this part
+    // (plan `feature-type-icons`, FR-4/FR-5). Checked against the vocabulary
+    // HERE, by the writer; absent keeps whatever is on disk (`writeParts`). A
+    // person's `role` is never read from a machine write — it is not even
+    // looked for.
+    const rawLearnedRole = record['learnedRole'];
+    if (rawLearnedRole !== undefined && !isFeatureRole(rawLearnedRole)) {
+      errors.push(`part '${name}' has learnedRole '${String(rawLearnedRole)}' — expected ${FEATURE_ROLES.join('|')}`);
+      return;
+    }
     parts.push({
       name,
       summary: typeof record['summary'] === 'string' ? record['summary'].trim() : '',
       anchors: anchors.map((a) => a.trim()),
       learnings,
+      ...(rawLearnedRole === undefined ? {} : { learnedRole: rawLearnedRole }),
     });
   });
 

@@ -57,6 +57,11 @@ export interface CuratedNode {
   view?: string
   code?: CuratedCode
   refs?: Array<[string, string]>
+  /**
+   * The component's role (plan `feature-type-icons`, FR-5) — passed through
+   * from the view as the CLI validated it. Drawing it is Phase 5's.
+   */
+  role?: string
 }
 
 export interface CuratedEdge {
