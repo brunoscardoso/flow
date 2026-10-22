@@ -142,3 +142,29 @@ describe('board palette: small text is readable', () => {
     expect(chroma('#0B7181')).toBeLessThan(MIN_CHROMA)
   })
 })
+
+describe('feature type colours (plan feature-type-icons)', () => {
+  const source = readFileSync(BOARD, 'utf-8')
+  /** WCAG's bar for a graphic — an icon is not text. */
+  const MIN_GRAPHIC = 3
+  const ROLES = ['ui', 'api', 'logic', 'data', 'config', 'jobs', 'integration', 'service', 'function', 'mobile']
+  const paper = { light: '#F4F2EC', dark: '#0C1320' }
+  const cell = { light: '#FBFAF6', dark: '#212833' }
+
+  for (const role of ROLES) {
+    it(`--fb-role-${role} is declared once per theme and reads as a graphic on both grounds`, () => {
+      const values = tokenValues(source, `--fb-role-${role}`)
+      expect(values).toHaveLength(2)
+      const [light, dark] = values
+      expect(contrastRatio(light, paper.light)).toBeGreaterThanOrEqual(MIN_GRAPHIC)
+      expect(contrastRatio(light, cell.light)).toBeGreaterThanOrEqual(MIN_GRAPHIC)
+      expect(contrastRatio(dark, paper.dark)).toBeGreaterThanOrEqual(MIN_GRAPHIC)
+      expect(contrastRatio(dark, cell.dark)).toBeGreaterThanOrEqual(MIN_GRAPHIC)
+    })
+  }
+
+  it('draws neutral in the dim ink, once per theme', () => {
+    const neutral = [...source.matchAll(/^\s*--fb-role-neutral\s*:\s*var\(--fb-ink-dim\)\s*;/gm)]
+    expect(neutral).toHaveLength(2)
+  })
+})

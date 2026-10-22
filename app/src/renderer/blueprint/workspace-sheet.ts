@@ -66,6 +66,8 @@ import {
 } from './territory-view'
 import type { TerritoryLabelClass } from './territory-view'
 import { cellFolders, folderSlice, type CellFolders } from './folder-rows-model'
+import { isFeatureRole, type FeatureRole, type FeatureRoleSource } from '../../shared/feature-role'
+import { roleIconShownAt } from './role-icon-model'
 
 /** How many hues the palette holds. A slot is `colorIndex mod` this. */
 export const WORKSPACE_PALETTE_SIZE = 8
@@ -118,6 +120,12 @@ export interface WorkspaceCell {
   rect: Rect
   labelClass: TerritoryLabelClass
   roomy: boolean
+  /** Its type and who answered it, as the CLI resolved them — exactly as the
+   *  project board's cell carries them (`TerritoryCell.role`). */
+  role: FeatureRole | null
+  roleSource: FeatureRoleSource | null
+  /** The icon shows — a role, on the full-name tier (`roleIconShownAt`). */
+  showRoleIcon: boolean
   /** `1.2k lines`, when there is room and it was measured. */
   sizeLine: string | null
   /**
@@ -458,6 +466,8 @@ function cellsOf(
     const text = summaryParts(node.summary)
     // CALM AT REST: one home line at the roomy tier; the rows wait for the details.
     const folders = cellFolders(folderSlice(node.folders, node.name, project.name), restingFolderTier(rect.w, rect.h), 0)
+    const labelClass = cellLabelClass(rect.w, rect.h)
+    const role = isFeatureRole(node.role) ? node.role : null
     return {
       key: cellKey(project.slug, entry.node.id),
       id: entry.node.id,
@@ -465,8 +475,11 @@ function cellsOf(
       name: entry.node.name,
       understanding: entry.node.understanding,
       rect,
-      labelClass: cellLabelClass(rect.w, rect.h),
+      labelClass,
       roomy,
+      role,
+      roleSource: role === null ? null : (node.roleSource ?? 'guess'),
+      showRoleIcon: role !== null && roleIconShownAt(labelClass),
       sizeLine: roomy && lines !== undefined && lines > 0 ? `${formatCount(lines)} lines` : null,
       // At rest the description shows where there is room; the rows are the hover's details.
       summary: hasRoomForSummary(rect.w, rect.h) ? text.about : null,

@@ -503,11 +503,28 @@ import {
   resolvePane,
   type DeriveState,
 } from './view-state'
+import { ICON_PATHS } from '../components/icon-paths'
+import {
+  boxRole,
+  partRolesOf,
+  roleIconShownAt,
+  roleMarkFor,
+  roleOfferDismissKey,
+  roleOfferView,
+  type PartRole,
+  type RoleMark,
+  type RoleOfferRun,
+} from './role-icon-model'
+import { countUnclassifiedRoles } from '../../shared/role-classify'
 
 /** How often the open learning panel re-asks what the learner is doing. */
 const LEARN_LIVE_POLL_MS = 3_000
 
 const SVG_NS = 'http://www.w3.org/2000/svg'
+
+/** Room the classify offer takes off the top of the Territory sheet: the bar
+ *  (36px, `.fb-role-offer`) and a gap before the first cell. */
+const ROLE_OFFER_BAND = 46
 
 /** Suffixes each curated canvas's arrowhead marker id — see `#buildCuratedCanvas`. */
 let curatedArrowSeq = 0
@@ -531,6 +548,12 @@ interface CuratedCanvasContext {
   ghostParts: ReadonlySet<string>
   /** Names the feature on the ground; the level's own title when null. */
   featureTitle: string | null
+  /**
+   * The feature's parts by name → their type, as the graph resolved them — the
+   * second answer a box's icon reads (`boxRole`). Absent or empty when the
+   * graph does not hold this feature: the boxes then draw a guess.
+   */
+  partRoles?: ReadonlyMap<string, PartRole>
   /** The pane the ground is fitted to, before the chrome's share comes off. */
   pane: { width: number; height: number }
 }
@@ -570,6 +593,8 @@ interface CellDiagram {
   featureTitle: string | null
   /** Its entries and exits, or null when it has none or they could not be read. */
   ports: FeaturePorts | null
+  /** The feature's parts' types, read off the graph the cell came from. */
+  partRoles: ReadonlyMap<string, PartRole>
 }
 
 /**
@@ -952,6 +977,50 @@ function learnGlyphMark(): SVGSVGElement {
   )
   svg.appendChild(brain)
   return svg
+}
+
+/**
+ * A FEATURE'S TYPE ICON (plan feature-type-icons): the glyph from the icon
+ * table, in a span that carries the colour class and the tooltip.
+ *
+ * HAND-BUILT RATHER THAN `<fl-icon>`, the same call `learnGlyphMark` made:
+ * the component draws every glyph at a fixed 1.2 stroke inside its shadow root,
+ * and the approved mockup draws these at 1.6 so a 12px glyph on a kicker row
+ * still reads as a shape. The PATH is the table's, so the picture has one home.
+ * The span holds the tooltip because an SVG element ignores `title`.
+ */
+function roleIconMark(mark: RoleMark, size: number): HTMLElement {
+  const wrap = document.createElement('span')
+  wrap.className = mark.className
+  wrap.title = mark.title
+  wrap.dataset['role'] = mark.role
+  wrap.dataset['roleSource'] = mark.source
+  wrap.style.setProperty('width', `${String(size)}px`)
+  wrap.style.setProperty('height', `${String(size)}px`)
+  const svg = document.createElementNS(SVG_NS, 'svg')
+  svg.setAttribute('viewBox', '0 0 16 16')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('aria-hidden', 'true')
+  const path = document.createElementNS(SVG_NS, 'path')
+  path.setAttribute('d', ICON_PATHS[mark.glyph])
+  path.setAttribute('stroke', 'currentColor')
+  path.setAttribute('stroke-width', '1.6')
+  path.setAttribute('stroke-linecap', 'round')
+  path.setAttribute('stroke-linejoin', 'round')
+  svg.appendChild(path)
+  wrap.appendChild(svg)
+  return wrap
+}
+
+/** A Territory cell's icon, first on its kicker row — or nothing, when the cell
+ *  has no role. Hidden (not absent) below the name tier, so a hover that
+ *  re-tiers the cell can show it again without rebuilding the row. */
+function cellRoleIcon(cell: { role: string | null; roleSource: string | null; showRoleIcon: boolean }): HTMLElement | null {
+  const mark = roleMarkFor(cell.role, cell.roleSource)
+  if (mark === null) return null
+  const icon = roleIconMark(mark, 12)
+  icon.hidden = !cell.showRoleIcon
+  return icon
 }
 
 function corpusGlyphMark(): SVGSVGElement {
@@ -1680,6 +1749,17 @@ export class BlueprintBoard {
   #featureViewStops: Array<() => void> = []
   /** The feature graph — the board's DEFAULT view (feature-blueprint). */
   #featureGraph: FeatureGraphInput | null = null
+  /**
+   * THE ONE-TIME CLASSIFY OFFER (plan feature-type-icons, FR-10), per project
+   * root. A pass in flight, a pass that ran to its end this session, and the
+   * sentence main sent when a start did not run. "Not now" is remembered in
+   * this viewer's storage (`roleOfferDismissKey`); the rest lasts the session.
+   */
+  #roleOfferRuns = new Map<string, RoleOfferRun>()
+  #roleOfferFinished = new Set<string>()
+  #roleOfferFailures = new Map<string, string>()
+  /** The bar on screen, so a progress tick rewrites it in place. */
+  #roleOfferEl: HTMLElement | null = null
   /**
    * `standingProgress` for the graph on stage — every node's parts fraction,
    * built ONCE per graph rather than once per rectangle.
@@ -10175,6 +10255,7 @@ export class BlueprintBoard {
       ghostParts:
         this.#brief === null ? new Set<string>() : ghostPartNames(this.#brief.delta, 'next'),
       featureTitle: this.#curatedView?.meta.title ?? null,
+      partRoles: partRolesOf(this.#featureGraph?.nodes ?? [], this.#curatedView?.feature),
       // A stage with no layout yet measures zero — the default sheet keeps the
       // arithmetic sane until the resize observer fires with a real one,
       // exactly as `#territoryOptions` does for the feature board.
@@ -10379,6 +10460,14 @@ export class BlueprintBoard {
       // whatever the corner is for).
       const head = document.createElement('div')
       head.className = 'fb-curated-cardhead'
+      // ITS TYPE, BEFORE THE KIND WORD (plan feature-type-icons): the
+      // component's own role, else its part's, else a guess — `boxRole`'s
+      // order, drawn grey when it is a guess. The word and the edge stay.
+      if (node !== undefined) {
+        const answered = boxRole(node, card.part === null ? null : (options.partRoles?.get(card.part) ?? null))
+        const mark = roleMarkFor(answered.role, answered.source)
+        if (mark !== null) head.appendChild(roleIconMark(mark, 14))
+      }
       const kind = document.createElement('span')
       kind.className = 'fb-curated-kind'
       kind.textContent = node?.kind ?? ''
@@ -11787,6 +11876,12 @@ export class BlueprintBoard {
 
     this.#headStrip?.replaceChildren(this.#buildTerritoryTitle(view))
     wrap.append(sheet, this.#buildTerritoryFoot(view, limits))
+    // THE CLASSIFY OFFER, above the cells, in the room `topBand` left for it.
+    this.#roleOfferEl = null
+    if (this.#roleOfferShown()) {
+      const offer = this.#buildRoleOffer()
+      if (offer !== null) wrap.appendChild(offer)
+    }
     this.#stage.appendChild(wrap)
     if (lens !== null) {
       // The SAME rectangle, still in the air, over a level that has just
@@ -12648,6 +12743,9 @@ export class BlueprintBoard {
       }
       const kicker = document.createElement('div')
       kicker.className = 'fb-terr-cell-kicker'
+      // The same type icon as inside the project, first on the row.
+      const roleIcon = cellRoleIcon(cell)
+      if (roleIcon !== null) kicker.appendChild(roleIcon)
       const dot = document.createElement('span')
       dot.className = `fb-learn-dot fb-learn-${cell.understanding}`
       dot.title = `understanding: ${cell.understanding}`
@@ -13005,6 +13103,8 @@ export class BlueprintBoard {
     const graph = { nodes: project.graph.nodes, edges: project.graph.edges }
     const view = buildTerritoryView(graph, remote.stack, {
       ...this.#territoryOptions(),
+      // The offer belongs to the open project's own board, not to this one.
+      topBand: 0,
       project: project.name,
       source: project.state === 'remote' ? 'shared Workspace knowledge' : 'features graph',
       fetchFailure: null,
@@ -13068,6 +13168,9 @@ export class BlueprintBoard {
       }
       const kicker = document.createElement('div')
       kicker.className = 'fb-terr-cell-kicker'
+      // The same type icon as the project's own board, first on the row.
+      const roleIcon = cellRoleIcon(cell)
+      if (roleIcon !== null) kicker.appendChild(roleIcon)
       if (cell.understanding !== null) {
         const dot = document.createElement('span')
         dot.className = `fb-learn-dot fb-learn-${cell.understanding}`
@@ -13165,8 +13268,139 @@ export class BlueprintBoard {
    *  whether the read failed (an empty graph then means "unknown", not "none").
    *  One place, because every pure re-derivation below has to agree with the
    *  render — a pop computes the parent level's rectangles from it. */
+  // ── THE ONE-TIME CLASSIFY OFFER (plan feature-type-icons, FR-10) ──────────
+  //
+  // What the bar says is `roleOfferView`'s answer; these methods read the
+  // board's state into it, run the pass on a press and spell the result.
+
+  /** What the offer would say for the open project right now. */
+  #roleOfferNow(): ReturnType<typeof roleOfferView> {
+    const root = this.#activeRoot
+    const graph = this.#featureGraph
+    // AN OLDER PRELOAD HAS NO PASS TO OFFER, and an offer that cannot run is a
+    // dead button (forbidden-pattern #12's cousin).
+    if (root === null || graph === null || window.flow.learn.classifyRoles === undefined) return { kind: 'hidden' }
+    return roleOfferView({
+      count: countUnclassifiedRoles(graph.nodes),
+      dismissed: readLocalStorage(roleOfferDismissKey(root)) === '1',
+      finished: this.#roleOfferFinished.has(root),
+      running: this.#roleOfferRuns.get(root) ?? null,
+      failure: this.#roleOfferFailures.get(root) ?? null,
+    })
+  }
+
+  /** The bar shows: on the project's own top level, with something to say. */
+  #roleOfferShown(): boolean {
+    if (this.#featureStack.length !== 0 || this.#brief !== null) return false
+    return this.#roleOfferNow().kind !== 'hidden'
+  }
+
+  /** The bar, or null when it has nothing to say. */
+  #buildRoleOffer(): HTMLElement | null {
+    const view = this.#roleOfferNow()
+    const root = this.#activeRoot
+    if (view.kind === 'hidden' || root === null) return null
+    const bar = document.createElement('div')
+    bar.className = 'fb-role-offer'
+    bar.setAttribute('role', 'status')
+    // The bar is its own place: a press on it is not a press on the sheet.
+    bar.addEventListener('click', (event) => event.stopPropagation())
+    const mark = roleMarkFor('neutral', 'guess')
+    if (mark !== null) {
+      const icon = roleIconMark(mark, 16)
+      icon.removeAttribute('title')
+      bar.appendChild(icon)
+    }
+    const text = document.createElement('span')
+    text.className = 'fb-role-offer-text'
+    text.textContent = view.text
+    bar.appendChild(text)
+    if (view.kind === 'running') {
+      const stop = document.createElement('button')
+      stop.type = 'button'
+      stop.className = 'fb-role-offer-secondary'
+      stop.textContent = view.stop
+      stop.title = 'Stop classifying; what is already classified stays'
+      stop.addEventListener('click', () => {
+        stop.disabled = true
+        void window.flow.learn.classifyRoles?.({ rootId: root, stop: true })
+      })
+      bar.appendChild(stop)
+    } else {
+      const start = document.createElement('button')
+      start.type = 'button'
+      start.className = 'fb-role-offer-primary'
+      start.textContent = view.primary
+      start.title = 'Give each learned feature a type from what Flow already learned about it'
+      start.addEventListener('click', () => void this.#runRoleClassify(root))
+      const later = document.createElement('button')
+      later.type = 'button'
+      later.className = 'fb-role-offer-secondary'
+      later.textContent = view.secondary
+      later.title = 'Hide this for this project'
+      later.addEventListener('click', () => {
+        writeLocalStorage(roleOfferDismissKey(root), '1')
+        // THE SHEET TAKES ITS ROOM BACK — a re-render re-lays the cells.
+        if (root === this.#activeRoot) this.#renderFeatureBoard()
+      })
+      bar.append(start, later)
+    }
+    this.#roleOfferEl = bar
+    return bar
+  }
+
+  /** Put the bar back as the offer now reads, without re-laying the sheet. */
+  #repaintRoleOffer(): void {
+    const old = this.#roleOfferEl
+    if (old === null || !old.isConnected) return
+    const next = this.#buildRoleOffer()
+    if (next === null) old.remove()
+    else old.replaceWith(next)
+  }
+
+  /**
+   * RUN THE PASS — on a press, never on its own. Progress rewrites the bar in
+   * place; the end refreshes the graph, which re-renders the board with the
+   * new types (and, the pass having run, no bar).
+   */
+  async #runRoleClassify(rootId: string): Promise<void> {
+    const classify = window.flow.learn.classifyRoles
+    if (classify === undefined || this.#roleOfferRuns.has(rootId)) return
+    const graph = this.#featureGraph
+    const total = graph === null ? 0 : countUnclassifiedRoles(graph.nodes)
+    this.#roleOfferFailures.delete(rootId)
+    this.#roleOfferRuns.set(rootId, { done: 0, total })
+    this.#repaintRoleOffer()
+    const unsubscribe = window.flow.learn.onClassifyRolesProgress?.((event) => {
+      if (event.rootId !== rootId || !this.#roleOfferRuns.has(rootId)) return
+      this.#roleOfferRuns.set(rootId, { done: event.done, total: event.total })
+      // Only the bar on screen pays for a tick (allowed-pattern #17).
+      if (rootId === this.#activeRoot) this.#repaintRoleOffer()
+    })
+    try {
+      const result = await classify({ rootId })
+      if (!result.ok) {
+        this.#roleOfferFailures.set(rootId, result.reason ?? 'Flow could not start it.')
+      } else if (!result.stopped) {
+        this.#roleOfferFinished.add(rootId)
+      }
+    } catch (error) {
+      console.warn('flow: the type classify pass failed', error)
+      this.#roleOfferFailures.set(rootId, 'Flow could not reach the classifier.')
+    } finally {
+      unsubscribe?.()
+      this.#roleOfferRuns.delete(rootId)
+    }
+    // THE NEW TYPES ARE ON DISK — read them back. The re-render this triggers
+    // also drops the bar (or brings the offer back after a stop).
+    if (rootId === this.#activeRoot) void this.#loadFeatureGraph()
+  }
+
   #territoryOptions(): TerritoryOptions {
     return {
+      // THE CLASSIFY OFFER TAKES ITS ROOM FROM THE SHEET rather than covering
+      // a cell — on every build of the level, so a hover re-lay agrees.
+      ...(this.#roleOfferShown() ? { topBand: ROLE_OFFER_BAND } : {}),
       // A stage with no layout yet measures zero; the default sheet keeps the
       // arithmetic sane until the ResizeObserver fires with a real one.
       stage: {
@@ -13268,6 +13502,10 @@ export class BlueprintBoard {
 
     const kicker = document.createElement('div')
     kicker.className = 'fb-terr-cell-kicker'
+    // ITS TYPE LEADS THE ROW (plan feature-type-icons): before the learn dot
+    // and the facts, on the full-name tier only — `showRoleIcon` decided that.
+    const roleIcon = cellRoleIcon(cell)
+    if (roleIcon !== null) kicker.appendChild(roleIcon)
     if (cell.understanding !== null) {
       const dot = document.createElement('span')
       // The board's existing learn vocabulary, unchanged: `fb-learn-*` means
@@ -13846,6 +14084,11 @@ export class BlueprintBoard {
     placeRect(el, rect)
     el.classList.remove(...TERRITORY_SMALL_TIERS)
     if (labelClass !== '') el.classList.add(`fb-terr-${labelClass}`)
+    // THE TYPE ICON FOLLOWS THE NEW TIER — the same rule the cell model used
+    // at build, so a cell grown to its full name shows it and one shrunk below
+    // it never lets the icon take a letter from the name.
+    const roleIcon = el.querySelector<HTMLElement>(':scope > .fb-terr-cell-kicker > .fb-role-icon')
+    if (roleIcon !== null) roleIcon.hidden = !roleIconShownAt(labelClass)
     el.classList.toggle('fb-terr-roomy', roomy)
     el.classList.toggle('fb-terr-grown', focused === id)
     el.classList.toggle('fb-terr-shrunk', focused !== null && focused !== id)
@@ -14248,6 +14491,7 @@ export class BlueprintBoard {
         parts: diagram.parts,
         ghostParts: new Set<string>(),
         featureTitle: diagram.featureTitle,
+        partRoles: diagram.partRoles,
         pane: { width: width + CURATED_GROUND_PAD_X, height: room.height + CURATED_GROUND_CHROME_H },
         // Pressable: the canvas takes no pointer until the cell is pinned.
         ports: { data: diagram.ports, mode, pressable: true },
@@ -14823,6 +15067,9 @@ export class BlueprintBoard {
       parts: readPartRecords(result.parts),
       featureTitle: resolution.view?.meta.title ?? null,
       ports: hasPorts(ports) ? ports : null,
+      // The cell's own graph (this project's, or the sibling's it was drawn
+      // from) — never another project's part that happens to share a name.
+      partRoles: partRolesOf(target.graphNodes, ref),
     }
   }
 
@@ -18430,6 +18677,22 @@ const BOARD_STYLES = `
     --fb-warn: #96621A;
     --fb-danger: #C43C2E;
     --fb-external: #7C56B8;
+    /* A FEATURE'S TYPE (plan feature-type-icons): one hue per role, drawn
+       on the icon only — cells stay neutral, the project name is the only
+       project colour. Darkened for the paper here; every value clears 3:1
+       on it, the bar for a graphic. A guess is drawn in --fb-ink-dim
+       instead, so neutral needs no hue of its own. */
+    --fb-role-ui: #1F6FC2;
+    --fb-role-api: #4B57C9;
+    --fb-role-logic: #7A4FC4;
+    --fb-role-data: #12806F;
+    --fb-role-config: #56677A;
+    --fb-role-jobs: #9A6410;
+    --fb-role-integration: #1C7FAE;
+    --fb-role-service: #4566B8;
+    --fb-role-function: #0E7C82;
+    --fb-role-mobile: #B8407E;
+    --fb-role-neutral: var(--fb-ink-dim);
     /* THE WORKSPACE PALETTE — one muted hue per project (decision
        workspace-blueprint), handed out by slot from the project's stable index.
        Hand-picked per theme like every pair here: these are darkened for
@@ -18549,6 +18812,18 @@ const BOARD_STYLES = `
     --fb-warn: #d29922;
     --fb-danger: #DE7F7F;
     --fb-external: #B48EDE;
+    /* The type hues, lifted for the dark sheet. */
+    --fb-role-ui: #5AA8FF;
+    --fb-role-api: #8C9BFF;
+    --fb-role-logic: #B18CF0;
+    --fb-role-data: #45C4B0;
+    --fb-role-config: #9AAEC4;
+    --fb-role-jobs: #F0B25A;
+    --fb-role-integration: #6CCBF2;
+    --fb-role-service: #7E9CF0;
+    --fb-role-function: #5ED0D6;
+    --fb-role-mobile: #EE7FB8;
+    --fb-role-neutral: var(--fb-ink-dim);
     /* The Workspace palette, lifted for the dark sheet. */
     --fb-ws-hue-0: var(--fl-project-hue-0);
     --fb-ws-hue-1: var(--fl-project-hue-1);
@@ -20147,6 +20422,81 @@ const BOARD_STYLES = `
   /* NOT UNDERSTOOD IS THE NORMAL STATE — no mark for it. A dot appears only
      when there is something to say: understood, being read, or drifted. */
   .flow-board-root .fb-terr-cell-kicker .fb-learn-dot.fb-learn-none { display: none; }
+  /* ── A FEATURE'S TYPE (plan feature-type-icons) ──────────────────────────
+     The glyph in its role's hue; a guess in the dim ink (FR-9). The size is
+     set on the element (12px on a cell, 14px in a box head). flex:none so
+     the kicker row's truncation never squeezes it: the second line gives,
+     the icon does not. Hidden below the name tier by the hidden attribute,
+     which a display rule would otherwise override. */
+  .flow-board-root .fb-role-icon {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--fb-role-neutral);
+  }
+  .flow-board-root .fb-role-icon[hidden] { display: none; }
+  .flow-board-root .fb-role-icon svg { width: 100%; height: 100%; display: block; }
+  .flow-board-root .fb-role-ui { color: var(--fb-role-ui); }
+  .flow-board-root .fb-role-api { color: var(--fb-role-api); }
+  .flow-board-root .fb-role-logic { color: var(--fb-role-logic); }
+  .flow-board-root .fb-role-data { color: var(--fb-role-data); }
+  .flow-board-root .fb-role-config { color: var(--fb-role-config); }
+  .flow-board-root .fb-role-jobs { color: var(--fb-role-jobs); }
+  .flow-board-root .fb-role-integration { color: var(--fb-role-integration); }
+  .flow-board-root .fb-role-service { color: var(--fb-role-service); }
+  .flow-board-root .fb-role-function { color: var(--fb-role-function); }
+  .flow-board-root .fb-role-mobile { color: var(--fb-role-mobile); }
+  .flow-board-root .fb-role-neutral { color: var(--fb-role-neutral); }
+  .flow-board-root .fb-role-icon.fb-role-guessed { color: var(--fb-ink-dim); }
+  /* THE CLASSIFY OFFER: one bar above the cells, in the room the sheet gave
+     up for it (ROLE_OFFER_BAND). Left and right match the sheet's margin. */
+  .flow-board-root .fb-role-offer {
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    top: 8px;
+    height: 36px;
+    z-index: 2;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 10px;
+    background: var(--fb-card);
+    border: 1px solid var(--fb-card-border);
+    border-radius: 8px;
+    font-size: 12px;
+    color: var(--fb-ink);
+  }
+  .flow-board-root .fb-role-offer-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .flow-board-root .fb-role-offer-primary,
+  .flow-board-root .fb-role-offer-secondary {
+    flex: none;
+    font: inherit;
+    font-size: 12px;
+    border-radius: 6px;
+    padding: 4px 12px;
+    cursor: pointer;
+  }
+  .flow-board-root .fb-role-offer-primary {
+    background: var(--fb-accent);
+    color: var(--fb-paper);
+    border: 1px solid var(--fb-accent);
+    font-weight: 600;
+  }
+  .flow-board-root .fb-role-offer-secondary {
+    background: transparent;
+    color: var(--fb-ink);
+    border: 1px solid var(--fb-card-border);
+  }
+  .flow-board-root .fb-role-offer-secondary:disabled { opacity: 0.6; cursor: default; }
   /* ONE MARK FOR ONE FACT: a cell that prints its percentage says how
      understood it is already, so its dot steps aside (user, 2026-10-06). A
      drifted dot stays — that is a different claim the ring does not make. */
@@ -21961,6 +22311,9 @@ const BOARD_STYLES = `
     display: flex; align-items: center; justify-content: space-between; gap: 6px;
     min-height: 11px;
   }
+  /* THE KIND WORD STAYS BESIDE ITS TYPE ICON: the auto margin takes the free
+     space the head used to spread between the word and the badge. */
+  .flow-board-root .fb-curated-cardhead > .fb-curated-kind { margin-right: auto; }
   .flow-board-root .fb-terr-delta {
     flex: none; font-family: var(--fl-font-mono, ui-monospace, monospace);
     font-size: 8.5px; letter-spacing: 0.12em; text-transform: uppercase;

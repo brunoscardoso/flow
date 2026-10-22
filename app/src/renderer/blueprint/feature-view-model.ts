@@ -26,6 +26,7 @@ import {
   type FocusNodeKind,
 } from './focus-stack'
 import type { BlueprintFeatureFolders } from '../../shared/ipc-contract'
+import type { FeatureRole, FeatureRoleSource } from '../../shared/feature-role'
 
 /** Learning status, mirroring the module tier this replaces. */
 export type FeatureUnderstanding = 'none' | 'learning' | 'learned' | 'stale'
@@ -65,6 +66,12 @@ export interface FeatureGraphNodeInput {
   /** Where it lives — its top folders. Mirrors `BlueprintFeatureNode.folders`;
    *  absent when the CLI found no files for it. */
   folders?: BlueprintFeatureFolders
+  /** What kind of thing it is — resolved once by the CLI (person, else learn,
+   *  else guess). Mirrors `BlueprintFeatureNode.role`; absent on a change and
+   *  from an older bundle. The board draws it and never re-derives it. */
+  role?: FeatureRole
+  /** Who answered `role`. Present exactly when `role` is. */
+  roleSource?: FeatureRoleSource
 }
 
 /** A `relates` edge between two features. */

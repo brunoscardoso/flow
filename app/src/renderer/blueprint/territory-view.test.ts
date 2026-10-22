@@ -1159,3 +1159,59 @@ describe('where it lives — folder rows by tier (plan feature-home-folders)', (
     expect(byId(parts.cells, 'part:chats/engine').folders?.rows[0]?.display).toBe('components/automations')
   })
 })
+
+describe("a cell carries its type (plan feature-type-icons, change note 8)", () => {
+  const typed: FeatureGraphInput = {
+    nodes: [
+      node({ id: 'feature:chats', name: 'Chats', anchorCount: 12, role: 'ui', roleSource: 'learn' }),
+      node({ id: 'feature:store', name: 'Store', anchorCount: 9, role: 'data', roleSource: 'guess' }),
+      node({ id: 'feature:old', name: 'Old', anchorCount: 4 }),
+      node({ id: 'part:chats/engine', name: 'Engine', kind: 'part', parent: 'feature:chats', anchorCount: 5, role: 'logic', roleSource: 'person' }),
+    ],
+    edges: [],
+  }
+
+  it('copies the role and its source as the CLI resolved them, never guessing one', () => {
+    const view = buildTerritoryView(typed, [], { stage: { width: 1200, height: 700 } })
+    expect(byId(view.cells, 'feature:chats')).toMatchObject({ role: 'ui', roleSource: 'learn' })
+    expect(byId(view.cells, 'feature:store')).toMatchObject({ role: 'data', roleSource: 'guess' })
+    // An older bundle sends no role: nothing to draw, and no guess made here.
+    expect(byId(view.cells, 'feature:old')).toMatchObject({ role: null, roleSource: null, showRoleIcon: false })
+    const parts = buildTerritoryView(typed, focusPath(typed, 'feature:chats'), { stage: { width: 1200, height: 700 } })
+    expect(byId(parts.cells, 'part:chats/engine')).toMatchObject({ role: 'logic', roleSource: 'person' })
+  })
+
+  it('shows the icon on the full-name tier only — positive first, then the small tiers', () => {
+    const big = buildTerritoryView(typed, [], { stage: { width: 1200, height: 700 } })
+    const named = byId(big.cells, 'feature:chats')
+    expect(named.labelClass).toBe('')
+    expect(named.showRoleIcon).toBe(true)
+
+    const cramped = buildTerritoryView(typed, [], { stage: TINY })
+    const small = cramped.cells.filter((cell) => cell.labelClass !== '' && cell.role !== null)
+    expect(small.length).toBeGreaterThan(0)
+    for (const cell of small) expect(cell.showRoleIcon).toBe(false)
+    for (const cell of cramped.cells) {
+      expect(cell.showRoleIcon).toBe(cell.role !== null && cell.labelClass === '')
+    }
+  })
+
+  it('an off-list role reads as none', () => {
+    const odd: FeatureGraphInput = {
+      nodes: [node({ id: 'feature:x', name: 'X', anchorCount: 3, role: 'wizard' as never, roleSource: 'person' })],
+      edges: [],
+    }
+    expect(byId(buildTerritoryView(odd).cells, 'feature:x')).toMatchObject({ role: null, showRoleIcon: false })
+  })
+
+  it('a top band takes its room from the sheet, so a bar above never covers a cell', () => {
+    const stage = { width: 1200, height: 700 }
+    const plain = sheetRect(stage)
+    const banded = sheetRect(stage, 46)
+    expect(banded.y).toBe(plain.y + 46)
+    expect(banded.h).toBe(plain.h - 46)
+    const view = buildTerritoryView(typed, [], { stage, topBand: 46 })
+    expect(view.cells.length).toBeGreaterThan(0)
+    for (const cell of view.cells) expect(cell.rect.y).toBeGreaterThanOrEqual(plain.y + 46)
+  })
+})
