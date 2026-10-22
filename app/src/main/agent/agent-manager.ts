@@ -23,7 +23,7 @@
 import { EventEmitter } from 'events'
 import { existsSync } from 'fs'
 import { homedir } from 'os'
-import { basename, join } from 'path'
+import { basename, isAbsolute, join, resolve } from 'path'
 
 import type {
   McpServerConfig,
@@ -44,6 +44,9 @@ import type { AttachmentStore } from '../store/attachment-store'
 import { buildUserContent } from './user-content'
 import { BRAIN_FIRST_COMPACT } from './brain-first'
 import type { BoardToolsProvider } from './board-tools/board-tools-provider'
+import { createFlowBoardTools, type SubtaskToolDeps } from './board-tools/flow-tools'
+import { FLOW_MCP_SERVER_NAME, flowToolName, SUBTASK_TOOL_NAME } from './board-tools/board-tools-shared'
+import { isSubtaskTicket, subtaskSourceMessageId, type SubtaskRegistry } from './subtask-registry'
 import type { CredentialsManager } from '../credentials'
 import {
   THREAD_STORE_CHANGE_EVENT,
@@ -429,6 +432,19 @@ export interface AgentManagerOptions {
    * app exactly as before.
    */
   basicDiscovery?: Pick<BasicDiscovery, 'require' | 'whenSettled' | 'isDeferred'>
+  /**
+   * MID-RUN SUBTASKS (plan_mid-run-subtasks). The only writer of subtask rows.
+   * Present → every Claude session gets `start_subtask` on its `flow` server,
+   * the Agent hook that links a ticket and enforces the cap, the write record,
+   * the task-event settle, and Stop.
+   *
+   * OPTIONAL ON PURPOSE, and not a fail-open (allowed-pattern #26): the tool and
+   * the gate come from this ONE dependency, so absent means the feature is
+   * absent as a whole — no ticket can exist without the registry, so there is
+   * no capped thing to bypass, and an Agent call without a ticket is a skill
+   * sub-agent exactly as before. Production always passes it.
+   */
+  subtasks?: SubtaskRegistry
 }
 
 /** One message stored while its thread waits on a basic discovery. */
@@ -462,6 +478,42 @@ export interface SendMessageOptions {
 
 /** Thrown when a project's bound account cannot run — fail-closed (never
  *  substitutes another account). Surfaced to the user via markThreadFailed. */
+/**
+ * The Agent PreToolUse decision (plan mid-run-subtasks note 5). `name` = a
+ * subtask ticket → link it to this Agent call, or deny with the registry's
+ * reason (an unknown ticket, an ended one, a queued one with every slot taken).
+ * No name, or a name that is not ticket-shaped → a skill sub-agent: unchanged.
+ * Pure over the registry so it tests without a session.
+ */
+export function subtaskAgentHookDecision(
+  registry: Pick<SubtaskRegistry, 'link'>,
+  threadId: string,
+  toolInput: unknown,
+  toolUseId: string,
+): { continue: true; hookSpecificOutput?: { hookEventName: 'PreToolUse'; permissionDecision: 'deny'; permissionDecisionReason: string } } {
+  const name =
+    toolInput !== null && typeof toolInput === 'object' ? (toolInput as Record<string, unknown>).name : undefined
+  if (!isSubtaskTicket(name)) return { continue: true }
+  let reason: string
+  try {
+    const linked = registry.link({ threadId, ticket: name, toolCallId: toolUseId })
+    if (linked.ok) return { continue: true }
+    reason = linked.reason
+  } catch (error) {
+    reason = `Subtask "${name}" could not be linked: ${error instanceof Error ? error.message : String(error)}`
+  }
+  return {
+    continue: true,
+    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
+  }
+}
+
+/** The text the agent is told when a queued subtask may start. Pushed to the
+ *  SDK input only — never stored as the person's message. */
+export function subtaskSlotFreeText(next: { ticket: string; title: string }): string {
+  return `Subtask slot free: ${next.ticket} "${next.title}" may start now. Call the Agent tool with run_in_background: true and name: ${next.ticket}.`
+}
+
 /** Tools a Flow session never offers the agent — see buildSessionOptions. */
 export const FLOW_DISALLOWED_TOOLS = ['EnterPlanMode', 'ExitPlanMode'] as const
 
@@ -536,6 +588,9 @@ interface RuntimeThreadSession {
 function projectsKey(roots: readonly string[]): string {
   return JSON.stringify([...new Set(roots)].sort())
 }
+
+/** How many recent messages `start_subtask` searches for its source prompt. */
+const SUBTASK_SOURCE_WINDOW = 40
 
 /** Statuses in which a thread has no turn in flight and no question waiting. */
 const RESTING_STATUSES: ReadonlySet<ThreadStatus> = new Set<ThreadStatus>(['idle', 'done', 'failed'])
@@ -999,6 +1054,9 @@ export class AgentManager extends EventEmitter {
     // Auto-attach debounces once per root per TURN (phase 6) — a new turn
     // starts with a clean slate.
     this.attachTracker.beginTurn(threadId)
+    // A new request (not a send folded into a live turn — that returned above):
+    // the main agent's writes from the previous one leave the overlap check.
+    this.options.subtasks?.beginRequest(threadId)
 
     // Brain-first compact block (brain-first-retrieval): first turn only, and
     // only when the CLI shim is on PATH — never instruct a verb that isn't
@@ -1031,6 +1089,72 @@ export class AgentManager extends EventEmitter {
         parent_tool_use_id: null,
       })
     }
+  }
+
+  /**
+   * Stop one of the person's running subtasks (a Stop press, `subtasks:stop`).
+   *
+   * The registry answers WHAT to stop; this does the stopping, on the thread's
+   * live Claude session. The SDK then emits `task_notification` 'stopped',
+   * which settles the row through the bridge — never here, so it is settled
+   * once.
+   */
+  async stopSubtask(threadId: string, ticket: string): Promise<{ ok: boolean; detail?: string }> {
+    const registry = this.options.subtasks
+    if (registry === undefined) return { ok: false, detail: 'Stopping a subtask is not available right now.' }
+    const session = this.sessions.get(threadId)
+    if (session === undefined || session.provider !== 'claude') {
+      return { ok: false, detail: 'This conversation is not running, so there is nothing to stop.' }
+    }
+    const answer = registry.stop({ threadId, ticket })
+    if (!answer.ok) return { ok: false, detail: answer.reason }
+    try {
+      await session.query.stopTask(answer.taskId)
+      return { ok: true }
+    } catch (error) {
+      console.error('[AgentManager] stopTask failed:', error)
+      return { ok: false, detail: 'The subtask could not be stopped. Try again.' }
+    }
+  }
+
+  /** `start_subtask`'s registry, bound to one thread — or null when the
+   *  registry is not wired. The source message is resolved here, from the
+   *  thread's own recent messages (bounded), at call time. */
+  #subtaskToolDeps(threadId: string): SubtaskToolDeps | null {
+    const registry = this.options.subtasks
+    if (registry === undefined) return null
+    return {
+      start: (input) =>
+        registry.start({
+          threadId,
+          fromMessageId: subtaskSourceMessageId(
+            this.threadStore.listMessages(threadId, { limit: SUBTASK_SOURCE_WINDOW }),
+            input.fromPrompt,
+          ),
+          title: input.title,
+          task: input.task,
+          ...(input.retryOf !== undefined ? { retryOf: input.retryOf } : {}),
+        }),
+    }
+  }
+
+  /**
+   * A slot is free and `next` may start: tell the agent. NOT the person's
+   * message, so it is pushed to the SDK input only and never stored — the app
+   * has no synthetic-user row. `'next'` lands it at the first tool boundary of
+   * a live turn (probe §1); on a resting session it starts a turn the bridge
+   * settles like any wake-up turn. No live session → nobody to tell; the row
+   * stays queued and is seen in the panel.
+   */
+  #announceSubtaskSlot(threadId: string, next: { ticket: string; title: string }): void {
+    const session = this.sessions.get(threadId)
+    if (session === undefined || session.provider !== 'claude') return
+    session.input.push({
+      type: 'user',
+      message: { role: 'user', content: subtaskSlotFreeText(next) },
+      parent_tool_use_id: null,
+      priority: 'next',
+    })
   }
 
   /**
@@ -1446,6 +1570,12 @@ export class AgentManager extends EventEmitter {
         this.options.onToolCallRecorded?.({ threadId: thread.id, ...observation })
       },
       backgroundTasks: this.backgroundTasks,
+      ...(this.options.subtasks !== undefined
+        ? {
+            subtasks: this.options.subtasks,
+            onSubtaskSlotFree: (next) => this.#announceSubtaskSlot(thread.id, next),
+          }
+        : {}),
     })
     // A FRESH CLI PROCESS OWES NOTHING YET. The runtime emits its live set only
     // when membership changes, never at startup, so anything left from the
@@ -1455,22 +1585,30 @@ export class AgentManager extends EventEmitter {
     }
 
     const options = this.buildSessionOptions(thread, abortController, accountConfigDir)
-    // Board tools (Claude only): a user-chat session in a project with the setting
-    // on gets the in-process `flow` server. The provider decides both gates and
-    // returns null otherwise; a failure to build the tools must never fail the
-    // session, so it is logged and the turn proceeds without them.
-    if (this.boardToolsProvider) {
-      try {
-        const servers = await this.boardToolsProvider({
-          threadId: thread.id,
-          // The registered PROJECT, not the session's worktree — the board is
-          // keyed by project.
-          projectRoot: thread.projectRoot,
-        })
-        if (servers) options.mcpServers = { ...(options.mcpServers ?? {}), ...servers }
-      } catch (error) {
-        console.error('[AgentManager] board tools provider failed:', error)
+    // The in-process `flow` server (Claude only), ONE server with two halves:
+    //   - the board tools, for a user-chat session in a project with the setting
+    //     on — the provider decides both gates and returns null otherwise;
+    //   - `start_subtask`, on EVERY Claude thread session when the registry is
+    //     wired (it is not a board feature; the `flow` key is reserved, so it
+    //     rides the same server instead of a second one).
+    // A failure to build either must never fail the session: it is logged and
+    // the turn proceeds without them.
+    try {
+      const board = this.boardToolsProvider
+        ? await this.boardToolsProvider({
+            threadId: thread.id,
+            // The registered PROJECT, not the session's worktree — the board is
+            // keyed by project.
+            projectRoot: thread.projectRoot,
+          })
+        : null
+      const subtasks = this.#subtaskToolDeps(thread.id)
+      if (board !== null || subtasks !== null) {
+        const server = await createFlowBoardTools(board, subtasks)
+        options.mcpServers = { ...(options.mcpServers ?? {}), [FLOW_MCP_SERVER_NAME]: server }
       }
+    } catch (error) {
+      console.error('[AgentManager] flow tools failed:', error)
     }
 
     // The USER's own MCP servers (their `.mcp.json` / ~/.claude.json). Flow
@@ -1741,6 +1879,10 @@ export class AgentManager extends EventEmitter {
       // mode added a second, private plan file and an "ExitPlanMode —
       // permission required" card mid-execution.
       disallowedTools: [...FLOW_DISALLOWED_TOOLS],
+      // `start_subtask` writes nothing but a ticket in Flow's own store (the cap
+      // is enforced there and again at the Agent hook), so it never asks. The
+      // Agent call it leads to still goes through every gate as before.
+      ...(this.options.subtasks !== undefined ? { allowedTools: [flowToolName(SUBTASK_TOOL_NAME)] } : {}),
       // Saved allow/deny rules stay keyed to the PROJECT, not the worktree:
       // a rule remembered against a checkout that is pruned at merge time
       // would make the reader answer the same question in every new thread.
@@ -1783,6 +1925,43 @@ export class AgentManager extends EventEmitter {
         permissionDecisionReason: reason,
       },
     })
+    // FILES WRITTEN, per subtask and by the main agent (plan mid-run-subtasks
+    // note 5). Only ALLOWED writes are recorded — a denied one wrote nothing. A
+    // sub-agent's write carries `agent_id` (= its task id); the main agent's
+    // carries none (probe §3). Never throws into the containment decision.
+    const subtasks = this.options.subtasks
+    const recordWrite = (hookInput: { tool_input: unknown; agent_id?: string }): void => {
+      if (subtasks === undefined) return
+      const raw = editFilePath(hookInput.tool_input)
+      if (raw === null) return
+      try {
+        subtasks.recordWrite({
+          threadId: thread.id,
+          agentId: hookInput.agent_id ?? null,
+          filePath: isAbsolute(raw) ? raw : resolve(primaryRoot, raw),
+        })
+      } catch (error) {
+        console.error('[AgentManager] subtask write record failed:', error)
+      }
+    }
+    if (subtasks !== undefined) {
+      hookSets.push({
+        PreToolUse: [
+          {
+            // THE TICKET GATE (note 5; allowed-pattern #14): the cap and the
+            // link live here, in code. The stream says `Agent`, the init tool
+            // list says `Task` — both are matched (probe §2).
+            matcher: 'Agent|Task',
+            hooks: [
+              async (hookInput) => {
+                if (hookInput.hook_event_name !== 'PreToolUse') return { continue: true }
+                return subtaskAgentHookDecision(subtasks, thread.id, hookInput.tool_input, hookInput.tool_use_id)
+              },
+            ],
+          },
+        ],
+      })
+    }
     hookSets.push({
       PreToolUse: [
         {
@@ -1803,11 +1982,15 @@ export class AgentManager extends EventEmitter {
                   )
                   if (target !== null && this.autoAttachRoots(thread.id, [target])) {
                     const recheck = containmentCheck(hookInput.tool_input, currentRoots())
-                    if (!recheck.deny) return { continue: true }
+                    if (!recheck.deny) {
+                      recordWrite(hookInput)
+                      return { continue: true }
+                    }
                     return denyOnEscape(recheck.reason)
                   }
                   return denyOnEscape(check.reason)
                 }
+                recordWrite(hookInput)
               }
               return { continue: true }
             },

@@ -24,6 +24,14 @@ export const BOARD_TOOL_NAMES = {
   stopLoop: 'stop_loop',
 } as const
 
+/**
+ * The subtask tool's base name (plan_mid-run-subtasks). Not a board tool: it is
+ * on the `flow` server of EVERY Claude thread session, whatever the board gates
+ * say, and it writes nothing but a subtask ticket — so it is not a board WRITE
+ * and never asks (agent-manager pre-approves it).
+ */
+export const SUBTASK_TOOL_NAME = 'start_subtask'
+
 /** The full, namespaced name the SDK reports for one of this server's tools. */
 export function flowToolName(base: string): string {
   return `mcp__${FLOW_MCP_SERVER_NAME}__${base}`

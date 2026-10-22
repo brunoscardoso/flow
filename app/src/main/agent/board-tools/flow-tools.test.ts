@@ -4,7 +4,12 @@
 
 import type { TaskRecord } from '../../store/task-store'
 import type { BoardLoopStatus } from '../../tasks/board-loop'
-import { boardToolHandlers, type FlowBoardToolsDeps } from './flow-tools'
+import {
+  boardToolHandlers,
+  START_SUBTASK_DESCRIPTION,
+  subtaskToolHandlers,
+  type FlowBoardToolsDeps,
+} from './flow-tools'
 
 function fakeTask(over: Partial<TaskRecord> = {}): TaskRecord {
   return {
@@ -136,5 +141,55 @@ describe('boardToolHandlers', () => {
     const { payload, isError } = body(await boardToolHandlers(deps).createTask({ title: 'x' }))
     expect(isError).toBe(true)
     expect(payload).toEqual({ ok: false, error: 'database is locked' })
+  })
+})
+
+describe('start_subtask', () => {
+  const record = {} as never
+  const read = (result: { content: Array<{ text: string }> }): string => result.content[0].text
+
+  it('a running ticket: tells the model to call Agent now, named by the ticket', async () => {
+    const start = jest.fn().mockReturnValue({ ok: true, ticket: 'st-abc123', state: 'running', attempt: 1, record })
+    const result = await subtaskToolHandlers({ start }).startSubtask({
+      title: 'Docs',
+      task: 'Update the README',
+      from_prompt: 'update the readme',
+    })
+    expect(start).toHaveBeenCalledWith({ title: 'Docs', task: 'Update the README', fromPrompt: 'update the readme' })
+    expect(result.isError).toBeUndefined()
+    expect(read(result)).toContain('st-abc123')
+    expect(read(result)).toContain('run_in_background: true')
+    expect(read(result)).toContain('name: st-abc123')
+  })
+
+  it('a queued ticket: says wait, and not to call Agent now', async () => {
+    const start = jest.fn().mockReturnValue({
+      ok: true,
+      ticket: 'st-qqqqqq',
+      state: 'queued',
+      attempt: 1,
+      queuedBehind: ['st-1', 'st-2', 'st-3'],
+      record,
+    })
+    const result = await subtaskToolHandlers({ start }).startSubtask({ title: 'T', task: 'X', retry_of: 'st-old000' })
+    expect(start).toHaveBeenCalledWith({ title: 'T', task: 'X', retryOf: 'st-old000' })
+    expect(read(result)).toContain('queued')
+    expect(read(result)).toContain('Wait')
+    expect(read(result)).toContain('Do not call Agent')
+  })
+
+  it('a refusal: relays the registry reason as an error result', async () => {
+    const start = jest.fn().mockReturnValue({ ok: false, reason: 'A subtask needs a title.' })
+    const result = await subtaskToolHandlers({ start }).startSubtask({ title: ' ', task: 'X' })
+    expect(result.isError).toBe(true)
+    expect(read(result)).toBe('Refused: A subtask needs a title.')
+  })
+
+  it('the description carries the protocol', () => {
+    expect(START_SUBTASK_DESCRIPTION).toContain('independent of your current task')
+    expect(START_SUBTASK_DESCRIPTION).toContain('run_in_background: true')
+    expect(START_SUBTASK_DESCRIPTION).toContain('name set to the ticket')
+    expect(START_SUBTASK_DESCRIPTION).toContain('"queued"')
+    expect(START_SUBTASK_DESCRIPTION).toContain('SendMessage')
   })
 })

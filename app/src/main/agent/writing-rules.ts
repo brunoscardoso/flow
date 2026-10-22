@@ -26,6 +26,7 @@ export const WRITING_RULES = [
   '- Use one term for one thing. Write technical names exactly, in inline code.',
   '- Start each instruction with the verb.',
   '- Say it once. Do not restate a point. Do not send a second "done" message.',
+  '- If `start_subtask` exists, use it for work independent of the current task, then run a background Agent named by the ticket. Give a subtask only files the current work does not touch.',
   '- Do not narrate routine steps. One short line before a group of tool calls is enough.',
   `- When a background task or a scheduled wake-up finds nothing new, reply with exactly \`${NO_CHANGE_REPLY}\` as plain text, and nothing else.`,
 ].join('\n')

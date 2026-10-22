@@ -1793,6 +1793,9 @@ function bootstrapMainProcess(): void {
       // roots: the address gate's answer (a registered project or a thread's
       // checkout), never a bare row in the thread store.
       isAttachableRoot: (root) => addressableRoots.isAddressable(root),
+      // Mid-run subtasks: `start_subtask`, the Agent ticket gate, the write
+      // record, the task-event settle and Stop all go through this one writer.
+      subtasks: subtaskRegistry,
       accountResolver,
       getModelRouting: () => appSettings.getModelRouting(),
       // The picker's evidence: what each runtime reported running (see
@@ -2838,6 +2841,13 @@ const understandFeature = async (request: {
   disposeIpc = registerIpcHandlers({
     threadStore,
     taskStore,
+    // A person's Stop press on their own subtask: the registry answers what to
+    // stop, the thread's live Claude session stops it (late-bound, like the
+    // terminal manager below).
+    stopSubtask: async ({ threadId, ticket }) =>
+      agentManager === null
+        ? { ok: false, detail: 'Stopping a subtask is not available right now.' }
+        : agentManager.stopSubtask(threadId, ticket),
     // #1484: removing a project closes its shells too — otherwise the PTYs
     // outlive the project with no tab, no menu entry and no route back.
     disposeTerminalsForRoot: (rootPath) => {

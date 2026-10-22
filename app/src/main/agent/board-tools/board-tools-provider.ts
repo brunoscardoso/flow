@@ -16,7 +16,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import type { TaskStore } from '../../store/task-store'
 import type { ThreadStore } from '../../store/thread-store'
 import type { BoardLoop } from '../../tasks/board-loop'
@@ -27,14 +26,18 @@ import {
   type BriefGenerator,
 } from '../../tasks/task-service'
 import { parseFlowconfigText } from '../../flow/flow-observer'
-import { boardToolsEnabledIn, FLOW_MCP_SERVER_NAME } from './board-tools-shared'
-import { createFlowBoardTools, type FlowBoardToolsDeps } from './flow-tools'
+import { boardToolsEnabledIn } from './board-tools-shared'
+import type { FlowBoardToolsDeps } from './flow-tools'
 
-/** The `mcpServers` fragment a session gets, or null when it gets none. */
+/**
+ * The board operations a session gets, bound to its project, or null when it
+ * gets none. The AgentManager builds the one `flow` server from this AND the
+ * subtask tool, which every Claude thread session gets whatever this says.
+ */
 export type BoardToolsProvider = (input: {
   threadId: string
   projectRoot: string
-}) => Promise<Record<string, McpServerConfig> | null>
+}) => Promise<FlowBoardToolsDeps | null>
 
 export interface BoardToolsProviderDeps {
   taskStore: TaskStore
@@ -116,15 +119,14 @@ export function buildBoardToolsDeps(
 }
 
 /**
- * Build the provider the AgentManager calls per session. Returns the `flow`
- * server fragment when both gates pass, else null. Every board operation is bound
- * to the session's project here.
+ * Build the provider the AgentManager calls per session. Returns the board
+ * operations when both gates pass, else null. Every board operation is bound to
+ * the session's project here.
  */
 export function makeBoardToolsProvider(deps: BoardToolsProviderDeps): BoardToolsProvider {
   return async ({ threadId, projectRoot }) => {
     if (!boardToolsEnabled(projectRoot)) return null
     if (!isUserChatThread(threadId, deps)) return null
-    const server = await createFlowBoardTools(buildBoardToolsDeps(deps, projectRoot))
-    return { [FLOW_MCP_SERVER_NAME]: server }
+    return buildBoardToolsDeps(deps, projectRoot)
   }
 }

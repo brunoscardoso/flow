@@ -31,7 +31,8 @@ import type { TaskLane, TaskRecord, UpdateTaskInput } from '../../store/task-sto
  */
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean }
 import type { BoardLoopStatus } from '../../tasks/board-loop'
-import { BOARD_TOOL_NAMES, FLOW_MCP_SERVER_NAME } from './board-tools-shared'
+import type { SubtaskStartResult } from '../subtask-registry'
+import { BOARD_TOOL_NAMES, FLOW_MCP_SERVER_NAME, SUBTASK_TOOL_NAME } from './board-tools-shared'
 
 /** Every lane a card can be moved to — the runtime half of the TaskLane union. */
 const LANES: readonly TaskLane[] = ['todo', 'doing', 'blocked', 'review', 'done']
@@ -54,6 +55,60 @@ export interface FlowBoardToolsDeps {
   startLoop(): Promise<BoardLoopStatus>
   /** Stop the whole-board loop — wraps BoardLoop.stop. */
   stopLoop(): BoardLoopStatus
+}
+
+/**
+ * The subtask registry, bound to ONE thread by the AgentManager (which owns the
+ * session) — so no tool argument can reach another conversation's tickets.
+ * `fromPrompt` is the model's short quote of the person's message the work came
+ * from; the binding resolves it to a message id (a model cannot know ids).
+ */
+export interface SubtaskToolDeps {
+  start(input: { title: string; task: string; fromPrompt?: string; retryOf?: string }): SubtaskStartResult
+}
+
+/** The `start_subtask` description: the delegation protocol, for the model. */
+export const START_SUBTASK_DESCRIPTION =
+  'Get a ticket for a background subtask. Use it only for work that is independent of your current task. ' +
+  'Then call the Agent tool with run_in_background: true and name set to the ticket. ' +
+  'One ticket for one Agent call. If the answer is "queued", do not call Agent yet: wait until you are told the ticket may start. ' +
+  'Give a subtask only files your current work does not touch. ' +
+  'To change what a running subtask does, send it a message with SendMessage, to = its ticket.'
+
+/** The pure `start_subtask` logic — short plain words the model acts on. */
+export interface SubtaskToolHandlers {
+  startSubtask(args: { title: string; task: string; from_prompt?: string; retry_of?: string }): Promise<ToolResult>
+}
+
+export function subtaskToolHandlers(deps: SubtaskToolDeps): SubtaskToolHandlers {
+  return {
+    startSubtask: async (args) => {
+      try {
+        const result = deps.start({
+          title: args.title,
+          task: args.task,
+          ...(args.from_prompt !== undefined ? { fromPrompt: args.from_prompt } : {}),
+          ...(args.retry_of !== undefined ? { retryOf: args.retry_of } : {}),
+        })
+        if (!result.ok) return text(`Refused: ${result.reason}`, true)
+        if (result.state === 'queued') {
+          return text(
+            `Ticket ${result.ticket} is queued: all subtask slots are in use. Wait — you will be told when ${result.ticket} may start. Do not call Agent for it now.`,
+          )
+        }
+        return text(
+          `Ticket ${result.ticket}. Call the Agent tool now with run_in_background: true and name: ${result.ticket}.`,
+        )
+      } catch (error) {
+        return text(`Refused: ${error instanceof Error ? error.message : String(error)}`, true)
+      }
+    },
+  }
+}
+
+/** A plain-text result (the subtask tool speaks sentences, not JSON). */
+function text(body: string, isError = false): ToolResult {
+  return { content: [{ type: 'text', text: body }], ...(isError ? { isError: true } : {}) }
 }
 
 /** ESM SDK members loaded at runtime; typed off the real module for inference. */
@@ -187,14 +242,44 @@ const LANE_ENUM = ['todo', 'doing', 'blocked', 'review', 'done'] as const
  * Build the `flow` MCP server for one session. Async because the SDK's tool
  * factories are loaded at runtime (see MODULE FORMAT above). Adds the zod schemas
  * and transport around the pure handlers above.
+ *
+ * TWO HALVES, ONE SERVER. `board` is null when the board gates said no (the
+ * setting is off, or this is not a plain user chat); `subtasks` is present on
+ * every Claude thread session. The server key `flow` is reserved, so both
+ * halves share it rather than one shadowing the other.
  */
 export async function createFlowBoardTools(
-  deps: FlowBoardToolsDeps,
+  board: FlowBoardToolsDeps | null,
+  subtasks: SubtaskToolDeps | null = null,
 ): Promise<McpSdkServerConfigWithInstance> {
   const { createSdkMcpServer, tool } = await loadSdkMcpApi()
-  const h = boardToolHandlers(deps)
+
+  const subtaskTools =
+    subtasks === null
+      ? []
+      : [
+          tool(
+            SUBTASK_TOOL_NAME,
+            START_SUBTASK_DESCRIPTION,
+            {
+              title: z.string().min(1).describe('A few words naming the work.'),
+              task: z.string().min(1).describe('The full instructions the background agent gets.'),
+              from_prompt: z
+                .string()
+                .optional()
+                .describe('A few words quoted from the person’s message this work comes from.'),
+              retry_of: z.string().optional().describe('The ticket of an ended subtask this one tries again.'),
+            },
+            (args) => subtaskToolHandlers(subtasks).startSubtask(args),
+          ),
+        ]
+  if (board === null) {
+    return createSdkMcpServer({ name: FLOW_MCP_SERVER_NAME, version: '1.0.0', tools: subtaskTools })
+  }
+  const h = boardToolHandlers(board)
 
   const tools = [
+    ...subtaskTools,
     tool(
       BOARD_TOOL_NAMES.createTask,
       'Create a task card on this project’s Flow board (with its own chat thread). Returns the new card.',

@@ -34,6 +34,8 @@ describe('writing rules', () => {
     expect(text).toContain('Say it once')
     expect(text).toContain('second "done" message')
     expect(text).toContain('Do not narrate routine steps')
+    expect(text).toContain('If `start_subtask` exists')
+    expect(text).toContain('Give a subtask only files the current work does not touch')
   })
 
   it('carries the exact `No change.` marker the feed hides', () => {

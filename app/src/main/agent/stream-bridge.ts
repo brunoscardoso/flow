@@ -30,7 +30,8 @@ import type {
 
 import type { AgentStreamEvent, ToolCallStatus } from '../../shared/ipc-contract'
 import { turnFailureDetail, turnFailureNote } from '../../shared/turn-failure'
-import type { ThreadStore } from '../store/thread-store'
+import type { SubtaskRecord, ThreadStore } from '../store/thread-store'
+import type { SubtaskRegistry } from './subtask-registry'
 import type { BackgroundTaskTracker } from './background-tasks'
 import { isTurnResultTerminal } from './turn-completion'
 import { turnUsageTotals } from './turn-usage'
@@ -67,6 +68,18 @@ export interface StreamBridgeCallbacks {
    * (or a runtime that reports no background work) simply does not track.
    */
   backgroundTasks?: BackgroundTaskTracker
+  /**
+   * The subtask registry (plan mid-run-subtasks note 6). The SDK's own task
+   * events are the truth about a background agent's start and end: the bridge
+   * hands them over, and the registry decides what they mean for a ticket. A
+   * task that is not a subtask (a skill sub-agent) changes nothing there.
+   */
+  subtasks?: Pick<SubtaskRegistry, 'onTaskStarted' | 'onTaskSettled'>
+  /**
+   * A settle freed a slot and `next` may start. The bridge does not own the
+   * session's input, so it reports; the AgentManager tells the agent.
+   */
+  onSubtaskSlotFree?(next: SubtaskRecord): void
 }
 
 /**
@@ -306,6 +319,7 @@ export class StreamBridge {
    * new about this thread.
    */
   private handleBackgroundTaskMessage(message: SDKMessage & { type: 'system' }): void {
+    this.forwardSubtaskEvent(message)
     const tasks = this.callbacks.backgroundTasks
     if (tasks === undefined) return
     let changed = false
@@ -334,6 +348,32 @@ export class StreamBridge {
       return
     }
     if (changed) this.emitBackgroundTasks()
+  }
+
+  /**
+   * Hand `task_started` / `task_notification` to the subtask registry, ahead
+   * of (and independent of) the tracker: the tracker forgets a task on settle,
+   * the registry keeps the row. Never throws into the task-event path.
+   */
+  private forwardSubtaskEvent(message: SDKMessage & { type: 'system' }): void {
+    const registry = this.callbacks.subtasks
+    if (registry === undefined) return
+    try {
+      if (message.subtype === 'task_started') {
+        if (message.tool_use_id === undefined) return
+        registry.onTaskStarted({ threadId: this.threadId, toolUseId: message.tool_use_id, taskId: message.task_id })
+      } else if (message.subtype === 'task_notification') {
+        const settled = registry.onTaskSettled({
+          threadId: this.threadId,
+          taskId: message.task_id,
+          status: message.status,
+          ...(message.status === 'failed' && message.summary !== '' ? { error: message.summary } : {}),
+        })
+        if (settled.next !== null) this.callbacks.onSubtaskSlotFree?.(settled.next)
+      }
+    } catch (error) {
+      console.error('[StreamBridge] subtask event failed:', error)
+    }
   }
 
   /** The persisted record id a task event's `tool_use_id` points at, or

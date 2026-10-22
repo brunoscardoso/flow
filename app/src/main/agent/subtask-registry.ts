@@ -93,6 +93,36 @@ export function makeTicket(): string {
   return `st-${out}`
 }
 
+/** Is `name` shaped like a ticket `makeTicket` mints? A name that is not is a
+ *  skill sub-agent's own name, and passes the Agent hook untouched. */
+export function isSubtaskTicket(name: unknown): name is string {
+  return typeof name === 'string' && /^st-[0-9a-z]{6}$/.test(name)
+}
+
+/**
+ * Which of the person's messages a subtask comes from. The model cannot know
+ * message ids, so `start_subtask` takes a short quote (`from_prompt`): the
+ * NEWEST user message containing it (case and spacing ignored) is the source.
+ * No quote, or a quote no message contains → the newest user message, which is
+ * the prompt in flight when the agent asked. Null only for a thread with no
+ * user message at all. `messages` is oldest first, as the store returns it.
+ */
+export function subtaskSourceMessageId(
+  messages: ReadonlyArray<{ id: string; role: string; content: string }>,
+  quote?: string,
+): string | null {
+  const users = messages.filter((message) => message.role === 'user')
+  if (users.length === 0) return null
+  const normalize = (value: string): string => value.toLowerCase().replace(/\s+/g, ' ').trim()
+  const needle = quote === undefined ? '' : normalize(quote)
+  if (needle !== '') {
+    for (let index = users.length - 1; index >= 0; index -= 1) {
+      if (normalize(users[index].content).includes(needle)) return users[index].id
+    }
+  }
+  return users[users.length - 1].id
+}
+
 export class SubtaskRegistry {
   readonly #store: SubtaskStoreLike
   readonly #emit: (event: ThreadChangeEvent) => void
