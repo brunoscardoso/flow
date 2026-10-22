@@ -112,3 +112,48 @@ describe('resolveFeatureRole', () => {
     expect(resolveFeatureRole({ learnedRole: ' Data\n', anchors })).toEqual({ role: 'data', source: 'learn' });
   });
 });
+
+describe('guess over anchor lines copied from flow/brain/features (plan feature-type-icons, phase 6)', () => {
+  it('guesses each real shape', () => {
+    // heartbeat: a daemon module votes jobs; the skill .md file does not vote.
+    expect(guessFeatureRole(['module:src/cli/daemon', 'file:.claude/resources/skills/resume-work-skill.md'])).toBe('jobs');
+    // code-review: renderer vs main tie; the two .md skills must not break it either way.
+    expect(
+      guessFeatureRole([
+        'module:app/src/renderer/review',
+        'module:app/src/main/review',
+        'file:.claude/resources/skills/review-code-skill.md',
+        'file:.claude/resources/skills/review-pr-skill.md',
+      ]),
+    ).toBe('neutral');
+    // loops-pause-all-unify: four renderer files, mixed with nothing.
+    expect(
+      guessFeatureRole([
+        'file:app/src/renderer/loops/loops-panel-model.ts',
+        'file:app/src/renderer/loops/loops-screen-model.ts',
+        'file:app/src/renderer/loops/loops-screen.ts',
+        'file:app/src/renderer/tasks/kanban-board.ts',
+      ]),
+    ).toBe('ui');
+    // loops: logic (src/cli) + ui + service, one vote each.
+    expect(guessFeatureRole(['module:src/cli/loop', 'module:app/src/renderer/loops', 'module:app/src/main/loops'])).toBe(
+      'neutral',
+    );
+    // brain: service + logic tie.
+    expect(guessFeatureRole(['module:app/src/main/brain', 'file:src/cli/blueprint/corpus-index.ts'])).toBe('neutral');
+    // an md-only feature has no signal at all.
+    expect(guessFeatureRole(['file:.claude/resources/skills/a.md', 'file:docs/b.mdx'])).toBe('neutral');
+  });
+
+  it('a mixed feature with a clear majority takes it', () => {
+    expect(
+      guessFeatureRole(['module:app/src/renderer/a', 'file:app/src/renderer/b.ts', 'module:app/src/main/c', 'file:docs/x.md']),
+    ).toBe('ui');
+  });
+
+  it('an off-list stored value never reaches the guess result', () => {
+    const resolved = resolveFeatureRole({ role: 'wizard', learnedRole: 'sorcery', anchors: ['module:src/cli/daemon'] });
+    expect(resolved).toEqual({ role: 'jobs', source: 'guess' });
+    expect(isFeatureRole(resolved.role)).toBe(true);
+  });
+});

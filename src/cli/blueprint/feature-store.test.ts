@@ -1364,3 +1364,87 @@ describe('role: and learnedRole: — two keys, two writers (plan feature-type-ic
     expect([featureRole(after), featureLearnedRole(after)]).toEqual(['ui', 'logic']);
   });
 });
+
+describe('the two-key promise, end to end (plan feature-type-icons, note 10)', () => {
+  const NOTE = [
+    '---',
+    'id: feature:chats',
+    'name: Chats',
+    'kind: core',
+    'anchors: [module:src/app/chat]',
+    'relates: []',
+    'lastFullRead: null',
+    'patchCount: 0',
+    'role: ui',
+    '---',
+    '# Chats',
+    '',
+    'Prose.',
+    '',
+    '## Parts',
+    '',
+    '### Live stream',
+    'anchors: src/lib/sse.ts',
+    'role: api',
+    '',
+    '### List',
+    'anchors: src/components/chat/list',
+    '',
+  ].join('\n');
+
+  const roleLines = (raw: string): string[] => raw.split('\n').filter((line) => /^role:/.test(line));
+
+  it('keeps every person role line through all four writers; learnedRole holds the last learned value', () => {
+    const flow = tempFlow();
+    const file = join(featuresDir(flow), 'chats.md');
+    writeFileSync(file, NOTE);
+    const original = roleLines(NOTE);
+    expect(original).toEqual(['role: ui', 'role: api']);
+    let previous = readFileSync(file, 'utf-8');
+    const step = (): string => {
+      const now = readFileSync(file, 'utf-8');
+      expect(now).not.toBe(previous); // the writer DID change the file
+      expect(roleLines(now)).toEqual(original); // ...and left the person's lines alone
+      previous = now;
+      return now;
+    };
+
+    // (a) machine fields
+    writeFeature(flow, readFeatures(flow)[0], { anchors: ['module:src/elsewhere'] });
+    expect(step()).toContain('module:src/elsewhere');
+    // (b) the learn body writer
+    writeLearned(flow, 'chats', [{ text: 'It streams.', provenance: 'code', date: '2026-10-07' }]);
+    expect(step()).toContain('It streams.');
+    // (c) the parts re-derive, passing roles that must lose
+    writeParts(flow, 'chats', [
+      { name: 'Live stream', summary: 'Re-derived.', anchors: ['src/lib/sse.ts'], learnings: [], role: 'jobs' },
+      { name: 'List', summary: 'Also.', anchors: ['src/components/chat/list'], learnings: [], role: 'data' },
+    ]);
+    expect(step()).toContain('Re-derived.');
+    // (d) the learnedRole verb, feature then a part
+    writeLearnedRole(flow, 'chats', 'service');
+    writeLearnedRole(flow, 'chats', 'logic');
+    writeLearnedRole(flow, 'chats', 'jobs', 'List');
+    const last = step();
+    expect(last).toContain('learnedRole: logic');
+
+    const [after] = readFeatures(flow);
+    expect([featureRole(after), featureLearnedRole(after)]).toEqual(['ui', 'logic']);
+    expect(readParts(flow, 'chats').map((part) => [part.role, part.learnedRole])).toEqual([
+      ['api', undefined],
+      [undefined, 'jobs'],
+    ]);
+  });
+
+  it('refuses an off-list learned role with the file byte-identical', () => {
+    const flow = tempFlow();
+    const file = join(featuresDir(flow), 'chats.md');
+    writeFileSync(file, NOTE);
+    writeLearnedRole(flow, 'chats', 'data'); // positive first: the writer works
+    const before = readFileSync(file);
+    expect(before.toString()).toContain('learnedRole: data');
+    expect(() => writeLearnedRole(flow, 'chats', 'wizard' as FeatureRole)).toThrow(/not a feature role/);
+    expect(() => writeLearnedRole(flow, 'chats', 'wizard' as FeatureRole, 'List')).toThrow(/not a feature role/);
+    expect(readFileSync(file).equals(before)).toBe(true);
+  });
+});

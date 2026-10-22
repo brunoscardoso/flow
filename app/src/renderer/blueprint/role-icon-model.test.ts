@@ -186,3 +186,24 @@ describe('the classify offer (FR-10)', () => {
     expect(roleOfferDismissKey('/code/a')).not.toBe(roleOfferDismissKey('/code/b'))
   })
 })
+
+describe('every string the reader sees (forbidden-pattern #12)', () => {
+  const SOURCES = ['person', 'learn', 'guess'] as const
+
+  it('no tooltip or mark title says "role", names a path or a command', () => {
+    for (const role of FEATURE_ROLES) {
+      for (const source of SOURCES) {
+        const words = [roleTooltip(role, source), roleMarkFor(role, source)?.title ?? '']
+        expect(words[1]).toBe(words[0]) // the mark really carries the tooltip
+        for (const text of words) expect(text).not.toMatch(/role|planflow|flowconfig|\/|\.md|`/i)
+      }
+    }
+  })
+
+  it('the offer moves offer -> running -> hidden as a pass starts and ends', () => {
+    const base: RoleOfferInput = { count: 3, dismissed: false, finished: false, running: null, failure: null }
+    expect(roleOfferView(base).kind).toBe('offer')
+    expect(roleOfferView({ ...base, running: { done: 1, total: 3 } }).kind).toBe('running')
+    expect(roleOfferView({ ...base, running: null, finished: true }).kind).toBe('hidden')
+  })
+})
