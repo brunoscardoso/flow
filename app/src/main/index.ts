@@ -44,6 +44,7 @@ if (remoteDebugPort && !app.isPackaged) {
 
 import { registerAccountChannels } from './accounts/ipc'
 import { AgentManager } from './agent/agent-manager'
+import { SubtaskRegistry } from './agent/subtask-registry'
 import { makeBoardToolsProvider } from './agent/board-tools/board-tools-provider'
 import { readProjectProvider } from './agent/runtime/project-provider'
 import { AccountResolver } from './agent/account-resolver'
@@ -678,6 +679,15 @@ function bootstrapMainProcess(): void {
   // Sessions don't survive a restart — clear any thread stuck 'working' and
   // any tool call stuck 'running' from a previous run (they'd spin forever).
   threadStore.reconcileInterruptedWork()
+  // Mid-run subtasks (plan_mid-run-subtasks): the only writer of subtask rows.
+  // Its events ride the store's change stream, so they reach the renderer in
+  // the same `threads:updated` batch as every other thread change. The agent
+  // side (hooks, task events, Stop) is handed this instance.
+  const subtaskRegistry = new SubtaskRegistry(threadStore, (event) =>
+    threadStore.emit(THREAD_STORE_CHANGE_EVENT, event),
+  )
+  // Same reason as the sweep above: no background task survives a restart.
+  subtaskRegistry.reconcileInterrupted()
   mark('thread store')
   const credentials = new CredentialsManager()
   // Task list: a task owns one thread; IntegrationsManager reads Jira/GitHub

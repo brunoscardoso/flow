@@ -107,3 +107,17 @@ describe('v36 — the turn-end mark (plan_chat-cleanup, Phase 1)', () => {
     expect(v39?.compatibleDownTo).toBe(35)
   })
 })
+
+describe('v40 — the subtasks table (plan_mid-run-subtasks, Phase 3)', () => {
+  const v40 = MIGRATIONS.find((m) => m.version === 40)
+
+  it('creates the subtasks table additively — never a drop, rename or ALTER of an old table', () => {
+    const source = String(v40?.up)
+    expect(source).toContain('CREATE TABLE IF NOT EXISTS subtasks')
+    expect(source).not.toMatch(/\b(DROP|RENAME|ALTER)\b/i)
+  })
+
+  it('declares floor 35, so the installed v35 build keeps opening the shared profile', () => {
+    expect(v40?.compatibleDownTo).toBe(35)
+  })
+})

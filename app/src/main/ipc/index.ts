@@ -95,7 +95,7 @@ import {
   ThreadScopeManager,
   THREAD_SCOPE_CHANGED_EVENT,
 } from '../project/thread-scope-manager'
-import type { ProjectContext, ThreadScope } from '../../shared/ipc-contract'
+import type { ProjectContext, SubtaskStopResult, ThreadScope } from '../../shared/ipc-contract'
 import type { BoardLoop } from '../tasks/board-loop'
 import type { AutopilotChain } from '../drive/autopilot-chain'
 import type { DebugSessionSummary, DebugStopResult } from '../../shared/debug-session-ipc'
@@ -223,6 +223,13 @@ export interface IpcDependencies {
    * optional so tests and headless harnesses can omit it.
    */
   backfillSubagentThread?: (childThreadId: string) => Promise<unknown>
+  /**
+   * Stop one running subtask (plan_mid-run-subtasks). Built where the
+   * AgentManager lives: it asks SubtaskRegistry.stop what to stop, then calls
+   * the runtime's stopTask. Optional until that wiring exists — absent,
+   * `subtasks:stop` refuses with a sentence and stops nothing.
+   */
+  stopSubtask?: (input: { threadId: string; ticket: string }) => Promise<SubtaskStopResult>
   /** In-app auto-update controller (#auto-update). */
   updater: UpdaterManager
   /**
@@ -546,6 +553,7 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
     appSettings,
     telemetry,
     backfillSubagentThread,
+    stopSubtask,
     updater,
     maybeProvision,
     notifyUnreachableRoot,
@@ -1227,6 +1235,18 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
   handle('toolCalls:get', ({ threadId, toolCallId }) =>
     threadStore.getToolCall(threadId, toolCallId),
   )
+  // A thread's subtasks (plan_mid-run-subtasks). Bounded by shape: a row is
+  // its ticket, state and files — the steps are read through
+  // threads:subagentTranscript when a row is opened.
+  handle('subtasks:list', ({ threadId }) => threadStore.listSubtasks(threadId))
+  // Stop is a person's press on their own running subtask. The stopping itself
+  // belongs to the agent side; without it, nothing is stopped and the answer says so.
+  handle('subtasks:stop', async ({ threadId, ticket }) => {
+    if (stopSubtask === undefined) {
+      return { ok: false, detail: 'Stopping a subtask is not available right now.' }
+    }
+    return stopSubtask({ threadId, ticket })
+  })
   // A sub-agent's transcript (#1931): messages + tool calls captured under the
   // parent Task tool call, outputs withheld like toolCalls:list.
   handle('threads:subagentTranscript', ({ threadId, toolCallId, outputLimit }) => ({

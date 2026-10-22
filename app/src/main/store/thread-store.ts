@@ -12,6 +12,9 @@ import { join } from 'path'
 import type { FlowDatabase } from './db'
 import { withTransaction } from './db'
 import { PROJECT_STATE_TABLE, THREAD_PROJECT_ROOT_COLUMN } from './storage-names'
+import type { SubtaskRecord, SubtaskState } from '../../shared/ipc-contract'
+
+export type { SubtaskRecord, SubtaskState }
 
 export type ThreadStatus = 'idle' | 'working' | 'needs-decision' | 'blocked' | 'done' | 'failed'
 export type MessageRole = 'user' | 'assistant' | 'system'
@@ -284,9 +287,13 @@ export interface UpdateThreadInput {
 }
 
 export interface ThreadChangeEvent {
-  entity: 'thread' | 'message' | 'tool_call'
+  /** `subtask` events are emitted by SubtaskRegistry (the subtask rows' only
+   *  writer), never by this store's own subtask methods. */
+  entity: 'thread' | 'message' | 'tool_call' | 'subtask'
   action: 'created' | 'updated' | 'deleted'
   threadId: string
+  /** The row as written — on a `subtask` event only. */
+  subtask?: SubtaskRecord
   /**
    * The checkout the row had, present ONLY on a thread deletion that had one.
    *
@@ -318,6 +325,40 @@ export const THREAD_ROOTS_CHANGED_EVENT = 'thread-roots-changed'
 export interface ThreadRootsChangedEvent {
   threadId: string | null
 }
+
+interface SubtaskRow {
+  ticket: string
+  thread_id: string
+  from_message_id: string | null
+  title: string
+  task: string
+  state: SubtaskState
+  attempt: number
+  retry_of: string | null
+  tool_call_id: string | null
+  sdk_task_id: string | null
+  created_at: string
+  started_at: string | null
+  ended_at: string | null
+  error: string | null
+  files_written: string
+  overlap_files: string
+}
+
+/** The subtask fields a write may change. Everything else is fixed at insert. */
+export type SubtaskPatch = Partial<
+  Pick<
+    SubtaskRecord,
+    | 'state'
+    | 'toolCallId'
+    | 'sdkTaskId'
+    | 'startedAt'
+    | 'endedAt'
+    | 'error'
+    | 'filesWritten'
+    | 'overlapFiles'
+  >
+>
 
 interface ThreadRow {
   id: string
@@ -1079,7 +1120,7 @@ export class ThreadStore extends EventEmitter {
     }
   }
 
-  /** Delete a thread and (via FK cascade) its messages and tool calls. */
+  /** Delete a thread and (via FK cascade) its messages, tool calls and subtasks. */
   deleteThread(id: string): void {
     // READ BEFORE THE DELETE, because after it there is nothing to read. This
     // is the only moment anything can still say which checkout belonged to this
@@ -2085,6 +2126,86 @@ export class ThreadStore extends EventEmitter {
     return rows.map((row) => ({ toolName: row.tool_name, filePath: row.file_path }))
   }
 
+  // ── Subtasks (plan_mid-run-subtasks) ──────────────────────────────────
+  //
+  // Plain reads and writes. The rules — the cap, attempt numbering, linking,
+  // settling, overlaps — and the change events live in SubtaskRegistry, the
+  // only caller of the three writers below (allowed-pattern #14).
+
+  insertSubtask(record: SubtaskRecord): SubtaskRecord {
+    this.db
+      .prepare(
+        `INSERT INTO subtasks (ticket, thread_id, from_message_id, title, task, state, attempt, retry_of,
+           tool_call_id, sdk_task_id, created_at, started_at, ended_at, error, files_written, overlap_files)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.ticket,
+        record.threadId,
+        record.fromMessageId,
+        record.title,
+        record.task,
+        record.state,
+        record.attempt,
+        record.retryOf,
+        record.toolCallId,
+        record.sdkTaskId,
+        record.createdAt,
+        record.startedAt,
+        record.endedAt,
+        record.error,
+        JSON.stringify(record.filesWritten),
+        JSON.stringify(record.overlapFiles),
+      )
+    return this.getSubtask(record.ticket) ?? record
+  }
+
+  getSubtask(ticket: string): SubtaskRecord | null {
+    const row = this.db.prepare('SELECT * FROM subtasks WHERE ticket = ?').get(ticket) as
+      | SubtaskRow
+      | undefined
+    return row === undefined ? null : toSubtaskRecord(row)
+  }
+
+  /** A thread's subtasks, oldest first. */
+  listSubtasks(threadId: string): SubtaskRecord[] {
+    const rows = this.db
+      .prepare('SELECT * FROM subtasks WHERE thread_id = ? ORDER BY created_at ASC, rowid ASC')
+      .all(threadId) as SubtaskRow[]
+    return rows.map(toSubtaskRecord)
+  }
+
+  /** Subtasks in any of `states`, across every thread — the restart sweep's read. */
+  listSubtasksInStates(states: readonly SubtaskState[]): SubtaskRecord[] {
+    if (states.length === 0) return []
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM subtasks WHERE state IN (${states.map(() => '?').join(', ')}) ORDER BY created_at ASC, rowid ASC`,
+      )
+      .all(...states) as SubtaskRow[]
+    return rows.map(toSubtaskRecord)
+  }
+
+  /** Write the given fields; an omitted field keeps its stored value. Returns
+   *  the row as stored, or null when the ticket is unknown. */
+  updateSubtask(ticket: string, patch: SubtaskPatch): SubtaskRecord | null {
+    const columns: Array<[string, unknown]> = []
+    if (patch.state !== undefined) columns.push(['state', patch.state])
+    if (patch.toolCallId !== undefined) columns.push(['tool_call_id', patch.toolCallId])
+    if (patch.sdkTaskId !== undefined) columns.push(['sdk_task_id', patch.sdkTaskId])
+    if (patch.startedAt !== undefined) columns.push(['started_at', patch.startedAt])
+    if (patch.endedAt !== undefined) columns.push(['ended_at', patch.endedAt])
+    if (patch.error !== undefined) columns.push(['error', patch.error])
+    if (patch.filesWritten !== undefined) columns.push(['files_written', JSON.stringify(patch.filesWritten)])
+    if (patch.overlapFiles !== undefined) columns.push(['overlap_files', JSON.stringify(patch.overlapFiles)])
+    if (columns.length > 0) {
+      this.db
+        .prepare(`UPDATE subtasks SET ${columns.map(([name]) => `${name} = ?`).join(', ')} WHERE ticket = ?`)
+        .run(...columns.map(([, value]) => value), ticket)
+    }
+    return this.getSubtask(ticket)
+  }
+
   private emitChange(event: ThreadChangeEvent): void {
     this.emit(THREAD_STORE_CHANGE_EVENT, event)
   }
@@ -2140,6 +2261,37 @@ function toThreadRecord(row: ThreadRow): ThreadRecord {
     // running this conversation's steps for it".
     chainId: row.chain_id ?? null,
     chainStage: row.chain_stage ?? null,
+  }
+}
+
+function toSubtaskRecord(row: SubtaskRow): SubtaskRecord {
+  return {
+    ticket: row.ticket,
+    threadId: row.thread_id,
+    fromMessageId: row.from_message_id,
+    title: row.title,
+    task: row.task,
+    state: row.state,
+    attempt: row.attempt,
+    retryOf: row.retry_of,
+    toolCallId: row.tool_call_id,
+    sdkTaskId: row.sdk_task_id,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    error: row.error,
+    filesWritten: parseStringArray(row.files_written),
+    overlapFiles: parseStringArray(row.overlap_files),
+  }
+}
+
+/** A JSON text array column; anything unreadable reads as empty. */
+function parseStringArray(json: string): string[] {
+  try {
+    const value: unknown = JSON.parse(json)
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+  } catch {
+    return []
   }
 }
 

@@ -97,8 +97,13 @@ describeIfProfile('a copy of the real profile, opened by today’s code', () => 
       for (const object of before.objects) {
         expect(afterNames.has(`${object.type}:${object.name}`)).toBe(true)
       }
-      // …and migration invented or lost no rows in any pre-existing table.
-      expect(after.rows).toEqual(before.rows)
+      // …and migration invented or lost no rows in any pre-existing table. A
+      // table a later migration ADDS (v40's `subtasks`) is new, not changed,
+      // so the comparison is over the tables the profile already had.
+      const preExisting = Object.fromEntries(
+        Object.keys(before.rows).map((name) => [name, after.rows[name]]),
+      )
+      expect(preExisting).toEqual(before.rows)
       expect(db.pragma('integrity_check', { simple: true })).toBe('ok')
     } finally {
       db.close()

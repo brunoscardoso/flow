@@ -925,9 +925,60 @@ export interface LearnForgetTally {
 }
 
 export interface ThreadChangeEvent {
-  entity: 'thread' | 'message' | 'tool_call'
+  /** `subtask`: a mid-run subtask row changed (plan_mid-run-subtasks). It
+   *  rides the same `threads:updated` batch, so a subscriber that draws no
+   *  subtask filters it out by entity (allowed-pattern #17). */
+  entity: 'thread' | 'message' | 'tool_call' | 'subtask'
   action: 'created' | 'updated' | 'deleted'
   threadId: string
+  /** The row as written, on a `subtask` event only — a listener needs no
+   *  second read to redraw one row. */
+  subtask?: SubtaskRecord
+}
+
+// ── Mid-run subtasks (plan_mid-run-subtasks) ─────────────────────────────
+
+/** Where a subtask is. `queued` holds no slot; `running` holds one of the
+ *  thread's three; the rest are ended. */
+export type SubtaskState = 'queued' | 'running' | 'done' | 'failed' | 'stopped'
+
+/**
+ * One subtask: work the agent handed to a background sub-agent under a ticket.
+ * Written only by main's SubtaskRegistry. Carries no step output — the steps
+ * are read through the sub-agent transcript path when a row is opened.
+ */
+export interface SubtaskRecord {
+  /** The ticket id the agent names its Agent call with. */
+  ticket: string
+  threadId: string
+  /** The person's message the subtask came from; null when not known. */
+  fromMessageId: string | null
+  title: string
+  task: string
+  state: SubtaskState
+  /** 1-based; a retry is the retried ticket's attempt + 1. */
+  attempt: number
+  /** The ticket this one retries, or null for a first attempt. */
+  retryOf: string | null
+  /** The Agent tool call the ticket was linked to, once the agent made it. */
+  toolCallId: string | null
+  /** The runtime's background task id (also the sub-agent's `agent_id`). */
+  sdkTaskId: string | null
+  createdAt: string
+  startedAt: string | null
+  endedAt: string | null
+  error: string | null
+  /** Files this subtask wrote, in first-write order. */
+  filesWritten: string[]
+  /** Files this subtask wrote that another writer in the same request also
+   *  wrote — the overlap warning names them. Nothing is blocked. */
+  overlapFiles: string[]
+}
+
+/** The answer to a Stop press. `detail` is a plain sentence for the person. */
+export interface SubtaskStopResult {
+  ok: boolean
+  detail?: string
 }
 
 // ── Tasks (task list) ────────────────────────────────────────────────────
@@ -5688,6 +5739,17 @@ export interface IpcInvokeMap {
    * whole-thread read — the import path and any consumer that really wants
    * everything still has one.
    */
+  /** A thread's subtasks, oldest first. Bounded: rows carry no step output. */
+  'subtasks:list': {
+    request: { threadId: string }
+    response: SubtaskRecord[]
+  }
+  /** Stop one running subtask of the person's own. Skill sub-agents have no
+   *  ticket and are refused. */
+  'subtasks:stop': {
+    request: { threadId: string; ticket: string }
+    response: SubtaskStopResult
+  }
   'toolCalls:list': {
     /**
      * `since` bounds the read to the window the pane will actually mount: the
@@ -7595,6 +7657,8 @@ export const IPC_INVOKE_CHANNELS = [
   'messages:append',
   'toolCalls:list',
   'toolCalls:get',
+  'subtasks:list',
+  'subtasks:stop',
   'threads:subagentTranscript',
   'editor:hover',
   'editor:definition',
@@ -8016,6 +8080,11 @@ export interface FlowToolCallsApi {
   /** One tool call, whole — optional so an older preload degrades to "no
    *  output" rather than throwing at the card that asked for it. */
   get?(request: IpcRequest<'toolCalls:get'>): Promise<IpcResponse<'toolCalls:get'>>
+}
+
+export interface FlowSubtasksApi {
+  list(request: IpcRequest<'subtasks:list'>): Promise<IpcResponse<'subtasks:list'>>
+  stop(request: IpcRequest<'subtasks:stop'>): Promise<IpcResponse<'subtasks:stop'>>
 }
 
 export interface FlowEditorApi {
@@ -8826,6 +8895,9 @@ export interface FlowApi {
   integrations: FlowIntegrationsApi
   messages: FlowMessagesApi
   toolCalls: FlowToolCallsApi
+  /** Optional so an older preload degrades to "no subtasks" rather than
+   *  throwing at the panel that asked. */
+  subtasks?: FlowSubtasksApi
   editor: FlowEditorApi
   terminal: FlowTerminalApi
   attachments: FlowAttachmentsApi

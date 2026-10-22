@@ -1002,6 +1002,42 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    // MID-RUN SUBTASKS (plan_mid-run-subtasks, Phase 3). A subtask is work the
+    // agent hands to a background sub-agent while the person keeps talking. Its
+    // row is created by `start_subtask` (a ticket) before the Agent call exists,
+    // linked to that call by the Agent PreToolUse hook (`tool_call_id`), and to
+    // the SDK's background task by `task_started` (`sdk_task_id`, which is also
+    // the `agent_id` on the sub-agent's own hook input). SubtaskRegistry is the
+    // ONLY writer. `files_written` / `overlap_files` are JSON text arrays.
+    //
+    // ADDITIVE (a new table + an index): a v35 build never reads it, so the v35
+    // floor carries forward.
+    version: 40,
+    description: 'subtasks — mid-run background subtasks and their tickets',
+    compatibleDownTo: 35,
+    up: `
+      CREATE TABLE IF NOT EXISTS subtasks (
+        ticket          TEXT PRIMARY KEY,
+        thread_id       TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        from_message_id TEXT,
+        title           TEXT NOT NULL,
+        task            TEXT NOT NULL,
+        state           TEXT NOT NULL CHECK (state IN ('queued', 'running', 'done', 'failed', 'stopped')),
+        attempt         INTEGER NOT NULL DEFAULT 1,
+        retry_of        TEXT,
+        tool_call_id    TEXT,
+        sdk_task_id     TEXT,
+        created_at      TEXT NOT NULL,
+        started_at      TEXT,
+        ended_at        TEXT,
+        error           TEXT,
+        files_written   TEXT NOT NULL DEFAULT '[]',
+        overlap_files   TEXT NOT NULL DEFAULT '[]'
+      );
+      CREATE INDEX IF NOT EXISTS idx_subtasks_thread ON subtasks(thread_id, created_at);
+    `,
+  },
 ]
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0

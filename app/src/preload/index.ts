@@ -264,6 +264,10 @@ const flowApi: FlowApi = {
     list: (request) => invoke('toolCalls:list', request),
     get: (request) => invoke('toolCalls:get', request),
   },
+  subtasks: {
+    list: (request) => invoke('subtasks:list', request),
+    stop: (request) => invoke('subtasks:stop', request),
+  },
   editor: {
     hover: (request) => invoke('editor:hover', request),
     definition: (request) => invoke('editor:definition', request),

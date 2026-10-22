@@ -138,8 +138,10 @@ describe('the shipped ladder', () => {
   // indexes), v36 adds the `compatible_down_to` column, and all three record
   // the v35 floor — so a v35 build with the opening rule still opens the
   // profile. This pin is the loud, non-quiet bump that policy asks for.
-  it('tops out at v39, floored at v35 for the installed pre-rename build', () => {
-    expect(LATEST_SCHEMA_VERSION).toBe(39)
+  // v39 (turn-end mark) and v40 (the subtasks table, plan_mid-run-subtasks)
+  // follow the same rule: additive, floored at v35.
+  it('tops out at v40, floored at v35 for the installed pre-rename build', () => {
+    expect(LATEST_SCHEMA_VERSION).toBe(40)
   })
 
   // Workspaces (plan_workspaces-knowledge-hub, Phase 4) deliberately added NO
@@ -151,7 +153,7 @@ describe('the shipped ladder', () => {
     try {
       const db = openDatabase(join(dir, 'fresh.db'))
       try {
-        expect(versionOf(db)).toBe(39)
+        expect(versionOf(db)).toBe(40)
         const tables = (
           db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>
         ).map((row) => row.name)
@@ -170,7 +172,7 @@ describe('the shipped ladder', () => {
     }
   })
 
-  it('the installed build (ladder ending at v35) opens a v39 database and writes into it', () => {
+  it('the installed build (ladder ending at v35) opens a v40 database and writes into it', () => {
     const dir = mkdtempSync(join(tmpdir(), 'flow-schema-compat-'))
     try {
       const path = join(dir, 'shared.db')
@@ -207,7 +209,7 @@ describe('the shipped ladder', () => {
     try {
       const db = openDatabase(join(dir, 'fresh.db'))
       try {
-        expect(versionOf(db)).toBe(39)
+        expect(versionOf(db)).toBe(40)
         expect(readCompatibleFloor(db)).toBe(35)
         const tables = (
           db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>
