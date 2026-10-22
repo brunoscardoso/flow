@@ -887,6 +887,32 @@ export class AgentManager extends EventEmitter {
     sendOptions: SendMessageOptions,
     isFirstTurn: boolean,
   ): Promise<void> {
+    // A SEND INTO A LIVE CLAUDE TURN IS NOT A NEW TURN (plan mid-run-subtasks
+    // note 2). The composer injects on a working Claude thread instead of
+    // queueing, and main decides it again here from its OWN facts — so the
+    // rule holds whichever renderer path sent the message. The message is
+    // already stored (and any parked question cancelled) by #sendMessageNow;
+    // what is skipped is everything that announces or prepares a turn: the
+    // gate, the checkout, the status flip, onTurnStart (a Kanban move for a
+    // turn that never began), the attach tracker's per-turn reset (which would
+    // re-arm auto-attach mid-turn), the interrupt-mark reset (a stop the person
+    // asked for while this lands must still read as a stop) and the first-turn
+    // seed / brain-first block (the turn already got them).
+    const live = this.#liveClaudeTurn(threadId)
+    if (live !== null) {
+      // `'next'`, never `'now'`: the live probe (flow/resources/sdk-mid-turn-probe.md)
+      // showed `'now'` closing the turn with an EMPTY result and starting a
+      // second one, while `'next'` lands at the first tool boundary of the SAME
+      // turn with one result — one turn end for StreamBridge to mark.
+      live.input.push({
+        type: 'user',
+        message: { role: 'user', content: buildUserContent(content, attachments) },
+        parent_tool_use_id: null,
+        priority: 'next',
+      })
+      return
+    }
+
     // THE CONTEXT GATE (Workspaces Phase 7) — BEFORE the checkout is cut and
     // before the session spawns: the projects it attaches get their thread
     // checkouts from the same `ensureThreadWorktree` below (as a manual attach
@@ -1005,6 +1031,25 @@ export class AgentManager extends EventEmitter {
         parent_tool_use_id: null,
       })
     }
+  }
+
+  /**
+   * The thread's Claude session when a turn is running in it right now, else
+   * null — the "already working" fact a mid-run send is pushed on.
+   *
+   * Main's own facts only: a live Claude session, the stored status `working`
+   * (the bridge flips it to done / idle / failed when the turn's result lands,
+   * and to needs-decision while a permission or a question is parked — #1470:
+   * those take the normal path, exactly as before), and no stop in flight
+   * (`interrupt` flips the status to idle synchronously, but a mark still
+   * pending means the turn is being torn down, not one to join).
+   */
+  #liveClaudeTurn(threadId: string): ClaudeThreadSession | null {
+    const session = this.sessions.get(threadId)
+    if (session === undefined || session.provider !== 'claude') return null
+    if (session.bridge.wasInterruptRequested) return null
+    const status = this.threadStore.getThread(threadId)?.status
+    return status === 'working' ? session : null
   }
 
   /**

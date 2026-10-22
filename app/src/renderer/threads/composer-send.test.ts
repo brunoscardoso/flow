@@ -43,10 +43,35 @@ describe('composedPromptFor — a card-composed message (flow:send-prompt)', () 
   })
 })
 
-describe('composedSendRoute — the queue rule a typed message follows', () => {
-  it('sends when the composer is free and nothing is in flight; queues otherwise', () => {
-    expect(composedSendRoute(true, false)).toBe('send')
-    expect(composedSendRoute(false, false)).toBe('queue')
-    expect(composedSendRoute(true, true)).toBe('queue')
+describe('composedSendRoute — the one rule a typed and a composed send follow', () => {
+  it('sends a new turn when the composer is free and nothing is in flight', () => {
+    for (const status of ['idle', 'done', 'failed'] as const) {
+      expect(composedSendRoute({ status, sending: false, provider: 'claude' })).toBe('send')
+      expect(composedSendRoute({ status, sending: false, provider: 'copilot' })).toBe('send')
+      expect(composedSendRoute({ status, sending: false, provider: null })).toBe('send')
+    }
+  })
+
+  it('injects into the live turn of a working Claude thread', () => {
+    expect(composedSendRoute({ status: 'working', sending: false, provider: 'claude' })).toBe('inject')
+  })
+
+  it('queues on a turn parked on a decision, even for Claude (#1470)', () => {
+    // State the positive first (allowed-pattern #28): the same thread injects
+    // while it is working, so the queue below is the parked-turn rule at work.
+    expect(composedSendRoute({ status: 'working', sending: false, provider: 'claude' })).toBe('inject')
+    expect(composedSendRoute({ status: 'needs-decision', sending: false, provider: 'claude' })).toBe('queue')
+    expect(composedSendRoute({ status: 'blocked', sending: false, provider: 'claude' })).toBe('queue')
+  })
+
+  it('queues while a send is still in flight, whatever the status', () => {
+    expect(composedSendRoute({ status: 'working', sending: true, provider: 'claude' })).toBe('queue')
+    expect(composedSendRoute({ status: 'idle', sending: true, provider: 'claude' })).toBe('queue')
+  })
+
+  it('keeps the queue for a working Copilot or Codex thread, and for an unknown runtime', () => {
+    expect(composedSendRoute({ status: 'working', sending: false, provider: 'copilot' })).toBe('queue')
+    expect(composedSendRoute({ status: 'working', sending: false, provider: 'codex' })).toBe('queue')
+    expect(composedSendRoute({ status: 'working', sending: false, provider: null })).toBe('queue')
   })
 })

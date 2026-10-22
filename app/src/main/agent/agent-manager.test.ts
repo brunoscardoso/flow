@@ -1750,6 +1750,108 @@ describe('AgentManager', () => {
       manager.dispose()
     })
   })
+  describe('a send into a live Claude turn is not a new turn (mid-run-subtasks note 2)', () => {
+    interface Fed {
+      message: { content: unknown }
+      priority?: string
+    }
+
+    function harness(): {
+      manager: AgentManager
+      query: () => FakeQuery
+      fed: () => Promise<Fed>
+      turnStarts: string[]
+    } {
+      let current: FakeQuery | null = null
+      let iterator: AsyncIterator<Fed> | null = null
+      const turnStarts: string[] = []
+      const queryFn = jest.fn((params: { prompt: AsyncIterable<Fed> }): Query => {
+        iterator = params.prompt[Symbol.asyncIterator]()
+        current = makeFakeQuery()
+        return current as unknown as Query
+      })
+      const manager = new AgentManager(store, credentialsStub, broker, {
+        queryFn: queryFn as unknown as QueryFunction,
+        cliShimDir: '/tmp/planflow-shim',
+        seedProvider: () => 'Issue context: fix the widget',
+        onTurnStart: (threadId) => turnStarts.push(threadId),
+      })
+      manager.on(AGENT_STREAM_EVENT, (event: AgentStreamEvent) => events.push(event))
+      return {
+        manager,
+        query: () => current as FakeQuery,
+        fed: async () => {
+          const next = await (iterator as AsyncIterator<Fed>).next()
+          expect(next.done).toBe(false)
+          return next.value
+        },
+        turnStarts,
+      }
+    }
+
+    const workingFlips = (threadId: string): number =>
+      events.filter((e) => e.kind === 'status' && e.threadId === threadId && e.status === 'working').length
+
+    it('pushes into the working turn with priority next and skips the turn-start work', async () => {
+      const { manager, fed, turnStarts } = harness()
+      const thread = store.createThread({ projectRoot: tempDir })
+      await manager.sendMessage(thread.id, 'first')
+      // The positive first (allowed-pattern #28): the first send IS a turn start.
+      expect(turnStarts).toEqual([thread.id])
+      expect(workingFlips(thread.id)).toBe(1)
+      const first = await fed()
+      expect(String(first.message.content)).toContain('Issue context: fix the widget')
+      expect(first.priority).toBeUndefined()
+
+      await manager.sendMessage(thread.id, 'also do this')
+      const second = await fed()
+      // Verbatim — no seed or brain-first block, although no assistant reply
+      // has landed yet (isFirstTurn is still true for this message).
+      expect(second.message.content).toBe('also do this')
+      expect(second.priority).toBe('next')
+      expect(turnStarts).toEqual([thread.id])
+      expect(workingFlips(thread.id)).toBe(1)
+      // Stored as sent, so the chat shows it.
+      expect(store.listMessages(thread.id).map((m) => [m.role, m.content])).toEqual([
+        ['user', 'first'],
+        ['user', 'also do this'],
+      ])
+      expect(store.getThread(thread.id)?.status).toBe('working')
+      manager.dispose()
+    })
+
+    it('a turn that has ended takes the next send as a new turn', async () => {
+      const { manager, fed, query, turnStarts } = harness()
+      const thread = store.createThread({ projectRoot: tempDir })
+      await manager.sendMessage(thread.id, 'first')
+      await fed()
+      query().push(resultSuccess())
+      await flushMicrotasks()
+      expect(store.getThread(thread.id)?.status).toBe('done')
+
+      await manager.sendMessage(thread.id, 'next turn')
+      const second = await fed()
+      expect(second.priority).toBeUndefined()
+      expect(turnStarts).toEqual([thread.id, thread.id])
+      expect(workingFlips(thread.id)).toBe(2)
+      manager.dispose()
+    })
+
+    it('a turn parked on a decision is not joined — main takes the normal path (#1470)', async () => {
+      const { manager, fed, turnStarts } = harness()
+      const thread = store.createThread({ projectRoot: tempDir })
+      await manager.sendMessage(thread.id, 'first')
+      await fed()
+      store.updateThread(thread.id, { status: 'needs-decision' })
+
+      await manager.sendMessage(thread.id, 'stop that')
+      const second = await fed()
+      expect(second.priority).toBeUndefined()
+      expect(turnStarts).toEqual([thread.id, thread.id])
+      manager.dispose()
+    })
+  })
+
   describe("the session moves into the thread's worktree (phase 4)", () => {
     // Fictional absolute roots: containment is lexical (no disk access), and
     // tmpdir() is a temp SINK for bash containment — writes there are always

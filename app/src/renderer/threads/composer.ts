@@ -176,6 +176,18 @@ export class Composer {
   /** The model+effort popover — a view over the two selects above. */
   #modelEffort!: ModelEffortMenu
   #status: ThreadStatus = 'idle'
+  /**
+   * The runtime THIS thread's project resolves to (its own `provider`, else the
+   * app default, else Claude), or null until main has answered. It decides
+   * whether a send on a working turn goes into the live turn (Claude) or waits
+   * in the queue (Copilot, Codex) — see `composedSendRoute`. Not
+   * `#modelProvider`: that is the app-wide default the picker offers, and a
+   * project can name a different runtime. Null routes to the queue (fail closed).
+   */
+  #threadProvider: string | null = null
+  /** The project `#threadProvider` was resolved for — a late answer for a project
+   *  the composer has since left is dropped. */
+  #threadProviderRoot: string | null = null
   #sending = false
   /** #1931: non-null while sending is LOCKED — a promoted sub-agent child
    *  thread whose origin tool call is still running cannot take a reply (the
@@ -856,6 +868,9 @@ export class Composer {
     if (thread !== null && (switched || thread.projectRoot !== previous?.projectRoot)) {
       void this.#listCommands().then(() => this.#highlight.sync())
     }
+    // The thread's runtime decides mid-run sends; re-asked only when the
+    // project changes, never per threads:updated batch (forbidden #14).
+    if (thread?.projectRoot !== this.#threadProviderRoot) this.#resolveThreadProvider()
     // A different thread's resolved model doesn't carry over — clear it until
     // the new thread's turn reports one (#129).
     if (switched) {
@@ -936,6 +951,33 @@ export class Composer {
     this.#syncEffortEnabled()
   }
 
+  /**
+   * Ask main which runtime the current thread's project resolves to. Fail
+   * soft: an older preload without the call, or a failed read, leaves it null
+   * — which routes a working turn's send to the queue, as before mid-run
+   * sends existed.
+   */
+  #resolveThreadProvider(): void {
+    const root = this.#thread?.projectRoot ?? null
+    this.#threadProviderRoot = root
+    this.#threadProvider = null
+    this.#syncEnabled()
+    const getProjectProvider = window.flow.settings.getProjectProvider
+    if (root === null || getProjectProvider === undefined) return
+    void getProjectProvider({ rootPath: root })
+      .then(({ provider }) => {
+        if (this.#threadProviderRoot !== root) return // the composer moved on
+        this.#threadProvider = provider
+        this.#syncEnabled()
+      })
+      .catch((error: unknown) => console.warn('flow: could not read the thread runtime', error))
+  }
+
+  /** Where a send goes right now — the one rule (`composedSendRoute`). */
+  #sendRoute(): 'send' | 'inject' | 'queue' {
+    return composedSendRoute({ status: this.#status, sending: this.#sending, provider: this.#threadProvider })
+  }
+
   /** Reflect the thread's live status (drives Send ↔ Interrupt). */
   setStatus(status: ThreadStatus): void {
     const prevStatus = this.#status
@@ -980,6 +1022,9 @@ export class Composer {
     // change (a Settings edit) while provider + model list stay identical, and
     // the menu's Context row reads this map live.
     this.#modelContext = contextPreferences
+    // The default runtime changed (or was first read): a project without its
+    // own `provider` follows it, so the current thread's runtime is re-asked.
+    if (provider !== this.#modelProvider) this.#resolveThreadProvider()
     const signature = `${provider}\u0000${extraModels.join(',')}\u0000${untestedModels.join(',')}`
     if (signature === this.#modelSignature) return
     this.#modelSignature = signature
@@ -1109,7 +1154,12 @@ export class Composer {
     // app was in fact waiting on the user, and delivered a message written to STOP
     // an action as a follow-up that runs after it. isComposerFreeStatus is the
     // composer's own predicate for this and already documents the rule.
-    if (!isComposerFreeStatus(this.#status)) {
+    //
+    // Mid-run sends (plan mid-run-subtasks): a WORKING Claude turn is the one
+    // exception — its session reads input as a stream, so the message goes into
+    // the live turn now ('inject') and main pushes it at the next tool boundary.
+    // Parked turns, Copilot and Codex still queue; `composedSendRoute` owns all of it.
+    if (this.#sendRoute() === 'queue') {
       this.#textarea.value = ''
       this.#saveDraft(thread.id, '') // the draft is committed to the queue (#1067)
       this.#autoGrow()
@@ -1172,7 +1222,7 @@ export class Composer {
     const thread = this.#thread
     if (!thread) return
     this.#history = pushEntry(this.#history, content)
-    if (composedSendRoute(isComposerFreeStatus(this.#status), this.#sending) === 'queue') {
+    if (this.#sendRoute() === 'queue') {
       this.#enqueue(content, [])
       return
     }
@@ -2269,7 +2319,14 @@ export class Composer {
     // restore 'Send' left the button stuck on "Queue" after the turn ended (#722).
     // A working turn labels it "Queue" (#472); idle reads "Send". Not while
     // pending — that shows the "Sending…" spinner.
-    if (!pending) this.#sendLabel.textContent = working ? 'Queue' : 'Send'
+    //
+    // Mid-run sends: a working Claude turn takes the message at once, so the
+    // button says "Send" there — "Queue" only where the message really waits.
+    // The route is asked with `sending: false` so the label does not flicker to
+    // "Queue" for the moment a send is in flight (the button is disabled then).
+    const queues =
+      composedSendRoute({ status: this.#status, sending: false, provider: this.#threadProvider }) === 'queue'
+    if (!pending) this.#sendLabel.textContent = working && queues ? 'Queue' : 'Send'
     if (!hasThread || this.#sending || !hasContent || locked) {
       this.#sendButton.setAttribute('disabled', '')
     } else {

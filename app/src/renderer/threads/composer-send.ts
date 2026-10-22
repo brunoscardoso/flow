@@ -2,6 +2,8 @@
 // button must disable (and #send() must no-op) when the composer holds no
 // sendable content — empty/whitespace text AND no chips — so Send isn't a dead
 // click. DOM-free → unit-testable; the composer is DOM-coupled.
+import type { ThreadStatus } from '../../shared/ipc-contract'
+import { isComposerFreeStatus } from './prompt-queue'
 
 /**
  * Whether the composer has something to send: non-whitespace text, at least one
@@ -36,10 +38,34 @@ export function composedPromptFor(detail: unknown, threadId: string | null): str
 }
 
 /**
- * Whether a composed message goes now or waits in the prompt queue — the rule
- * a typed message follows (#472, #1470): a turn that is running, or parked on
- * a decision, or a send still in flight means the queue.
+ * Where a message goes when the person sends it — the ONE rule both the typed
+ * send and a surface-composed send follow (#472, #1470, plan mid-run-subtasks
+ * note 1):
+ *
+ * - `'send'` — the composer is free (idle / done / failed) and no send is in
+ *   flight: a new turn starts.
+ * - `'inject'` — a Claude thread whose turn is `working`: the message goes into
+ *   the LIVE turn at once. The Claude session reads its input as a stream, so
+ *   main pushes it at the next tool boundary of the same turn (SDK priority
+ *   `'next'` — `'now'` was probed and ends the turn instead, see
+ *   flow/resources/sdk-mid-turn-probe.md). Nothing about it is a new turn.
+ * - `'queue'` — everything else waits in the prompt queue: a turn parked on a
+ *   decision (`needs-decision`, `blocked` — #1470: a live send there un-parks
+ *   the ask and delivers a STOP as a follow-up), a send still in flight, and a
+ *   working Copilot or Codex thread (one-shot-per-turn runtimes; their queue
+ *   row and Send now are unchanged).
+ *
+ * `provider` is the runtime the thread's project resolves to, or null while it
+ * is not known yet — an unknown runtime never injects (fail closed to the
+ * queue, which is exactly what every thread did before this existed).
  */
-export function composedSendRoute(free: boolean, sending: boolean): 'send' | 'queue' {
-  return free && !sending ? 'send' : 'queue'
+export function composedSendRoute(input: {
+  status: ThreadStatus
+  sending: boolean
+  provider: string | null
+}): 'send' | 'inject' | 'queue' {
+  if (input.sending) return 'queue'
+  if (isComposerFreeStatus(input.status)) return 'send'
+  if (input.status === 'working' && input.provider === 'claude') return 'inject'
+  return 'queue'
 }
