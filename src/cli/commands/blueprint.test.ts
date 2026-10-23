@@ -21,7 +21,7 @@ import {
   readInvestigations,
 } from '../blueprint/investigation-store.js';
 import { readEffectiveProposals } from '../blueprint/proposal-store.js';
-import { writeFeature, writeParts } from '../blueprint/feature-store.js';
+import { readParts, writeFeature, writeParts } from '../blueprint/feature-store.js';
 import { appendAnnotation, readAnnotations, readGraph } from '../blueprint/store.js';
 import type { BlueprintCommandOptions } from './blueprint.js';
 import type { BlueprintGraph, HeatCounter, InvestigationEntry } from '../blueprint/types.js';
@@ -1008,6 +1008,40 @@ describe('blueprint command', () => {
       writeFileSync(join(flowDir, 'brain', 'features', 'sse.md'), '---\nid: feature:sse\nname: SSE\nkind: core\n---\n# SSE\n', 'utf-8');
       const result = await runActionAt(repoRoot, 'features', { feature: 'feature:chats/sse' }, 'parts');
       expect(`${result.stdout}\n${result.stderr}`).toMatch(/no feature/);
+    });
+  });
+
+  describe('blueprint features parts --write — learnedRole (feature-type-icons FR-4/FR-5)', () => {
+    function seedFeature(): void {
+      mkdirSync(join(flowDir, 'brain', 'features'), { recursive: true });
+      writeFileSync(
+        join(flowDir, 'brain', 'features', 'chats.md'),
+        '---\nid: feature:chats\nname: Chats\nkind: core\n---\n# Chats\n',
+        'utf-8',
+      );
+    }
+
+    it('writes the learnedRole a part carries', async () => {
+      seedFeature();
+      const write = JSON.stringify([{ name: 'SSE stream', summary: 's', anchors: ['src/sse.ts'], learnedRole: 'api' }]);
+      const out = await runActionAt(repoRoot, 'features', { feature: 'chats', write }, 'parts');
+      expect(`${out.stdout}\n${out.stderr}`).toContain('1 part(s) written');
+      expect(readParts(flowDir, 'chats')[0]).toMatchObject({ name: 'SSE stream', learnedRole: 'api' });
+    });
+
+    it('refuses a learnedRole off the list and writes nothing', async () => {
+      seedFeature();
+      const write = JSON.stringify([{ name: 'SSE stream', summary: 's', anchors: ['src/sse.ts'], learnedRole: 'frontend' }]);
+      const out = await runActionAt(repoRoot, 'features', { feature: 'chats', write }, 'parts');
+      expect(`${out.stdout}\n${out.stderr}`).toContain("learnedRole 'frontend'");
+      expect(readParts(flowDir, 'chats')).toEqual([]);
+    });
+
+    it('never reads a person-owned role from a machine write', async () => {
+      seedFeature();
+      const write = JSON.stringify([{ name: 'SSE stream', summary: 's', anchors: ['src/sse.ts'], role: 'ui' }]);
+      await runActionAt(repoRoot, 'features', { feature: 'chats', write }, 'parts');
+      expect(readParts(flowDir, 'chats')[0]?.role).toBeUndefined();
     });
   });
 

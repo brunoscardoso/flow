@@ -49,9 +49,14 @@ import {
   parseFeatureLearnEdges,
   parseFeatureLearnOutput,
   renderFeatureRoster,
+  featureRolePromptLines,
+  normaliseFeatureRole,
+  parseFeatureLearnRole,
+  writeLearnedRoleViaCli,
   type FeatureEdgeProposal,
   type FeatureRosterEntry,
 } from './learn-session'
+import type { FeatureRole } from '../../shared/feature-role'
 import type { BundledCli } from '../blueprint/derive-runner'
 import { PORTS_EXAMPLE_LINE, viewPortsPromptLines } from '../../shared/feature-view-ports-prompt'
 
@@ -121,6 +126,10 @@ export interface FeatureViewPassResult {
   learnings?: number
   /** The learnings half was ATTEMPTED and refused. See `reason`. */
   learningsFailed?: boolean
+  /** The feature's role the reply named (plan `feature-type-icons`, FR-3), when on the list. */
+  role?: FeatureRole
+  /** The role was written through the learnedRole verb. False when it was refused. */
+  roleWritten?: boolean
   /**
    * What to tell the user, naming which half landed whenever they differ.
    * Present on every partial outcome; absent only when both halves went
@@ -224,9 +233,17 @@ export function buildFeatureViewPrompt(input: {
     // write down HOW they connect.
     ...renderFeatureRoster(input.roster ?? []),
     '',
+    // THE ROLE — one more field of the same reply (plan `feature-type-icons`,
+    // FR-3 and FR-5): one for the feature, and an optional one per component.
+    'ROLE — what kind of thing this is, drawn as an icon',
+    ...featureRolePromptLines('this feature as a whole'),
+    'Give each component its own optional "role" from the same list when one clearly fits;',
+    'leave it out when none does. A role off the list is dropped.',
+    '',
     'Reply with ONLY a single JSON object — no prose, no code fence:',
     '{',
     '  "meta": { "title": "<what this feature is called in conversation>", "sub": "<one clause>" },',
+    '  "role": "<one word from the role list — the feature as a whole>",',
     '  "learnings": ["<one non-obvious sentence>", "<another>"],',
     ...(hasRoster
       ? [
@@ -245,7 +262,7 @@ export function buildFeatureViewPrompt(input: {
     '      "summary": "<two sentences on how it works today>",',
     PORTS_EXAMPLE_LINE,
     '      "nodes": [',
-    '        { "id": "bff", "kind": "endpoint", "title": "Gateway BFF", "sub": "streamTurn",',
+    '        { "id": "bff", "kind": "endpoint", "title": "Gateway BFF", "sub": "streamTurn", "role": "api",',
     '          "delta": "stable", "doc": "<what it is and why it matters>",',
     '          "phases": [2, 3], "view": "<nested level id, only when one exists>",',
     '          "code": { "file": "<repo-relative>", "from": 851, "to": 857, "note": "<why THIS code matters>" },',
@@ -432,6 +449,39 @@ export function stripViewPorts(view: Record<string, unknown>): number {
 }
 
 /**
+ * Normalise every component's `role` in place, and drop one off the list —
+ * returning how many were dropped.
+ *
+ * SANITIZED, NOT REFUSED (allowed-pattern #22): the role is a value this pass
+ * proposes, and the validator refuses the WHOLE view over one bad role. A model
+ * that wrote "UI" or "frontend" on one box must not cost the picture; the
+ * validator stays the backstop for anything that reaches it some other way.
+ */
+export function sanitizeViewRoles(view: Record<string, unknown>): number {
+  const views = view['views']
+  if (typeof views !== 'object' || views === null) return 0
+  let dropped = 0
+  for (const level of Object.values(views as Record<string, unknown>)) {
+    if (typeof level !== 'object' || level === null) continue
+    const nodes = (level as Record<string, unknown>)['nodes']
+    if (!Array.isArray(nodes)) continue
+    for (const node of nodes) {
+      if (typeof node !== 'object' || node === null) continue
+      const record = node as Record<string, unknown>
+      if (!('role' in record)) continue
+      const role = normaliseFeatureRole(record['role'])
+      if (role === null) {
+        delete record['role']
+        dropped += 1
+      } else {
+        record['role'] = role
+      }
+    }
+  }
+  return dropped
+}
+
+/**
  * Generate and persist a feature's curated view AND its learnings.
  *
  * The CLI validates and writes (Phase 1), so a contract violation — a line from
@@ -516,11 +566,16 @@ export async function runFeatureViewPass(
   // against its own roster (`writeEdges`), so a name this pass could not have
   // resolved is refused there rather than trusted here.
   const edges = parseFeatureLearnEdges(raw)
+  // THE FEATURE'S ROLE, off that same reply. Written through the learnedRole
+  // verb below — never stored in the view, which holds the COMPONENTS' roles.
+  const role = parseFeatureLearnRole(raw)
   // Never part of the artifact. The view is validated as a picture, and a stray
   // key riding along in the stored JSON would be a second, unvalidated place
   // the prose lives.
   delete view['learnings']
   delete view['relates']
+  delete view['role']
+  sanitizeViewRoles(view)
 
   const { dropped } = fillCodeExcerpts(view, params.rootPath)
   const now = params.now ? params.now() : new Date()
@@ -564,6 +619,12 @@ export async function runFeatureViewPass(
       ? { ok: true }
       : await writeLearnings(params, runCli, learnings, edges, date)
   const learningsWritten = learned.ok ? learnings.length : 0
+  // The role is written AFTER the learnings and can never fail the pass — like
+  // the learnings, it is attempted whether or not the picture landed.
+  const roleOutcome =
+    role === null
+      ? {}
+      : { role, roleWritten: await writeLearnedRoleViaCli(runCli, params.bundledCli, params.rootPath, params.featureRef, role) }
 
   if (!written.ok) {
     // THE PICTURE WAS REFUSED. Say so — and say what survived, because "could
@@ -574,6 +635,7 @@ export async function runFeatureViewPass(
       ok: false,
       learnings: learningsWritten,
       ...(learned.ok ? {} : { learningsFailed: true }),
+      ...roleOutcome,
       reason:
         learningsWritten > 0
           ? `${why} — ${String(learningsWritten)} learning(s) were still written`
@@ -602,6 +664,7 @@ export async function runFeatureViewPass(
     components: nodes,
     learnings: learningsWritten,
     ...(learned.ok ? {} : { learningsFailed: true }),
+    ...roleOutcome,
     ...(notes.length > 0 ? { reason: notes.join(' · ') } : {}),
   }
 }
@@ -626,6 +689,8 @@ export function derivePartsFromView(view: unknown): Array<{
   name: string
   summary: string
   anchors: string[]
+  /** The component's role, carried as the part's learn-owned role (FR-5). */
+  learnedRole?: FeatureRole
 }> {
   if (typeof view !== 'object' || view === null) return []
   const views = (view as Record<string, unknown>)['views']
@@ -635,7 +700,7 @@ export function derivePartsFromView(view: unknown): Array<{
   const nodes = (root as Record<string, unknown>)['nodes']
   if (!Array.isArray(nodes)) return []
 
-  const parts: Array<{ name: string; summary: string; anchors: string[] }> = []
+  const parts: Array<{ name: string; summary: string; anchors: string[]; learnedRole?: FeatureRole }> = []
   for (const raw of nodes) {
     if (typeof raw !== 'object' || raw === null) continue
     const node = raw as Record<string, unknown>
@@ -661,12 +726,16 @@ export function derivePartsFromView(view: unknown): Array<{
     if (anchors.size === 0) continue
 
     const doc = typeof node['doc'] === 'string' ? node['doc'].trim() : ''
+    // The component's role becomes the part's `learnedRole` — the drawing
+    // decided it from the same read. Off the list ⇒ none, never a refusal.
+    const learnedRole = normaliseFeatureRole(node['role'])
     parts.push({
       name: title,
       // One clause, not the whole paragraph: the summary sits under a heading
       // in a file a person reads, and the full prose lives in the view.
       summary: doc.split(/(?<=\.)\s/)[0]?.trim() ?? '',
       anchors: [...anchors],
+      ...(learnedRole === null ? {} : { learnedRole }),
     })
   }
   return parts

@@ -26,9 +26,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { addressPartNames, edgeKey, featureHome, featureSummary, parseLearnings, resolveFeatureRef, slugifyFeatureName, splitLearned } from './feature-store.js';
+import { addressPartNames, edgeKey, featureHome, featureLearnedRole, featureRole, featureSummary, parseLearnings, resolveFeatureRef, slugifyFeatureName, splitLearned } from './feature-store.js';
 import type { FeatureNode, FeaturePart } from './feature-store.js';
 import type { BlueprintGraph } from './types.js';
+import { resolveFeatureRole, type FeatureRole, type FeatureRoleSource } from './feature-role.js';
 import type { FeatureSize } from './feature-size.js';
 import type { FeatureFolders, FolderNodeInput } from './feature-folders.js';
 
@@ -92,6 +93,16 @@ export interface FeatureGraphNode {
   folders?: FeatureFolders;
   /** One line saying what this feature IS — empty when it says nothing. */
   summary: string;
+  /**
+   * WHAT KIND OF THING it is — the icon the board draws (plan
+   * `feature-type-icons`, FR-7). Resolved ONCE, here: the person's `role:`,
+   * else the learned one, else the guess from the anchors (`resolveFeatureRole`),
+   * so the board never needs the anchor list and never re-derives a role. On
+   * features and parts; absent on a change, which gets no rectangle to draw it on.
+   */
+  role?: FeatureRole;
+  /** Who answered `role`: a person, a learn pass, or the guess (drawn in grey). */
+  roleSource?: FeatureRoleSource;
 }
 
 /** A `relates` edge between two features. Undirected in meaning, stored once. */
@@ -398,6 +409,7 @@ function buildPartNodes(
       folders === undefined
         ? null
         : folders({ slug: id.slice(id.lastIndexOf('/') + 1), anchors: part.anchors, home: part.home ?? null });
+    const resolved = resolveFeatureRole({ role: part.role, learnedRole: part.learnedRole, anchors: part.anchors });
     nodes.push({
       id,
       slug: feature.slug,
@@ -411,6 +423,8 @@ function buildPartNodes(
       ...(measure === undefined ? {} : { size: measure(part.anchors) }),
       ...(rows === null ? {} : { folders: rows }),
       summary: part.summary.trim(),
+      role: resolved.role,
+      roleSource: resolved.source,
     });
   }
   return nodes;
@@ -465,6 +479,17 @@ export function buildFeatureGraph(
       if (folders !== undefined && feature.kind === 'core') {
         const rows = folders({ slug: feature.slug, anchors: feature.anchors, home: featureHome(feature) });
         if (rows !== null) node.folders = rows;
+      }
+      // ITS ROLE — the one place the precedence is applied. A change gets no
+      // rectangle, so like the folders it gets no role either.
+      if (feature.kind === 'core') {
+        const resolved = resolveFeatureRole({
+          role: featureRole(feature),
+          learnedRole: featureLearnedRole(feature),
+          anchors: feature.anchors,
+        });
+        node.role = resolved.role;
+        node.roleSource = resolved.source;
       }
       // A child whose parent is missing renders at level 1 rather than
       // vanishing — losing a node is worse than misplacing one.

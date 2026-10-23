@@ -170,7 +170,11 @@ program
   )
   .option(
     '--part <feature-ref>',
-    'Feature or part whose files to read as one story (storyline only)',
+    'Feature or part whose files to read as one story (storyline), or the part whose learned role to write (features role)',
+  )
+  .option(
+    '--learned <role>',
+    "The role a learn pass decided for a feature or part (features role only)",
   )
   .option(
     '--base <rev>',

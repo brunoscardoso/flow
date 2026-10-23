@@ -134,7 +134,14 @@ import { GitManager, gitRootsProviderFrom, registerGitChannels } from './git'
 import { GitPublishService } from './git/publish'
 import { GIT_CHANGED_EVENT, type GitChangedEvent } from './git/git-manager'
 import { createInvariantService, type InvariantService } from './review/invariant-service'
-import { loadFeatureRoster, runBundledCliCapturing, runFeatureLearnPass } from './agent/learn-session'
+import {
+  loadFeatureRoster,
+  runBundledCliCapturing,
+  runFeatureLearnPass,
+  writeLearnedRoleViaCli,
+} from './agent/learn-session'
+import { createRoleClassifier } from './learn/classify-roles'
+import { runFeatures } from './blueprint/feature-runner'
 import {
   derivePartsFromView,
   resolvePartFiles,
@@ -2699,7 +2706,14 @@ function bootstrapMainProcess(): void {
       // visible and unlearned, which is honest and resumable; holding
       // everything until the end would lose the decomposition too.
       const writeAll = async (
-        entries: ReadonlyArray<{ name: string; summary: string; anchors: string[]; learnings?: unknown[] }>,
+        entries: ReadonlyArray<{
+          name: string
+          summary: string
+          anchors: string[]
+          learnings?: unknown[]
+          /** The part's learn-owned role — the writer validates it (feature-type-icons FR-4). */
+          learnedRole?: string
+        }>,
       ): Promise<boolean> => {
         const written = await runBundledCliCapturing(bundled, request.rootId, [
           'blueprint',
@@ -2728,7 +2742,13 @@ function bootstrapMainProcess(): void {
       // Read ONCE for the whole loop — the store does not change while it runs,
       // and a per-part CLI read would pay for the same answer N times.
       const partsRoster = await loadFeatureRoster(bundled, request.rootId)
-      const learned: Array<{ name: string; summary: string; anchors: string[]; learnings: unknown[] }> = []
+      const learned: Array<{
+        name: string
+        summary: string
+        anchors: string[]
+        learnings: unknown[]
+        learnedRole?: string
+      }> = []
       /** Parts whose anchors resolved to nothing readable — named at the end. */
       const unreadable: string[] = []
       for (const part of parts) {
@@ -2766,6 +2786,9 @@ function bootstrapMainProcess(): void {
         learned.push({
           ...part,
           learnings: (result.learnings ?? []).map((text) => ({ text, provenance: 'code', date: today })),
+          // The part's own pass read its own files, so its role outranks the
+          // one the drawing gave the component; without one, the drawing's stays.
+          ...(result.role !== undefined ? { learnedRole: result.role } : {}),
         })
         await writeAll([...learned, ...parts.slice(learned.length)])
         broadcast('learn:featureParts', {
@@ -2837,6 +2860,23 @@ const understandFeature = async (request: {
     if (!drawn) return
     await learnFeatureParts(request)
   }
+
+  /**
+   * THE CLASSIFY PASS (plan `feature-type-icons`, FR-10). The graph read is the
+   * board's own (`blueprint features graph`), the model is the fast one the
+   * context gate uses (a hidden e2e run answers it with its stand-in), and every
+   * answer is written through the one learnedRole verb — never the store.
+   */
+  const roleClassifier = createRoleClassifier({
+    readNodes: async (rootPath) => (await runFeatures(bundledCli, rootPath)).nodes,
+    askModel: (rootPath, prompt, signal) => {
+      const standIn = e2eSeams()?.askFastModel
+      if (standIn !== undefined) return standIn({ projectRoot: rootPath, prompt, signal })
+      return agentManager?.askFastModel({ projectRoot: rootPath, prompt, signal }) ?? Promise.resolve(null)
+    },
+    writeRole: (rootPath, id, role) => writeLearnedRoleViaCli(runBundledCliCapturing, bundledCli, rootPath, id, role),
+    onProgress: (rootPath, progress) => broadcast('learn:classifyRolesProgress', { rootId: rootPath, ...progress }),
+  })
 
   disposeIpc = registerIpcHandlers({
     threadStore,
@@ -2967,6 +3007,9 @@ const understandFeature = async (request: {
     },
     // Learning-panel "Brain retrieval" line (brain-first-retrieval Phase 4).
     brainUsage: (rootPath) => readBrainUsageTotals(rootPath),
+    // The one-time role classify pass (feature-type-icons FR-10) — offered by
+    // the board, never run on its own. See `learn/classify-roles.ts`.
+    classifyRoles: (rootPath, options) => roleClassifier.run(rootPath, options),
     // Conversation pane's cumulative savings chip — pure recompute over the
     // thread's persisted tool calls priced at the root's current baseline.
     // PERF: memoized per thread on the tool-call COUNT — the pane re-asks on

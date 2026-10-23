@@ -385,3 +385,17 @@ describe('workspace sheet — where a feature lives (plan feature-home-folders)'
     expect(view.cells.find((c) => c.id === 'feature:app::chats')?.folders).toBeNull()
   })
 })
+
+describe('a Workspace cell carries its type (plan feature-type-icons)', () => {
+  it('copies role and source from the node and shows the icon only on the full-name tier', () => {
+    const typed: BlueprintFeatureNode = { ...core('alpha::chats', 4000, 'learned'), role: 'api', roleSource: 'learn' }
+    const plain = core('alpha::old', 2000)
+    const sheet = buildWorkspaceSheet(graphOf([project('alpha', 0, [typed, plain])]), { stage: STAGE, showConnections: false })
+    const chats = sheet.cells.find((cell) => cell.id === 'alpha::chats')
+    const old = sheet.cells.find((cell) => cell.id === 'alpha::old')
+    expect(chats).toMatchObject({ role: 'api', roleSource: 'learn' })
+    expect(chats?.showRoleIcon).toBe(chats?.labelClass === '')
+    expect(chats?.labelClass).toBe('')
+    expect(old).toMatchObject({ role: null, roleSource: null, showRoleIcon: false })
+  })
+})

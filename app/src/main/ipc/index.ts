@@ -350,6 +350,15 @@ export interface IpcDependencies {
    */
   brainUsage?: (rootPath: string) => Promise<import('../../shared/ipc-contract').BrainUsageTotals>
   /**
+   * Run — or, with `stop`, stop — the one-time role classify pass
+   * (`learn:classifyRoles`, plan `feature-type-icons` FR-10). Optional so
+   * tests/headless harnesses can omit it (the call then says it is not wired).
+   */
+  classifyRoles?: (
+    rootPath: string,
+    options: { stop: boolean },
+  ) => Promise<IpcResponse<'learn:classifyRoles'>>
+  /**
    * Estimated tokens saved by knowledge search across ONE thread (the
    * conversation pane's cumulative chip) — a pure recompute over the thread's
    * persisted tool calls plus the root's rolling burst samples. Fail-soft by
@@ -573,6 +582,7 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
     learnCancel,
     learnReset,
     brainUsage,
+    classifyRoles,
     brainThreadSavings,
   } = deps
 
@@ -1499,6 +1509,12 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
       return { searches: 0, freshHits: 0, staleHits: 0, misses: 0, savedTokens: 0, updatedAt: null }
     }
     return brainUsage(rootId)
+  })
+  handle('learn:classifyRoles', async ({ rootId, stop }) => {
+    const none = { written: 0, skipped: 0, failed: 0, total: 0, stopped: false }
+    if (!classifyRoles) return { ok: false, ...none, reason: 'Classifying roles is not available in this build.' }
+    if (typeof rootId !== 'string' || rootId === '') return { ok: false, ...none, reason: 'No project was named.' }
+    return classifyRoles(rootId, { stop: stop === true })
   })
 
   // ── broadcasts ───────────────────────────────────────────────────────

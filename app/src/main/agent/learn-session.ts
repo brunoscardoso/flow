@@ -77,6 +77,10 @@ import type { BundledCli } from '../blueprint/derive-runner'
 import { slugify } from '../brain/compaction'
 import { adjudicableClaimPaths, isClaimImagePath } from '../../shared/claim-files'
 import { describeSdkActivity } from './sdk-activity'
+import type { FeatureRole } from '../../shared/feature-role'
+import { featureRolePromptLines, normaliseFeatureRole } from './feature-role-prompt'
+
+export { featureRolePromptLines, normaliseFeatureRole } from './feature-role-prompt'
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -1591,6 +1595,14 @@ export interface FeatureLearnPassResult {
   learnings?: string[]
   /** The relationships PROPOSED — the store decides which of them it accepts. */
   edges?: FeatureEdgeProposal[]
+  /**
+   * The role the pass decided (plan `feature-type-icons`, FR-3), or absent when
+   * the reply named none on the list. A collect-only (part) pass returns it for
+   * its caller to write with the part; a feature pass has already written it.
+   */
+  role?: FeatureRole
+  /** The role was written through the learnedRole verb. False when it was refused. */
+  roleWritten?: boolean
   reason?: string
 }
 
@@ -1649,10 +1661,12 @@ export function buildFeatureLearnPrompt(input: {
     '- No newlines inside a learning — one line each.',
     '- If the code does not support a non-obvious claim, return fewer learnings. An empty list is a valid, honest answer.',
     '',
+    ...featureRolePromptLines('this feature'),
+    '',
     'Reply with ONLY a single JSON object — no prose, no code fence:',
     hasRoster
-      ? '{ "learnings": ["<one sentence>"], "relates": [{"target": "<an id from the list above>", "via": "<the file or file.ts#symbol where you saw it>", "note": "<one line: how they connect>"}] }'
-      : '{ "learnings": ["<one sentence>", "<one sentence>"] }',
+      ? '{ "learnings": ["<one sentence>"], "role": "<one word from the role list>", "relates": [{"target": "<an id from the list above>", "via": "<the file or file.ts#symbol where you saw it>", "note": "<one line: how they connect>"}] }'
+      : '{ "learnings": ["<one sentence>", "<one sentence>"], "role": "<one word from the role list>" }',
     // THE `relates` HALF. Recording the relationship is the deliverable the
     // roster exists for — and the `note` is what makes it worth recording: a
     // bare id says two capabilities touch and sends the reader into both of
@@ -1668,6 +1682,72 @@ export function buildFeatureLearnPrompt(input: {
         ]
       : []),
   ].join('\n')
+}
+
+// ── The role (plan `feature-type-icons`, FR-3) ───────────────────────────────
+//
+// One more field in the SAME reply, never a second call (NFR-4). The model is
+// told the list; the CLI verb is what actually checks it (allowed-pattern #14) —
+// the parser below only decides whether there is anything worth sending.
+
+/**
+ * Parse the `role` of a feature pass's reply. Null when the reply names none,
+ * or names one off the list — either way nothing is written. Never throws.
+ *
+ * SEPARATE from the learnings parser for the reason the edges parser is: a
+ * reply with good facts and an unusable role must not lose the facts.
+ */
+export function parseFeatureLearnRole(raw: string): FeatureRole | null {
+  const candidate = extractJsonObject(raw)
+  if (candidate === null) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(candidate)
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
+  return normaliseFeatureRole((parsed as Record<string, unknown>)['role'])
+}
+
+/** The argv of the one learnedRole writer — `blueprint features role`. */
+export function buildLearnedRoleArgs(featureRef: string, role: FeatureRole, part?: string): string[] {
+  return [
+    'blueprint',
+    'features',
+    'role',
+    '--feature',
+    featureRef,
+    ...(part !== undefined && part.length > 0 ? ['--part', part] : []),
+    '--learned',
+    role,
+    '--json',
+  ]
+}
+
+/**
+ * Write a learned role through the verb. Resolves false on a refusal and NEVER
+ * throws: a role is decoration on top of a pass's real work, so its refusal is
+ * logged and the pass carries on.
+ */
+export async function writeLearnedRoleViaCli(
+  runCli: CliRunner,
+  bundledCli: BundledCli,
+  rootPath: string,
+  featureRef: string,
+  role: FeatureRole,
+  part?: string,
+): Promise<boolean> {
+  try {
+    const result = await runCli(bundledCli, rootPath, buildLearnedRoleArgs(featureRef, role, part))
+    if (!result.ok) {
+      console.warn(`[learn:role] ${featureRef}${part === undefined ? '' : ` / ${part}`}: ${result.error ?? 'refused'}`)
+    }
+    return result.ok
+  } catch (error) {
+    console.warn(`[learn:role] ${featureRef}: ${errorMessage(error)}`)
+    return false
+  }
 }
 
 /** One relationship the pass proposes. Mirrors the CLI's FeatureEdge. */
@@ -1829,16 +1909,26 @@ export async function runFeatureLearnPass(
   // to carry one. A collect-only pass therefore proposes no edges rather than
   // attributing a part's reading to its parent.
   const edges = params.collectOnly === true ? [] : parseFeatureLearnEdges(raw)
+  // THE ROLE, off the same reply. A part's role is its caller's to write (it
+  // rides the parts write), so a collect-only pass only returns it.
+  const role = parseFeatureLearnRole(raw)
+  const withRole = role === null ? {} : { role }
+  if (params.collectOnly === true) return { ok: true, learnings, ...withRole }
+  /** Written AFTER the learnings, and never able to fail the pass. */
+  const writeRole = async (): Promise<{ roleWritten?: boolean }> =>
+    role === null
+      ? {}
+      : { roleWritten: await writeLearnedRoleViaCli(runCli, params.bundledCli, params.rootPath, params.featureRef, role) }
   if (learnings.length === 0 && edges.length === 0) {
     // Honest, and not a failure — but nothing is written, so the section keeps
-    // whatever it had rather than being emptied by a quiet pass.
-    return { ok: true, learnings: [] }
+    // whatever it had rather than being emptied by a quiet pass. The role is
+    // still a real answer about what the feature is.
+    return { ok: true, learnings: [], ...withRole, ...(await writeRole()) }
   }
 
   const now = params.now ? params.now() : new Date()
   const date = now.toISOString().slice(0, 10)
   const provenance = params.provenance ?? 'code'
-  if (params.collectOnly === true) return { ok: true, learnings }
 
   const args = ['blueprint', 'features', 'learned', '--feature', params.featureRef]
   for (const text of learnings) {
@@ -1857,5 +1947,5 @@ export async function runFeatureLearnPass(
       reason: `could not write learnings: ${written.error ?? 'unknown'}`,
     }
   }
-  return { ok: true, learnings, ...(edges.length > 0 ? { edges } : {}) }
+  return { ok: true, learnings, ...(edges.length > 0 ? { edges } : {}), ...withRole, ...(await writeRole()) }
 }

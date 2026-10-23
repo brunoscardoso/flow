@@ -150,6 +150,8 @@ import { requestImportIndexWarm } from '../blueprint/storyline-index-warm.js';
 import { StorylineReaders } from '../blueprint/storyline-reader.js';
 import { runFeaturePortsVerb } from '../blueprint/feature-ports.js';
 import { runFeatureHomeVerb } from '../blueprint/feature-home.js';
+import { runFeatureRoleVerb } from '../blueprint/feature-learned-role.js';
+import { FEATURE_ROLES, isFeatureRole } from '../blueprint/feature-role.js';
 import { computeDrift } from '../blueprint/drift-check.js';
 import { advanceFileStamps, computeFileStamps, establishFileStampsIfMissing, readFileStamps, stampEdgeVias, writeFileStamps, type FileStamp } from '../blueprint/file-stamps.js';
 import { walkRepo } from '../blueprint/extractors/scan.js';
@@ -1076,8 +1078,10 @@ export interface BlueprintCommandOptions {
   file?: string;
   /** features home: the project folder to pin as the feature's home. */
   folder?: string;
-  /** storyline: the feature or part whose files to read as one story. */
+  /** storyline: the feature or part whose files to read as one story; features role: the part, by name. */
   part?: string;
+  /** features role: the role a learn pass decided. */
+  learned?: string;
   /** storyline --plan: the plan's starting commit, when the caller names it. */
   base?: string;
 }
@@ -2485,11 +2489,22 @@ function runFeaturesParts(repoRoot: string, options: BlueprintCommandOptions): n
           ];
         })
       : [];
+    // `learnedRole` is the learn-owned role a pass decided for this part
+    // (plan `feature-type-icons`, FR-4/FR-5). Checked against the vocabulary
+    // HERE, by the writer; absent keeps whatever is on disk (`writeParts`). A
+    // person's `role` is never read from a machine write — it is not even
+    // looked for.
+    const rawLearnedRole = record['learnedRole'];
+    if (rawLearnedRole !== undefined && !isFeatureRole(rawLearnedRole)) {
+      errors.push(`part '${name}' has learnedRole '${String(rawLearnedRole)}' — expected ${FEATURE_ROLES.join('|')}`);
+      return;
+    }
     parts.push({
       name,
       summary: typeof record['summary'] === 'string' ? record['summary'].trim() : '',
       anchors: anchors.map((a) => a.trim()),
       learnings,
+      ...(rawLearnedRole === undefined ? {} : { learnedRole: rawLearnedRole }),
     });
   });
 
@@ -2783,6 +2798,25 @@ function runFeaturesHome(repoRoot: string, options: BlueprintCommandOptions): nu
     ...(typeof options.feature === 'string' ? { feature: options.feature } : {}),
     ...(typeof options.folder === 'string' ? { folder: options.folder } : {}),
     clear: options.clear === true,
+    json: options.json === true,
+  });
+  process.stdout.write(output.stdout);
+  return output.exitCode;
+}
+
+/**
+ * `blueprint features role --feature <ref> [--part <name>] --learned <role> [--json]`
+ * — the one writer of a feature's or part's learn-owned `learnedRole:`
+ * (`blueprint/feature-learned-role.ts`). It never writes the person's `role:`.
+ * A refusal is its JSON payload then `features refused: <reason> — <sentence>`,
+ * exit 1, nothing written.
+ */
+function runFeaturesRole(repoRoot: string, options: BlueprintCommandOptions): number {
+  const output = runFeatureRoleVerb({
+    repoRoot,
+    ...(typeof options.feature === 'string' ? { feature: options.feature } : {}),
+    ...(typeof options.part === 'string' ? { part: options.part } : {}),
+    ...(typeof options.learned === 'string' ? { learned: options.learned } : {}),
     json: options.json === true,
   });
   process.stdout.write(output.stdout);
@@ -4526,7 +4560,9 @@ export async function runBlueprint(
                                     ? runFeaturesPorts(repoRoot, options)
                                     : target === 'home'
                                       ? runFeaturesHome(repoRoot, options)
-                                      : runFeatures(repoRoot, options);
+                                      : target === 'role'
+                                        ? runFeaturesRole(repoRoot, options)
+                                        : runFeatures(repoRoot, options);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         process.exitCode = refuseFeatures(message);

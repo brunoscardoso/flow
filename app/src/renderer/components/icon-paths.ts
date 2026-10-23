@@ -143,6 +143,44 @@ export const ICON_PATHS = {
   // renderer strokes and does not fill. Drawn as two concentric strokes (the
   // first attempt) it read as a weak double ring at 14px and said nothing.
   record: 'M8 14.2 A6.2 6.2 0 1 0 8 1.8 A6.2 6.2 0 0 0 8 14.2',
+  // ── A FEATURE'S TYPE (plan feature-type-icons) ──────────────────────────────
+  // One glyph per role, drawn on the board's Territory cells (12px) and in an
+  // opened feature's boxes (14px). The shapes are the approved mockup's,
+  // re-spelled as paths: this renderer takes path data only, so each circle is
+  // two arcs and each rounded rectangle its four corners. `role-icon-model.ts`
+  // maps a role to its name here.
+  //
+  // A window: the frame and its title bar.
+  'role-ui':
+    'M3 2.5 H13 A1.5 1.5 0 0 1 14.5 4 V12 A1.5 1.5 0 0 1 13 13.5 H3 A1.5 1.5 0 0 1 1.5 12 V4 A1.5 1.5 0 0 1 3 2.5 Z M1.5 5.5 H14.5',
+  // Three nodes, one forking to two — a request fanning out.
+  'role-api':
+    'M8 5.3 A1.8 1.8 0 1 0 8 1.7 A1.8 1.8 0 0 0 8 5.3 M3.5 14.3 A1.8 1.8 0 1 0 3.5 10.7 A1.8 1.8 0 0 0 3.5 14.3 M12.5 14.3 A1.8 1.8 0 1 0 12.5 10.7 A1.8 1.8 0 0 0 12.5 14.3 M7.1 5 L4.4 11 M8.9 5 L11.6 11',
+  // A gear: a hub inside a ring, its teeth touching the ring (`settings`' note
+  // on detached ticks reading as brightness is why they touch).
+  'role-logic':
+    'M8 10 A2 2 0 1 0 8 6 A2 2 0 0 0 8 10 M8 12.5 A4.5 4.5 0 1 0 8 3.5 A4.5 4.5 0 0 0 8 12.5 M8 1.5 V3.5 M8 12.5 V14.5 M1.5 8 H3.5 M12.5 8 H14.5 M3.4 3.4 L4.8 4.8 M11.2 11.2 L12.6 12.6 M3.4 12.6 L4.8 11.2 M11.2 4.8 L12.6 3.4',
+  // A cylinder: the top ellipse, the walls and one band.
+  'role-data':
+    'M3 3.5 A5 2 0 1 0 13 3.5 A5 2 0 1 0 3 3.5 Z M3 3.5 V12.5 C3 13.6 5.2 14.5 8 14.5 S13 13.6 13 12.5 V3.5 M3 8 C3 9.1 5.2 10 8 10 S13 9.1 13 8',
+  // Three sliders. The mockup filled each knob with the card colour; this
+  // renderer only strokes, so the track stops short of each knob instead — the
+  // same picture without a fill (the table's fills are `record`'s alone).
+  'role-config':
+    'M3 4 H4.5 M7.5 4 H13 M3 8 H9 M12 8 H13 M3 12 H3.5 M6.5 12 H13 M6 5.5 A1.5 1.5 0 1 0 6 2.5 A1.5 1.5 0 0 0 6 5.5 M10.5 9.5 A1.5 1.5 0 1 0 10.5 6.5 A1.5 1.5 0 0 0 10.5 9.5 M5 13.5 A1.5 1.5 0 1 0 5 10.5 A1.5 1.5 0 0 0 5 13.5',
+  // A bolt — work that runs on its own.
+  'role-jobs': 'M9 1.5 L3.5 9 H8 L7 14.5 L12.5 7 H8 Z',
+  // A cloud — something outside, reached over the wire.
+  'role-integration': 'M4.5 12.5 H11.5 A3 3 0 0 0 11.8 6.5 A4 4 0 0 0 4.1 7.5 A2.5 2.5 0 0 0 4.5 12.5 Z',
+  // A cube — a self-contained running thing.
+  'role-service': 'M8 1.5 L13.5 4.5 V11.5 L8 14.5 L2.5 11.5 V4.5 Z M2.5 4.5 L8 7.5 L13.5 4.5 M8 7.5 V14.5',
+  // Code brackets with a slash.
+  'role-function': 'M5.5 4.5 L2 8 L5.5 11.5 M10.5 4.5 L14 8 L10.5 11.5 M9 3 L7 13',
+  // A phone: the body and its home bar.
+  'role-mobile':
+    'M6 1.5 H10 A1.5 1.5 0 0 1 11.5 3 V13 A1.5 1.5 0 0 1 10 14.5 H6 A1.5 1.5 0 0 1 4.5 13 V3 A1.5 1.5 0 0 1 6 1.5 Z M7 12.5 H9',
+  // A hollow circle — a type nobody has named.
+  'role-neutral': 'M8 12.5 A4.5 4.5 0 1 0 8 3.5 A4.5 4.5 0 0 0 8 12.5',
 } as const satisfies Record<string, string>
 
 /**

@@ -81,6 +81,29 @@ describe('validateFeatureView — shape', () => {
   });
 });
 
+describe('validateFeatureView — component roles (feature-type-icons FR-5)', () => {
+  it('accepts a component with a role on the list, and one with none', () => {
+    const ok = view()
+    ok.views.root.nodes[0] = { id: 'browser', kind: 'project', title: 'Chat UI', delta: 'stable', role: 'ui' }
+    ok.views.root.nodes[1] = { id: 'bff', kind: 'endpoint', title: 'Gateway BFF', delta: 'modify' }
+    expect(validateFeatureView(ok)).toEqual({ ok: true, errors: [] });
+  });
+
+  it('refuses a role that is not on the list, naming the component', () => {
+    const bad = view()
+    bad.views.root.nodes[0] = { id: 'browser', kind: 'project', title: 'Chat UI', delta: 'stable', role: 'frontend' as never }
+    const result = validateFeatureView(bad);
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toContain("component 'browser' has role 'frontend'");
+  });
+
+  it('refuses a role in the wrong case — the list is lower-case and exact', () => {
+    const bad = view()
+    bad.views.root.nodes[0] = { id: 'browser', kind: 'project', title: 'Chat UI', delta: 'stable', role: 'UI' as never }
+    expect(validateFeatureView(bad).ok).toBe(false);
+  });
+});
+
 describe('validateFeatureView — connections', () => {
   it('refuses an edge from a component that is not here — a line from nowhere', () => {
     const bad = view()

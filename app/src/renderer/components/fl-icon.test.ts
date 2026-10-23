@@ -53,3 +53,32 @@ describe('the icon table', () => {
     expect(collisions).toEqual([])
   })
 })
+
+describe('the feature type glyphs (plan feature-type-icons)', () => {
+  const ROLE_GLYPH_NAMES = [
+    'role-ui',
+    'role-api',
+    'role-logic',
+    'role-data',
+    'role-config',
+    'role-jobs',
+    'role-integration',
+    'role-service',
+    'role-function',
+    'role-mobile',
+    'role-neutral',
+  ]
+
+  it('has all eleven, each a path on the 16-box', () => {
+    const table = ICON_PATHS as Record<string, string>
+    for (const name of ROLE_GLYPH_NAMES) {
+      expect({ name, path: typeof table[name] }).toEqual({ name, path: 'string' })
+      const numbers = (table[name] ?? '').match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? []
+      expect(numbers.every((value) => value >= 0 && value <= 16)).toBe(true)
+    }
+  })
+
+  it('gained no fill — config draws its knobs as strokes', () => {
+    expect(Object.keys(ICON_FILL_PATHS)).toEqual(['record'])
+  })
+})

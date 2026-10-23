@@ -77,6 +77,8 @@ import { relationsOf } from './feature-relations'
 import { understoodBySlug } from './learn-progress-model'
 import type { InFlightMark } from './learn-inflight'
 import type { AppliedCap } from './limitations-model'
+import { isFeatureRole, type FeatureRole, type FeatureRoleSource } from '../../shared/feature-role'
+import { roleIconShownAt } from './role-icon-model'
 
 /* ── THE SHEET'S OWN GEOMETRY ───────────────────────────────────────────────
  *
@@ -263,6 +265,20 @@ export interface TerritoryCell {
   controlTitle: string | null
   /** This cell's knowledge has drifted past the code it describes. */
   stale: boolean
+  /**
+   * WHAT KIND OF THING IT IS (plan feature-type-icons) — the node's role and
+   * who answered it, copied as the CLI resolved them. Null for a domain, a
+   * ghost, a change and a node from a bundle that predates roles: nothing to
+   * draw, never a guess made here.
+   */
+  role: FeatureRole | null
+  roleSource: FeatureRoleSource | null
+  /**
+   * The icon shows: there is a role AND the cell prints its full name
+   * (`roleIconShownAt`). Decided here so the three builders only spell it —
+   * the icon can never take letters from a name.
+   */
+  showRoleIcon: boolean
   labelClass: TerritoryLabelClass
   /** True when the cell has room for its second line — the board's `roomy`
    *  class, and the gate `secondLine` was decided behind. */
@@ -382,6 +398,12 @@ export interface TerritoryOptions {
    * same movement; a smaller share.
    */
   focusMode?: FocusMode
+  /**
+   * Room taken off the TOP of the sheet for a bar drawn above the cells (the
+   * one-time classify offer). Omitted or 0 → the whole sheet. Every build of
+   * one level must pass the same value, or a hover re-lay would move the map.
+   */
+  topBand?: number
 }
 
 /** How far a focused cell grows — see `TerritoryOptions.focusMode`. */
@@ -508,13 +530,18 @@ export function hasControlFor(kind: FocusNodeKind): boolean {
   return kind === 'feature' || kind === 'part'
 }
 
-/** The sheet the cells are packed into: the stage, less the two chrome bands. */
-export function sheetRect(stage: StageSize): Rect {
+/**
+ * The sheet the cells are packed into: the stage, less the two chrome bands —
+ * and less `band` at the top when a bar is shown above the cells (the classify
+ * offer), so the bar takes room from the sheet instead of covering a cell.
+ */
+export function sheetRect(stage: StageSize, band = 0): Rect {
+  const top = Math.max(0, band)
   return safeRect({
     x: SHEET_MARGIN,
-    y: TITLE_STRIP_H,
+    y: TITLE_STRIP_H + top,
     w: stage.width - SHEET_MARGIN * 2,
-    h: stage.height - TITLE_STRIP_H - TITLE_BLOCK_H,
+    h: stage.height - TITLE_STRIP_H - TITLE_BLOCK_H - top,
   })
 }
 
@@ -632,6 +659,13 @@ function cellFor(
       : (source?.understanding ?? 'none')
   const active = node.kind !== 'domain' && source?.active === true
   const anchorCount = source?.anchorCount ?? 0
+  // THE TYPE, AS THE CLI RESOLVED IT — copied, never re-derived. Only a
+  // feature or a part has one; a domain's ground and a ghost say nothing.
+  const typed = node.kind === 'feature' || node.kind === 'part'
+  const rawRole: unknown = source?.role
+  const role = typed && isFeatureRole(rawRole) ? rawRole : null
+  const roleSource = role === null ? null : (source?.roleSource ?? 'guess')
+  const labelClass = cellLabelClass(drawn.w, drawn.h)
   const roomy = isRoomy(drawn.w, drawn.h)
   const hasControl = hasControlFor(node.kind)
   const secondLine = secondLineFor({
@@ -670,7 +704,10 @@ function cellFor(
     hasControl,
     controlTitle: hasControl ? controlTitle(node.name, anchorCount > 0) : null,
     stale: understanding === 'stale',
-    labelClass: cellLabelClass(drawn.w, drawn.h),
+    role,
+    roleSource,
+    showRoleIcon: role !== null && roleIconShownAt(labelClass),
+    labelClass,
     roomy,
     rect: drawn,
     lit: false,
@@ -697,7 +734,7 @@ export function buildTerritoryView(
   options: TerritoryOptions = {},
 ): TerritoryView {
   const stage = options.stage ?? DEFAULT_STAGE
-  const sheet = sheetRect(stage)
+  const sheet = sheetRect(stage, options.topBand ?? 0)
   const grown = options.focus ?? null
   const details = options.focusMode === 'details'
   // WHERE THE GROWN CELL IS DRAWN NOW, when the grow moves to it from another:

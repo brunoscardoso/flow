@@ -26,6 +26,7 @@ import type { ContextUsageSnapshot } from './context-usage'
 import type { SideIdentity } from './side-identity'
 import type { ConflictHunkChoice, ConflictHunkOrder } from './conflict-hunks'
 import type { UpdateStatus } from './updater'
+import type { FeatureRole, FeatureRoleSource } from './feature-role'
 import type {
   BrowserBufferCounts,
   BrowserCapabilities,
@@ -3121,6 +3122,14 @@ export interface BlueprintFeatureNode {
    * from a bundle that predates the field: no rows, never a guessed folder.
    */
   folders?: BlueprintFeatureFolders
+  /**
+   * WHAT KIND OF THING it is — the icon the board draws. Resolved once by the
+   * CLI (the person's role, else the learned one, else the guess); the board
+   * never re-derives it. Absent on a change, and from a bundle that predates it.
+   */
+  role?: FeatureRole
+  /** Who answered `role`: a person, a learn pass, or the guess. Present exactly when `role` is. */
+  roleSource?: FeatureRoleSource
 }
 
 /** One folder a feature or part lives in. Mirrors the CLI's `FolderRow`. */
@@ -7285,6 +7294,32 @@ export interface IpcInvokeMap {
     request: { rootId: string }
     response: BrainUsageTotals
   }
+  /**
+   * The one-time CLASSIFY pass (plan `feature-type-icons`, FR-10): the smallest
+   * model, in batches, decides a role for every learned feature (and part)
+   * whose role is still only a guess — from names, summaries and part names,
+   * never code — and writes each through the learnedRole verb.
+   *
+   * Offered by the board, never run silently. Resolves when the pass ENDS, with
+   * what it did; `learn:classifyRolesProgress` reports it batch by batch.
+   * `stop: true` stops a running pass for the root (its own call resolves with
+   * `stopped: true`) and answers at once. A second start while one runs is
+   * refused with `ok: false` and a reason. Whether to OFFER the pass is derived
+   * in the renderer from the nodes on screen (`shared/role-classify.ts`).
+   */
+  'learn:classifyRoles': {
+    request: { rootId: string; stop?: boolean }
+    response: {
+      ok: boolean
+      written: number
+      skipped: number
+      failed: number
+      total: number
+      stopped: boolean
+      /** Why it did not run — a sentence for a person, never a command. */
+      reason?: string
+    }
+  }
   /** Compile a doc's `## Story` section via `blueprint narrate --from <docPath>`
    *  (cwd = root). Never throws for a CLI failure — a refusal (bad anchors,
    *  missing graph, etc.) comes back as `{ ok: false, reason }` with the CLI's
@@ -7539,6 +7574,8 @@ export interface IpcEventMap {
   }
   /** A curated view finished generating; the board reopens the brief. */
   'learn:featureViewed': { rootId: string; featureRef: string; components: number }
+  /** The classify pass settled another batch (`learn:classifyRoles`). */
+  'learn:classifyRolesProgress': { rootId: string; done: number; total: number; written: number }
   /**
    * Basic discovery's FEATURE-GENERATION step settled.
    *
@@ -7878,6 +7915,7 @@ export const IPC_INVOKE_CHANNELS = [
   'learn:reset',
   'learn:narrate',
   'learn:brainUsage',
+  'learn:classifyRoles',
   'flow:listArtifacts',
   'browser:navigate',
   'browser:back',
@@ -7942,6 +7980,7 @@ export const IPC_EVENT_CHANNELS = [
   'learn:featureParts',
   'learn:featureReadProgress',
   'learn:featureViewed',
+  'learn:classifyRolesProgress',
   'learn:featuresDiscovered',
   'learn:basicDiscoveryChanged',
   'blueprint:invariantVerdicts',
@@ -8703,6 +8742,12 @@ export interface FlowLearnApi {
   narrate(request: IpcRequest<'learn:narrate'>): Promise<IpcResponse<'learn:narrate'>>
   /** Cumulative brain-retrieval counters for a root (zeros when never counted). */
   brainUsage(request: IpcRequest<'learn:brainUsage'>): Promise<IpcResponse<'learn:brainUsage'>>
+  /** Run (or, with `stop`, stop) the one-time role classify pass. Optional: an older preload lacks it. */
+  classifyRoles?(request: IpcRequest<'learn:classifyRoles'>): Promise<IpcResponse<'learn:classifyRoles'>>
+  /** Follow the classify pass batch by batch. */
+  onClassifyRolesProgress?(
+    listener: (event: IpcEventPayload<'learn:classifyRolesProgress'>) => void,
+  ): () => void
   /** Show the one-time basic-discovery ask when main requests it for a root. */
   onBasicDiscoveryAsk(
     listener: (event: IpcEventPayload<'learn:basicDiscoveryAsk'>) => void,
