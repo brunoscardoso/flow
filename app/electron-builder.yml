@@ -111,8 +111,10 @@ mac:
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
   notarize: true
-  # 1024px source; electron-builder generates the multi-resolution .icns.
-  icon: build/icon.png
+  # Built by build/icons/make-icns.mjs with Apple's iconutil and used verbatim.
+  # NOT build/icon.png: electron-builder's own conversion wrote the 16/32/48 px
+  # slots as noise, so Finder and app lists showed static instead of the icon.
+  icon: build/icon.icns
   category: public.app-category.developer-tools
   target:
     - target: dir
