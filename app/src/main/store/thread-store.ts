@@ -311,6 +311,13 @@ export interface ThreadChangeEvent {
   abandoned?: { projectRoot: string; worktreePath: string; branch: string | null }
 }
 
+/** How long before a doc's mtime a Bash call may have started and still be
+ *  its writer (`latestWriterThreadFor`). A heredoc write lands within a second
+ *  of its call starting; the margin covers a long script that writes last. */
+const SHELL_WRITE_WINDOW_MS = 10 * 60 * 1000
+/** A file's mtime can read slightly ahead of the call's recorded start. */
+const SHELL_WRITE_CLOCK_SLACK_MS = 5 * 1000
+
 /** Emitted for every mutation. Payload: ThreadChangeEvent. */
 export const THREAD_STORE_CHANGE_EVENT = 'change'
 
@@ -1674,29 +1681,62 @@ export class ThreadStore extends EventEmitter {
    *     through the project (`<root>/<relPath>`) and its realpath, because
    *     `flow/` is a link and an agent may have written either. The caller
    *     resolves the realpath (the store does no filesystem reads); with none
-   *     given, `<root>/<relPath>` alone is used.
+   *     given, `<root>/<relPath>` alone is used. Plus the thread's OWN
+   *     worktree of that project (`thread_roots.worktree_path`): an agent in
+   *     a thread with its own checkout writes there, and neither form above
+   *     names it (live 2026-10-23: the marker fell to the thread on screen).
+   *
+   * With `observedAt` (the doc's mtime), a Bash call that names the doc's file
+   * and started just before that moment also counts — skills write docs with
+   * `cat > … <<EOF` too. Without it, only file-tool writes count.
    */
   latestWriterThreadFor(
     rootPath: string,
     relPath: string,
     absoluteForms: readonly string[] = [],
+    observedAt: number | null = null,
   ): string | null {
     const forms = [...new Set([join(rootPath, relPath), ...absoluteForms])]
     const attachedMatch = forms.map(() => 'tc.input_json LIKE ?').join(' OR ')
+    const fileWrite = `tc.tool_name IN ('Write', 'Edit', 'MultiEdit', 'NotebookEdit')
+           AND ((t.${THREAD_PROJECT_ROOT_COLUMN} = ? AND tc.input_json LIKE ?)
+                OR EXISTS (SELECT 1 FROM thread_roots r WHERE r.thread_id = t.id AND r.root_path = ?
+                    AND ((${attachedMatch})
+                         OR (r.worktree_path IS NOT NULL
+                             AND instr(tc.input_json, r.worktree_path || '/' || ?) > 0))))`
+    const fileWriteParams = [rootPath, `%${relPath}%`, rootPath, ...forms.map((form) => `%${form}%`), relPath]
+    // A SHELL WRITE (`cat > "$FLOW/plans/plan_x_v1.md" <<EOF`) names the doc
+    // through variables, so no path form above matches it — only the file
+    // name does. A name alone also matches a `cat` that read it, so it counts
+    // only for a thread carrying the project, and only for a call that STARTED
+    // in the window just before the file changed (`observedAt`, its mtime).
+    const fileName = relPath.split('/').pop() ?? relPath
+    const shellWrite =
+      observedAt === null || fileName === ''
+        ? null
+        : {
+            sql: `tc.tool_name = 'Bash'
+           AND instr(tc.input_json, ?) > 0
+           AND tc.started_at BETWEEN ? AND ?
+           AND (t.${THREAD_PROJECT_ROOT_COLUMN} = ?
+                OR EXISTS (SELECT 1 FROM thread_roots r WHERE r.thread_id = t.id AND r.root_path = ?))`,
+            params: [
+              fileName,
+              new Date(observedAt - SHELL_WRITE_WINDOW_MS).toISOString(),
+              new Date(observedAt + SHELL_WRITE_CLOCK_SLACK_MS).toISOString(),
+              rootPath,
+              rootPath,
+            ],
+          }
     const row = this.db
       .prepare(
         `SELECT tc.thread_id AS threadId FROM tool_calls tc
          JOIN threads t ON t.id = tc.thread_id
-         WHERE tc.tool_name IN ('Write', 'Edit', 'MultiEdit', 'NotebookEdit')
-           AND tc.parent_tool_call_id IS NULL
-           AND ((t.${THREAD_PROJECT_ROOT_COLUMN} = ? AND tc.input_json LIKE ?)
-                OR (EXISTS (SELECT 1 FROM thread_roots r WHERE r.thread_id = t.id AND r.root_path = ?)
-                    AND (${attachedMatch})))
+         WHERE tc.parent_tool_call_id IS NULL
+           AND ((${fileWrite})${shellWrite === null ? '' : ` OR (${shellWrite.sql})`})
          ORDER BY tc.started_at DESC LIMIT 1`,
       )
-      .get(rootPath, `%${relPath}%`, rootPath, ...forms.map((form) => `%${form}%`)) as
-      | { threadId: string }
-      | undefined
+      .get(...fileWriteParams, ...(shellWrite?.params ?? [])) as { threadId: string } | undefined
     return row?.threadId ?? null
   }
 

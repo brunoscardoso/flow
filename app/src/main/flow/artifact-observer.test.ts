@@ -228,7 +228,7 @@ describe('makeMarkerPersister (#1056)', () => {
   } {
     const appended: Array<{ threadId: string; content: string }> = []
     const sink: ArtifactMarkerSink = {
-      activeThreadFor: () => 'thread-1',
+      owningThreadFor: () => 'thread-1',
       hasMarker: () => false,
       append: (threadId, content) => {
         appended.push({ threadId, content })
@@ -238,7 +238,7 @@ describe('makeMarkerPersister (#1056)', () => {
     return { sink, appended }
   }
 
-  it('appends one marker row to the active thread on first observation', () => {
+  it('appends one marker row to the writer thread on first observation', () => {
     const { sink, appended } = makeSink()
     makeMarkerPersister(sink)(EVENT)
     expect(appended).toEqual([
@@ -250,7 +250,7 @@ describe('makeMarkerPersister (#1056)', () => {
     // The live report: after orbit-app's flow/ was re-pointed into its
     // Workspace, every discovery, plan and brainstorm in it appeared as a card
     // in the open thread, whose agent wrote none of them.
-    const { sink, appended } = makeSink()
+    const { sink, appended } = makeSink({ owningThreadFor: () => null })
     const persist = makeMarkerPersister(sink)
     persist({ ...EVENT, replayed: true })
     expect(appended).toEqual([])
@@ -270,7 +270,7 @@ describe('makeMarkerPersister (#1056)', () => {
 
   it('records distinct docs and distinct threads independently', () => {
     let thread = 'thread-1'
-    const { sink, appended } = makeSink({ activeThreadFor: () => thread })
+    const { sink, appended } = makeSink({ owningThreadFor: () => thread })
     const persist = makeMarkerPersister(sink)
     persist(EVENT)
     persist({ ...EVENT, path: 'flow/plans/plan_bar_v1.md', name: 'plan_bar_v1.md' })
@@ -279,39 +279,28 @@ describe('makeMarkerPersister (#1056)', () => {
     expect(appended.map((entry) => entry.threadId)).toEqual(['thread-1', 'thread-1', 'thread-2'])
   })
 
-  it('the WRITER thread outranks the active one — reading elsewhere loses nothing (#1717)', () => {
+  it('the WRITER thread owns the card, whatever thread the user is reading (#1717)', () => {
     // The live report: the agent wrote a discovery doc while the user was on
     // another thread; the marker attributed by focus was never written, so
-    // the card vanished on the next reload (#1056's suppression, working as
-    // designed on a marker that did not exist).
-    const { sink, appended } = makeSink({
-      activeThreadFor: () => 'thread-the-user-is-reading',
-      owningThreadFor: () => 'thread-that-wrote-the-doc',
-    })
+    // the card vanished on the next reload.
+    const { sink, appended } = makeSink({ owningThreadFor: () => 'thread-that-wrote-the-doc' })
     makeMarkerPersister(sink)(EVENT)
     expect(appended).toEqual([
       { threadId: 'thread-that-wrote-the-doc', content: '[artifact] plan flow/plans/plan_foo_v1.md' },
     ])
   })
 
-  it('a recorded writer rescues the no-active-thread case entirely (#1717)', () => {
-    const { sink, appended } = makeSink({
-      activeThreadFor: () => null,
-      owningThreadFor: () => 'thread-that-wrote-the-doc',
-    })
-    makeMarkerPersister(sink)(EVENT)
-    expect(appended.map((entry) => entry.threadId)).toEqual(['thread-that-wrote-the-doc'])
-  })
-
-  it('a hand-edited doc with no writer still falls back to the active thread (#1717)', () => {
+  it('a doc no thread wrote gets no marker anywhere — never the open thread (live 2026-10-23)', () => {
+    // The live report: a discovery whose writer was not found was pinned to
+    // the thread on screen — another conversation with the same project open.
+    // A card lives only in the thread that made it.
     const { sink, appended } = makeSink({ owningThreadFor: () => null })
-    makeMarkerPersister(sink)(EVENT)
-    expect(appended.map((entry) => entry.threadId)).toEqual(['thread-1'])
+    expect(makeMarkerPersister(sink)(EVENT)).toBeNull()
+    expect(appended).toEqual([])
   })
 
   it('a doc written into a project ATTACHED to the thread names its root, and the thread is returned for the broadcast (live 2026-10-09)', () => {
     const { sink, appended } = makeSink({
-      activeThreadFor: () => null,
       owningThreadFor: () => 'writer',
       primaryRootOf: () => '/primary',
     })
@@ -327,7 +316,7 @@ describe('makeMarkerPersister (#1056)', () => {
   })
 
   it('returns null when the doc belongs to no thread — the broadcast then carries no owner', () => {
-    const { sink } = makeSink({ activeThreadFor: () => null, owningThreadFor: () => null })
+    const { sink } = makeSink({ owningThreadFor: () => null })
     expect(makeMarkerPersister(sink)(EVENT)).toBeNull()
     expect(makeMarkerPersister(null)(EVENT)).toBeNull()
   })
@@ -338,10 +327,7 @@ describe('makeMarkerPersister (#1056)', () => {
     expect(appended).toEqual([])
   })
 
-  it('does nothing when no thread is active or no sink is configured', () => {
-    const { sink, appended } = makeSink({ activeThreadFor: () => null })
-    makeMarkerPersister(sink)(EVENT)
-    expect(appended).toEqual([])
+  it('does nothing when no sink is configured', () => {
     expect(() => makeMarkerPersister(null)(EVENT)).not.toThrow()
     expect(() => makeMarkerPersister(undefined)(EVENT)).not.toThrow()
   })

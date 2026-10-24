@@ -560,6 +560,86 @@ describe('ThreadStore', () => {
       expect(store.latestWriterThreadFor(ROOT_B, 'flow/discovery/discovery_q_v1.md', [physical])).toBe(thread.id)
     })
 
+    it('matches an attached project’s doc written through that project’s WORKTREE (live 2026-10-23)', () => {
+      // The live report: a jupiter-core thread with celeste-desktop attached
+      // wrote its discovery into celeste-desktop's thread worktree. Neither
+      // `<root>/<relPath>` nor the link's realpath names that path, so the doc
+      // had no writer and the marker fell to the thread on screen — another
+      // conversation entirely.
+      const writer = store.createThread({ projectRoot: ROOT_A })
+      store.addThreadRoot(writer.id, ROOT_B)
+      const worktree = '/tmp/.project-b-threads/worktree/writer'
+      store.setThreadRootWorktree(writer.id, ROOT_B, { path: worktree, branch: 'worktree/writer', base: 'main' })
+      // The thread on screen also has B attached — and wrote nothing.
+      const onScreen = store.createThread({ projectRoot: ROOT_B })
+      store.recordToolCall({
+        threadId: writer.id,
+        toolName: 'Write',
+        inputJson: JSON.stringify({ file_path: `${worktree}/flow/discovery/discovery_w_v1.md`, content: '#' }),
+      })
+
+      expect(store.latestWriterThreadFor(ROOT_B, 'flow/discovery/discovery_w_v1.md')).toBe(writer.id)
+      expect(onScreen.id).not.toBe(writer.id)
+      // The worktree identifies B's checkout only: the same-named doc in the
+      // primary project is still not credited through it.
+      expect(store.latestWriterThreadFor(ROOT_B, 'flow/discovery/discovery_other_v1.md')).toBeNull()
+    })
+
+    it('names a thread whose agent wrote the doc through a SHELL heredoc, dated by the file’s mtime (live 2026-09-16)', () => {
+      // The live shape: the skill wrote through a variable, so no path form
+      // matches — only the file name, inside a call that started just before
+      // the doc changed.
+      const writer = store.createThread({ projectRoot: ROOT_A })
+      const startedAt = '2026-09-16T22:53:14.543Z'
+      store.recordToolCall({
+        threadId: writer.id,
+        toolName: 'Bash',
+        startedAt,
+        inputJson: JSON.stringify({
+          command: 'FLOW=/x/brain/projects/a/flow\ncat > "$FLOW/discovery/discovery_s_v1.md" <<\'EOF\'\n# S\nEOF',
+        }),
+      })
+      const mtime = Date.parse(startedAt) + 800
+
+      expect(store.latestWriterThreadFor(ROOT_A, 'flow/discovery/discovery_s_v1.md', [], mtime)).toBe(writer.id)
+      // Without a moment to date it by, a shell call never counts.
+      expect(store.latestWriterThreadFor(ROOT_A, 'flow/discovery/discovery_s_v1.md')).toBeNull()
+    })
+
+    it('never credits a shell call that only named the doc long before it changed, or ran in an unrelated project', () => {
+      const reader = store.createThread({ projectRoot: ROOT_A })
+      const elsewhere = store.createThread({ projectRoot: '/tmp/project-c' })
+      const startedAt = '2026-09-16T10:00:00.000Z'
+      for (const thread of [reader, elsewhere]) {
+        store.recordToolCall({
+          threadId: thread.id,
+          toolName: 'Bash',
+          startedAt,
+          inputJson: JSON.stringify({ command: 'cat flow/plans/plan_r_v1.md' }),
+        })
+      }
+      // An hour later the doc changes: the old `cat` is no writer.
+      expect(store.latestWriterThreadFor(ROOT_A, 'flow/plans/plan_r_v1.md', [], Date.parse(startedAt) + 3_600_000)).toBeNull()
+      // At the moment it changes, only the thread carrying the project counts.
+      expect(store.latestWriterThreadFor(ROOT_A, 'flow/plans/plan_r_v1.md', [], Date.parse(startedAt) + 500)).toBe(reader.id)
+      expect(store.latestWriterThreadFor(ROOT_B, 'flow/plans/plan_r_v1.md', [], Date.parse(startedAt) + 500)).toBeNull()
+    })
+
+    it('never credits a doc to a thread whose worktree of the attached project is a different checkout', () => {
+      const writer = store.createThread({ projectRoot: ROOT_A })
+      store.addThreadRoot(writer.id, ROOT_B)
+      store.setThreadRootWorktree(writer.id, ROOT_B, { path: '/tmp/.project-b-threads/worktree/mine', branch: null, base: null })
+      store.recordToolCall({
+        threadId: writer.id,
+        toolName: 'Write',
+        inputJson: JSON.stringify({
+          file_path: '/tmp/.project-b-threads/worktree/someone-else/flow/discovery/discovery_v_v1.md',
+          content: '#',
+        }),
+      })
+      expect(store.latestWriterThreadFor(ROOT_B, 'flow/discovery/discovery_v_v1.md')).toBeNull()
+    })
+
     it('through the real marker sink: the attached-project doc lands in the writer thread with its root', () => {
       // The sink exactly as main/index.ts wires it, over a real store — the
       // user is reading another project when the doc appears.
@@ -571,7 +651,6 @@ describe('ThreadStore', () => {
         inputJson: JSON.stringify({ file_path: '/tmp/project-b/flow/discovery/discovery_y_v1.md', content: '#' }),
       })
       const persist = makeMarkerPersister({
-        activeThreadFor: () => null,
         owningThreadFor: (rootPath, path) => store.latestWriterThreadFor(rootPath, path),
         primaryRootOf: (threadId) => store.getThread(threadId)?.projectRoot ?? null,
         hasMarker: (threadId, content) => store.hasSystemMessage(threadId, content),
@@ -588,7 +667,6 @@ describe('ThreadStore', () => {
       }
       expect(persist(event)).toBe(writer.id)
       expect(makeMarkerPersister({
-        activeThreadFor: () => null,
         owningThreadFor: (rootPath, path) => store.latestWriterThreadFor(rootPath, path),
         primaryRootOf: (threadId) => store.getThread(threadId)?.projectRoot ?? null,
         hasMarker: (threadId, content) => store.hasSystemMessage(threadId, content),

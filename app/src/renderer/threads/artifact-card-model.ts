@@ -411,23 +411,20 @@ export function supersedes(
 
 /**
  * What #renderArtifactCard should do for a card owned by `owner` when
- * `threadId` is active (#658). An artifact card belongs to the thread that was
- * active when its doc-change event arrived — the same ownership rule the story
- * card uses — so switching chats never carries another thread's card along:
+ * `threadId` is active (#658). An artifact card belongs to the thread whose
+ * agent wrote its doc, and lives there only:
  *   - `render` — the active thread owns the card.
- *   - `adopt`  — the card is unowned (its event arrived while no thread was
- *                active); the active thread claims it and renders.
- *   - `skip`   — another thread owns it, or no thread is active.
+ *   - `skip`   — another thread owns it, nobody does, or no thread is active.
+ * An unowned card is never adopted by whichever thread is open — that is how
+ * one conversation's discovery appeared in another (live 2026-10-23).
  */
-export type ArtifactRenderDecision = 'render' | 'adopt' | 'skip'
+export type ArtifactRenderDecision = 'render' | 'skip'
 
 export function artifactRenderDecision(
   owner: string | null,
   threadId: string | null,
 ): ArtifactRenderDecision {
-  if (threadId === null) return 'skip'
-  if (owner === null) return 'adopt'
-  return owner === threadId ? 'render' : 'skip'
+  return threadId !== null && owner === threadId ? 'render' : 'skip'
 }
 
 /**

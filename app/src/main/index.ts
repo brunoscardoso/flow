@@ -3261,17 +3261,13 @@ const understandFeature = async (request: {
     // row at that transcript position, so its card renders INLINE (not in a
     // bottom pile) when the thread is reopened.
     markers: {
-      activeThreadFor: (rootPath) => {
-        const project = projectContext.getActiveProject()
-        return project !== null && project.rootPath === rootPath ? project.activeThreadId : null
-      },
-      // #1717: the doc's WRITER thread outranks whatever happens to be on
-      // screen — during long runs the user reads elsewhere, and a marker
-      // attributed by focus was a marker that usually never got written.
+      // #1717: the doc's WRITER thread is its only owner — never whatever
+      // happens to be on screen (live 2026-10-23: a discovery crossed into
+      // another thread that had the same project open).
       // An ATTACHED project's doc is matched only by absolute path — through
       // the project and, since `flow/` is a link, its physical form too.
-      owningThreadFor: (rootPath, path) =>
-        threadStore.latestWriterThreadFor(rootPath, path, [realPathThroughLinksSync(join(rootPath, path))]),
+      owningThreadFor: (rootPath, path, observedAt) =>
+        threadStore.latestWriterThreadFor(rootPath, path, [realPathThroughLinksSync(join(rootPath, path))], observedAt),
       // A doc in a project attached to the thread names its root in the marker.
       primaryRootOf: (threadId) => threadStore.getThread(threadId)?.projectRoot ?? null,
       hasMarker: (threadId, content) => threadStore.hasSystemMessage(threadId, content),

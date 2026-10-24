@@ -3547,9 +3547,11 @@ export class ConversationPane {
     if (!this.#showsArtifactEvent(event)) return
     const current = this.#artifactSources.get(event.kind)
     if (current && current.event.mtime > event.mtime) return
-    // The thread active NOW owns the card (#658) — a doc change belongs to the
-    // conversation it happened in; a later change re-claims for its own thread.
-    this.#artifactSources.set(event.kind, { event, docText, owner: this.#threadId, seeded })
+    // The thread whose agent WROTE the doc owns the card — main names it on
+    // the event, and nothing else can (#658). Not the thread on screen: two
+    // threads with one project open would both show it (live 2026-10-23). An
+    // event naming no thread has no owner and shows nowhere.
+    this.#artifactSources.set(event.kind, { event, docText, owner: event.threadId ?? null, seeded })
     // A live plan event names the plan's own project (a seeded one only ever
     // lists the active project's, and never overrides what a marker said).
     if (event.kind === 'plan' && !seeded) this.#planRoots.set(event.path, event.rootId)
@@ -3720,12 +3722,10 @@ export class ConversationPane {
     // change — never carry another thread's card across a chat switch. An
     // unowned card (event arrived with no thread active) is adopted by the
     // first thread to render it.
-    const decision = artifactRenderDecision(source?.owner ?? null, this.#threadId)
-    if (decision === 'skip') {
+    if (artifactRenderDecision(source?.owner ?? null, this.#threadId) === 'skip') {
       this.#removeArtifactCard(kind)
       return
     }
-    if (decision === 'adopt' && source) source.owner = this.#threadId
     // ONE CARD PER VERSION — the same rule as the marker path: only a plan
     // folds, into the most recent discovery card of its feature already in the
     // feed (`foldHostIndex`). Any card this kind had of its own is dropped, or

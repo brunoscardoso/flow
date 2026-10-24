@@ -368,8 +368,10 @@ describe('artifactRenderDecision (#658)', () => {
     expect(artifactRenderDecision('thread-a', 'thread-b')).toBe('skip')
   })
 
-  it('adopts an unowned card into the active thread', () => {
-    expect(artifactRenderDecision(null, 'thread-a')).toBe('adopt')
+  it('never adopts an unowned card into the open thread (live 2026-10-23)', () => {
+    // A doc no thread wrote belongs to no conversation; the thread on screen
+    // claiming it is how a discovery crossed into another thread.
+    expect(artifactRenderDecision(null, 'thread-a')).toBe('skip')
   })
 
   it('skips when no thread is active, owned or not', () => {

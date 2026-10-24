@@ -510,16 +510,13 @@ export function scanArtifacts(rootPath: string): FlowArtifactChangedEvent[] {
  * electron or a database.
  */
 export interface ArtifactMarkerSink {
-  /** The thread a doc observed under `rootPath` belongs to — the active
-   *  thread of the active project — or null when the root isn't the active
-   *  project / no thread is active (the doc then stays a bottom-fallback
-   *  card only, never mis-attributed to an unrelated thread). */
-  activeThreadFor(rootPath: string): string | null
   /** The thread whose agent most recently WROTE this doc, or null (#1717).
-   *  Preferred over the active thread: during a long run the user is often
-   *  reading elsewhere when the doc lands, and attributing by "what was on
-   *  screen" dropped the marker — so the card vanished on the next reload. */
-  owningThreadFor?(rootPath: string, path: string): string | null
+   *  It is the ONLY owner a doc can have: a card lives in the conversation
+   *  that made it. Attributing by "what was on screen" put one thread's
+   *  discovery into another thread that merely had the same project open
+   *  (live 2026-10-23), so a doc with no recorded writer gets no card.
+   *  `observedAt` is the doc's mtime — what dates a shell write. */
+  owningThreadFor(rootPath: string, path: string, observedAt: number): string | null
   /** The thread's own (primary) project root, or null when unknown. A doc
    *  observed under any OTHER root — a project attached to the thread — gets
    *  that root in its marker, so the card reads and opens it there. */
@@ -534,8 +531,9 @@ export interface ArtifactMarkerSink {
 /**
  * Build the per-event marker persister used by registerArtifactChannels: on a
  * live watcher event, record `[artifact] <kind> <path>` ONCE per
- * (thread, docPath) into the doc's thread — its writer, else the active
- * thread. A doc in a project other than the thread's own carries that root
+ * (thread, docPath) into the thread whose agent wrote the doc — and into no
+ * other: a doc nobody's agent wrote (a hand edit, a re-listed folder) gets no
+ * marker, never the thread that happens to be open. A doc in a project other than the thread's own carries that root
  * (`… @<root>`). An in-memory guard short-circuits repeat events within the
  * session before the store is queried. Fail-soft — a sink error is logged and
  * never breaks the broadcast path. Returns the thread the doc belongs to (or
@@ -550,12 +548,9 @@ export function makeMarkerPersister(
   return (event: FlowArtifactChangedEvent): string | null => {
     if (!sink) return null
     try {
-      // The WRITER owns the card (#1717); the active thread is the fallback
-      // for docs that appear without a recorded writer (hand-edited files).
-      const writer = sink.owningThreadFor?.(event.rootId, event.path) ?? null
-      // A RE-LISTED doc belongs to its writer or to nobody — never to whatever
-      // thread happens to be open when a link is re-pointed.
-      const threadId = writer ?? (event.replayed === true ? null : sink.activeThreadFor(event.rootId))
+      // The WRITER owns the card (#1717), and nobody else does: no fallback
+      // to the open thread, which is how a doc crossed conversations.
+      const threadId = sink.owningThreadFor(event.rootId, event.path, event.mtime)
       if (threadId === null) return null
       const guardKey = `${threadId}\n${event.rootId}\n${event.path}`
       if (recorded.has(guardKey)) return threadId
