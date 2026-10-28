@@ -493,6 +493,8 @@ export class StorylineView {
       const caption = document.createElement('span')
       caption.className = 'fb-story-frame-caption'
       caption.textContent = frameCaption(frame.startLine, frame.constructorSignature)
+      // The caption is cut at the frame's edge; the hover shows all of it.
+      caption.title = caption.textContent
       label.append(name, caption)
       el.appendChild(label)
       this.#frames.set(key, el)

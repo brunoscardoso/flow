@@ -23989,19 +23989,28 @@ const BOARD_STYLES = `
   .flow-board-root .fb-story-frame-label {
     position: absolute;
     left: 16px;
+    right: 16px;
     top: 12px;
     display: flex;
     align-items: baseline;
     gap: 10px;
+    min-width: 0;
     white-space: nowrap;
   }
   .flow-board-root .fb-story-frame-name {
+    flex: none;
     font-family: var(--fl-font-mono, ui-monospace, monospace);
     font-size: 12px;
     font-weight: var(--fl-text-ui-weight-medium);
     color: var(--sl-class);
   }
+  /* A long constructor (a Python __init__ with a dozen typed parameters) is
+     cut at the frame's edge; its hover title carries the whole signature. */
   .flow-board-root .fb-story-frame-caption {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: auto;
     font-family: var(--fl-font-ui);
     font-size: var(--fl-text-caption-size);
     color: var(--fb-ink-dim);
