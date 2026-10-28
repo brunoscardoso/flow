@@ -55,3 +55,20 @@ export function computeNextStepCommand(
   if (!next) return null
   return commands.find((command) => command.name === next) ?? null
 }
+
+/**
+ * Is the next-step button shown? Only once the step it follows has FINISHED:
+ * a suggestion exists, a thread is open, no turn is running, and the thread
+ * has no background work running or queued. A turn can end while the skill's
+ * own work goes on — `/execute-plan` hands phases to background sub-agents and
+ * replies "Phase 4 is still running" — and offering `/review-code` then
+ * recommends a step whose input does not exist yet.
+ */
+export function nextStepVisible(state: {
+  hasSuggestion: boolean
+  hasThread: boolean
+  status: string
+  backgroundBusy: boolean
+}): boolean {
+  return state.hasSuggestion && state.hasThread && state.status !== 'working' && !state.backgroundBusy
+}

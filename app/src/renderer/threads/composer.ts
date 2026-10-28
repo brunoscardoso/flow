@@ -98,7 +98,10 @@ import {
   seedEntries,
   type ComposerHistory,
 } from './composer-history'
-import { computeNextStepCommand } from './workflow-suggestion'
+import { computeNextStepCommand, nextStepVisible } from './workflow-suggestion'
+import { activityStripState } from './background-activity-model'
+import { backgroundActivityStore } from './background-activity-store'
+import { backgroundWorkView } from './background-work-model'
 import { modelLabel } from './model-label'
 import { modelOptionsFor, type RuntimeModelOption } from '../../shared/runtime-models'
 import { buildModelOptions } from './model-options'
@@ -171,6 +174,9 @@ export class Composer {
   #suggestionBar: HTMLDivElement
   #suggestionButton: HTMLButtonElement
   #nextStep: SlashCommand | null = null
+  /** The thread on screen still has background work running or queued — the
+   *  same count as the footer's `1 running` pill, from the same store. */
+  #backgroundBusy = false
   #mentionPopup: HTMLDivElement
   #commandPopup: HTMLDivElement
   #thread: ThreadSummary | null = null
@@ -274,6 +280,20 @@ export class Composer {
     this.#suggestionButton.className = 'fl-composer-suggestion-btn'
     this.#suggestionButton.addEventListener('click', () => this.#acceptNextStep())
     this.#suggestionBar.appendChild(this.#suggestionButton)
+    // A turn that ended with sub-agents still out has not finished its step,
+    // so the bar waits for the background work too. Read from the one store
+    // the footer pill draws from, never a second fetch (allowed-pattern #14).
+    backgroundActivityStore.subscribe({
+      onScreen: () => this.#suggestionBar.isConnected && this.#container.getClientRects().length > 0,
+      render: (snapshot) => {
+        const counts = backgroundWorkView({ ...snapshot, now: Date.now() }).counts
+        const state = activityStripState(counts)
+        const busy = snapshot.threadId !== null && state.running + state.queued > 0
+        if (busy === this.#backgroundBusy) return
+        this.#backgroundBusy = busy
+        this.#renderSuggestion()
+      },
+    })
 
     // ── Blueprint reference chips (Board→Chat) ───────────────────────────
     // Dismissible pills above the textarea. Fed by the document-level
@@ -2188,10 +2208,16 @@ export class Composer {
     )
   }
 
-  /** Show the suggestion button when there is one and the thread is idle. */
+  /** Show the suggestion button when there is one and the thread is idle —
+   *  no turn running and no background work still out. */
   #renderSuggestion(): void {
     const command = this.#nextStep
-    const show = command !== null && this.#thread !== null && this.#status !== 'working'
+    const show = nextStepVisible({
+      hasSuggestion: command !== null,
+      hasThread: this.#thread !== null,
+      status: this.#status,
+      backgroundBusy: this.#backgroundBusy,
+    })
     this.#suggestionBar.hidden = !show
     if (!command) return
     this.#suggestionButton.textContent = ''
