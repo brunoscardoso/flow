@@ -354,7 +354,10 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
     if (!isMdFile) {
       previewToggle.style.display = 'none'
       previewPane.style.display = 'none'
-      showEditor(true)
+      // A view (Blueprint, Board…) is stacked over the editor without a z-index,
+      // so Monaco's own layered widgets — the find bar is z-index 35 — painted
+      // through it, on top of the view's header. Hide the editor under a view.
+      showEditor(active === null || !views.has(active))
       return
     }
     previewToggle.style.display = ''
