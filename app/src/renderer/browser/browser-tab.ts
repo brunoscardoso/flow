@@ -476,11 +476,18 @@ function buildOverlay(onNavigate: (url: string) => void): {
   go.setAttribute('small', '')
   go.textContent = 'Open'
   form.append(input, go)
-  form.addEventListener('submit', (event) => {
-    event.preventDefault()
+  const open = (): void => {
     const value = input.value.trim()
     if (value.length > 0) onNavigate(normalizeUrl(value))
+  }
+  form.addEventListener('submit', (event) => {
+    event.preventDefault()
+    open()
   })
+  // <fl-button>'s real <button> lives in its shadow root, which is not part of
+  // this form — a click never submits it, so the click opens the URL itself.
+  // Opening the URL that just failed loads it again: that is the reload.
+  go.addEventListener('click', open)
 
   el.append(icon, title, sub, form)
 
