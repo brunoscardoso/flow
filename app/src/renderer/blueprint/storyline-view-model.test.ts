@@ -23,6 +23,7 @@ import {
   fileName,
   findCallSpan,
   followCamera,
+  followLineCamera,
   frameCaption,
   isStorylinePath,
   monacoLanguageFor,
@@ -338,6 +339,25 @@ describe('cameras', () => {
     const wide = followCamera({ k: 0.5 }, { x: 1000, y: 300, w: 2000, h: 100 }, { w: 1000, h: 800 })
     expect(wide.k).toBe(STORY_OPEN_SCALE)
     expect(wide.x).toBe(STORY_OPEN_MARGIN_PX - 1000 * STORY_OPEN_SCALE)
+  })
+})
+
+describe('followLineCamera — a quoted line stays in view', () => {
+  const viewport = { w: 1000, h: 800 }
+  const box = { x: 100, y: 1000, w: 300, h: 1200 }
+  it('ends with the line inside the viewport when it sits below the fold', () => {
+    const line = { x: 110, y: 2100, w: 280, h: 20 }
+    const cam = followLineCamera({ k: 1 }, box, line, viewport)
+    const top = cam.y + line.y * cam.k
+    const bottom = cam.y + (line.y + line.h) * cam.k
+    expect(top).toBeGreaterThanOrEqual(0)
+    expect(bottom).toBeLessThanOrEqual(viewport.h)
+    expect(cam.k).toBe(followCamera({ k: 1 }, box, viewport).k)
+    expect(cam.x).toBe(followCamera({ k: 1 }, box, viewport).x)
+  })
+  it('gives followCamera exactly when the line is already on screen', () => {
+    const line = { x: 110, y: 1100, w: 280, h: 20 }
+    expect(followLineCamera({ k: 1 }, box, line, viewport)).toEqual(followCamera({ k: 1 }, box, viewport))
   })
 })
 

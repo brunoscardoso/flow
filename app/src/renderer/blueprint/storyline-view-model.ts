@@ -431,6 +431,26 @@ export function followCamera(current: { k: number }, box: StoryRect, viewport: V
   return { k, x, y: STORY_FOLLOW_TOP_PX - box.y * k }
 }
 
+/**
+ * followCamera, then nudged so a quoted line inside the box is in view too.
+ * A line already on screen keeps followCamera's camera exactly. Otherwise the
+ * line lands a third of the way down, never pushing the box's top above the
+ * viewport and never the line's own top out of it.
+ */
+export function followLineCamera(current: { k: number }, box: StoryRect, line: StoryRect, viewport: ViewportSize): { x: number; y: number; k: number } {
+  const cam = followCamera(current, box, viewport)
+  const k = cam.k
+  const lineTop = cam.y + line.y * k
+  const lineBottom = cam.y + (line.y + line.h) * k
+  if (lineTop >= 0 && lineBottom <= viewport.h) return cam
+  const target = viewport.h / 3 - (line.y + line.h / 2) * k
+  const boxTopInView = -box.y * k
+  const lineBottomInView = viewport.h - (line.y + line.h) * k
+  const lineTopInView = -line.y * k
+  const y = Math.max(Math.min(Math.max(target, boxTopInView), lineBottomInView), lineTopInView)
+  return { k, x: cam.x, y }
+}
+
 /** The piece a chip into another file should open at: by name, else none. */
 export function pieceNamed(result: StorylineResult, name: string | null | undefined): string | null {
   if (name === null || name === undefined || name === '') return null

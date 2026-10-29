@@ -42,6 +42,7 @@ import {
   fileLabels,
   fileName,
   followCamera,
+  followLineCamera,
   frameCaption,
   kindBadge,
   monacoLanguageFor,
@@ -65,6 +66,8 @@ import {
 import type { PlanNoteVerdict, StorylineNote } from '../../shared/ipc-contract'
 import { buildNoteBlock, paintNoteStrip, paintReviewBar, type NoteBlock } from './note-review-view'
 import { decisionOf } from './note-review-model'
+import { buildTourSteps, stepAfterRebuild, tourStepIndexOf, tourSummary, type TourStep } from './review-tour-model'
+import { mountTourCard, type TourCardEnd, type TourCardHandle } from './review-tour-view'
 import type { PlanReviewState } from './plan-review-session'
 import {
   buildReviewOverlay,
@@ -81,6 +84,9 @@ const WHEEL_ZOOM_SENSITIVITY = 0.0022
 /** How long a followed callee's camera move takes, and its flash. */
 const FOLLOW_MOVE_MS = 320
 const FLASH_MS = 900
+/** The tour's step bar: its distance from what it sits beside, and from the canvas edge. */
+const TOUR_GAP_PX = 12
+const TOUR_EDGE_PX = 8
 /** Numbered dot radius. */
 const DOT_RADIUS = 9
 /** A press on these never starts a pan: they are controls, or text to select. */
@@ -89,7 +95,7 @@ const DOT_RADIUS = 9
 // header, between boxes — pans and never selects. Buttons (follow a call,
 // chips, folds) still press; the plain-code fallback still selects.
 // A review's note (its words, its inputs) is text to read and type in, never a handle.
-const NO_PAN_SELECTOR = 'button, select, a, input, textarea, .fb-note, .fb-story-plain, pre.fb-story-code'
+const NO_PAN_SELECTOR = 'button, select, a, input, textarea, .fb-note, .fb-tour-bar, .fb-story-plain, pre.fb-story-code'
 /** The code block a selection drag may start in. */
 const CODE_BLOCK_SELECTOR = 'pre.fb-story-code'
 /** Not code: injected next to the code, never copied with it. */
@@ -205,6 +211,10 @@ export class StorylineView {
   #storyFoot: { result: StorylineResult; plan: StoryPlan } | null = null
   /** Each drawn file's label — its name, or enough of its path to tell two of one name apart. */
   #fileLabels = new Map<string, string>()
+  /** The open review tour — its steps, where it stands, the mode they were built for, its bar. Null while closed. */
+  #tour: { steps: TourStep[]; index: number; mode: ReviewMode; card: TourCardHandle | null } | null = null
+  /** Start the tour once the next sheet is drawn — a review opens on it (user decision 2026-10-29). */
+  #tourOnDraw = false
 
   constructor(callbacks: StorylineViewCallbacks) {
     this.#callbacks = callbacks
@@ -214,6 +224,8 @@ export class StorylineView {
     this.element.className = 'fb-story'
     this.#viewport = document.createElement('div')
     this.#viewport.className = 'fb-story-viewport'
+    // Focusable from code only: closing the tour from its bar lands the focus here.
+    this.#viewport.tabIndex = -1
     this.#stage = document.createElement('div')
     this.#stage.className = 'fb-story-stage'
     this.#viewport.appendChild(this.#stage)
@@ -263,6 +275,17 @@ export class StorylineView {
    */
   setReview(review: StoryReviewBinding | null): void {
     this.#review = review
+    if (review === null) this.#tourOnDraw = false
+  }
+
+  /**
+   * Open the review ON the walk-through: the tour starts once the sheet is
+   * drawn and the camera has gone to its entry — starting it before would let
+   * that first camera move take the reader away from step 1. The reader can
+   * close it; nothing starts it again.
+   */
+  startTourWhenDrawn(): void {
+    this.#tourOnDraw = true
   }
 
   /** True while the sheet draws a plan change review. */
@@ -373,17 +396,34 @@ export class StorylineView {
     this.#setCamera(fitViewInRect(bounds, { x: 0, y: 0, w, h }, STORY_FIT_PADDING_PX))
   }
 
-  /** Bring a piece to the reader: move the camera to it and flash it. */
-  follow(pieceId: string): void {
+  /**
+   * Bring a piece to the reader: move the camera to it and flash it. With a
+   * file line, the camera also brings that quoted line into view.
+   */
+  follow(pieceId: string, line?: number): void {
     const box = this.#boxes.get(pieceId)
     if (box === undefined) return
-    const next = followCamera(this.#camera, this.#rectOf(box), this.#viewportSize())
-    this.#stage.classList.add('fb-story-moving')
-    if (this.#moveTimer !== null) window.clearTimeout(this.#moveTimer)
-    this.#moveTimer = window.setTimeout(() => {
-      this.#moveTimer = null
-      this.#stage.classList.remove('fb-story-moving')
-    }, FOLLOW_MOVE_MS + 20)
+    this.#aimAt(box, line === undefined ? undefined : this.#lineElement(box, line))
+  }
+
+  /** Move the camera to an element (a box, or a file's notes) and flash it. */
+  #aimAt(box: HTMLElement, lineEl: HTMLElement | undefined): void {
+    const viewport = this.#viewportSize()
+    const next = lineEl === undefined
+      ? followCamera(this.#camera, this.#rectOf(box), viewport)
+      : followLineCamera(this.#camera, this.#rectOf(box), this.#rectOf(lineEl), viewport)
+    // A reduced-motion reader gets the jump, not the glide.
+    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      this.#stage.classList.add('fb-story-moving')
+      // The tour's bar glides with the stage instead of jumping ahead of it.
+      this.#viewport.classList.add('fb-story-gliding')
+      if (this.#moveTimer !== null) window.clearTimeout(this.#moveTimer)
+      this.#moveTimer = window.setTimeout(() => {
+        this.#moveTimer = null
+        this.#stage.classList.remove('fb-story-moving')
+        this.#viewport.classList.remove('fb-story-gliding')
+      }, FOLLOW_MOVE_MS + 20)
+    }
     this.#setCamera(next)
     box.classList.remove('fb-story-flash')
     void box.offsetWidth
@@ -391,7 +431,56 @@ export class StorylineView {
     window.setTimeout(() => box.classList.remove('fb-story-flash'), FLASH_MS)
   }
 
+  // ── Review tour ─────────────────────────────────────────────────────────
+
+  /** True while the review tour is open. */
+  get tourOpen(): boolean {
+    return this.#tour !== null
+  }
+
+  /**
+   * Walk the review's notes one at a time: every change stays where it is on
+   * the canvas; the step's box and its note block stay sharp and the rest is
+   * blurred. False when this view draws no note to walk (Today, no notes).
+   */
+  startTour(): boolean {
+    const overlay = this.#overlay
+    if (overlay === null) return false
+    const steps = this.#tourSteps()
+    if (steps.length === 0) {
+      this.closeTour()
+      return false
+    }
+    this.#tour = { steps, index: 0, mode: overlay.mode, card: this.#tour?.card ?? null }
+    this.#showTourStep(true)
+    return true
+  }
+
+  closeTour(): void {
+    const tour = this.#tour
+    if (tour === null) return
+    // The bar's own Close had the focus: keep it on the sheet, so Escape and
+    // the arrows still reach the board after the bar is gone.
+    const hadFocus = tour.card !== null && tour.card.element.contains(document.activeElement)
+    tour.card?.destroy()
+    this.#tour = null
+    this.#clearTourFocus()
+    this.#stage.classList.remove('fb-tour-on')
+    if (hadFocus) this.#viewport.focus({ preventScroll: true })
+  }
+
+  tourNext(): void {
+    const tour = this.#tour
+    if (tour !== null && tour.index < tour.steps.length - 1) this.#goToTourStep(tour.index + 1)
+  }
+
+  tourBack(): void {
+    const tour = this.#tour
+    if (tour !== null && tour.index > 0) this.#goToTourStep(tour.index - 1)
+  }
+
   destroy(): void {
+    this.closeTour()
     this.#destroyed = true
     this.#resize.disconnect()
     if (this.#wireFrame !== null) cancelAnimationFrame(this.#wireFrame)
@@ -402,6 +491,8 @@ export class StorylineView {
   // ── Building ────────────────────────────────────────────────────────────
 
   #reset(): void {
+    // A new story on the sheet: the tour walked the old one.
+    this.closeTour()
     this.#paintSeq += 1
     this.#result = null
     this.#plan = null
@@ -591,6 +682,10 @@ export class StorylineView {
       if (this.#destroyed || this.#plan !== plan) return
       this.#drawWires()
       if (openAtEntry) this.#openAtEntry()
+      if (this.#tourOnDraw && this.#overlay !== null) {
+        this.#tourOnDraw = false
+        this.startTour()
+      }
     })
   }
 
@@ -623,7 +718,8 @@ export class StorylineView {
     this.element.classList.remove('fb-story-refused')
     this.element.classList.add('fb-story-review')
     this.element.dataset['reviewMode'] = mode
-    for (const child of [...this.#viewport.children]) if (child !== this.#stage) child.remove()
+    const bar = this.#tour?.card?.element
+    for (const child of [...this.#viewport.children]) if (child !== this.#stage && child !== bar) child.remove()
     if (this.#reviewRefusal !== null || (state.loaded && views.length === 0)) {
       const banner = document.createElement('div')
       banner.className = 'fb-nr-banner'
@@ -632,6 +728,7 @@ export class StorylineView {
       this.#viewport.appendChild(banner)
     }
     this.#build(openAtStart)
+    this.#rebuildTour()
   }
 
   /** A note's block, wired to the open review, remembered so a decision repaints it. */
@@ -767,6 +864,12 @@ export class StorylineView {
       host.classList.toggle('fb-nr-rejected', decisions.length > 0 && decisions.every((decision) => decision === 'rejected'))
     }
     paintNoteStrip(this.#notes, state, new Set(Object.keys(overlay.noteBox).map(Number)), (n) => {
+      // An open tour moves to the pressed note's step, so the bar and the pill agree.
+      const step = this.#tour === null ? -1 : tourStepIndexOf(this.#tour.steps, n)
+      if (step !== -1) {
+        this.#goToTourStep(step)
+        return
+      }
       const id = overlay.noteBox[n]
       if (id !== undefined) this.follow(id)
     })
@@ -778,7 +881,187 @@ export class StorylineView {
       this.#foot.replaceChildren()
       this.#buildFoot(this.#storyFoot.result, this.#storyFoot.plan)
     }
+    // The bar shows the same decisions as the blocks and the strip.
+    this.#paintTourCard()
     this.#scheduleWires()
+  }
+
+  /** The steps the current overlay can walk, in note order. */
+  #tourSteps(): TourStep[] {
+    const review = this.#review
+    const overlay = this.#overlay
+    if (review === null || overlay === null) return []
+    return buildTourSteps(overlay, [...this.#reviewViews.values()], review.state().phases, overlay.mode)
+  }
+
+  #goToTourStep(index: number): void {
+    const tour = this.#tour
+    if (tour === null || index < 0 || index >= tour.steps.length) return
+    tour.index = index
+    this.#showTourStep(true)
+  }
+
+  /**
+   * The review was redrawn (a mode switch, a re-read, a verdict): the steps
+   * are built again and the tour keeps its note — or the next one, or closes
+   * when the view draws none. The camera moves only when the step did.
+   */
+  #rebuildTour(): void {
+    const tour = this.#tour
+    const overlay = this.#overlay
+    if (tour === null) return
+    if (overlay === null) {
+      this.closeTour()
+      return
+    }
+    const previous = tour.steps[tour.index]?.n ?? null
+    const steps = this.#tourSteps()
+    const index = stepAfterRebuild(previous, steps)
+    if (index === -1) {
+      this.closeTour()
+      return
+    }
+    const moved = tour.mode !== overlay.mode || steps[index]?.n !== previous
+    this.#tour = { ...tour, steps, index, mode: overlay.mode }
+    this.#showTourStep(moved)
+  }
+
+  #clearTourFocus(): void {
+    for (const el of this.#stage.querySelectorAll('.fb-tour-focus')) el.classList.remove('fb-tour-focus')
+  }
+
+  /** Focus the step's box and its note blocks, blur the rest, aim the camera, and paint the bar. */
+  #showTourStep(aim: boolean): void {
+    const tour = this.#tour
+    const step = tour?.steps[tour.index]
+    if (tour === null || step === undefined) return
+    this.#stage.classList.add('fb-tour-on')
+    this.#clearTourFocus()
+    const box = this.#boxes.get(step.boxId)
+    box?.classList.add('fb-tour-focus')
+    const hosts = this.#noteHosts.get(step.n) ?? []
+    for (const host of hosts) host.classList.add('fb-tour-focus')
+    if (aim) {
+      // A file note without a quoted line sits under its file's label, not in
+      // the box: the camera goes to the note, where the reader decides.
+      const fileNotes = hosts.find((host) => host !== box)
+      if (box !== undefined && (step.line !== null || fileNotes === undefined)) this.#aimAt(box, step.line === null ? undefined : this.#lineElement(box, step.line))
+      else if (fileNotes !== undefined) this.#aimAt(fileNotes, undefined)
+    }
+    this.#paintTourCard()
+    this.#placeTourCard()
+  }
+
+  /** The last step's line: the tally over every note, and Send — or the note still to review. */
+  #tourEnd(): TourCardEnd | null {
+    const tour = this.#tour
+    const review = this.#review
+    if (tour === null || review === null || tour.index !== tour.steps.length - 1) return null
+    const state = review.state()
+    const summary = tourSummary(tour.steps, state.notes, state.drafts, state.saves)
+    const tally = `${String(summary.accepted)} accepted · ${String(summary.rejected)} rejected · ${String(summary.unreviewed)} not reviewed`
+    // Send is the review bar's, so only where the bar has it: Proposal, with a conversation to go to.
+    if (tour.mode !== 'proposal') return { tally, goToN: null, send: null, sentence: null }
+    if (state.sent) return { tally, goToN: null, send: null, sentence: 'Review sent.' }
+    const goToN = summary.firstUnreviewedN !== null && tourStepIndexOf(tour.steps, summary.firstUnreviewedN) !== -1 ? summary.firstUnreviewedN : null
+    const send =
+      state.request.threadId === null
+        ? null
+        : { enabled: summary.canSend, title: summary.canSend ? 'One message with every decision and comment, into the plan’s conversation' : 'Review every note before sending the review.' }
+    return { tally, goToN, send, sentence: null }
+  }
+
+  /** Make or repaint the bar from the tour's state. */
+  #paintTourCard(): void {
+    const tour = this.#tour
+    const step = tour?.steps[tour.index]
+    if (tour === null || step === undefined) return
+    const end = this.#tourEnd()
+    if (tour.card !== null && tour.card.element.isConnected) {
+      tour.card.update(step, tour.index, tour.steps.length, end)
+      return
+    }
+    tour.card?.destroy()
+    tour.card = mountTourCard(
+      this.#viewport,
+      step,
+      tour.index,
+      tour.steps.length,
+      {
+        back: () => this.tourBack(),
+        next: () => this.tourNext(),
+        close: () => this.closeTour(),
+        send: () => this.#review?.send(),
+        goTo: (n) => {
+          const index = this.#tour === null ? -1 : tourStepIndexOf(this.#tour.steps, n)
+          if (index !== -1) this.#goToTourStep(index)
+        },
+      },
+      end,
+    )
+  }
+
+  /** An element's rectangle in stage coordinates, from layout — the same mid-glide as at rest. */
+  #layoutRectOf(el: HTMLElement): StoryRect {
+    let x = 0
+    let y = 0
+    let node: HTMLElement | null = el
+    while (node !== null && node !== this.#stage) {
+      x += node.offsetLeft
+      y += node.offsetTop
+      node = node.offsetParent instanceof HTMLElement ? node.offsetParent : null
+    }
+    return { x, y, w: el.offsetWidth, h: el.offsetHeight }
+  }
+
+  /**
+   * Put the bar beside the focused note block: right of its box, else left,
+   * else below or above the block — inside the canvas, and never over the
+   * box's marked lines. Placed from the camera's target, so a glide ends with
+   * the bar where it belongs.
+   */
+  #placeTourCard(): void {
+    const tour = this.#tour
+    const card = tour?.card
+    const step = tour?.steps[tour.index]
+    if (card === null || card === undefined || step === undefined) return
+    const bar = card.element
+    const { w, h } = this.#viewportSize()
+    const cw = bar.offsetWidth
+    const ch = bar.offsetHeight
+    const clamp = (x: number, y: number): StoryRect => ({
+      x: Math.max(TOUR_EDGE_PX, Math.min(x, w - cw - TOUR_EDGE_PX)),
+      y: Math.max(TOUR_EDGE_PX, Math.min(y, h - ch - TOUR_EDGE_PX)),
+      w: cw,
+      h: ch,
+    })
+    const put = (rect: StoryRect): void => {
+      bar.style.left = `${String(Math.round(rect.x))}px`
+      bar.style.top = `${String(Math.round(rect.y))}px`
+    }
+    const box = this.#boxes.get(step.boxId)
+    const block = this.#noteHosts.get(step.n)?.flatMap((host) => [...host.querySelectorAll<HTMLElement>(`.fb-note[data-note="${String(step.n)}"]`)])[0]
+    const anchorEl = block ?? box
+    if (anchorEl === undefined) {
+      put(clamp(w - cw - TOUR_EDGE_PX, TOUR_EDGE_PX))
+      return
+    }
+    const cam = this.#camera
+    const screen = (rect: StoryRect): StoryRect => ({ x: cam.x + rect.x * cam.k, y: cam.y + rect.y * cam.k, w: rect.w * cam.k, h: rect.h * cam.k })
+    const anchor = screen(this.#layoutRectOf(anchorEl))
+    const around = box === undefined ? anchor : screen(this.#layoutRectOf(box))
+    const avoid = box === undefined ? [] : [...box.querySelectorAll<HTMLElement>('.fb-nr-hit')].map((line) => screen(this.#layoutRectOf(line)))
+    const overlaps = (a: StoryRect, b: StoryRect): boolean => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+    const candidates = [
+      clamp(Math.max(anchor.x + anchor.w, around.x + around.w) + TOUR_GAP_PX, anchor.y),
+      clamp(Math.min(anchor.x, around.x) - TOUR_GAP_PX - cw, anchor.y),
+      clamp(anchor.x, anchor.y + anchor.h + TOUR_GAP_PX),
+      clamp(anchor.x, anchor.y - ch - TOUR_GAP_PX),
+    ]
+    const clear = (rect: StoryRect): boolean => !avoid.some((line) => overlaps(rect, line))
+    const chosen =
+      candidates.find((rect) => clear(rect) && !overlaps(rect, anchor)) ?? candidates.find(clear) ?? (candidates[0] as StoryRect)
+    put(chosen)
   }
 
   #bandLabel(text: string): HTMLElement {
@@ -1218,6 +1501,12 @@ export class StorylineView {
     })
   }
 
+  /** The on-screen code line for a file line in a box; undefined when it is not drawn or folded away. */
+  #lineElement(box: HTMLElement, line: number): HTMLElement | undefined {
+    const el = box.querySelector<HTMLElement>(`[data-line="${String(line)}"]`)
+    return el === null || el.offsetParent === null ? undefined : el
+  }
+
   /** A rectangle in stage coordinates (unscaled), measured from the DOM. */
   #rectOf(el: Element): StoryRect {
     const base = this.#stage.getBoundingClientRect()
@@ -1310,6 +1599,8 @@ export class StorylineView {
     this.#drawReviewWires(svg, rectFor)
     this.#stage.insertBefore(svg, this.#stage.firstChild)
     this.#svg = svg
+    // Whatever moved the wires (a font, Monaco's colours, a fold) moved the boxes the bar sits beside.
+    this.#placeTourCard()
   }
 
   /** A review's dashed "will call" wires: each caller to the new function a note adds. */
@@ -1391,6 +1682,7 @@ export class StorylineView {
     this.#stage.style.transform = `translate(${String(camera.x)}px, ${String(camera.y)}px) scale(${String(camera.k)})`
     this.#viewport.style.backgroundSize = gridBackgroundSize(camera.k)
     this.#viewport.style.backgroundPosition = `${String(camera.x)}px ${String(camera.y)}px`
+    this.#placeTourCard()
     this.#callbacks.onCameraChange(camera.k)
   }
 

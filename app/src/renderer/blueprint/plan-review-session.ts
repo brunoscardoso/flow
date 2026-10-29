@@ -13,6 +13,7 @@ import type {
   PlanNoteReport,
   PlanNoteVerdict,
   PlanNotesAnswer,
+  PlanPhaseTitle,
   PlanSetNoteAnswer,
   PlanSetNoteRequest,
 } from '../../shared/ipc-contract'
@@ -67,6 +68,8 @@ export interface PlanReviewState {
   /** Why the notes could not be read — one sentence — or null. */
   error: string | null
   notes: PlanNoteReport[]
+  /** Each phase's number and title, from the plan's headings — empty until read. */
+  phases: readonly PlanPhaseTitle[]
   /** The plan file (project-relative) — to match watcher events, never shown. */
   path: string | null
   drafts: Record<number, string>
@@ -124,6 +127,7 @@ export class PlanReviewSession {
       loaded: false,
       error: null,
       notes: [],
+      phases: [],
       path: null,
       drafts: loadDrafts(deps.storage, this.#draftKey),
       saves: {},
@@ -171,7 +175,7 @@ export class PlanReviewSession {
     })
     // The agent revised the notes after a sent review: there is a new review to make.
     const revised = this.#state.loaded && noteWordsKey(this.#state.notes) !== noteWordsKey(notes)
-    this.#set({ loaded: true, error: null, notes, path: answer.path, sent: this.#state.sent && !revised })
+    this.#set({ loaded: true, error: null, notes, phases: answer.phases ?? [], path: answer.path, sent: this.#state.sent && !revised })
   }
 
   /** Whether a watcher event is about this review's plan file. */

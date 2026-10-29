@@ -52,6 +52,7 @@ const NOTES_ANSWER = {
   notes: [CHANGE_NOTE, NEW_NOTE],
   counts: { total: 2, accepted: 1, rejected: 0, unreviewed: 1 },
   unreadable: [{ line: 40, reason: 'no target', n: 3 }],
+  phases: [{ number: 1, title: 'Data' }, { number: 2, title: 'View' }],
 }
 
 interface Call {
@@ -225,6 +226,14 @@ describe('narrowing', () => {
       verdict: 'done',
       verdictWhy: 'Built as written.',
     })
+  })
+
+  it('carries the phase titles, drops a malformed one, and answers none for an older CLI', () => {
+    const phases = [{ number: 1, title: ' Data ' }, { number: 'x', title: 'Bad' }, { number: 2, title: '' }, null, { number: 3, title: 'Tests' }]
+    const answer = parsePlanNotesStdout(JSON.stringify({ ...NOTES_ANSWER, phases }))
+    expect(answer).toMatchObject({ ok: true, phases: [{ number: 1, title: 'Data' }, { number: 3, title: 'Tests' }] })
+    const { phases: _dropped, ...older } = NOTES_ANSWER
+    expect(parsePlanNotesStdout(JSON.stringify(older))).toMatchObject({ ok: true, phases: [] })
   })
 
   it('ignores a refusal payload as an answer', () => {

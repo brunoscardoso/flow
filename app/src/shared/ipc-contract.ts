@@ -2869,6 +2869,9 @@ export interface PlanNotesFailure {
   detail: string
 }
 
+/** A phase's number and title, as the plan's own headings read. */
+export type PlanPhaseTitle = { number: number; title: string }
+
 export interface PlanNotesSnapshot {
   ok: true
   plan: string
@@ -2877,6 +2880,8 @@ export interface PlanNotesSnapshot {
   notes: PlanNoteReport[]
   counts: PlanNoteCounts
   unreadable: PlanUnreadableNote[]
+  /** Optional because a bundled CLI older than this field sends none. */
+  phases?: PlanPhaseTitle[]
 }
 
 export type PlanNotesAnswer = PlanNotesSnapshot | PlanNotesFailure

@@ -43,7 +43,7 @@ import {
 import { readRoundsEntries } from '../state/rounds-reader.js';
 import { evaluateResume, type ResumeStatus } from '../state/resume-evaluator.js';
 import type { RunScript } from '../state/types.js';
-import { whyNoPhases } from '../state/plan-parser.js';
+import { parsePlanContent, whyNoPhases } from '../state/plan-parser.js';
 import { archiveRounds, summarizeArchivedRounds } from '../state/rounds-summary.js';
 import { locateWorkspaceProject } from '../handlers/workspace-locate.js';
 import {
@@ -468,6 +468,8 @@ export interface PlanNotesResult {
   notes: PlanNoteReport[];
   counts: NoteCounts;
   unreadable: UnreadableNote[];
+  /** Each phase's number and title, so the review can name the phase a note sits in. A plan with no phase headings yields `[]`. */
+  phases: { number: number; title: string }[];
 }
 
 function findPlanOrRefuse(target: string, planArg: string): FoundPlan {
@@ -516,6 +518,7 @@ export async function readPlanNotes(
     notes,
     counts: countNotes(parsed.notes),
     unreadable: parsed.unreadable,
+    phases: parsePlanContent(found.content).map((phase) => ({ number: phase.number, title: phase.name })),
   };
 }
 

@@ -213,6 +213,22 @@ describe('readPlanNotes — the reader', () => {
     makeRepo(PLAN);
     await expect(readPlanNotes('nope', { target: repo })).rejects.toMatchObject({ reason: 'unknown-plan' });
   });
+
+  it("carries each phase's number and title, so the review tour can name a note's phase", async () => {
+    makeRepo(`${PLAN}\n### Phase 2: Tests (Final)\n**Complexity**: 2/10\n\n- [ ] Test it\n`);
+    const result = await readPlanNotes('demo', { target: repo });
+    expect(result.phases).toEqual([
+      { number: 1, title: 'Wire' },
+      { number: 2, title: 'Tests (Final)' },
+    ]);
+    expect(result.notes[0]).toMatchObject({ n: 1, phase: 1 });
+  });
+
+  it('a plan with no phase headings carries an empty phase list', async () => {
+    makeRepo(PLAN.replace('### Phase 1: Wire', '## Wire'));
+    const result = await readPlanNotes('demo', { target: repo });
+    expect(result.phases).toEqual([]);
+  });
 });
 
 describe('readPlanNotes — notes with a Workspace project prefix', () => {

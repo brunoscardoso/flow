@@ -29,6 +29,7 @@ import type {
   PlanNoteVerdict,
   PlanNotesAnswer,
   PlanNotesFailure,
+  PlanPhaseTitle,
   PlanSetNoteAnswer,
   PlanSetNoteRequest,
   PlanUnreadableNote,
@@ -210,9 +211,21 @@ export function parsePlanNotesStdout(stdout: string): PlanNotesAnswer | null {
     const unreadable = Array.isArray(value.unreadable)
       ? value.unreadable.map(narrowUnreadable).filter((entry): entry is PlanUnreadableNote => entry !== null)
       : []
-    return { ok: true, plan: value.plan, path: value.path, notes, counts: countPlanNotes(notes), unreadable }
+    // The plan's phase titles — the review tour's "Phase 2 · Data". An older
+    // CLI sends none, and the tour then names the phase by number alone.
+    const phases = Array.isArray(value.phases)
+      ? value.phases.map(narrowPhaseTitle).filter((phase): phase is PlanPhaseTitle => phase !== null)
+      : []
+    return { ok: true, plan: value.plan, path: value.path, notes, counts: countPlanNotes(notes), unreadable, phases }
   }
   return null
+}
+
+function narrowPhaseTitle(value: unknown): PlanPhaseTitle | null {
+  if (typeof value !== 'object' || value === null) return null
+  const { number, title } = value as { number?: unknown; title?: unknown }
+  if (typeof number !== 'number' || !Number.isInteger(number) || typeof title !== 'string' || title.trim() === '') return null
+  return { number, title: title.trim() }
 }
 
 /** `plan note --json`'s answer, narrowed — null when stdout carries none (or the note is malformed). */

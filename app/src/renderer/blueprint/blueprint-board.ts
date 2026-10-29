@@ -2379,6 +2379,13 @@ export class BlueprintBoard {
         if (this.#onEscape()) event.preventDefault()
         return
       }
+      // → / ← step the review tour while it is open; nothing while it is closed.
+      if ((event.key === 'ArrowRight' || event.key === 'ArrowLeft') && this.#storyView?.tourOpen === true && !isTypingTarget(event.target)) {
+        if (event.key === 'ArrowRight') this.#storyView.tourNext()
+        else this.#storyView.tourBack()
+        event.preventDefault()
+        return
+      }
       if (event.key === '0' && !isTypingTarget(event.target)) {
         // THE FEATURE MAP HAS NO CAMERA TO RESET. Territory is packed into the
         // measured stage — there is no pan and no zoom, so there is nowhere for
@@ -5236,6 +5243,8 @@ export class BlueprintBoard {
     // THE PLAN'S OWN STORY: no file of this project is asked for — the CLI
     // builds the story from every note's code, a sibling project's included,
     // so a plan whose notes all live in other projects still shows its code.
+    // It opens ON the walk-through (user decision 2026-10-29); Close leaves it.
+    this.#storyViewOrCreate().startTourWhenDrawn()
     await this.#openStory({}, state.request.plan, null, session)
   }
 
@@ -5351,6 +5360,19 @@ export class BlueprintBoard {
       seg.appendChild(button)
     }
     strip.append(chip, seg)
+    // THE TOUR starts on request, in the two views that have changes to explain.
+    if ((level.mode === 'proposal' || level.mode === 'verify') && notes.length > 0) {
+      const walk = this.#headerButton({
+        icon: 'map',
+        label: 'Walk through the changes',
+        title: 'Go through the notes one at a time, each in its code',
+        press: () => {
+          if (this.#storyView?.startTour() !== true) this.#notify('Walk through the changes', 'None of this plan’s notes is drawn in this view.')
+        },
+      })
+      walk.classList.add('fb-tour-start')
+      strip.appendChild(walk)
+    }
     strip.classList.add('fb-story-head-compared')
   }
 
@@ -6219,6 +6241,12 @@ export class BlueprintBoard {
    * drawer, else pop one drill level.
    */
   #onEscape(): boolean {
+    // AN OPEN REVIEW TOUR CLOSES FIRST, and Escape stops there: it is the
+    // topmost thing, and the story under it stays open.
+    if (this.#storyView?.tourOpen === true) {
+      this.#storyView.closeTour()
+      return true
+    }
     // A PINNED CELL UNPINS FIRST, and the map goes back — it is the thing on top.
     if (this.#pinned !== null) {
       this.#quietFocusedHover()
@@ -24859,6 +24887,113 @@ const BOARD_STYLES = `
   .flow-board-root .fb-nr-accept-all:focus-visible { outline: 2px solid var(--fb-accent); outline-offset: 2px; }
   .flow-board-root .fb-nr-accept-all + .fb-nr-send { margin-left: 0; }
   .flow-board-root .fb-nr-send:focus-visible { outline: 2px solid var(--fb-accent); outline-offset: 2px; }
+
+  /* The review tour: every change stays on the canvas. The step's box and its
+     note blocks stay sharp; everything else is blurred and faded, never hidden
+     or moved. */
+  .flow-board-root .fb-story-viewport:focus { outline: none; }
+  .flow-board-root .fb-story-stage .fb-story-box { transition: opacity 180ms ease, filter 180ms ease, border-color 120ms, box-shadow 120ms; }
+  .flow-board-root .fb-story-stage .fb-nr-filenotes,
+  .flow-board-root .fb-story-stage svg.fb-story-wires,
+  .flow-board-root .fb-story-stage .fb-story-band,
+  .flow-board-root .fb-story-stage .fb-story-file,
+  .flow-board-root .fb-story-stage .fb-story-frame { transition: filter 180ms ease, opacity 180ms ease; }
+  .flow-board-root .fb-tour-on .fb-story-box:not(.fb-tour-focus),
+  .flow-board-root .fb-tour-on .fb-nr-filenotes:not(.fb-tour-focus),
+  .flow-board-root .fb-tour-on svg.fb-story-wires,
+  .flow-board-root .fb-tour-on .fb-story-band,
+  .flow-board-root .fb-tour-on .fb-story-file,
+  .flow-board-root .fb-tour-on .fb-story-frame { filter: blur(2.5px); opacity: 0.4; }
+  .flow-board-root .fb-tour-bar {
+    position: absolute;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 300px;
+    padding: 8px 10px;
+    border: 1px solid var(--fl-color-border);
+    border-radius: 8px;
+    background: var(--fl-color-surface-raised);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+    font-family: var(--fl-font-ui);
+    font-size: var(--fl-text-caption-size);
+    color: var(--fb-ink);
+    cursor: default;
+  }
+  .flow-board-root .fb-story-gliding .fb-tour-bar { transition: left 320ms ease, top 320ms ease; }
+  .flow-board-root .fb-tour-head { display: flex; align-items: center; gap: 10px; }
+  .flow-board-root .fb-tour-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; white-space: nowrap; }
+  .flow-board-root .fb-tour-close {
+    flex: none;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    font-size: 14px;
+    line-height: 1;
+    color: var(--fb-ink-dim);
+    cursor: pointer;
+  }
+  .flow-board-root .fb-tour-close:hover { background: var(--fb-card); color: var(--fb-ink); }
+  .flow-board-root .fb-tour-story { display: flex; flex-direction: column; gap: 4px; }
+  .flow-board-root .fb-tour-file {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--fl-font-mono);
+    color: var(--fl-color-text-secondary);
+  }
+  .flow-board-root .fb-tour-action { font-weight: 600; font-family: var(--fl-font-mono); color: var(--fb-proposal); overflow-wrap: anywhere; }
+  .flow-board-root .fb-tour-change,
+  .flow-board-root .fb-tour-reason,
+  .flow-board-root .fb-tour-result { margin: 0; line-height: 1.45; overflow-wrap: anywhere; }
+  .flow-board-root .fb-tour-reason { color: var(--fl-color-text-secondary); }
+  .flow-board-root .fb-tour-result { color: var(--fb-ink-dim); }
+  .flow-board-root .fb-tour-missing { color: var(--fb-proposal); overflow-wrap: anywhere; }
+  .flow-board-root .fb-tour-end { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+  .flow-board-root .fb-tour-tally { color: var(--fl-color-text-secondary); }
+  .flow-board-root .fb-tour-acts { display: flex; align-items: center; gap: 6px; }
+  .flow-board-root .fb-tour-hint { flex: 1 1 auto; margin-right: 6px; color: var(--fb-ink-dim); white-space: nowrap; }
+  .flow-board-root .fb-tour-back,
+  .flow-board-root .fb-tour-goto {
+    height: 24px;
+    padding: 0 10px;
+    border: 1px solid var(--fl-color-border);
+    border-radius: 6px;
+    background: transparent;
+    font-family: var(--fl-font-ui);
+    font-size: var(--fl-text-caption-size);
+    color: var(--fb-ink);
+    cursor: pointer;
+  }
+  .flow-board-root .fb-tour-next,
+  .flow-board-root .fb-tour-send {
+    height: 24px;
+    padding: 0 12px;
+    border: 1px solid var(--fb-accent);
+    border-radius: 6px;
+    background: var(--fb-accent);
+    font-family: var(--fl-font-ui);
+    font-size: var(--fl-text-caption-size);
+    font-weight: 600;
+    color: var(--fb-card);
+    cursor: pointer;
+  }
+  .flow-board-root .fb-tour-bar button:disabled { opacity: 0.45; cursor: default; }
+  .flow-board-root .fb-tour-bar button:focus-visible { outline: 2px solid var(--fb-accent); outline-offset: 2px; }
+  .flow-board-root .fb-tour-bar [hidden] { display: none; }
+  @media (prefers-reduced-motion: reduce) {
+    .flow-board-root .fb-story-stage .fb-story-box,
+    .flow-board-root .fb-story-stage .fb-nr-filenotes,
+    .flow-board-root .fb-story-stage svg.fb-story-wires,
+    .flow-board-root .fb-story-stage .fb-story-band,
+    .flow-board-root .fb-story-stage .fb-story-file,
+    .flow-board-root .fb-story-stage .fb-story-frame,
+    .flow-board-root .fb-story-gliding .fb-tour-bar { transition: none; }
+  }
   .flow-board-root .fb-nr-chips { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
   .flow-board-root .fb-nr-chip {
     max-width: 100%;
