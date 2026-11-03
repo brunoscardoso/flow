@@ -1003,6 +1003,27 @@ export function artifactEventIsHistorical(input: {
 }
 
 /**
+ * Whether a live doc's card belongs BEFORE the loaded part of the transcript.
+ *
+ * The pane loads only the newest messages of a long thread, so a doc's marker
+ * row can sit in the part that was not fetched — and a doc with no marker in
+ * hand is drawn at the feed end. Live 2026-11-02: a discovery and a plan this
+ * thread wrote three days and 400 messages earlier came back under every new
+ * answer, in an app that had stayed open since before they were written. A doc
+ * last written before the oldest loaded message has its card up there, where
+ * "Show earlier" reveals it; it never sits under today's answer.
+ */
+export function artifactPrecedesLoadedHistory(input: {
+  historyTruncated: boolean
+  oldestLoadedAt: string | null
+  docMtime: number
+}): boolean {
+  if (!input.historyTruncated || input.oldestLoadedAt === null) return false
+  const oldest = Date.parse(input.oldestLoadedAt)
+  return Number.isFinite(oldest) && input.docMtime < oldest
+}
+
+/**
  * Whether a NEW card for a live doc waits instead of mounting now.
  *
  * While the agent's turn is running, a doc lands in pieces: the markdown first

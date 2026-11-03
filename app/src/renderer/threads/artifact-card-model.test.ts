@@ -5,6 +5,7 @@ import {
   PLAN_SUMMARY_MAX_CHARS,
   holdsNewArtifactCard,
   artifactEventIsHistorical,
+  artifactPrecedesLoadedHistory,
   artifactRowActions,
   executeCommandFor,
   executeConfirmText,
@@ -1157,6 +1158,28 @@ describe('artifactEventIsHistorical — a re-listed doc is history, not a write'
 
   it('a real write is never history', () => {
     expect(artifactEventIsHistorical({ ...base, replayed: false })).toBe(false)
+  })
+})
+
+describe('artifactPrecedesLoadedHistory — an old doc never sits under today\'s answer', () => {
+  const oldestLoadedAt = '2026-11-02T20:00:00.000Z'
+  const before = Date.parse('2026-10-30T19:48:00.000Z')
+  const after = Date.parse('2026-11-02T21:00:00.000Z')
+
+  it('places a doc written before the loaded messages up there', () => {
+    expect(artifactPrecedesLoadedHistory({ historyTruncated: true, oldestLoadedAt, docMtime: before })).toBe(true)
+  })
+
+  it('keeps a doc written inside the loaded messages at the feed end', () => {
+    expect(artifactPrecedesLoadedHistory({ historyTruncated: true, oldestLoadedAt, docMtime: after })).toBe(false)
+  })
+
+  it('says nothing when the whole thread is loaded — its markers are all in hand', () => {
+    expect(artifactPrecedesLoadedHistory({ historyTruncated: false, oldestLoadedAt, docMtime: before })).toBe(false)
+  })
+
+  it('says nothing without a loaded message to compare with', () => {
+    expect(artifactPrecedesLoadedHistory({ historyTruncated: true, oldestLoadedAt: null, docMtime: before })).toBe(false)
   })
 })
 

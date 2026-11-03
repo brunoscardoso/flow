@@ -59,6 +59,7 @@ import {
   foldHostIndex,
   holdsNewArtifactCard,
   artifactEventIsHistorical,
+  artifactPrecedesLoadedHistory,
   planCommandFor,
   planPhaseCount,
   planSlugOf,
@@ -692,6 +693,9 @@ export class ConversationPane {
    *  does not have. WITHHELD IS NOT EMPTY (allowed-pattern #18) — the control
    *  says so and fetches them, rather than showing a shorter thread. */
   #historyTruncated = false
+  /** When the oldest loaded message was written — a doc older than it has its
+   *  marker in the part not loaded (`artifactPrecedesLoadedHistory`). */
+  #oldestLoadedAt: string | null = null
   /** The blueprint story card (at most one per feed), rebuilt across thread
    *  switches but preserved (step + minimize state) across turn reconciles. */
   #storyCard: StoryCard | null = null
@@ -1371,6 +1375,7 @@ export class ConversationPane {
     // was about that transcript, not this one.
     this.#historyFetchLimit = HISTORY_FETCH
     this.#historyTruncated = false
+    this.#oldestLoadedAt = null
     this.#entriesAtUnpin = null
     this.#renderedEntries = 0
     this.#feed.textContent = ''
@@ -1653,6 +1658,7 @@ export class ConversationPane {
     // A read that came back exactly full is a read that left something behind.
     this.#historyTruncated =
       this.#historyFetchLimit !== undefined && messages.length >= this.#historyFetchLimit
+    this.#oldestLoadedAt = messages[0]?.createdAt ?? null
     const entries: HistoryEntry[] = [
       ...messages.map((message): HistoryEntry => ({
         kind: 'message',
@@ -3715,6 +3721,19 @@ export class ConversationPane {
     // exactly the #1056 complaint. Their content still hydrates inline marker
     // cards above; a LIVE change this session clears the flag and renders.
     if (source?.seeded) {
+      this.#removeArtifactCard(kind)
+      return
+    }
+    // A doc written before the loaded messages has its marker in the part not
+    // loaded — its card is up there, behind "Show earlier", never down here.
+    if (
+      source !== undefined &&
+      artifactPrecedesLoadedHistory({
+        historyTruncated: this.#historyTruncated,
+        oldestLoadedAt: this.#oldestLoadedAt,
+        docMtime: source.event.mtime,
+      })
+    ) {
       this.#removeArtifactCard(kind)
       return
     }
