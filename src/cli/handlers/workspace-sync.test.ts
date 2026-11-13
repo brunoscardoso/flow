@@ -37,6 +37,7 @@ const model = await import('./workspace-model.js');
 const syncModule = await import('./workspace-sync.js');
 const merge = await import('./workspace-merge.js');
 const moveModule = await import('./workspace-move.js');
+const remoteModule = await import('./workspace-remote.js');
 
 const { WorkspaceRefusal, createWorkspace, joinWorkspace, linkRepo, defaultWorkspaceGit } = model;
 const { syncWorkspace, syncAllWorkspaces, classifyRemoteFailure, classifyRejection, LOCK_TIMEOUT_MS } = syncModule;
@@ -864,6 +865,29 @@ describeWithGit('workspace sync against real git, two machines', () => {
       expect(b).toMatchObject({ state: 'synced', pushed: true, branch: 'knowledge' });
       expect(git(bare, 'show', 'refs/heads/knowledge:projects/backend/brain/features/from-b.md')).toBe('# from B\n');
       expect(git(bare, 'show', 'refs/heads/knowledge:projects/backend/brain/features/from-a.md')).toBe('# from A\n');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'a machine that disconnects and reconnects the shared repository lands on the knowledge branch with its own work',
+    () => {
+      protectOnRemote('main');
+      write(wsA, 'projects/backend/brain/features/from-a.md', '# from A\n');
+      expect(sync(flowA).moved?.reason).toBe('pull-request-required');
+
+      // B disconnects (still on main), writes while local-only, then reconnects.
+      remoteModule.unsetWorkspaceRemote({ flowFolder: flowB, workspace: 'team' });
+      write(wsB, 'projects/backend/brain/features/offline-b.md', '# written while disconnected\n');
+      expect(sync(flowB)).toMatchObject({ state: 'local-only' });
+      expect(branchOf(wsB)).toBe('main');
+      remoteModule.setWorkspaceRemote({ flowFolder: flowB, workspace: 'team', remote: REMOTE });
+
+      const b = sync(flowB);
+      expect(b.moved).toEqual({ from: 'main', to: 'knowledge', reason: 'followed' });
+      expect(b).toMatchObject({ state: 'synced', pushed: true, branch: 'knowledge' });
+      expect(read(wsB, 'projects/backend/brain/features/from-a.md')).toBe('# from A\n');
+      expect(git(bare, 'show', 'refs/heads/knowledge:projects/backend/brain/features/offline-b.md')).toBe('# written while disconnected\n');
     },
     TEST_TIMEOUT_MS
   );
