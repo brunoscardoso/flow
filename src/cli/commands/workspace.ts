@@ -71,6 +71,12 @@ import {
   type UnsetRemoteResult,
 } from '../handlers/workspace-remote.js';
 import {
+  listWorkspaceBranches,
+  setWorkspaceBranch,
+  type BranchesResult,
+  type SetBranchResult,
+} from '../handlers/workspace-branch.js';
+import {
   WorkspaceRefusal,
   createWorkspace,
   describeProject,
@@ -123,6 +129,8 @@ export const WORKSPACE_ACTIONS = [
   'set-default',
   'set-remote',
   'unset-remote',
+  'branches',
+  'set-branch',
   'learn-connections',
 ] as const;
 
@@ -181,6 +189,10 @@ export interface WorkspaceCommandOptions {
   take?: string;
   /** set-remote: a person chose to change the shared repository the Workspace already has. */
   replace?: boolean;
+  /** set-branch (required), set-remote, join: the branch the Workspace syncs on. */
+  branch?: string;
+  /** set-branch: put back a branch that was working, without marking it chosen. */
+  restore?: boolean;
   /** learn-connections: check this pair of projects, `<a>,<b>`. */
   pair?: string;
   /** learn-connections --pair: a file holding the fast model's raw answer. */
@@ -216,6 +228,8 @@ type WorkspaceResult =
   | SetDefaultResult
   | SetRemoteResult
   | UnsetRemoteResult
+  | BranchesResult
+  | SetBranchResult
   | LearnConnectionsPlanResult
   | LearnConnectionsPairResult;
 
@@ -259,6 +273,7 @@ function dispatch(action: WorkspaceAction, options: WorkspaceCommandOptions, run
         ...context,
         remote: required(options.remote, 'remote', action),
         ...(options.name === undefined ? {} : { name: options.name }),
+        ...(options.branch === undefined ? {} : { branch: options.branch }),
       });
     case 'status':
       return workspaceStatus({
@@ -347,9 +362,23 @@ function dispatch(action: WorkspaceAction, options: WorkspaceCommandOptions, run
         remote: required(options.remote, 'remote', action),
         // THE TYPED FLAG IS THE CONFIRMATION (forbidden-pattern #15).
         replace: options.replace === true,
+        ...(options.branch === undefined ? {} : { branch: options.branch }),
       });
     case 'unset-remote':
       return unsetWorkspaceRemote({ ...context, workspace: required(options.workspace, 'workspace', action) });
+    case 'branches':
+      return listWorkspaceBranches({
+        ...context,
+        workspace: required(options.workspace, 'workspace', action),
+        ...(options.remote === undefined ? {} : { remote: options.remote }),
+      });
+    case 'set-branch':
+      return setWorkspaceBranch({
+        ...context,
+        workspace: required(options.workspace, 'workspace', action),
+        branch: required(options.branch, 'branch', action),
+        restore: options.restore === true,
+      });
   }
 }
 
@@ -504,6 +533,17 @@ function renderHuman(result: WorkspaceResult): string {
       return connected.changed
         ? `workspace: ${connected.workspace.name} now shares through ${connected.remote}. ${connected.detail}`
         : `workspace: ${connected.workspace.name} already shares through ${connected.remote}`;
+    }
+    case 'branches': {
+      const listed = result as BranchesResult;
+      const names = listed.branches.map((entry) => `${entry.name}${entry.pullRequestOnly ? ' (pull requests only)' : ''}`);
+      return `workspace: ${listed.workspace.name} — ${names.length === 0 ? 'no branches yet' : names.join(', ')}; suggested ${listed.suggestion.name} (${listed.suggestion.source})`;
+    }
+    case 'set-branch': {
+      const chosen = result as SetBranchResult;
+      return chosen.changed
+        ? `workspace: ${chosen.workspace.name} now syncs on ${chosen.branch}${chosen.previous === null ? '' : ` (was ${chosen.previous})`}. ${chosen.detail}`
+        : `workspace: ${chosen.workspace.name} already syncs on ${chosen.branch}`;
     }
     case 'unset-remote': {
       const disconnected = result as UnsetRemoteResult;

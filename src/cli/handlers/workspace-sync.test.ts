@@ -38,6 +38,7 @@ const syncModule = await import('./workspace-sync.js');
 const merge = await import('./workspace-merge.js');
 const moveModule = await import('./workspace-move.js');
 const remoteModule = await import('./workspace-remote.js');
+const branchModule = await import('./workspace-branch.js');
 
 const { WorkspaceRefusal, createWorkspace, joinWorkspace, linkRepo, defaultWorkspaceGit } = model;
 const { syncWorkspace, syncAllWorkspaces, classifyRemoteFailure, classifyRejection, LOCK_TIMEOUT_MS } = syncModule;
@@ -159,6 +160,30 @@ describe('replaceStaleLock (review fix 14)', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('choosing a Workspace branch — the pure parts', () => {
+  const { suggestBranch, parseLsRemote } = branchModule;
+  it('reads ls-remote --symref output: branches sorted, default from the HEAD symref', () => {
+    const sha = 'a'.repeat(40);
+    expect(parseLsRemote(`ref: refs/heads/main\tHEAD\n${sha}\tHEAD\n${sha}\trefs/heads/main\n${sha}\trefs/heads/knowledge\n`)).toEqual({
+      branches: ['knowledge', 'main'],
+      defaultBranch: 'main',
+    });
+    expect(parseLsRemote('')).toEqual({ branches: [], defaultBranch: null });
+  });
+  it.each([
+    [{ branches: ['main', 'notes'], defaultBranch: 'main', current: 'notes', pullRequestOnly: [] }, { name: 'notes', source: 'current' }],
+    [{ branches: ['knowledge', 'notes'], defaultBranch: 'main', current: 'notes', currentChosen: true, pullRequestOnly: [] }, { name: 'notes', source: 'current' }],
+    [{ branches: ['knowledge', 'main'], defaultBranch: 'main', current: 'main', pullRequestOnly: [] }, { name: 'knowledge', source: 'in-use' }],
+    [{ branches: ['main', 'knowledge'], defaultBranch: 'main', current: null, pullRequestOnly: [] }, { name: 'knowledge', source: 'in-use' }],
+    [{ branches: ['main', 'knowledge'], defaultBranch: 'main', current: 'main', pullRequestOnly: ['main'] }, { name: 'knowledge', source: 'in-use' }],
+    [{ branches: ['main'], defaultBranch: 'main', current: null, pullRequestOnly: [] }, { name: 'main', source: 'default' }],
+    [{ branches: ['main'], defaultBranch: 'main', current: 'main', pullRequestOnly: ['main'] }, { name: 'knowledge', source: 'new' }],
+    [{ branches: [], defaultBranch: null, current: 'main', pullRequestOnly: [] }, { name: 'main', source: 'new' }],
+  ])('suggests %o → %o, never a branch that only takes pull requests', (input, expected) => {
+    expect(suggestBranch(input)).toEqual(expected);
   });
 });
 
@@ -888,6 +913,106 @@ describeWithGit('workspace sync against real git, two machines', () => {
       expect(b).toMatchObject({ state: 'synced', pushed: true, branch: 'knowledge' });
       expect(read(wsB, 'projects/backend/brain/features/from-a.md')).toBe('# from A\n');
       expect(git(bare, 'show', 'refs/heads/knowledge:projects/backend/brain/features/offline-b.md')).toBe('# written while disconnected\n');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'lists the shared repository\'s branches, marks the one that refused a direct push, and suggests the one in use',
+    () => {
+      protectOnRemote('main');
+      write(wsA, 'projects/backend/brain/features/from-a.md', '# from A\n');
+      expect(sync(flowA).moved?.reason).toBe('pull-request-required');
+      const listed = branchModule.listWorkspaceBranches({ flowFolder: flowA, workspace: 'team', deps: { git: recordingGit } });
+      expect(listed.branches).toEqual([
+        { name: 'knowledge', pullRequestOnly: false },
+        { name: 'main', pullRequestOnly: true },
+      ]);
+      expect(listed.suggestion).toEqual({ name: 'knowledge', source: 'in-use' });
+      expect(listed.workspace).toMatchObject({ branch: 'knowledge', branchMove: { from: 'main', to: 'knowledge', reason: 'pull-request-required' } });
+      // B has never been refused and is still on main: it is suggested the branch in use.
+      const fromB = branchModule.listWorkspaceBranches({ flowFolder: flowB, workspace: 'team', deps: { git: recordingGit } });
+      expect(fromB.suggestion).toEqual({ name: 'knowledge', source: 'in-use' });
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'a CHOSEN branch that only takes pull requests is reported, never moved away from — and the working one is restored',
+    () => {
+      protectOnRemote('main');
+      const chosen = branchModule.setWorkspaceBranch({ flowFolder: flowA, workspace: 'team', branch: 'main', deps: { git: recordingGit } });
+      expect(chosen).toMatchObject({ changed: false, branch: 'main' });
+      write(wsA, 'projects/backend/brain/features/from-a.md', '# from A\n');
+      const refused = sync(flowA);
+      // POSITIVE first (#28): the push really ran and was refused.
+      expect(calls.filter((args) => args.includes('push'))).toHaveLength(1);
+      expect(refused).toMatchObject({ state: 'no-access', rejection: { kind: 'pull-request-required' }, branch: 'main' });
+      expect(refused.moved).toBeUndefined();
+      expect(branchOf(wsA)).toBe('main');
+
+      // The person picks another branch: it is created by the next sync, with the work.
+      expect(branchModule.setWorkspaceBranch({ flowFolder: flowA, workspace: 'team', branch: 'notes', deps: { git: recordingGit } })).toMatchObject({
+        changed: true,
+        previous: 'main',
+      });
+      expect(sync(flowA)).toMatchObject({ state: 'synced', pushed: true, branch: 'notes' });
+      expect(git(bare, 'show', 'refs/heads/notes:projects/backend/brain/features/from-a.md')).toBe('# from A\n');
+
+      // Restoring a branch is not choosing it: sync may move it again by itself.
+      branchModule.setWorkspaceBranch({ flowFolder: flowA, workspace: 'team', branch: 'main', restore: true, deps: { git: recordingGit } });
+      write(wsA, 'projects/backend/brain/features/again.md', '# again\n');
+      expect(sync(flowA).moved?.reason).toBe('pull-request-required');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'refuses a name git would not accept as a branch, before anything changes',
+    () => {
+      for (const bad of ['', '-x', 'a b', 'a..b', 'x.lock']) {
+        expect(() => branchModule.setWorkspaceBranch({ flowFolder: flowA, workspace: 'team', branch: bad, deps: { git: recordingGit } })).toThrow(
+          expect.objectContaining({ reason: 'invalid-branch' })
+        );
+      }
+      expect(branchOf(wsA)).toBe('main');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'set-remote --branch reconnects onto the chosen branch',
+    () => {
+      remoteModule.unsetWorkspaceRemote({ flowFolder: flowB, workspace: 'team' });
+      const connected = remoteModule.setWorkspaceRemote({ flowFolder: flowB, workspace: 'team', remote: REMOTE, branch: 'notes' });
+      expect(connected).toMatchObject({ changed: true, branchChanged: true, workspace: { branch: 'notes' } });
+      write(wsB, 'projects/backend/brain/features/from-b.md', '# from B\n');
+      expect(sync(flowB)).toMatchObject({ state: 'synced', pushed: true, branch: 'notes' });
+      // Same address, another branch: only the branch changes.
+      expect(remoteModule.setWorkspaceRemote({ flowFolder: flowB, workspace: 'team', remote: REMOTE, branch: 'main' })).toMatchObject({
+        branchChanged: true,
+        workspace: { branch: 'main' },
+      });
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'a new member joins on the branch the team moved to, and on a chosen one when asked',
+    () => {
+      protectOnRemote('main');
+      write(wsA, 'projects/backend/brain/features/from-a.md', '# from A\n');
+      expect(sync(flowA).moved?.reason).toBe('pull-request-required');
+
+      const flowC = join(sandbox, 'flow-c');
+      joinWorkspace({ flowFolder: flowC, remote: REMOTE });
+      const wsC = join(flowC, 'workspaces', 'team');
+      expect(branchOf(wsC)).toBe('knowledge');
+      expect(read(wsC, 'projects/backend/brain/features/from-a.md')).toBe('# from A\n');
+
+      const flowD = join(sandbox, 'flow-d');
+      joinWorkspace({ flowFolder: flowD, remote: REMOTE, branch: 'main' });
+      expect(branchOf(join(flowD, 'workspaces', 'team'))).toBe('main');
     },
     TEST_TIMEOUT_MS
   );

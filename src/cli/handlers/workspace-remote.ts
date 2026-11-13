@@ -41,6 +41,7 @@
  */
 
 import { redactRemote } from './knowledge-migration.js';
+import { chooseWorkspaceBranch, requireBranchName } from './workspace-branch.js';
 import { refuseIfBusy } from './workspace-admin.js';
 import {
   NO_HINTS,
@@ -68,6 +69,8 @@ export interface SetRemoteOptions extends WorkspaceContext {
   remote: string;
   /** A person chose to change a shared repository the Workspace already has (forbidden-pattern #15). */
   replace?: boolean;
+  /** The branch to sync on there — a person's choice (`set-branch`'s switch, same rules). */
+  branch?: string;
 }
 
 export interface SetRemoteResult {
@@ -77,8 +80,10 @@ export interface SetRemoteResult {
   remote: string;
   /** The shared repository it had before (credentials masked), or null. */
   previous: string | null;
-  /** False when it already shared through exactly this address. */
+  /** False when it already shared through exactly this address and nothing else changed. */
   changed: boolean;
+  /** `--branch` moved the Workspace to another branch. */
+  branchChanged?: boolean;
   /** Always false: this verb never contacts the remote — the next sync publishes. */
   pushed: false;
   detail: string;
@@ -165,11 +170,27 @@ export function setWorkspaceRemote(options: SetRemoteOptions): SetRemoteResult {
   if (invalid !== null) throw invalid;
   const workspace = pickWorkspace(scanWorkspaces(flowFolder), options.workspace, NO_HINTS);
   requireRepository(workspace, deps.git);
+  // Decided before anything is written: a bad name changes nothing.
+  const branch = options.branch === undefined ? undefined : requireBranchName(options.branch, deps.git, workspace.path);
 
   const origin = originOf(workspace.path, deps.git);
   const recorded = workspace.file.remote ?? null;
   const current = origin ?? recorded;
   if (origin === remote && recorded === remote) {
+    if (branch !== undefined) {
+      refuseIfUnsettled(workspace, deps.git);
+      const { changed } = chooseWorkspaceBranch(workspace, deps.git, branch);
+      return {
+        action: 'set-remote',
+        workspace: summaryOf(readWorkspace(flowFolder, workspace.slug), deps.git),
+        remote,
+        previous: redactRemote(remote),
+        changed,
+        branchChanged: changed,
+        pushed: false,
+        detail: changed ? 'Nothing was sent yet — the next sync exchanges the Workspace on this branch.' : 'The Workspace already shares through this repository.',
+      };
+    }
     return {
       action: 'set-remote',
       workspace: summaryOf(workspace, deps.git),
@@ -203,6 +224,7 @@ export function setWorkspaceRemote(options: SetRemoteOptions): SetRemoteResult {
     }
   }
   if (recorded !== remote) writeWorkspace(withRemote(workspace, remote));
+  const branchChanged = branch === undefined ? false : chooseWorkspaceBranch(workspace, deps.git, branch).changed;
 
   return {
     action: 'set-remote',
@@ -210,6 +232,7 @@ export function setWorkspaceRemote(options: SetRemoteOptions): SetRemoteResult {
     remote,
     previous: current === null ? null : redactRemote(current),
     changed: true,
+    branchChanged,
     pushed: false,
     detail: 'Nothing was sent yet — the next sync publishes the Workspace there.',
   };

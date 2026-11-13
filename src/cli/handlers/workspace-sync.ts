@@ -125,6 +125,7 @@ import {
   workspaceGitattributes,
 } from './knowledge-classes.js';
 import { type HeldKnowledge, heldKnowledgePaths } from './knowledge-landing.js';
+import { WORKSPACE_FALLBACK_BRANCH, switchWorkspaceBranch } from './workspace-branch.js';
 import { parseGitRemote, redactRemote } from './knowledge-migration.js';
 import {
   applyDecisions,
@@ -142,8 +143,11 @@ import {
   type Take,
 } from './workspace-merge.js';
 import {
+  chosenBranchOf,
   defaultWorkspaceGit,
+  markPullRequestOnly,
   projectFolder,
+  recordBranchMove,
   readLocalProjects,
   readWorkspace,
   realOrResolved,
@@ -161,13 +165,7 @@ import {
 // ─── Names ──────────────────────────────────────────────────────────────────
 
 const REMOTE_NAME = 'origin';
-/**
- * Where a Workspace syncs when its own branch only accepts pull requests.
- * A CONVENTION, not a record: every member's Flow reaches the same answer from
- * the remote alone (the branch exists there → sync there), so nobody has to be
- * told and nothing has to be written on a branch that refuses writes.
- */
-export const WORKSPACE_FALLBACK_BRANCH = 'knowledge';
+export { WORKSPACE_FALLBACK_BRANCH } from './workspace-branch.js';
 export const SYNC_LOCK_GIT_PATH = 'plan-flow-sync.lock';
 /** Written right before Flow's own merge starts, removed once it is committed or undone. */
 export const SYNC_MERGE_MARKER_GIT_PATH = 'plan-flow-sync-merge.json';
@@ -1532,12 +1530,22 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
      * merge brings in what the remote holds there. Refused (false) when a local
      * branch of that name already holds commits HEAD does not.
      */
+    // A branch a PERSON chose is never moved away from, nor left to follow
+    // another member: a refusal there is reported, so they can choose again.
+    const chosen = chosenBranchOf(repo, git) === branch;
     const moveTo = (reason: 'pull-request-required' | 'followed'): boolean => {
+      if (chosen) return false;
       const target = WORKSPACE_FALLBACK_BRANCH;
+      // Only ever AT the current commit: a local branch that diverged is left alone.
       const existing = revParse(git, repo, `refs/heads/${target}`);
       if (existing !== null && !isAncestor(git, repo, existing, 'HEAD')) return false;
-      if (!attempt(git, ['switch', '-q', '-C', target], repo).ok) return false;
+      try {
+        switchWorkspaceBranch(git, repo, target, workspace.file.name);
+      } catch {
+        return false;
+      }
       result.moved = { from: branch, to: target, reason };
+      recordBranchMove(repo, git, { from: branch, to: target, reason, at: now().toISOString() });
       branch = target;
       trackingRef = `refs/remotes/${REMOTE_NAME}/${target}`;
       result.branch = target;
@@ -1616,12 +1624,10 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
         // The branch only takes pull requests: move to the fallback branch ONCE,
         // bring in whatever is already there, and push again. This does not
         // spend a round.
-        if (
-          !movedForPush &&
-          branch !== WORKSPACE_FALLBACK_BRANCH &&
-          classifyRejection(pushed.detail).kind === 'pull-request-required' &&
-          moveTo('pull-request-required')
-        ) {
+        const pullRequestsOnly = classifyRejection(pushed.detail).kind === 'pull-request-required';
+        // Remembered on this machine, so the branch list can say so the next time someone picks a branch.
+        if (pullRequestsOnly) markPullRequestOnly(repo, git, branch);
+        if (!movedForPush && branch !== WORKSPACE_FALLBACK_BRANCH && pullRequestsOnly && moveTo('pull-request-required')) {
           movedForPush = true;
           const fetched = fetchOnce();
           if (!fetched.ok) {

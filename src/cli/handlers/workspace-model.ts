@@ -223,6 +223,13 @@ export type WorkspaceRefusalReason =
   | 'remote-exists'
   /** sync: the shared repository holds a history that has nothing in common with this Workspace's. */
   | 'unrelated-history'
+  // the Workspace's branch (workspace-branch.ts)
+  /** set-branch / --branch: not a name git accepts for a branch. */
+  | 'invalid-branch'
+  /** set-branch: a local branch of that name holds commits the Workspace's current one does not. */
+  | 'branch-diverged'
+  /** branches: the shared repository could not be read (unreachable, or access refused). */
+  | 'remote-unreadable'
   | 'failed';
 
 /**
@@ -640,6 +647,100 @@ export interface WorkspaceSummary {
   slug: string;
   path: string;
   remote: string | null;
+  /** The branch this Workspace syncs on here (its checked-out branch), or null when it is on none. */
+  branch: string | null;
+  /** The last time Flow moved this Workspace to another branch by itself, or null. */
+  branchMove: BranchMove | null;
+}
+
+/** Why Flow moved a Workspace's branch by itself (workspace sync). */
+export type BranchMoveReason = 'pull-request-required' | 'followed';
+
+export interface BranchMove {
+  from: string;
+  to: string;
+  reason: BranchMoveReason;
+  /** RFC 3339. */
+  at: string;
+}
+
+// ─── The Workspace's branch, as this machine knows it ───────────────────────
+//
+// Git IS the record: the branch is whatever the Workspace repository has
+// checked out. What git cannot say — that Flow moved it, and which branches
+// refused a direct push — lives in the repository's own config under `flow.*`,
+// local to this machine and never synced.
+
+/**
+ * Where a Workspace syncs when its own branch only accepts pull requests.
+ * A CONVENTION, not a record: every member's Flow reaches the same answer from
+ * the remote alone (the branch exists there → sync there), so nobody has to be
+ * told and nothing has to be written on a branch that refuses writes.
+ */
+export const WORKSPACE_FALLBACK_BRANCH = 'knowledge';
+
+const MOVE_KEYS = { from: 'flow.branchmovedfrom', to: 'flow.branchmovedto', reason: 'flow.branchmovedreason', at: 'flow.branchmovedat' } as const;
+const PULL_REQUEST_ONLY_KEY = 'flow.pullrequestonly';
+
+export function currentBranchOf(repo: string, git: WorkspaceGit): string | null {
+  const name = tryGit(git, ['symbolic-ref', '--short', '-q', 'HEAD'], repo)?.trim() ?? '';
+  return name === '' ? null : name;
+}
+
+export function branchMoveOf(repo: string, git: WorkspaceGit): BranchMove | null {
+  const read = (key: string): string => tryGit(git, ['config', '--local', '--get', key], repo)?.trim() ?? '';
+  const from = read(MOVE_KEYS.from);
+  const to = read(MOVE_KEYS.to);
+  const reason = read(MOVE_KEYS.reason);
+  const at = read(MOVE_KEYS.at);
+  if (from === '' || to === '' || at === '' || (reason !== 'pull-request-required' && reason !== 'followed')) return null;
+  return { from, to, reason, at };
+}
+
+/** Record that Flow moved the branch by itself; a person choosing one clears it (`clearBranchMove`). */
+export function recordBranchMove(repo: string, git: WorkspaceGit, move: BranchMove): void {
+  for (const [field, key] of Object.entries(MOVE_KEYS)) {
+    tryGit(git, ['config', '--local', key, move[field as keyof BranchMove]], repo);
+  }
+}
+
+export function clearBranchMove(repo: string, git: WorkspaceGit): void {
+  for (const key of Object.values(MOVE_KEYS)) tryGit(git, ['config', '--local', '--unset-all', key], repo);
+}
+
+const CHOSEN_KEY = 'flow.branchchosen';
+
+/**
+ * The branch a PERSON chose for this Workspace on this machine, or null. While
+ * it is the checked-out branch, sync never moves away from it or follows
+ * another member by itself: it reports the refusal instead.
+ */
+export function chosenBranchOf(repo: string, git: WorkspaceGit): string | null {
+  const name = tryGit(git, ['config', '--local', '--get', CHOSEN_KEY], repo)?.trim() ?? '';
+  return name === '' ? null : name;
+}
+
+export function setChosenBranch(repo: string, git: WorkspaceGit, branch: string | null): void {
+  if (branch === null) tryGit(git, ['config', '--local', '--unset-all', CHOSEN_KEY], repo);
+  else tryGit(git, ['config', '--local', CHOSEN_KEY, branch], repo);
+}
+
+/** Branches this machine saw refuse a direct push because they only take pull requests. */
+export function pullRequestOnlyBranches(repo: string, git: WorkspaceGit): string[] {
+  const out = tryGit(git, ['config', '--local', '--get-all', PULL_REQUEST_ONLY_KEY], repo) ?? '';
+  return [...new Set(out.split('\n').map((line) => line.trim()).filter((line) => line !== ''))];
+}
+
+export function markPullRequestOnly(repo: string, git: WorkspaceGit, branch: string): void {
+  if (pullRequestOnlyBranches(repo, git).includes(branch)) return;
+  tryGit(git, ['config', '--local', '--add', PULL_REQUEST_ONLY_KEY, branch], repo);
+}
+
+/** A name git accepts for a branch — never one that reads as an option. */
+export function isValidBranchName(name: string, git: WorkspaceGit, cwd: string): boolean {
+  const trimmed = name.trim();
+  if (trimmed === '' || trimmed !== name || trimmed.startsWith('-') || trimmed.length > 200) return false;
+  return tryGit(git, ['check-ref-format', '--branch', trimmed], cwd) !== null;
 }
 
 export interface ProjectView {
@@ -660,6 +761,8 @@ export function summaryOf(workspace: LoadedWorkspace, git: WorkspaceGit): Worksp
     slug: workspace.slug,
     path: workspace.path,
     remote: workspace.file.remote ?? originOf(workspace.path, git),
+    branch: currentBranchOf(workspace.path, git),
+    branchMove: branchMoveOf(workspace.path, git),
   };
 }
 
@@ -1351,6 +1454,8 @@ export interface JoinOptions extends WorkspaceContext {
   remote: string;
   /** The folder name to use on this machine (the Workspace's own name is kept). */
   name?: string;
+  /** The branch to sync on — a person's choice. Without it: the fallback branch when the repository has one, else its default. */
+  branch?: string;
 }
 
 export interface JoinResult {
@@ -1378,6 +1483,9 @@ export function joinWorkspace(options: JoinOptions): JoinResult {
   const refusal = remoteRefusal(remote);
   if (refusal !== null) throw refusal;
   const identity = remoteIdentity(remote);
+  if (options.branch !== undefined && !isValidBranchName(options.branch, deps.git, process.cwd())) {
+    throw new WorkspaceRefusal('invalid-branch', `'${options.branch}' isn't a name a branch can have`, { branch: options.branch });
+  }
 
   const scan = scanWorkspaces(flowFolder);
   const already = scan.workspaces.find((workspace) => {
@@ -1404,6 +1512,23 @@ export function joinWorkspace(options: JoinOptions): JoinResult {
   } catch (error) {
     rmSync(staging, { recursive: true, force: true });
     throw new WorkspaceRefusal('clone-failed', `the Workspace could not be fetched: ${errorText(error)}`, { remote });
+  }
+
+  // THE BRANCH, before anything is read from the clone: its workspace.json is
+  // the one the team keeps there. A chosen branch is checked out (or started
+  // here when the repository does not have it yet); without a choice, the
+  // fallback branch wins when some member already moved the Workspace to it —
+  // the repository's default would be a snapshot from before the move.
+  try {
+    const wanted = options.branch ?? (tryGit(deps.git, ['rev-parse', '-q', '--verify', `refs/remotes/origin/${WORKSPACE_FALLBACK_BRANCH}`], staging) === null ? null : WORKSPACE_FALLBACK_BRANCH);
+    if (wanted !== null) {
+      const onRemote = tryGit(deps.git, ['rev-parse', '-q', '--verify', `refs/remotes/origin/${wanted}`], staging) !== null;
+      deps.git(onRemote ? ['-c', 'core.symlinks=false', 'switch', '-q', wanted] : ['switch', '-q', '-c', wanted], staging);
+      if (options.branch !== undefined) setChosenBranch(staging, deps.git, wanted);
+    }
+  } catch (error) {
+    rmSync(staging, { recursive: true, force: true });
+    throw new WorkspaceRefusal('clone-failed', `the Workspace's branch could not be checked out: ${errorText(error)}`, { remote });
   }
 
   let parsed: unknown;
