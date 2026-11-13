@@ -625,6 +625,22 @@ describe('ThreadStore', () => {
       expect(store.latestWriterThreadFor(ROOT_B, 'flow/plans/plan_r_v1.md', [], Date.parse(startedAt) + 500)).toBeNull()
     })
 
+    it('credits a FILE-TOOL write only to a change it could have made — never a git rewrite an hour later (live 2026-11-13)', () => {
+      const writer = store.createThread({ projectRoot: ROOT_A })
+      const startedAt = '2026-11-13T13:40:00.000Z'
+      store.recordToolCall({
+        threadId: writer.id,
+        toolName: 'Write',
+        startedAt,
+        inputJson: JSON.stringify({ file_path: `${ROOT_A}/flow/discovery/discovery_d_v1.md`, content: '# D' }),
+      })
+      // POSITIVE first (#28): the agent's own write is credited, dated or not.
+      expect(store.latestWriterThreadFor(ROOT_A, 'flow/discovery/discovery_d_v1.md', [], Date.parse(startedAt) + 300)).toBe(writer.id)
+      expect(store.latestWriterThreadFor(ROOT_A, 'flow/discovery/discovery_d_v1.md')).toBe(writer.id)
+      // An hour later a rebase / sync rewrites the file: nobody's agent did that.
+      expect(store.latestWriterThreadFor(ROOT_A, 'flow/discovery/discovery_d_v1.md', [], Date.parse(startedAt) + 3_600_000)).toBeNull()
+    })
+
     it('never credits a doc to a thread whose worktree of the attached project is a different checkout', () => {
       const writer = store.createThread({ projectRoot: ROOT_A })
       store.addThreadRoot(writer.id, ROOT_B)

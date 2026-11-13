@@ -1689,6 +1689,14 @@ export class ThreadStore extends EventEmitter {
    * With `observedAt` (the doc's mtime), a Bash call that names the doc's file
    * and started just before that moment also counts — skills write docs with
    * `cat > … <<EOF` too. Without it, only file-tool writes count.
+   *
+   * With `observedAt`, a FILE-TOOL write counts only inside the same window:
+   * the question is "whose agent wrote THIS change", not "who ever wrote this
+   * file". Unbounded, a change nobody's agent made — a git rebase, a branch
+   * switch, a Workspace sync pulling a teammate's edit an hour later — was
+   * credited to the last thread that ever wrote the doc and pinned its card
+   * under that thread's newest answer (live 2026-11-13; a restart cleared it,
+   * because a reload only seeds history).
    */
   latestWriterThreadFor(
     rootPath: string,
@@ -1704,7 +1712,13 @@ export class ThreadStore extends EventEmitter {
                     AND ((${attachedMatch})
                          OR (r.worktree_path IS NOT NULL
                              AND instr(tc.input_json, r.worktree_path || '/' || ?) > 0))))`
-    const fileWriteParams = [rootPath, `%${relPath}%`, rootPath, ...forms.map((form) => `%${form}%`), relPath]
+    const fileWriteParams: unknown[] = [rootPath, `%${relPath}%`, rootPath, ...forms.map((form) => `%${form}%`), relPath]
+    const window =
+      observedAt === null
+        ? null
+        : [new Date(observedAt - SHELL_WRITE_WINDOW_MS).toISOString(), new Date(observedAt + SHELL_WRITE_CLOCK_SLACK_MS).toISOString()]
+    const fileWriteInWindow = window === null ? fileWrite : `${fileWrite} AND tc.started_at BETWEEN ? AND ?`
+    if (window !== null) fileWriteParams.push(...window)
     // A SHELL WRITE (`cat > "$FLOW/plans/plan_x_v1.md" <<EOF`) names the doc
     // through variables, so no path form above matches it — only the file
     // name does. A name alone also matches a `cat` that read it, so it counts
@@ -1722,8 +1736,7 @@ export class ThreadStore extends EventEmitter {
                 OR EXISTS (SELECT 1 FROM thread_roots r WHERE r.thread_id = t.id AND r.root_path = ?))`,
             params: [
               fileName,
-              new Date(observedAt - SHELL_WRITE_WINDOW_MS).toISOString(),
-              new Date(observedAt + SHELL_WRITE_CLOCK_SLACK_MS).toISOString(),
+              ...(window ?? []),
               rootPath,
               rootPath,
             ],
@@ -1733,7 +1746,7 @@ export class ThreadStore extends EventEmitter {
         `SELECT tc.thread_id AS threadId FROM tool_calls tc
          JOIN threads t ON t.id = tc.thread_id
          WHERE tc.parent_tool_call_id IS NULL
-           AND ((${fileWrite})${shellWrite === null ? '' : ` OR (${shellWrite.sql})`})
+           AND ((${fileWriteInWindow})${shellWrite === null ? '' : ` OR (${shellWrite.sql})`})
          ORDER BY tc.started_at DESC LIMIT 1`,
       )
       .get(...fileWriteParams, ...(shellWrite?.params ?? [])) as { threadId: string } | undefined
