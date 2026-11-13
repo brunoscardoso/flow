@@ -29,7 +29,7 @@ const project = (slug: string, localPath: string | null, extra: Record<string, u
 
 const ACME = { name: 'Acme', slug: 'acme', path: `${FLOW}/workspaces/acme`, remote: null }
 /** What the app reads ACME as: the CLI's `default` is a local notion, absent → not the Default one. */
-const ACME_APP = { ...ACME, isDefault: false }
+const ACME_APP = { ...ACME, branch: null, branchMove: null, isDefault: false }
 
 const LIST = {
   action: 'status',
@@ -563,7 +563,7 @@ describe('migrate — every project into the Default Workspace', () => {
     expect(answer).toEqual({
       ok: true,
       dryRun: false,
-      workspace: { name: 'Default', slug: 'default', path: `${FLOW}/workspaces/default`, remote: null, isDefault: true, created: true },
+      workspace: { name: 'Default', slug: 'default', path: `${FLOW}/workspaces/default`, remote: null, branch: null, branchMove: null, isDefault: true, created: true },
       migrated: [{ root: API, project: project('api', API), previous: { kind: 'link' }, imported: { files: 12, skipped: 0, renamed: 1 } }],
       unchanged: [],
       pending: [{ root: WEB, reason: 'committed-folder', commit: { message: 'chore: move knowledge', files: 3, from: 'flow', to: 'flow.pre-workspace' } }],
@@ -734,5 +734,88 @@ describe('connecting a Workspace to a shared repository', () => {
     })
     expect(await registry.unsetRemote('acme')).toEqual({ ok: true, workspace: ACME_APP, changed: true })
     expect(h.events).toEqual([{ cause: 'remote' }])
+  })
+})
+
+describe('the branch a Workspace syncs on', () => {
+  const TEAM = 'https://github.com/acme/acme-knowledge.git'
+  const MOVE = { from: 'main', to: 'knowledge', reason: 'pull-request-required', at: '2026-11-13T12:00:00.000Z' }
+
+  it('a summary carries the branch and the move Flow made — leniently: a bad move reads as none, never as unavailable', async () => {
+    const listing = (extra: Record<string, unknown>) => ok({ ...LIST, workspaces: [{ ...ACME, ...extra, projects: [] }] })
+    const good = harness({ [LIST_KEY]: listing({ branch: 'knowledge', branchMove: MOVE }) })
+    expect(await good.registry.list()).toMatchObject({ ok: true, workspaces: [{ branch: 'knowledge', branchMove: MOVE }] })
+    const odd = harness({ [LIST_KEY]: listing({ branch: 7, branchMove: { ...MOVE, reason: 'whim' } }) })
+    expect(await odd.registry.list()).toMatchObject({ ok: true, workspaces: [{ branch: null, branchMove: null }] })
+  })
+
+  it('set-remote and join pass a chosen branch as one value', async () => {
+    const SET = `${HOME} :: workspace set-remote --workspace=acme --remote=${TEAM} --branch=knowledge --json`
+    const { registry, h } = harness({
+      [SET]: ok({ action: 'set-remote', workspace: { ...ACME, remote: TEAM, branch: 'knowledge' }, changed: true, branchChanged: true }),
+    })
+    expect(await registry.setRemote('acme', TEAM, { branch: ' knowledge ' })).toMatchObject({ ok: true, workspace: { branch: 'knowledge' } })
+    expect(h.calls.map((call) => call.args)).toEqual([['workspace', 'set-remote', '--workspace=acme', `--remote=${TEAM}`, '--branch=knowledge', '--json']])
+  })
+
+  it('a branch that could be read as a flag, or holds a space, never reaches argv', async () => {
+    const { registry, h } = harness({})
+    expect(await registry.setRemote('acme', TEAM, { branch: '--upload-pack=evil' })).toMatchObject({ ok: false, reason: 'invalid-branch' })
+    expect(await registry.setBranch('acme', 'two words')).toMatchObject({ ok: false, reason: 'invalid-branch' })
+    expect(await registry.join(TEAM, undefined, { branch: '-x' })).toMatchObject({ ok: false, reason: 'invalid-branch' })
+    expect(h.calls).toEqual([])
+  })
+
+  it('branches is a read: the CLI answer handed on field by field, with a network-length bound', async () => {
+    const KEY = `${HOME} :: workspace branches --workspace=acme --remote=${TEAM} --json`
+    const { registry, h } = harness({
+      [KEY]: ok({
+        action: 'branches',
+        workspace: ACME,
+        remote: TEAM,
+        branches: [{ name: 'knowledge', pullRequestOnly: false, extra: 'never crosses' }, { name: 'main', pullRequestOnly: true }],
+        defaultBranch: 'main',
+        suggestion: { name: 'knowledge', source: 'in-use' },
+      }),
+    })
+    expect(await registry.branches('acme', TEAM)).toEqual({
+      ok: true,
+      branches: [{ name: 'knowledge', pullRequestOnly: false }, { name: 'main', pullRequestOnly: true }],
+      defaultBranch: 'main',
+      suggestion: { name: 'knowledge', source: 'in-use' },
+    })
+    expect(h.calls[0]?.timeoutMs).toBeGreaterThan(30_000)
+    expect(h.events).toEqual([])
+  })
+
+  it('an unknown suggestion source is a shape this build cannot read — unavailable, never half-used', async () => {
+    const KEY = `${HOME} :: workspace branches --workspace=acme --json`
+    const { registry } = harness({
+      [KEY]: ok({ action: 'branches', branches: [], defaultBranch: null, suggestion: { name: 'x', source: 'guess' } }),
+    })
+    expect(await registry.branches('acme')).toMatchObject({ ok: false, reason: 'unavailable' })
+  })
+
+  it('set-branch passes --restore only when asked, and announces a change once', async () => {
+    const KEY = `${HOME} :: workspace set-branch --workspace=acme --branch=main --restore --json`
+    const { registry, h } = harness({
+      [KEY]: ok({ action: 'set-branch', workspace: { ...ACME, branch: 'main' }, branch: 'main', previous: 'notes', changed: true }),
+    })
+    expect(await registry.setBranch('acme', 'main', { restore: true })).toEqual({
+      ok: true,
+      workspace: { ...ACME_APP, branch: 'main' },
+      previous: 'notes',
+      changed: true,
+    })
+    expect(h.events).toEqual([{ cause: 'remote' }])
+  })
+
+  it('the CLI refusals for a branch keep their own reason and sentence', async () => {
+    const KEY = `${HOME} :: workspace set-branch --workspace=acme --branch=notes --json`
+    const { registry } = harness({ [KEY]: refused({ action: 'set-branch', refused: 'branch-diverged', branch: 'notes' }) })
+    const answer = await registry.setBranch('acme', 'notes')
+    expect(answer).toMatchObject({ ok: false, reason: 'branch-diverged', payload: { branch: 'notes' } })
+    if (answer.ok) throw new Error('expected a refusal')
+    expect(answer.detail).toContain('Choose another branch')
   })
 })

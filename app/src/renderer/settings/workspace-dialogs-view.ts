@@ -133,7 +133,24 @@ import {
   workingLabel,
   type ConnectChoice,
 } from './workspace-remote-model'
-import type { WorkspaceHostTools, WorkspaceRemoteResult } from '../../shared/workspaces-contract'
+import type { WorkspaceBranchesResult, WorkspaceHostTools, WorkspaceRemoteResult, WorkspaceSyncCause } from '../../shared/workspaces-contract'
+import {
+  BRANCHES_AFTER_ADDRESS,
+  BRANCH_LABEL,
+  NEW_REPOSITORY_BRANCH,
+  CHANGE_BRANCH_BODY,
+  CHECKING_BRANCH_LABEL,
+  JOIN_BRANCH_HELP,
+  JOIN_BRANCH_LABEL,
+  NEW_BRANCH_LABEL,
+  NEW_BRANCH_PLACEHOLDER,
+  NEW_BRANCH_VALUE,
+  READING_BRANCHES,
+  SAVE_BRANCH_LABEL,
+  branchChoices,
+  changeBranchTitle,
+  pickedBranch,
+} from './workspace-branch-model'
 
 /** The projects open in the app, with their Workspace. */
 export async function readOpenProjects(): Promise<OpenProject[]> {
@@ -569,6 +586,164 @@ function fillSelect(select: HTMLSelectElement, values: readonly string[]): void 
   }
 }
 
+// ── The branch picker ───────────────────────────────────────────────────────
+
+interface BranchPicker {
+  row: HTMLDivElement
+  /** Ask for the branches of a repository (null: show `idleLine` and offer only a typed name). */
+  load(read: Promise<WorkspaceBranchesResult> | null, idleLine?: string): void
+  /** The picked branch; `required` refuses "no choice". */
+  value(required: boolean): ReturnType<typeof pickedBranch>
+  /** A check proved this branch unusable: keep it listed, labelled, and no longer pickable. */
+  markUnusable(branch: string, cause: WorkspaceSyncCause): void
+  focus(): void
+  setDisabled(disabled: boolean): void
+}
+
+/**
+ * One branch picker for every dialog that sets a branch: a select of the
+ * repository's branches (the suggestion pre-selected and labelled), "A new
+ * branch…" revealing a name field, and a line saying what is going on. Every
+ * word comes from `workspace-branch-model.ts`.
+ */
+function branchPicker(onChange: () => void): BranchPicker {
+  const row = document.createElement('div')
+  row.className = 'fl-ws-dialog-field fl-ws-branch'
+  row.dataset['part'] = 'branch-picker'
+  const select = selectField('fl-ws-branch-select', BRANCH_LABEL, [])
+  const typed = field('fl-ws-branch-new', NEW_BRANCH_LABEL, NEW_BRANCH_PLACEHOLDER, null)
+  const line = paragraph(BRANCHES_AFTER_ADDRESS, 'fl-ws-dialog-help')
+  line.dataset['part'] = 'branch-help'
+  row.append(select.row, typed.row, line)
+  let last: WorkspaceBranchesResult | null = null
+  let generation = 0
+  const unusable = new Map<string, WorkspaceSyncCause>()
+
+  const syncTyped = (): void => {
+    typed.row.hidden = select.select.value !== NEW_BRANCH_VALUE
+  }
+  const paint = (answer: WorkspaceBranchesResult | null, idleLine?: string): void => {
+    const choices = branchChoices(answer, unusable)
+    select.select.replaceChildren()
+    for (const choice of choices.options) {
+      const option = document.createElement('option')
+      option.value = choice.value
+      option.textContent = choice.label
+      option.disabled = choice.disabled
+      select.select.appendChild(option)
+    }
+    select.select.value = choices.selected
+    if (choices.newName !== '' && typed.input.value.trim() === '') typed.input.value = choices.newName
+    line.textContent = idleLine ?? choices.help
+    syncTyped()
+  }
+  select.select.addEventListener('change', () => {
+    syncTyped()
+    if (select.select.value === NEW_BRANCH_VALUE) typed.input.focus()
+    onChange()
+  })
+  typed.input.addEventListener('input', onChange)
+  paint(null, BRANCHES_AFTER_ADDRESS)
+
+  return {
+    row,
+    load(read, idleLine) {
+      generation += 1
+      const mine = generation
+      if (read === null) {
+        last = null
+        paint(null, idleLine ?? BRANCHES_AFTER_ADDRESS)
+        return
+      }
+      line.textContent = READING_BRANCHES
+      select.select.disabled = true
+      void read
+        .catch((): WorkspaceBranchesResult => ({ ok: false, reason: 'unavailable', detail: '' }))
+        .then((answer) => {
+          if (mine !== generation || !row.isConnected) return
+          select.select.disabled = false
+          last = answer
+          paint(answer)
+        })
+    },
+    value: (required) => pickedBranch(select.select.value, typed.input.value, { required }),
+    markUnusable(branch, cause) {
+      unusable.set(branch, cause)
+      if (typed.input.value.trim() === branch) typed.input.value = ''
+      paint(last)
+    },
+    focus() {
+      if (select.select.value === NEW_BRANCH_VALUE) typed.input.focus()
+      else select.select.focus()
+    },
+    setDisabled(disabled) {
+      select.select.disabled = disabled
+      typed.input.disabled = disabled
+    },
+  }
+}
+
+/**
+ * "Change…" on the settings' branch row: choose the branch a Workspace syncs
+ * on. Main switches it and checks it by one sync; a branch that can't be used
+ * is put back and refused, and the dialog stays open asking for another.
+ * Resolves true when the branch changed.
+ */
+export function openChangeBranchDialog(input: { slug: string; name: string }): Promise<boolean> {
+  return new Promise((resolve) => {
+    const api = window.flow.workspaces
+    const dialog = shell(changeBranchTitle(input.name), CHANGE_BRANCH_BODY, 'change-branch')
+    let changed = false
+    dialog.onClose(() => resolve(changed))
+    const picker = branchPicker(() => {
+      dialog.message.textContent = ''
+    })
+    dialog.content.append(picker.row)
+    picker.load(api?.branches({ slug: input.slug }) ?? null)
+    const confirm = actionButton(SAVE_BRANCH_LABEL, true, () => void submit())
+    confirm.dataset['action'] = 'change-branch-confirm'
+    dialog.actions.append(actionButton(CANCEL_LABEL, false, () => dialog.close()), confirm)
+
+    const submit = async (): Promise<void> => {
+      const picked = picker.value(true)
+      if (!picked.ok) {
+        dialog.message.textContent = picked.message
+        picker.focus()
+        return
+      }
+      if (api === undefined || picked.branch === undefined) {
+        dialog.message.textContent = CONNECT_FAILED_LINE
+        return
+      }
+      const branch = picked.branch
+      confirm.disabled = true
+      confirm.textContent = CHECKING_BRANCH_LABEL
+      picker.setDisabled(true)
+      const result = await api.setBranch({ slug: input.slug, branch }).catch(() => null)
+      confirm.disabled = false
+      confirm.textContent = SAVE_BRANCH_LABEL
+      picker.setDisabled(false)
+      if (result === null) {
+        dialog.message.textContent = CONNECT_FAILED_LINE
+        return
+      }
+      if (!result.ok) {
+        dialog.message.textContent = result.detail
+        if (result.reason === 'branch-unusable' && result.cause !== undefined) picker.markUnusable(branch, result.cause)
+        picker.focus()
+        return
+      }
+      changed = true
+      const outcome = remoteOutcome(result, input.name, Date.now())
+      const done = paragraph(outcome.text, outcome.kind === 'done' && outcome.tone === 'ok' ? 'fl-ws-dialog-done' : 'fl-ws-dialog-help')
+      done.dataset['part'] = 'branch-result'
+      dialog.content.replaceChildren(done)
+      dialog.dialog.querySelector('.fl-ws-dialog-body')?.remove()
+      dialog.actions.replaceChildren(actionButton(DONE_LABEL, true, () => dialog.close()))
+    }
+  })
+}
+
 /**
  * "Connect a shared repository…" (or "Change…", `replace: true`): create a
  * PRIVATE one on a host whose own tool is signed in here, or use an existing
@@ -610,6 +785,33 @@ export function openConnectRemoteDialog(input: { slug: string; name: string; rep
     const azureProject = selectField('fl-ws-remote-project', AZURE_PROJECT_LABEL, [])
     organization.select.addEventListener('change', () => fillSelect(azureProject.select, azureProjectsOf(tools, organization.select.value)))
     const privateNote = paragraph(PRIVATE_NOTE, 'fl-ws-dialog-note')
+    // The branch: read from the repository once its address is typed; a new repository has none yet.
+    const branch = branchPicker(() => {
+      dialog.message.textContent = ''
+    })
+    let readAddress = ''
+    let readTimer: ReturnType<typeof setTimeout> | null = null
+    const readBranches = (): void => {
+      if (readTimer !== null) clearTimeout(readTimer)
+      readTimer = null
+      const checked = validateRepositoryAddress(address.input.value)
+      if (!checked.ok) {
+        readAddress = ''
+        branch.load(null)
+        return
+      }
+      if (checked.remote === readAddress) return
+      readAddress = checked.remote
+      branch.load(api?.branches({ slug: input.slug, remote: checked.remote }) ?? null)
+    }
+    address.input.addEventListener('input', () => {
+      if (readTimer !== null) clearTimeout(readTimer)
+      readTimer = setTimeout(readBranches, 700)
+    })
+    address.input.addEventListener('change', readBranches)
+    dialog.onClose(() => {
+      if (readTimer !== null) clearTimeout(readTimer)
+    })
 
     const confirm = actionButton(primaryLabel(choice), true, () => void submit())
     confirm.dataset['action'] = 'connect-remote-confirm'
@@ -619,18 +821,21 @@ export function openConnectRemoteDialog(input: { slug: string; name: string; rep
       dialog.message.textContent = ''
       confirm.textContent = primaryLabel(choice)
       if (choice === 'existing') {
-        panel.replaceChildren(address.row)
+        panel.replaceChildren(address.row, branch.row)
+        readBranches()
         address.input.focus()
         return
       }
       if (choice === 'github') {
         fillSelect(owner.select, tools?.github.owners.map((entry) => entry.login) ?? [])
-        panel.replaceChildren(owner.row, repoName.row, privateNote)
+        branch.load(null, NEW_REPOSITORY_BRANCH)
+        panel.replaceChildren(owner.row, repoName.row, branch.row, privateNote)
       } else {
         const organizations = tools?.azure.organizations.filter((entry) => entry.projects.length > 0).map((entry) => entry.name) ?? []
         fillSelect(organization.select, organizations)
         fillSelect(azureProject.select, azureProjectsOf(tools, organizations[0] ?? ''))
-        panel.replaceChildren(organization.row, azureProject.row, repoName.row, privateNote)
+        branch.load(null, NEW_REPOSITORY_BRANCH)
+        panel.replaceChildren(organization.row, azureProject.row, repoName.row, branch.row, privateNote)
       }
       repoName.input.focus()
     }
@@ -683,6 +888,14 @@ export function openConnectRemoteDialog(input: { slug: string; name: string; rep
         fail(CONNECT_FAILED_LINE)
         return
       }
+      // A listed branch must be picked; with nothing to list, an empty name lets Flow choose.
+      const picked = branch.value(false)
+      if (!picked.ok) {
+        fail(picked.message)
+        branch.focus()
+        return
+      }
+      const chosen = picked.branch === undefined ? {} : { branch: picked.branch }
       let request: Promise<WorkspaceRemoteResult>
       if (choice === 'existing') {
         const checked = validateRepositoryAddress(address.input.value)
@@ -691,7 +904,7 @@ export function openConnectRemoteDialog(input: { slug: string; name: string; rep
           address.input.focus()
           return
         }
-        request = api.setRemote({ slug: input.slug, remote: checked.remote, ...(replace ? { replace } : {}) })
+        request = api.setRemote({ slug: input.slug, remote: checked.remote, ...(replace ? { replace } : {}), ...chosen })
       } else {
         const named = validateRepositoryName(repoName.input.value)
         if (!named.ok) {
@@ -704,7 +917,7 @@ export function openConnectRemoteDialog(input: { slug: string; name: string; rep
             fail(CHOOSE_OWNER)
             return
           }
-          request = api.createRemote({ slug: input.slug, provider: 'github', owner: owner.select.value, name: named.name, ...(replace ? { replace } : {}) })
+          request = api.createRemote({ slug: input.slug, provider: 'github', owner: owner.select.value, name: named.name, ...(replace ? { replace } : {}), ...chosen })
         } else {
           if (organization.select.value === '' || azureProject.select.value === '') {
             fail(CHOOSE_AZURE_PROJECT)
@@ -717,6 +930,7 @@ export function openConnectRemoteDialog(input: { slug: string; name: string; rep
             project: azureProject.select.value,
             name: named.name,
             ...(replace ? { replace } : {}),
+            ...chosen,
           })
         }
       }
@@ -734,13 +948,20 @@ export function openConnectRemoteDialog(input: { slug: string; name: string; rep
       const outcome = remoteOutcome(result, input.name, Date.now())
       if (outcome.kind === 'refused') {
         fail(outcome.text)
+        if (!result.ok && result.reason === 'branch-unusable') {
+          // Connected, but on a branch that can't be used: it was put back; ask for another one.
+          changed = true
+          if (result.cause !== undefined && picked.branch !== undefined) branch.markUnusable(picked.branch, result.cause)
+          branch.focus()
+        }
         if (outcome.suggestion !== undefined) repoName.input.value = outcome.suggestion
         if (outcome.created !== undefined) {
           // The repository exists now: the person can connect to it by its address.
           address.input.value = outcome.created
           choice = 'existing'
           paintChoices()
-          panel.replaceChildren(address.row)
+          panel.replaceChildren(address.row, branch.row)
+          readBranches()
           confirm.textContent = primaryLabel(choice)
         }
         return
@@ -962,7 +1183,9 @@ export function openJoinDialog(): Promise<WorkspaceSummary | null> {
       resolve(joined)
     })
     const address = field('fl-ws-join-address', ADDRESS_LABEL, ADDRESS_PLACEHOLDER, null)
-    dialog.content.append(address.row, paragraph(FRESH_NOTE, 'fl-ws-dialog-note'))
+    // Optional: empty follows the branch the team already syncs on.
+    const joinBranch = field('fl-ws-join-branch', JOIN_BRANCH_LABEL, NEW_BRANCH_PLACEHOLDER, JOIN_BRANCH_HELP)
+    dialog.content.append(address.row, joinBranch.row, paragraph(FRESH_NOTE, 'fl-ws-dialog-note'))
     const confirm = actionButton(JOIN_CONFIRM, true, () => void submit())
     dialog.actions.append(actionButton(CANCEL_LABEL, false, () => dialog.close()), confirm)
 
@@ -973,9 +1196,17 @@ export function openJoinDialog(): Promise<WorkspaceSummary | null> {
         address.input.focus()
         return
       }
+      const picked = pickedBranch(NEW_BRANCH_VALUE, joinBranch.input.value, { required: false })
+      if (!picked.ok) {
+        dialog.message.textContent = picked.message
+        joinBranch.input.focus()
+        return
+      }
       confirm.disabled = true
       confirm.textContent = JOINING_LABEL
-      const answer = await window.flow.workspaces?.join({ remote }).catch(() => null)
+      const answer = await window.flow.workspaces
+        ?.join({ remote, ...(picked.branch === undefined ? {} : { branch: picked.branch }) })
+        .catch(() => null)
       confirm.disabled = false
       confirm.textContent = JOIN_CONFIRM
       if (answer === null || answer === undefined) {

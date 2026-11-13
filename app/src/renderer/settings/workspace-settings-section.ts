@@ -32,6 +32,7 @@ import {
   openDeleteDialog,
   openJoinDialog,
   openConnectRemoteDialog,
+  openChangeBranchDialog,
   openDisconnectRemoteDialog,
   openMoveProjectDialog,
   openProjectIntoWorkspace,
@@ -76,6 +77,7 @@ import {
 } from './workspace-settings-model'
 import { WORKSPACE_SYNC_EVENT } from '../threads/collision-card-model'
 import { CHANGE_REMOTE_LABEL, CONNECT_REMOTE_LABEL, DISCONNECT_REMOTE_LABEL } from './workspace-remote-model'
+import { BRANCH_LABEL, CHANGE_BRANCH_LABEL, NO_BRANCH_YET } from './workspace-branch-model'
 
 const RELATIVE_TIME_REFRESH_MS = 60_000
 
@@ -257,6 +259,30 @@ export class WorkspaceSettingsSection {
       shared.appendChild(remoteActions)
     }
     card.appendChild(shared)
+
+    // The branch it syncs on, and why Flow moved it there if it did.
+    if (view.hasRemote) {
+      const branchRow = document.createElement('div')
+      branchRow.className = 'fl-wss-row'
+      branchRow.dataset['part'] = 'workspace-branch'
+      const branchPair = this.#pair(BRANCH_LABEL, view.branchText, view.branchText === NO_BRANCH_YET ? 'fl-wss-muted' : 'fl-wss-remote')
+      if (view.branchMoveText !== null) {
+        const moved = this.#line(view.branchMoveText, 'fl-wss-muted')
+        moved.dataset['part'] = 'branch-move'
+        branchPair.appendChild(moved)
+      }
+      const branchActions = document.createElement('div')
+      branchActions.className = 'fl-wss-actions'
+      branchActions.appendChild(
+        this.#button(
+          CHANGE_BRANCH_LABEL,
+          () => void openChangeBranchDialog({ slug: view.slug, name: view.name }).then((done) => { if (done && !this.#disposed) void this.refresh() }),
+          'change-branch',
+        ),
+      )
+      branchRow.append(branchPair, branchActions)
+      card.appendChild(branchRow)
+    }
 
     // Sync: where it stands, Sync now, and the way into a pause.
     const sync = document.createElement('div')

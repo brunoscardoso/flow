@@ -45,6 +45,9 @@ export const WORKSPACE_CLI_REFUSALS = [
   'unconfirmed',
   'remote-exists',
   'merge-in-progress',
+  'invalid-branch',
+  'branch-diverged',
+  'remote-unreadable',
   'failed',
 ] as const
 
@@ -73,6 +76,10 @@ export interface WorkspaceSummary {
   slug: string
   path: string
   remote: string | null
+  /** The branch this Workspace syncs on here, or null when the CLI does not say (an older one) or it is on none. */
+  branch: string | null
+  /** The last time Flow moved it to another branch by itself, or null. */
+  branchMove: WorkspaceBranchMove | null
   /**
    * The Default Workspace — the one every project lands in unless a person
    * moves it, and the one that can't be deleted. A local notion (the CLI's
@@ -353,8 +360,30 @@ export interface WorkspaceSyncReview {
 }
 
 /** `workspaces:syncStatus` — one Workspace's sync, built field by field in main. */
+/** Why Flow moved a Workspace's branch by itself. */
+export interface WorkspaceBranchMove {
+  from: string
+  to: string
+  reason: 'pull-request-required' | 'followed'
+  /** ISO time. */
+  at: string
+}
+
+/**
+ * WHY a sync could not exchange — set only when the remote said something a
+ * person can act on by changing the branch or the repository:
+ *   · `pull-request-required` — the branch only accepts pull requests;
+ *   · `author-not-allowed` — the remote refuses the commits' email;
+ *   · `access` — this person's access was refused;
+ *   · `declined` — another rule of the repository declined the push;
+ *   · `unrelated-history` — the branch holds a history unrelated to this Workspace.
+ */
+export type WorkspaceSyncCause = 'pull-request-required' | 'author-not-allowed' | 'access' | 'declined' | 'unrelated-history'
+
 export interface WorkspaceSyncStatus {
   state: WorkspaceSyncState
+  /** See `WorkspaceSyncCause`; absent when there is none to name. */
+  cause?: WorkspaceSyncCause
   /** ISO time of the last complete sync — kept across restarts — or null. */
   lastSyncedAt: string | null
   /** One plain sentence when there is something to say (no paths, commands or setting names). */
@@ -421,8 +450,8 @@ export interface WorkspaceHostTools {
 
 /** `workspaces:createRemote` — make a PRIVATE repository on a signed-in host, then connect the Workspace to it. */
 export type WorkspaceCreateRemoteRequest =
-  | { slug: string; provider: 'github'; owner: string; name: string; replace?: boolean }
-  | { slug: string; provider: 'azure'; organization: string; project: string; name: string; replace?: boolean }
+  | { slug: string; provider: 'github'; owner: string; name: string; replace?: boolean; branch?: string }
+  | { slug: string; provider: 'azure'; organization: string; project: string; name: string; replace?: boolean; branch?: string }
 
 /**
  * `workspaces:setRemote` — connect a Workspace to an existing repository on any
@@ -432,6 +461,32 @@ export interface WorkspaceSetRemoteRequest {
   slug: string
   remote: string
   replace?: boolean
+  /** The branch to sync on there — checked by the sync that follows, and put back when it can't be used. */
+  branch?: string
+}
+
+/** `workspaces:branches` — the branches of the Workspace's repository, or of `remote` (a connect not made yet). */
+export interface WorkspaceBranchesRequest {
+  slug: string
+  remote?: string
+}
+
+/** Where a suggested branch came from — the dialog labels it, never picks silently. */
+export type WorkspaceBranchSuggestionSource = 'current' | 'in-use' | 'default' | 'new'
+
+export type WorkspaceBranchesResult =
+  | {
+      ok: true
+      branches: Array<{ name: string; pullRequestOnly: boolean }>
+      defaultBranch: string | null
+      suggestion: { name: string; source: WorkspaceBranchSuggestionSource }
+    }
+  | { ok: false; reason: WorkspaceRemoteRefusal; detail: string }
+
+/** `workspaces:setBranch` — choose the branch a Workspace syncs on; checked by a sync, put back when unusable. */
+export interface WorkspaceSetBranchRequest {
+  slug: string
+  branch: string
 }
 
 /** Why connecting or disconnecting did not happen. */
@@ -443,6 +498,8 @@ export type WorkspaceRemoteRefusal =
   | 'name-taken'
   | 'no-permission'
   | 'timed-out'
+  /** The chosen branch can't be used (see `cause`); the Workspace was put back on the branch it had. */
+  | 'branch-unusable'
 
 /**
  * The answer to connect / create / disconnect. On success `remote` is the
@@ -454,4 +511,14 @@ export type WorkspaceRemoteRefusal =
  */
 export type WorkspaceRemoteResult =
   | { ok: true; remote: string | null; status: WorkspaceSyncStatus }
-  | { ok: false; reason: WorkspaceRemoteRefusal; detail: string; suggestion?: string; created?: string }
+  | {
+      ok: false
+      reason: WorkspaceRemoteRefusal
+      detail: string
+      suggestion?: string
+      created?: string
+      /** `branch-unusable`: why, so the dialog can ask for another branch. */
+      cause?: WorkspaceSyncCause
+      /** `branch-unusable`: the branch the Workspace was put back on. */
+      restored?: string | null
+    }

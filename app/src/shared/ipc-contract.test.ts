@@ -208,6 +208,8 @@ const INVOKE_MAP_KEYS: Record<IpcInvokeChannel, true> = {
   'workspaces:createRemote': true,
   'workspaces:setRemote': true,
   'workspaces:unsetRemote': true,
+  'workspaces:branches': true,
+  'workspaces:setBranch': true,
   'settings:shouldAskTelemetry': true,
   'settings:recordTelemetryAsk': true,
   'settings:setTelemetryConsent': true,

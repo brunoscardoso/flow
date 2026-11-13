@@ -42,6 +42,8 @@ const DEFAULT: WorkspaceListing = {
   slug: 'default',
   path: '/flow/workspaces/default',
   remote: null,
+  branch: null,
+  branchMove: null,
   isDefault: true,
   projects: [],
 }

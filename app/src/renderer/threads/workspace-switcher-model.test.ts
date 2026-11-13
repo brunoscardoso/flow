@@ -61,6 +61,8 @@ const ACME: WorkspaceListing = {
   slug: 'acme',
   path: '/flow/workspaces/acme',
   remote: null,
+  branch: null,
+  branchMove: null,
   isDefault: false,
   projects: [project('Backend', '/code/backend'), project('Frontend', '/private/var/code/frontend'), project('Docs', null)],
 }
@@ -69,6 +71,8 @@ const SIDE: WorkspaceListing = {
   slug: 'side',
   path: '/flow/workspaces/side',
   remote: null,
+  branch: null,
+  branchMove: null,
   isDefault: false,
   projects: [project('Toy', '/code/toy')],
 }
@@ -96,6 +100,8 @@ const DEFAULT: WorkspaceListing = {
   slug: 'default',
   path: '/flow/workspaces/default',
   remote: null,
+  branch: null,
+  branchMove: null,
   isDefault: true,
   projects: [],
 }

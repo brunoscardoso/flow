@@ -23,13 +23,26 @@ const CREATED_URL = 'https://github.com/acme/acme-knowledge'
 const SYNCED: WorkspaceSyncStatus = { state: 'synced', lastSyncedAt: '2026-10-06T12:00:00.000Z', detail: null, asks: [], reviews: [] }
 const LOCAL: WorkspaceSyncStatus = { state: 'local-only', lastSyncedAt: null, detail: null, asks: [], reviews: [] }
 
-const summary = (remote: string | null): WorkspaceSummary => ({ name: 'Acme', slug: 'acme', path: '/f/workspaces/acme', remote, isDefault: true })
+const summary = (remote: string | null, branch: string | null = 'main'): WorkspaceSummary => ({
+  name: 'Acme',
+  slug: 'acme',
+  path: '/f/workspaces/acme',
+  remote,
+  branch,
+  branchMove: null,
+  isDefault: true,
+})
 
 function harness(options: {
   table?: Record<string, Partial<HostToolRun>>
   remote?: string | null
   setRemote?: WorkspaceAnswer<{ workspace: WorkspaceSummary; changed: boolean }>
   unsetRemote?: WorkspaceAnswer<{ workspace: WorkspaceSummary; changed: boolean }>
+  /** The branch the Workspace is on before the change. */
+  branch?: string | null
+  /** What the sync after a change answers (default: synced). */
+  syncStatus?: WorkspaceSyncStatus
+  setBranch?: WorkspaceAnswer<{ workspace: WorkspaceSummary; previous: string | null; changed: boolean }>
 } = {}) {
   const hostCalls: string[] = []
   const received: unknown[] = []
@@ -47,7 +60,7 @@ function harness(options: {
   const list: WorkspaceAnswer<WorkspacesList> = {
     ok: true,
     flowFolder: '/f',
-    workspaces: [{ ...summary(options.remote ?? null), projects: [] }],
+    workspaces: [{ ...summary(options.remote ?? null, options.branch === undefined ? 'main' : options.branch), projects: [] }],
     unreadable: [],
   }
   const setup = createWorkspaceRemoteSetup({
@@ -61,11 +74,20 @@ function harness(options: {
         received.push({ unsetRemote: slug })
         return options.unsetRemote ?? { ok: true, workspace: summary(null), changed: true }
       },
+      branches: async (slug, remote) => {
+        received.push({ branches: [slug, remote] })
+        return { ok: true, branches: [{ name: 'knowledge', pullRequestOnly: false }], defaultBranch: 'main', suggestion: { name: 'knowledge', source: 'in-use' } }
+      },
+      setBranch: async (slug, branch, branchOptions) => {
+        received.push({ setBranch: [slug, branch, branchOptions ?? {}] })
+        return options.setBranch ?? { ok: true, workspace: summary('https://h/r', branch), previous: 'main', changed: true }
+      },
     },
     hostTools,
     sync: {
       syncNow: async (slug) => {
         received.push({ syncNow: slug })
+        if (options.syncStatus !== undefined) return options.syncStatus
         return options.setRemote?.ok === false ? LOCAL : received.some((entry) => 'unsetRemote' in (entry as object)) ? LOCAL : SYNCED
       },
     },
@@ -198,5 +220,88 @@ describe('use an existing repository, or disconnect', () => {
     const { setup, received } = harness()
     expect(await setup.unsetRemote('acme')).toEqual({ ok: true, remote: null, status: LOCAL })
     expect(received).toEqual([{ unsetRemote: 'acme' }, { syncNow: 'acme' }])
+  })
+})
+
+describe('a chosen branch is checked by the sync that follows', () => {
+  const PR_ONLY: WorkspaceSyncStatus = { state: 'no-access', cause: 'pull-request-required', lastSyncedAt: null, detail: 'x', asks: [], reviews: [] }
+  const NO_ACCESS: WorkspaceSyncStatus = { state: 'no-access', cause: 'access', lastSyncedAt: null, detail: 'x', asks: [], reviews: [] }
+
+  it('a usable branch connects: the branch reaches the registry, and the sync is the answer', async () => {
+    const { setup, received } = harness({ branch: 'main' })
+    const result = await setup.setRemote({ slug: 'acme', remote: 'https://h/r', branch: 'knowledge' })
+    expect(result).toEqual({ ok: true, remote: 'https://h/r', status: SYNCED })
+    expect(received).toEqual([{ setRemote: ['acme', 'https://h/r', { branch: 'knowledge' }] }, { syncNow: 'acme' }])
+  })
+
+  it('a branch that only takes pull requests is put back and refused with its cause, so the dialog asks again', async () => {
+    const { setup, received } = harness({ branch: 'knowledge', syncStatus: PR_ONLY })
+    const result = await setup.setRemote({ slug: 'acme', remote: 'https://h/r', branch: 'main' })
+    // POSITIVE FIRST: the connect and the check really ran.
+    expect(received.slice(0, 2)).toEqual([{ setRemote: ['acme', 'https://h/r', { branch: 'main' }] }, { syncNow: 'acme' }])
+    expect(received[2]).toEqual({ setBranch: ['acme', 'knowledge', { restore: true }] })
+    expect(result).toEqual({
+      ok: false,
+      reason: 'branch-unusable',
+      cause: 'pull-request-required',
+      restored: 'knowledge',
+      detail: 'main only accepts changes through pull requests, so Flow can’t save knowledge there. The Workspace stays on knowledge. Choose another branch.',
+    })
+  })
+
+  it('choosing the branch it is already on still takes the CHOICE back, so sync may move off it by itself', async () => {
+    const { setup, received } = harness({ branch: 'main', syncStatus: PR_ONLY })
+    const result = await setup.setRemote({ slug: 'acme', remote: 'https://h/r', branch: 'main' })
+    expect(received).toContainEqual({ setBranch: ['acme', 'main', { restore: true }] })
+    expect(result).toMatchObject({ ok: false, reason: 'branch-unusable', restored: null })
+  })
+
+  it('a cause no branch can fix is never blamed on the branch: the Workspace stays where it was put', async () => {
+    const { setup, received } = harness({ branch: 'main', syncStatus: NO_ACCESS })
+    const result = await setup.setRemote({ slug: 'acme', remote: 'https://h/r', branch: 'knowledge' })
+    expect(received).toContainEqual({ syncNow: 'acme' })
+    expect(received.filter((entry) => 'setBranch' in (entry as object))).toEqual([])
+    expect(result).toEqual({ ok: true, remote: 'https://h/r', status: NO_ACCESS })
+  })
+
+  it('without a chosen branch, nothing is checked or put back — the sync moves it by itself as before', async () => {
+    const { setup, received } = harness({ branch: 'main', syncStatus: PR_ONLY })
+    const result = await setup.setRemote({ slug: 'acme', remote: 'https://h/r' })
+    expect(received).toEqual([{ setRemote: ['acme', 'https://h/r', {}] }, { syncNow: 'acme' }])
+    expect(result.ok).toBe(true)
+  })
+
+  it('Change branch: switches, checks, and on failure puts the old branch back', async () => {
+    const ok = harness({ branch: 'main' })
+    expect(await ok.setup.setBranch({ slug: 'acme', branch: 'knowledge' })).toEqual({ ok: true, remote: 'https://h/r', status: SYNCED })
+    expect(ok.received).toEqual([{ setBranch: ['acme', 'knowledge', {}] }, { syncNow: 'acme' }])
+
+    const bad = harness({ branch: 'knowledge', syncStatus: { ...PR_ONLY, cause: 'unrelated-history' } })
+    const result = await bad.setup.setBranch({ slug: 'acme', branch: 'notes' })
+    expect(bad.received).toEqual([
+      { setBranch: ['acme', 'notes', {}] },
+      { syncNow: 'acme' },
+      { setBranch: ['acme', 'knowledge', { restore: true }] },
+    ])
+    expect(result).toMatchObject({ ok: false, reason: 'branch-unusable', cause: 'unrelated-history', restored: 'knowledge' })
+  })
+
+  it('a refused switch is reported as it is, and nothing is synced', async () => {
+    const { setup, received } = harness({
+      setBranch: { ok: false, reason: 'branch-diverged', detail: 'diverged', payload: {} },
+    })
+    expect(await setup.setBranch({ slug: 'acme', branch: 'notes' })).toEqual({ ok: false, reason: 'branch-diverged', detail: 'diverged' })
+    expect(received.filter((entry) => 'syncNow' in (entry as object))).toEqual([])
+  })
+
+  it('branches are handed on as the registry read them', async () => {
+    const { setup, received } = harness()
+    expect(await setup.branches({ slug: 'acme', remote: 'https://h/r' })).toEqual({
+      ok: true,
+      branches: [{ name: 'knowledge', pullRequestOnly: false }],
+      defaultBranch: 'main',
+      suggestion: { name: 'knowledge', source: 'in-use' },
+    })
+    expect(received).toEqual([{ branches: ['acme', 'https://h/r'] }])
   })
 })

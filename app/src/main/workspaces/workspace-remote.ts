@@ -19,16 +19,29 @@
  * Workspace's history merges, and one that holds an unrelated history is
  * refused by the CLI and shown as the sync's own sentence.
  *
+ * A BRANCH a person chose is checked the only way that answers truthfully: by
+ * the sync that follows. When that sync names a cause the branch is to blame
+ * for (`BRANCH_CAUSES` — it only takes pull requests, a rule of it declined the
+ * push, it holds an unrelated history), the Workspace is put back on the
+ * branch it had and the answer is `branch-unusable` with the cause, so the
+ * dialog stays open and asks for another. A cause no branch can fix (access,
+ * the commits' email) is reported as the sync's own status, never blamed on
+ * the branch.
+ *
  * Text rules (forbidden-pattern #12): every `detail` is a plain sentence. The
  * host tools' raw output stays in the log. The address a person typed, or the
  * one a host answered for a repository just created, is data and may be shown.
  */
 
 import type {
+  WorkspaceBranchesRequest,
+  WorkspaceBranchesResult,
   WorkspaceCreateRemoteRequest,
   WorkspaceHostTools,
   WorkspaceRemoteResult,
+  WorkspaceSetBranchRequest,
   WorkspaceSetRemoteRequest,
+  WorkspaceSyncCause,
   WorkspaceSyncStatus,
 } from '../../shared/workspaces-contract'
 import type { HostTools } from './host-tools'
@@ -36,7 +49,7 @@ import type { WorkspaceRegistry } from './workspace-registry'
 
 export interface WorkspaceRemoteDeps {
   /** REQUIRED (allowed-pattern #26): the only writer of a Workspace's shared repository is the CLI, behind this. */
-  registry: Pick<WorkspaceRegistry, 'list' | 'setRemote' | 'unsetRemote'>
+  registry: Pick<WorkspaceRegistry, 'list' | 'setRemote' | 'unsetRemote' | 'branches' | 'setBranch'>
   /** REQUIRED: the signed-in host tools — injected; tests never run the real `gh` or `az`. */
   hostTools: Pick<HostTools, 'detect' | 'listCreateTargets' | 'createRepo' | 'forgetDetection'>
   /** REQUIRED: the sync that follows every change, and whose status is the answer. */
@@ -49,13 +62,29 @@ export interface WorkspaceRemoteSetup {
   createRemote(request: WorkspaceCreateRemoteRequest): Promise<WorkspaceRemoteResult>
   setRemote(request: WorkspaceSetRemoteRequest): Promise<WorkspaceRemoteResult>
   unsetRemote(slug: string): Promise<WorkspaceRemoteResult>
+  branches(request: WorkspaceBranchesRequest): Promise<WorkspaceBranchesResult>
+  /** Choose the branch a Workspace syncs on, checked by one sync and put back when unusable. */
+  setBranch(request: WorkspaceSetBranchRequest): Promise<WorkspaceRemoteResult>
 }
+
+/** The sync causes a different branch can fix — the only ones a chosen branch is blamed for. */
+export const BRANCH_CAUSES: readonly WorkspaceSyncCause[] = ['pull-request-required', 'declined', 'unrelated-history']
 
 /** Sentences this module adds (may reach the UI). */
 export const WORKSPACE_REMOTE_SENTENCES = {
   createdNotConnected: (detail: string): string =>
     `The repository was created, but the Workspace couldn't be connected to it: ${detail} You can connect to it by its address instead.`,
   alreadyShared: 'This Workspace already shares through another repository. Choose Change to replace it.',
+  branchUnusable: (branch: string, cause: WorkspaceSyncCause, restored: string | null): string => {
+    const why =
+      cause === 'pull-request-required'
+        ? `${branch} only accepts changes through pull requests, so Flow can’t save knowledge there.`
+        : cause === 'unrelated-history'
+          ? `${branch} already holds something other than this Workspace.`
+          : `The repository declined changes to ${branch}.`
+    const back = restored === null ? '' : ` The Workspace stays on ${restored}.`
+    return `${why}${back} Choose another branch.`
+  },
 } as const
 
 function noTools(): WorkspaceHostTools {
@@ -106,12 +135,44 @@ export function createWorkspaceRemoteSetup(deps: WorkspaceRemoteDeps): Workspace
     return answer
   }
 
-  /** The registry's set-remote, then one sync — the answer is that sync's status. */
-  async function connect(slug: string, remote: string, replace: boolean): Promise<WorkspaceRemoteResult> {
-    const answer = await deps.registry.setRemote(slug, remote, replace ? { replace: true } : {})
-    if (!answer.ok) return { ok: false, reason: answer.reason, detail: answer.detail }
+  /** The branch a Workspace is on now, read before a change so it can be put back. */
+  async function branchOf(slug: string): Promise<string | null> {
+    const listed = await deps.registry.list()
+    if (!listed.ok) return null
+    return listed.workspaces.find((entry) => entry.slug === slug)?.branch ?? null
+  }
+
+  /**
+   * The sync that checks a chosen branch. Blamed on the branch → put back on
+   * `previous` (as a restore: nobody chose it, so sync may move it by itself
+   * later) and refused `branch-unusable`.
+   */
+  async function verify(slug: string, remote: string | null, branch: string | undefined, previous: string | null): Promise<WorkspaceRemoteResult> {
     const status = await deps.sync.syncNow(slug)
-    return { ok: true, remote: answer.workspace.remote, status }
+    const cause = status.cause
+    if (branch === undefined || cause === undefined || !BRANCH_CAUSES.includes(cause)) return { ok: true, remote, status }
+    let restored: string | null = null
+    // Even when it never left `previous`, the restore matters: it takes back the
+    // CHOICE, so sync is free again to move off a branch that refuses it.
+    if (previous !== null) {
+      const back = await deps.registry.setBranch(slug, previous, { restore: true })
+      if (back.ok && previous !== branch) restored = previous
+      if (!back.ok) log('putting a Workspace back on its branch failed', { slug, reason: back.reason })
+    }
+    log('a chosen branch cannot be used', { slug, cause })
+    return { ok: false, reason: 'branch-unusable', detail: WORKSPACE_REMOTE_SENTENCES.branchUnusable(branch, cause, restored), cause, restored }
+  }
+
+  /** The registry's set-remote, then one sync — the answer is that sync's status. */
+  async function connect(slug: string, remote: string, replace: boolean, branch?: string): Promise<WorkspaceRemoteResult> {
+    const chosen = branch?.trim() === '' ? undefined : branch?.trim()
+    const previous = chosen === undefined ? null : await branchOf(slug)
+    const answer = await deps.registry.setRemote(slug, remote, {
+      ...(replace ? { replace: true } : {}),
+      ...(chosen === undefined ? {} : { branch: chosen }),
+    })
+    if (!answer.ok) return { ok: false, reason: answer.reason, detail: answer.detail }
+    return verify(slug, answer.workspace.remote, chosen, previous)
   }
 
   async function sharesElsewhere(slug: string): Promise<boolean> {
@@ -141,8 +202,10 @@ export function createWorkspaceRemoteSetup(deps: WorkspaceRemoteDeps): Workspace
       }
     }
     deps.hostTools.forgetDetection()
-    const connected = await connect(request.slug, created.url, replace)
+    const connected = await connect(request.slug, created.url, replace, request.branch)
     if (connected.ok) return connected
+    // Connected, but on a branch that can't be used: the dialog asks for another, as for any connect.
+    if (connected.reason === 'branch-unusable') return { ...connected, created: created.url }
     log('a repository was created but the Workspace could not be connected to it', { reason: connected.reason })
     return {
       ok: false,
@@ -153,7 +216,21 @@ export function createWorkspaceRemoteSetup(deps: WorkspaceRemoteDeps): Workspace
   }
 
   function setRemote(request: WorkspaceSetRemoteRequest): Promise<WorkspaceRemoteResult> {
-    return connect(request.slug, request.remote, request.replace === true)
+    return connect(request.slug, request.remote, request.replace === true, request.branch)
+  }
+
+  async function branches(request: WorkspaceBranchesRequest): Promise<WorkspaceBranchesResult> {
+    const answer = await deps.registry.branches(request.slug, request.remote)
+    if (!answer.ok) return { ok: false, reason: answer.reason, detail: answer.detail }
+    return { ok: true, branches: answer.branches, defaultBranch: answer.defaultBranch, suggestion: answer.suggestion }
+  }
+
+  async function setBranch(request: WorkspaceSetBranchRequest): Promise<WorkspaceRemoteResult> {
+    const branch = request.branch.trim()
+    const previous = await branchOf(request.slug)
+    const answer = await deps.registry.setBranch(request.slug, branch)
+    if (!answer.ok) return { ok: false, reason: answer.reason, detail: answer.detail }
+    return verify(request.slug, answer.workspace.remote, branch, previous)
   }
 
   async function unsetRemote(slug: string): Promise<WorkspaceRemoteResult> {
@@ -163,5 +240,5 @@ export function createWorkspaceRemoteSetup(deps: WorkspaceRemoteDeps): Workspace
     return { ok: true, remote: null, status }
   }
 
-  return { hostTools, createRemote, setRemote, unsetRemote }
+  return { hostTools, createRemote, setRemote, unsetRemote, branches, setBranch }
 }

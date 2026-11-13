@@ -229,7 +229,8 @@ export function registerWorkspaceChannels(deps: WorkspaceChannelDependencies): (
     const body = record(request, channel)
     const remote = requiredString(body['remote'], channel, 'remote')
     const name = optionalString(body['name'], channel, 'name')
-    return registry.join(remote, name, { openRoots: deps.openRoots() })
+    const branch = optionalString(body['branch'], channel, 'branch')
+    return registry.join(remote, name, { openRoots: deps.openRoots(), ...(branch === undefined ? {} : { branch }) })
   })
 
   handle('workspaces:current', () => registry.current())
@@ -377,16 +378,18 @@ export function registerWorkspaceChannels(deps: WorkspaceChannelDependencies): (
     const slug = requiredString(body['slug'], channel, 'slug')
     const name = requiredString(body['name'], channel, 'name')
     const replace = optionalBoolean(body['replace'], channel, 'replace') === true
+    const branch = optionalString(body['branch'], channel, 'branch')
+    const extra = { ...(replace ? { replace } : {}), ...(branch === undefined ? {} : { branch }) }
     const provider = body['provider']
     // Rebuilt field by field: nothing the renderer adds is passed on.
     if (provider === 'github') {
       const owner = requiredString(body['owner'], channel, 'owner')
-      return deps.remote.createRemote({ slug, provider, owner, name, ...(replace ? { replace } : {}) })
+      return deps.remote.createRemote({ slug, provider, owner, name, ...extra })
     }
     if (provider === 'azure') {
       const organization = requiredString(body['organization'], channel, 'organization')
       const project = requiredString(body['project'], channel, 'project')
-      return deps.remote.createRemote({ slug, provider, organization, project, name, ...(replace ? { replace } : {}) })
+      return deps.remote.createRemote({ slug, provider, organization, project, name, ...extra })
     }
     throw new WorkspaceRequestError(channel, 'provider must be github or azure')
   })
@@ -397,7 +400,22 @@ export function registerWorkspaceChannels(deps: WorkspaceChannelDependencies): (
     const slug = requiredString(body['slug'], channel, 'slug')
     const remote = requiredString(body['remote'], channel, 'remote')
     const replace = optionalBoolean(body['replace'], channel, 'replace') === true
-    return deps.remote.setRemote({ slug, remote, ...(replace ? { replace } : {}) })
+    const branch = optionalString(body['branch'], channel, 'branch')
+    return deps.remote.setRemote({ slug, remote, ...(replace ? { replace } : {}), ...(branch === undefined ? {} : { branch }) })
+  })
+
+  handle('workspaces:branches', (request) => {
+    const channel = 'workspaces:branches'
+    const body = record(request, channel)
+    const slug = requiredString(body['slug'], channel, 'slug')
+    const remote = optionalString(body['remote'], channel, 'remote')
+    return deps.remote.branches({ slug, ...(remote === undefined ? {} : { remote }) })
+  })
+
+  handle('workspaces:setBranch', (request) => {
+    const channel = 'workspaces:setBranch'
+    const body = record(request, channel)
+    return deps.remote.setBranch({ slug: requiredString(body['slug'], channel, 'slug'), branch: requiredString(body['branch'], channel, 'branch') })
   })
 
   handle('workspaces:unsetRemote', (request) => {

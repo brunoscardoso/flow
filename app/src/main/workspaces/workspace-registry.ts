@@ -69,6 +69,8 @@ import {
   type WorkspacesChangedEvent,
   type WorkspacesList,
   type WorkspaceSuggestion,
+  type WorkspaceBranchMove,
+  type WorkspaceBranchSuggestionSource,
   type WorkspaceSummary,
 } from '../../shared/workspaces-contract'
 import { lastJsonLine } from './cli-json'
@@ -178,7 +180,11 @@ export interface WorkspaceRegistry {
    * checkout for them: the CLI only knows the checkouts its own Flow folder
    * recorded, and on a computer that never had the Workspace that is none.
    */
-  join(remote: string, name?: string, options?: { openRoots?: readonly string[] }): Promise<WorkspaceAnswer<WorkspaceJoinResult>>
+  join(
+    remote: string,
+    name?: string,
+    options?: { openRoots?: readonly string[]; branch?: string },
+  ): Promise<WorkspaceAnswer<WorkspaceJoinResult>>
   /** The selected Workspace; falls back to the Default one (then the first) when the selection is gone. */
   current(): Promise<WorkspaceAnswer<{ slug: string | null }>>
   setCurrent(slug: string | null): Promise<WorkspaceAnswer<{ slug: string | null }>>
@@ -209,7 +215,27 @@ export interface WorkspaceRegistry {
    * CLI contacts nothing — the next sync publishes. `replace` only when a
    * person chose to change the repository it already has (forbidden-pattern #15).
    */
-  setRemote(workspace: string, remote: string, options?: { replace?: boolean }): Promise<WorkspaceAnswer<{ workspace: WorkspaceSummary; changed: boolean }>>
+  setRemote(
+    workspace: string,
+    remote: string,
+    options?: { replace?: boolean; branch?: string },
+  ): Promise<WorkspaceAnswer<{ workspace: WorkspaceSummary; changed: boolean }>>
+  /**
+   * The branches of the Workspace's repository, or of `remote` when given (a
+   * connect not made yet) — `workspace branches`, the one read that contacts
+   * the repository. Never cached: a person is choosing from it now.
+   */
+  branches(workspace: string, remote?: string): Promise<WorkspaceAnswer<WorkspaceBranchList>>
+  /**
+   * Choose the branch a Workspace syncs on (`workspace set-branch`). `restore`
+   * puts back a branch that was working after a chosen one proved unusable —
+   * nobody chose it, so sync may move it again by itself.
+   */
+  setBranch(
+    workspace: string,
+    branch: string,
+    options?: { restore?: boolean },
+  ): Promise<WorkspaceAnswer<{ workspace: WorkspaceSummary; previous: string | null; changed: boolean }>>
   /** Disconnect a Workspace (`workspace unset-remote`): everything stays here; the repository is untouched. */
   unsetRemote(workspace: string): Promise<WorkspaceAnswer<{ workspace: WorkspaceSummary; changed: boolean }>>
   /** FR-3 auto-suggest: the repo is a local Workspace's project but is not linked yet. */
@@ -227,6 +253,8 @@ const READ_TIMEOUT_MS = 30_000
 const CREATE_TIMEOUT_MS = 60_000
 /** Link may commit in the code repo. */
 const LINK_TIMEOUT_MS = 120_000
+/** Listing branches contacts the repository: a slow host must not hold a dialog open for ever. */
+const BRANCHES_TIMEOUT_MS = 45_000
 /** Join clones (the CLI's own clone bound is 300 s) — a little more, so the CLI's answer arrives first. */
 const JOIN_TIMEOUT_MS = 330_000
 /** Migrate, move and delete copy knowledge folders — a large vault copy takes a while. */
@@ -293,9 +321,66 @@ export function readSummary(value: unknown): WorkspaceSummary {
     slug: need(str(value['slug']), 'workspace.slug'),
     path: need(str(value['path']), 'workspace.path'),
     remote,
+    // Both lenient: an older CLI says nothing about branches, and a summary is
+    // never refused over a field only the settings' branch row reads.
+    branch: str(value['branch']) ?? null,
+    branchMove: readBranchMove(value['branchMove']),
     // A local notion the CLI marks; an older CLI says nothing — not the default, then.
     isDefault: value['default'] === true,
   }
+}
+
+/**
+ * A branch name from the renderer: absent/blank → null (no choice made), one
+ * git could never accept on its face → false. The CLI checks the full grammar;
+ * this only keeps a stray flag or whitespace out of argv.
+ */
+function branchArg(value: string | undefined): string | null | false {
+  if (value === undefined) return null
+  const name = value.trim()
+  if (name === '') return null
+  if (name.startsWith('-') || /[\s~^:?*[\\]/.test(name) || name.length > 200) return false
+  return name
+}
+
+/** What `workspace branches` answers, as the app hands it on. */
+export interface WorkspaceBranchList {
+  branches: Array<{ name: string; pullRequestOnly: boolean }>
+  defaultBranch: string | null
+  suggestion: { name: string; source: WorkspaceBranchSuggestionSource }
+}
+
+const SUGGESTION_SOURCES: readonly WorkspaceBranchSuggestionSource[] = ['current', 'in-use', 'default', 'new']
+
+export function readBranchList(payload: Record<string, unknown>): WorkspaceBranchList {
+  const rows = payload['branches']
+  if (!Array.isArray(rows)) throw new MalformedAnswer('branches')
+  const branches = rows.map((row) => {
+    if (!isRecord(row)) throw new MalformedAnswer('branches[]')
+    return { name: need(str(row['name']), 'branches[].name'), pullRequestOnly: row['pullRequestOnly'] === true }
+  })
+  const suggestion = payload['suggestion']
+  if (!isRecord(suggestion)) throw new MalformedAnswer('suggestion')
+  const source = suggestion['source']
+  if (typeof source !== 'string' || !(SUGGESTION_SOURCES as readonly string[]).includes(source)) {
+    throw new MalformedAnswer('suggestion.source')
+  }
+  return {
+    branches,
+    defaultBranch: str(payload['defaultBranch']) ?? null,
+    suggestion: { name: need(str(suggestion['name']), 'suggestion.name'), source: source as WorkspaceBranchSuggestionSource },
+  }
+}
+
+function readBranchMove(value: unknown): WorkspaceBranchMove | null {
+  if (!isRecord(value)) return null
+  const from = str(value['from'])
+  const to = str(value['to'])
+  const at = str(value['at'])
+  const reason = value['reason']
+  if (from === null || to === null || at === null) return null
+  if (reason !== 'pull-request-required' && reason !== 'followed') return null
+  return { from, to, at, reason }
 }
 
 export function readProject(value: unknown): WorkspaceProject {
@@ -768,12 +853,18 @@ export function createWorkspaceRegistry(deps: WorkspaceRegistryDeps): WorkspaceR
   async function join(
     remote: string,
     name?: string,
-    options: { openRoots?: readonly string[] } = {},
+    options: { openRoots?: readonly string[]; branch?: string } = {},
   ): Promise<WorkspaceAnswer<WorkspaceJoinResult>> {
     const problem = remoteProblem(remote)
     if (problem !== null) return problem
     if (name !== undefined && !isPlainName(name)) return refusal('invalid-name')
-    const args = [`--remote=${remote.trim()}`, ...(name === undefined ? [] : [`--name=${name.trim()}`])]
+    const branch = branchArg(options.branch)
+    if (branch === false) return refusal('invalid-branch')
+    const args = [
+      `--remote=${remote.trim()}`,
+      ...(name === undefined ? [] : [`--name=${name.trim()}`]),
+      ...(branch === null ? [] : [`--branch=${branch}`]),
+    ]
     const answer = await serial(async () => {
       const joined = shape(await run('join', deps.homeDir, args, JOIN_TIMEOUT_MS), readJoin, 'join')
       if (!joined.ok) return joined
@@ -944,20 +1035,58 @@ export function createWorkspaceRegistry(deps: WorkspaceRegistryDeps): WorkspaceR
   function setRemote(
     workspace: string,
     remote: string,
-    options: { replace?: boolean } = {},
+    options: { replace?: boolean; branch?: string } = {},
   ): Promise<WorkspaceAnswer<{ workspace: WorkspaceSummary; changed: boolean }>> {
     if (!isSlug(workspace)) return Promise.resolve(refusal('unknown-workspace'))
     // The shared grammar decides before anything is spawned (the CLI decides again).
     const problem = remoteProblem(remote)
     if (problem !== null) return Promise.resolve(problem)
+    const branch = branchArg(options.branch)
+    if (branch === false) return Promise.resolve(refusal('invalid-branch'))
     const args = [
       `--workspace=${workspace}`,
       `--remote=${remote.trim()}`,
       // THE TYPED FLAG IS THE CONFIRMATION (forbidden-pattern #15).
       ...(options.replace === true ? ['--replace'] : []),
+      ...(branch === null ? [] : [`--branch=${branch}`]),
     ]
     return serial(async () => {
       const answer = shape(await runWhenFree('set-remote', deps.homeDir, args, READ_TIMEOUT_MS), readRemoteAnswer, 'set-remote')
+      if (answer.ok && answer.changed) changed('remote')
+      return answer
+    })
+  }
+
+  function branches(workspace: string, remote?: string): Promise<WorkspaceAnswer<WorkspaceBranchList>> {
+    if (!isSlug(workspace)) return Promise.resolve(refusal('unknown-workspace'))
+    if (remote !== undefined) {
+      const problem = remoteProblem(remote)
+      if (problem !== null) return Promise.resolve(problem)
+    }
+    const args = [`--workspace=${workspace}`, ...(remote === undefined ? [] : [`--remote=${remote.trim()}`])]
+    // A read: no serial(), no runWhenFree() — it writes nothing a sync could collide with.
+    return run('branches', deps.homeDir, args, BRANCHES_TIMEOUT_MS).then((outcome) => shape(outcome, readBranchList, 'branches'))
+  }
+
+  function setBranch(
+    workspace: string,
+    branch: string,
+    options: { restore?: boolean } = {},
+  ): Promise<WorkspaceAnswer<{ workspace: WorkspaceSummary; previous: string | null; changed: boolean }>> {
+    if (!isSlug(workspace)) return Promise.resolve(refusal('unknown-workspace'))
+    const name = branchArg(branch)
+    if (name === false || name === null) return Promise.resolve(refusal('invalid-branch'))
+    const args = [`--workspace=${workspace}`, `--branch=${name}`, ...(options.restore === true ? ['--restore'] : [])]
+    return serial(async () => {
+      const answer = shape(
+        await runWhenFree('set-branch', deps.homeDir, args, READ_TIMEOUT_MS),
+        (payload) => {
+          if (typeof payload['changed'] !== 'boolean') throw new MalformedAnswer('changed')
+          const previous = strOrNull(payload['previous'])
+          return { workspace: readSummary(payload['workspace']), previous: previous ?? null, changed: payload['changed'] }
+        },
+        'set-branch',
+      )
       if (answer.ok && answer.changed) changed('remote')
       return answer
     })
@@ -993,6 +1122,8 @@ export function createWorkspaceRegistry(deps: WorkspaceRegistryDeps): WorkspaceR
     deleteWorkspace,
     setRemote,
     unsetRemote,
+    branches,
+    setBranch,
     suggestJoin,
     invalidate,
   }

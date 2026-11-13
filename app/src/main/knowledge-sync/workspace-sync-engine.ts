@@ -56,6 +56,7 @@ import type {
   WorkspaceResolveResult,
   WorkspaceSyncAsk,
   WorkspaceSyncReview,
+  WorkspaceSyncCause,
   WorkspaceSyncState,
   WorkspaceSyncStatus,
   WorkspaceSyncTake,
@@ -404,6 +405,8 @@ interface WorkspaceRecord {
   state: WorkspaceSyncState
   lastSyncedAt: number | null
   detail: string | null
+  /** Why the last sync could not exchange, when a person can act on it by changing the branch or repository. */
+  cause: WorkspaceSyncCause | null
   asks: WorkspaceSyncAsk[]
   reviews: WorkspaceSyncReview[]
   /** Commits here the shared repository doesn't have (from the last answer). */
@@ -458,6 +461,7 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
         state: 'idle',
         lastSyncedAt: storedLastSynced(slug),
         detail: null,
+        cause: null,
         asks: [],
         reviews: [],
         ahead: 0,
@@ -481,6 +485,7 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
       state: rec.state,
       lastSyncedAt: rec.lastSyncedAt === null ? null : new Date(rec.lastSyncedAt).toISOString(),
       detail: rec.detail,
+      ...(rec.cause === null ? {} : { cause: rec.cause }),
       asks: rec.asks.map((ask) => ({ ...ask, options: [...ask.options], ...(ask.anchors === undefined ? {} : { anchors: [...ask.anchors] }) })),
       reviews: rec.reviews.map((review) => ({ ...review, options: [...review.options] })),
     }
@@ -499,8 +504,15 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
     }
   }
 
-  function set(rec: WorkspaceRecord, state: WorkspaceRecord['state'], detail: string | null, items?: { asks: WorkspaceSyncAsk[]; reviews: WorkspaceSyncReview[] }): void {
+  function set(
+    rec: WorkspaceRecord,
+    state: WorkspaceRecord['state'],
+    detail: string | null,
+    items?: { asks: WorkspaceSyncAsk[]; reviews: WorkspaceSyncReview[] },
+    cause: WorkspaceSyncCause | null = null,
+  ): void {
     rec.state = state
+    rec.cause = cause
     // A sentence may open with the Workspace's stand-in name ("the Workspace").
     rec.detail = detail === null || detail === '' ? detail : `${detail.charAt(0).toUpperCase()}${detail.slice(1)}`
     if (items !== undefined) {
@@ -618,7 +630,7 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
       if (outcome.reason === 'nothing-to-resolve' || outcome.reason === 'invalid-resolution' || outcome.reason === 'stale-decision') {
         return outcome
       }
-      set(rec, 'error', refusalSentence(outcome.reason, nameIn(rec)))
+      set(rec, 'error', refusalSentence(outcome.reason, nameIn(rec)), undefined, outcome.reason === 'unrelated-history' ? 'unrelated-history' : null)
       return outcome
     }
     const result = outcome.result
@@ -651,7 +663,7 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
         // Waits for a person: retrying cannot grant access. "Sync now" tries again.
         clearTimers(rec)
         rec.retryAttempt = 0
-        set(rec, 'no-access', noAccessSentence(nameIn(rec), result.rejection))
+        set(rec, 'no-access', noAccessSentence(nameIn(rec), result.rejection), undefined, result.rejection?.kind ?? 'access')
         break
       case 'committed':
         // Only a commit-only run answers this; nothing was exchanged.

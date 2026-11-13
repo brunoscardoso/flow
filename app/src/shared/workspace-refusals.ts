@@ -49,6 +49,10 @@ export const WORKSPACE_REFUSAL_SENTENCES: Record<WorkspaceRefusalReason, string>
   unconfirmed: 'This needs your go-ahead first.',
   'remote-exists': 'This Workspace already shares through another repository. Choose Change to replace it.',
   'merge-in-progress': 'A sync of this Workspace was left half-done. Sync it first, then try again.',
+  'invalid-branch': "That isn't a name a branch can have. Choose another.",
+  'branch-diverged':
+    'This computer already has a branch of that name with changes the current one doesn’t have, so Flow won’t switch over it. Choose another branch.',
+  'remote-unreadable': "Flow couldn't read that repository's branches. Check the address and that you have access to it.",
   failed: "Flow couldn't finish that.",
   unavailable: "Flow couldn't reach its Workspace tools just now. Try again in a moment.",
 }

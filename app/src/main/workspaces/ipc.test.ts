@@ -86,6 +86,8 @@ function harness(options: { trusted?: boolean } = {}) {
     },
     setRemote: async () => NO,
     unsetRemote: async () => NO,
+    branches: async () => NO,
+    setBranch: async () => NO,
     suggestJoin: async (root) => {
       received.push({ suggestJoin: root })
       return { ok: true, suggestion: { kind: 'none' } }
@@ -148,6 +150,14 @@ function harness(options: { trusted?: boolean } = {}) {
       unsetRemote: async (slug) => {
         received.push({ unsetRemote: slug })
         return { ok: true, remote: null, status: { state: 'local-only', lastSyncedAt: null, detail: null, asks: [], reviews: [] } }
+      },
+      branches: async (request) => {
+        received.push({ branches: request })
+        return { ok: true, branches: [], defaultBranch: null, suggestion: { name: 'main', source: 'new' } }
+      },
+      setBranch: async (request) => {
+        received.push({ setBranch: request })
+        return { ok: true, remote: 'https://h/r', status: { state: 'synced', lastSyncedAt: null, detail: null, asks: [], reviews: [] } }
       },
     },
     connections: {
@@ -323,6 +333,27 @@ describe('workspaces channels', () => {
     await expect(h.call('workspaces:setRemote', { slug: 'acme', remote: 'https://x/y', replace: 'yes' })).rejects.toThrow(/boolean/)
     await expect(h.call('workspaces:unsetRemote', {})).rejects.toThrow(/slug/)
     await expect(harness({ trusted: false }).call('workspaces:unsetRemote', { slug: 'acme' })).rejects.toThrow(/not available here/)
+  })
+
+  it('the branch channels rebuild every field; a branch reaches connect, create and join only as a string', async () => {
+    const h = harness()
+    await h.call('workspaces:branches', { slug: 'acme', remote: 'https://gitlab.com/acme/k.git', depth: 9 })
+    await h.call('workspaces:branches', { slug: 'acme' })
+    await h.call('workspaces:setBranch', { slug: 'acme', branch: 'knowledge', restore: true })
+    await h.call('workspaces:setRemote', { slug: 'acme', remote: 'https://gitlab.com/acme/k.git', branch: 'knowledge' })
+    await h.call('workspaces:createRemote', { slug: 'acme', provider: 'github', owner: 'acme', name: 'k', branch: 'notes' })
+    expect(h.received).toEqual([
+      { branches: { slug: 'acme', remote: 'https://gitlab.com/acme/k.git' } },
+      { branches: { slug: 'acme' } },
+      // `restore` is main's own decision after a failed check — never the renderer's.
+      { setBranch: { slug: 'acme', branch: 'knowledge' } },
+      { setRemote: { slug: 'acme', remote: 'https://gitlab.com/acme/k.git', branch: 'knowledge' } },
+      { createRemote: { slug: 'acme', provider: 'github', owner: 'acme', name: 'k', branch: 'notes' } },
+    ])
+    await expect(h.call('workspaces:setBranch', { slug: 'acme' })).rejects.toThrow(/branch/)
+    await expect(h.call('workspaces:setBranch', { slug: 'acme', branch: 7 })).rejects.toThrow(/branch/)
+    await expect(h.call('workspaces:setRemote', { slug: 'acme', remote: 'https://x/y', branch: '' })).rejects.toThrow(/branch/)
+    await expect(harness({ trusted: false }).call('workspaces:setBranch', { slug: 'acme', branch: 'x' })).rejects.toThrow(/not available here/)
   })
 
   it('connections learning takes an addressable root only, answered as its project', async () => {

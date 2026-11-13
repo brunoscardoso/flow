@@ -186,7 +186,7 @@ describe('pure parts', () => {
     const membership = {
       flowFolder: '/flow',
       target: API,
-      workspace: { name: 'Acme', slug: 'acme', path: '/flow/workspaces/acme', remote: null, isDefault: false },
+      workspace: { name: 'Acme', slug: 'acme', path: '/flow/workspaces/acme', remote: null, branch: null, branchMove: null, isDefault: false },
       project: { id: 'a', name: 'Backend', slug: 'api', remotes: [], description: null, localPath: API, flowPath: '/f/api' },
       linked: true,
       via: 'flow-link' as const,

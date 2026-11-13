@@ -37,6 +37,7 @@ import type {
 } from '../../shared/workspaces-contract'
 import { workspaceRefusalDetail } from '../../shared/workspace-refusals'
 import { comparablePath } from '../threads/workspace-switcher-model'
+import { NO_BRANCH_YET, branchMoveLine } from './workspace-branch-model'
 
 // ── The settings group and section ──────────────────────────────────────────
 
@@ -203,6 +204,10 @@ export interface WorkspaceCardView {
   canDelete: boolean
   remoteText: string
   hasRemote: boolean
+  /** The branch it syncs on — shown only when it shares through a repository. */
+  branchText: string
+  /** Why Flow moved it to that branch by itself, or null. */
+  branchMoveText: string | null
   sync: SyncLineView
   projects: WorkspaceProjectRow[]
   /** Projects of the other Workspaces that may move here. */
@@ -285,6 +290,9 @@ export function workspaceCard(input: {
     canDelete: !workspace.isDefault,
     remoteText: workspace.remote ?? NO_SHARED_REPOSITORY,
     hasRemote: workspace.remote !== null,
+    // An older CLI's summary has no branch fields at all.
+    branchText: workspace.branch ?? NO_BRANCH_YET,
+    branchMoveText: branchMoveLine(workspace.branchMove ?? null),
     sync: syncLine(input.sync, input.now, input.syncing === true),
     projects: projectRows(workspace, input.open, all.length > 1),
     moveHereCandidates: moveHereCandidates(all, workspace.slug),

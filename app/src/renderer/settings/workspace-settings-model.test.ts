@@ -65,6 +65,8 @@ const ACME: WorkspaceListing = {
   slug: 'acme',
   path: '/home/me/flowhome/workspaces/acme',
   remote: 'https://git.example.com/acme/knowledge.git',
+  branch: null,
+  branchMove: null,
   isDefault: false,
   projects: [project('backend', '/code/backend'), project('frontend', '/code/frontend'), project('mobile', null)],
 }
@@ -74,6 +76,8 @@ const DEFAULT: WorkspaceListing = {
   slug: 'default',
   path: '/home/me/flowhome/workspaces/default',
   remote: null,
+  branch: null,
+  branchMove: null,
   isDefault: true,
   projects: [project('docs', '/code/docs')],
 }
@@ -184,6 +188,16 @@ describe('a Workspace card', () => {
     expect(acme.projects.every((row) => row.canMove)).toBe(true)
     // With one Workspace there is nowhere to move a project to.
     expect(workspaceCard({ workspace: ACME, open: OPEN, sync: null, now: NOW }).projects.some((row) => row.canMove)).toBe(false)
+  })
+  it('shows the branch it syncs on and why Flow moved it there; an older answer reads as not chosen yet', () => {
+    const moved = workspaceCard({
+      workspace: { ...ACME, branch: 'knowledge', branchMove: { from: 'main', to: 'knowledge', reason: 'pull-request-required', at: '2026-11-13T12:00:00Z' } },
+      open: OPEN,
+      sync: null,
+      now: NOW,
+    })
+    expect(moved).toMatchObject({ branchText: 'knowledge', branchMoveText: 'Moved from main on Nov 13: main only accepts pull requests.' })
+    expect(workspaceCard({ workspace: ACME, open: OPEN, sync: null, now: NOW })).toMatchObject({ branchText: 'Not chosen yet', branchMoveText: null })
   })
   it('shows the shared repository as typed, or says there is none', () => {
     expect(workspaceCard({ workspace: ACME, open: OPEN, sync: null, now: NOW })).toMatchObject({

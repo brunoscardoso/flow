@@ -18,6 +18,8 @@ const WORKSPACE: WorkspaceListing = {
   slug: 'acme',
   path: '/flow/workspaces/acme',
   remote: null,
+  branch: null,
+  branchMove: null,
   isDefault: false,
   projects: [
     { id: 'a', name: 'Backend', slug: 'backend', remotes: [], description: null, localPath: '/code/backend', flowPath: '/f/a' },

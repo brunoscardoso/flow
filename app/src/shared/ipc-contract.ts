@@ -61,6 +61,9 @@ import type {
   WorkspaceHostTools,
   WorkspaceRemoteResult,
   WorkspaceSetRemoteRequest,
+  WorkspaceBranchesRequest,
+  WorkspaceBranchesResult,
+  WorkspaceSetBranchRequest,
   WorkspaceSyncChangedEvent,
   WorkspaceSyncStatus,
   WorkspaceJoinResult,
@@ -6705,7 +6708,7 @@ export interface IpcInvokeMap {
   /** Try a project that could not move into a Workspace again. */
   'workspaces:retryPlacement': { request: { rootPath: string }; response: WorkspacePlacementState }
   /** Join a Workspace by its repository address (one clone), linking the projects this computer has. */
-  'workspaces:join': { request: { remote: string; name?: string }; response: WorkspaceAnswer<WorkspaceJoinResult> }
+  'workspaces:join': { request: { remote: string; name?: string; branch?: string }; response: WorkspaceAnswer<WorkspaceJoinResult> }
   /** The selected Workspace (falls back to the first one here). */
   'workspaces:current': { request: Record<string, never>; response: WorkspaceAnswer<{ slug: string | null }> }
   'workspaces:setCurrent': { request: { slug: string | null }; response: WorkspaceAnswer<{ slug: string | null }> }
@@ -6746,6 +6749,14 @@ export interface IpcInvokeMap {
   'workspaces:createRemote': { request: WorkspaceCreateRemoteRequest; response: WorkspaceRemoteResult }
   'workspaces:setRemote': { request: WorkspaceSetRemoteRequest; response: WorkspaceRemoteResult }
   'workspaces:unsetRemote': { request: { slug: string }; response: WorkspaceRemoteResult }
+  /**
+   * The branch a Workspace syncs on. `branches`: what its repository (or one
+   * about to be connected) has, with a labelled suggestion — reads the remote,
+   * writes nothing. `setBranch`: a person's choice, checked by one sync and put
+   * back when the branch can't be used (`branch-unusable` with its `cause`).
+   */
+  'workspaces:branches': { request: WorkspaceBranchesRequest; response: WorkspaceBranchesResult }
+  'workspaces:setBranch': { request: WorkspaceSetBranchRequest; response: WorkspaceRemoteResult }
   /**
    * Connections learning (discovery workspace-connections-learning): a person
    * pressed Learn connections — check the pending pairs of `rootId`'s
@@ -7797,6 +7808,8 @@ export const IPC_INVOKE_CHANNELS = [
   'workspaces:createRemote',
   'workspaces:setRemote',
   'workspaces:unsetRemote',
+  'workspaces:branches',
+  'workspaces:setBranch',
   'settings:shouldAskTelemetry',
   'settings:recordTelemetryAsk',
   'settings:setTelemetryConsent',
@@ -8923,6 +8936,8 @@ export interface FlowWorkspacesApi {
   createRemote(request: IpcRequest<'workspaces:createRemote'>): Promise<IpcResponse<'workspaces:createRemote'>>
   setRemote(request: IpcRequest<'workspaces:setRemote'>): Promise<IpcResponse<'workspaces:setRemote'>>
   unsetRemote(request: IpcRequest<'workspaces:unsetRemote'>): Promise<IpcResponse<'workspaces:unsetRemote'>>
+  branches(request: IpcRequest<'workspaces:branches'>): Promise<IpcResponse<'workspaces:branches'>>
+  setBranch(request: IpcRequest<'workspaces:setBranch'>): Promise<IpcResponse<'workspaces:setBranch'>>
   onSyncChanged(listener: (event: IpcEventPayload<'workspaces:syncChanged'>) => void): Unsubscribe
   learnConnections(request: IpcRequest<'workspaces:learnConnections'>): Promise<IpcResponse<'workspaces:learnConnections'>>
   connectionsLearningStatus(request: IpcRequest<'workspaces:connectionsLearningStatus'>): Promise<IpcResponse<'workspaces:connectionsLearningStatus'>>

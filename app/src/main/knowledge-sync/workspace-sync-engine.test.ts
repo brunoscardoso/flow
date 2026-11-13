@@ -417,7 +417,7 @@ describe('workspace sync engine — the shared repository cannot be trusted as i
     const h = harness({ nameOf: async () => 'Acme' })
     h.answer(SYNC_ARGV, refused('unrelated-history', { pushed: false }))
     await h.engine.open(SLUG)
-    expect(h.last()).toMatchObject({ state: 'error', detail: WORKSPACE_SYNC_SENTENCES.unrelatedHistory('Acme') })
+    expect(h.last()).toMatchObject({ state: 'error', cause: 'unrelated-history', detail: WORKSPACE_SYNC_SENTENCES.unrelatedHistory('Acme') })
     expect(h.last()?.detail).not.toMatch(/git|merge-base|unrelated/)
   })
 })
@@ -487,6 +487,29 @@ describe('workspace sync engine — offline, behind, refusals', () => {
     await h.engine.open(SLUG)
     expect(h.last()).toMatchObject({ state: 'no-access', detail: sentence })
     expect(JSON.stringify(h.last())).not.toMatch(/dev\.azure\.com|VS403702|TF402455/)
+  })
+
+  it.each([
+    [{ kind: 'pull-request-required' }, 'pull-request-required'],
+    [{ kind: 'declined' }, 'declined'],
+    [{ kind: 'author-not-allowed', email: null }, 'author-not-allowed'],
+    [{ kind: 'something-newer' }, 'access'],
+  ])('no-access carries its cause %o → %s, so a branch check can tell what is to blame', async (rejection, cause) => {
+    const h = harness()
+    h.answer(SYNC_ARGV, result('no-access', { rejection, ahead: 1 }))
+    await h.engine.open(SLUG)
+    expect(h.last()).toMatchObject({ state: 'no-access', cause })
+  })
+
+  it('a cause belongs to the sync that named it: the next good sync carries none', async () => {
+    const h = harness()
+    h.answer(SYNC_ARGV, result('no-access', { rejection: { kind: 'pull-request-required' }, ahead: 1 }), result('synced'))
+    await h.engine.open(SLUG)
+    expect(h.last()?.cause).toBe('pull-request-required')
+    await h.engine.syncNow(SLUG)
+    // POSITIVE FIRST: the second sync ran and synced.
+    expect(h.last()?.state).toBe('synced')
+    expect(h.last()).not.toHaveProperty('cause')
   })
 
   it('no-access → its own state and sentence, ONE notification, and nothing retries until "Sync now"', async () => {
