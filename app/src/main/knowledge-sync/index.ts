@@ -96,6 +96,11 @@ const SKILL_INVOCATION = /^\/([a-z][a-z0-9-]{0,63})(?=\s|$)/i
  * project's folder name. NEVER the thread title and never the message text —
  * a title can be private, and a commit message is published.
  */
+/** The commit label for knowledge a learning run wrote: names the project, like a turn's. */
+export function learningLabelFor(projectRoot: string): string {
+  return `learning in ${basename(projectRoot) || 'this project'}`
+}
+
 export function commitLabelFor(projectRoot: string, lastUserMessage: string | null): string {
   const project = basename(projectRoot) || 'this project'
   const skill = lastUserMessage === null ? null : SKILL_INVOCATION.exec(lastUserMessage.trim())

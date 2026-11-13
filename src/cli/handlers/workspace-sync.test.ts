@@ -806,6 +806,110 @@ describeWithGit('workspace sync against real git, two machines', () => {
     TEST_TIMEOUT_MS
   );
 
+  // ── A branch that only takes pull requests ──
+
+  /** A real pre-receive hook that refuses `refs/heads/<branch>` the way Azure DevOps does. */
+  function protectOnRemote(...branches: string[]): void {
+    const hook = join(bare, 'hooks', 'pre-receive');
+    const cases = branches.map((branch) => `refs/heads/${branch}`).join('|');
+    writeFileSync(
+      hook,
+      `#!/bin/sh\nwhile read old new ref; do\n  case "$ref" in ${cases}) echo "TF402455: Pushes to this branch are not permitted; you must use a pull request to update this branch." >&2; exit 1;; esac\ndone\nexit 0\n`,
+      { mode: 0o755 }
+    );
+  }
+  const branchOf = (repo: string): string => git(repo, 'branch', '--show-current').trim();
+
+  it(
+    'moves to the knowledge branch when main only takes pull requests, and the other machine follows on its next sync',
+    () => {
+      protectOnRemote('main');
+      const mainBefore = git(bare, 'rev-parse', 'refs/heads/main').trim();
+
+      write(wsA, 'projects/backend/brain/features/from-a.md', '# from A\n');
+      const a = sync(flowA);
+      // POSITIVE first (#28): main really refused, and A really published.
+      expect(a).toMatchObject({ state: 'synced', pushed: true, ahead: 0, branch: 'knowledge' });
+      expect(a.moved).toEqual({ from: 'main', to: 'knowledge', reason: 'pull-request-required' });
+      expect(branchOf(wsA)).toBe('knowledge');
+      expect(git(bare, 'rev-parse', 'refs/heads/knowledge').trim()).toBe(head(wsA));
+      expect(git(bare, 'rev-parse', 'refs/heads/main').trim()).toBe(mainBefore);
+
+      // B is still on main, has nothing to push, and is never refused — it follows anyway.
+      expect(branchOf(wsB)).toBe('main');
+      const b = sync(flowB);
+      expect(b.moved).toEqual({ from: 'main', to: 'knowledge', reason: 'followed' });
+      expect(b).toMatchObject({ state: 'synced', branch: 'knowledge' });
+      expect(read(wsB, 'projects/backend/brain/features/from-a.md')).toBe('# from A\n');
+
+      // From here the two exchange on knowledge, both ways.
+      write(wsB, 'projects/backend/brain/features/from-b.md', '# from B\n');
+      expect(sync(flowB)).toMatchObject({ state: 'synced', pushed: true });
+      expect(sync(flowA)).toMatchObject({ state: 'synced', pulled: 1 });
+      expect(read(wsA, 'projects/backend/brain/features/from-b.md')).toBe('# from B\n');
+      expect(git(bare, 'rev-parse', 'refs/heads/main').trim()).toBe(mainBefore);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    "carries a follower's own unpushed commits onto the knowledge branch",
+    () => {
+      protectOnRemote('main');
+      write(wsA, 'projects/backend/brain/features/from-a.md', '# from A\n');
+      expect(sync(flowA).moved?.reason).toBe('pull-request-required');
+      // B wrote while A moved: B's commit and A's both end up on knowledge.
+      write(wsB, 'projects/backend/brain/features/from-b.md', '# from B\n');
+      const b = sync(flowB);
+      expect(b).toMatchObject({ state: 'synced', pushed: true, branch: 'knowledge' });
+      expect(git(bare, 'show', 'refs/heads/knowledge:projects/backend/brain/features/from-b.md')).toBe('# from B\n');
+      expect(git(bare, 'show', 'refs/heads/knowledge:projects/backend/brain/features/from-a.md')).toBe('# from A\n');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'moves ONCE: when the knowledge branch refuses too, it reports pull-request-required and stops',
+    () => {
+      protectOnRemote('main', 'knowledge');
+      const refsBefore = remoteRefs();
+      write(wsA, 'projects/backend/brain/features/from-a.md', '# from A\n');
+      const a = sync(flowA);
+      expect(a).toMatchObject({ state: 'no-access', pushed: false, rejection: { kind: 'pull-request-required' } });
+      expect(calls.filter((args) => args.includes('push'))).toHaveLength(2);
+      expect(remoteRefs()).toBe(refsBefore);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'commits as the email every linked project uses when the Workspace repository has none of its own',
+    () => {
+      git(join(sandbox, 'code', 'backend'), 'config', 'user.email', 'me@work.example');
+      write(wsA, 'projects/backend/brain/features/identity.md', '# who\n');
+      const a = sync(flowA);
+      expect(a).toMatchObject({ state: 'synced', pushed: true, identity: { email: 'me@work.example', source: 'projects' } });
+      expect(git(wsA, 'log', '-1', '--format=%ae %ce').trim()).toBe('me@work.example me@work.example');
+      // Set once: the next run changes nothing.
+      write(wsA, 'projects/backend/brain/features/identity.md', '# who, again\n');
+      expect(sync(flowA).identity).toBeUndefined();
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'leaves the email alone when the Workspace repository already has its own',
+    () => {
+      git(wsA, 'config', 'user.email', 'chosen@example.com');
+      git(join(sandbox, 'code', 'backend'), 'config', 'user.email', 'me@work.example');
+      write(wsA, 'projects/backend/brain/features/identity.md', '# who\n');
+      const a = sync(flowA);
+      expect(a.identity).toBeUndefined();
+      expect(git(wsA, 'log', '-1', '--format=%ae').trim()).toBe('chosen@example.com');
+    },
+    TEST_TIMEOUT_MS
+  );
+
   // ── Commit only ──
 
   it(

@@ -91,6 +91,7 @@ import { createShareClient } from './share/share-client'
 import { isAppMainFrame, registerShareChannels } from './share/share-ipc'
 import {
   commitLabelFor,
+  learningLabelFor,
   createKnowledgeRouter,
   createWorkspaceRoute,
   createWorkspaceSync,
@@ -2100,6 +2101,13 @@ function bootstrapMainProcess(): void {
     onFeaturesDiscovered: ({ rootPath, added, reason }) => {
       broadcast('learn:featuresDiscovered', { rootId: rootPath, added, reason })
     },
+    // Learning writes knowledge outside any chat turn: share it the same way a
+    // turn does (the sync engine folds a burst of jobs into one sync).
+    onKnowledgeWritten: (rootPath) => {
+      void knowledgeRoutes.commitAfterTurn(rootPath, [], (root) => learningLabelFor(root)).catch((error: unknown) => {
+        console.warn('[KnowledgeSync] commit after learning failed', { error: String(error) })
+      })
+    },
   })
   const orchestrator = learnOrchestrator
   const structureOf = (rootPath: string): string => join(rootPath, 'flow', 'brain', '.structure')
@@ -2118,7 +2126,11 @@ function bootstrapMainProcess(): void {
     },
     workspaceOfRoot: (root) => workspaces.workspaceOfRoot(root),
     automatic: () => automaticConnectionsLearning(),
-    onStatus: (status) => broadcast('workspaces:connectionsLearning', status),
+    onStatus: (status) => {
+      broadcast('workspaces:connectionsLearning', status)
+      // A finished run that found connections wrote them into the Workspace: share them.
+      if (!status.running && status.found > 0) workspaceSync.commitAfterTurn(status.workspace, 'connections learned')
+    },
     log: (message, details) => console.warn(`[Connections] ${message}`, details),
   })
   // Once after launch, after the launch's own learning has had its turn.

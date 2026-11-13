@@ -42,7 +42,17 @@
  *      force, never a rebase of published history. A rejected push (the
  *      remote moved meanwhile) fetches and merges ONCE more, then reports
  *      `behind` if it is still rejected. A push the remote itself DECLINED
- *      (`[remote rejected]` — a hook, a protected branch) is `no-access`.
+ *      (`[remote rejected]` — a hook, a protected branch) is `no-access`, with
+ *      `rejection` naming why — EXCEPT a branch that only takes pull requests:
+ *      the Workspace moves ONCE to `WORKSPACE_FALLBACK_BRANCH` at the current
+ *      commit, merges what the remote holds there, and pushes again (`moved`).
+ *      Every member's fetch also asks for that branch (a glob, so its absence
+ *      costs nothing), and a member still on the old branch FOLLOWS the moment
+ *      it exists — nobody is told, nothing is written on the refusing branch.
+ *
+ * Identity: the Workspace repository sits outside every project folder, so a
+ * per-folder git identity never reaches it. With no email of its own, it takes
+ * the one every linked project checkout here agrees on (`identity`).
  *
  * Deciding an ask or review: `--id <item id> [--resolve <path>] --take ours|theirs|merged|file:<file>`
  * (the id applies the decision only to exactly the content it was shown —
@@ -151,6 +161,13 @@ import {
 // ─── Names ──────────────────────────────────────────────────────────────────
 
 const REMOTE_NAME = 'origin';
+/**
+ * Where a Workspace syncs when its own branch only accepts pull requests.
+ * A CONVENTION, not a record: every member's Flow reaches the same answer from
+ * the remote alone (the branch exists there → sync there), so nobody has to be
+ * told and nothing has to be written on a branch that refuses writes.
+ */
+export const WORKSPACE_FALLBACK_BRANCH = 'knowledge';
 export const SYNC_LOCK_GIT_PATH = 'plan-flow-sync.lock';
 /** Written right before Flow's own merge starts, removed once it is committed or undone. */
 export const SYNC_MERGE_MARKER_GIT_PATH = 'plan-flow-sync-merge.json';
@@ -244,6 +261,17 @@ export interface SyncResult {
    * never published. Every one stays on this machine's disk.
    */
   untracked: string[];
+  /**
+   * This run moved the Workspace onto `WORKSPACE_FALLBACK_BRANCH`: because its
+   * branch refused a direct push (`pull-request-required`), or because another
+   * member already moved it (`followed`). Absent when nothing moved.
+   */
+  moved?: { from: string; to: string; reason: 'pull-request-required' | 'followed' };
+  /**
+   * The email this run gave the Workspace repository, copied from the one
+   * every linked project on this machine commits as. Absent when nothing changed.
+   */
+  identity?: { email: string; source: 'projects' };
   /**
    * `no-access` only: WHY the remote refused, so the app can say what is
    * wrong instead of blaming access for a policy the remote enforces.
@@ -1333,6 +1361,35 @@ function parseResolve(resolveOption: SyncResolve, repo: string, cwd: string): Re
   });
 }
 
+// ─── Identity ───────────────────────────────────────────────────────────────
+
+/**
+ * The Workspace repository lives outside every project's folder, so a git
+ * identity chosen BY FOLDER (`includeIf "gitdir:…"`) never reaches it and its
+ * commits fall back to the global email — which a team remote may refuse
+ * (Azure DevOps VS403702). When the repository has no email of its own and
+ * every linked project checkout on this machine commits as ONE email that
+ * differs from it, the repository takes that email (repo-local only).
+ * Disagreeing projects, no checkouts, or an email already set: nothing changes.
+ */
+function adoptProjectIdentity(git: WorkspaceGit, repo: string, flowFolder: string, workspace: LoadedWorkspace): string | null {
+  const own = attempt(git, ['config', '--local', '--get', 'user.email'], repo);
+  if (own.ok && own.out.trim() !== '') return null;
+  const local = readLocalProjects(flowFolder);
+  const emails = new Map<string, string>();
+  for (const project of workspace.file.projects) {
+    const path = local[project.id];
+    if (path === undefined || !existsSync(path)) continue;
+    const email = attempt(git, ['config', '--get', 'user.email'], path);
+    if (email.ok && email.out.trim() !== '') emails.set(email.out.trim().toLowerCase(), email.out.trim());
+  }
+  if (emails.size !== 1) return null;
+  const [email] = [...emails.values()] as [string];
+  const effective = attempt(git, ['config', '--get', 'user.email'], repo);
+  if (effective.ok && effective.out.trim().toLowerCase() === email.toLowerCase()) return null;
+  return attempt(git, ['config', '--local', 'user.email', email], repo).ok ? email : null;
+}
+
 // ─── The verb ───────────────────────────────────────────────────────────────
 
 /** Sync one Workspace. See the module header for the steps. */
@@ -1359,7 +1416,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
   try {
     const recoveredMerge = recoverLeftoverMerge(git, repo, workspace.slug);
     const branchOut = attempt(git, ['symbolic-ref', '--short', '-q', 'HEAD'], repo);
-    const branch = branchOut.ok ? branchOut.out.trim() : '';
+    let branch = branchOut.ok ? branchOut.out.trim() : '';
     if (branch === '') {
       throw new WorkspaceRefusal('detached-head', 'the Workspace folder is not on a branch, so there is nothing to sync from', { workspace: workspace.slug });
     }
@@ -1369,7 +1426,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     if (remote !== null && !parseGitRemote(remote).ok) {
       throw new WorkspaceRefusal('invalid-remote', "the Workspace's remote is not a repository address Flow can use", { remote: redactRemote(remote) });
     }
-    const trackingRef = `refs/remotes/${REMOTE_NAME}/${branch}`;
+    let trackingRef = `refs/remotes/${REMOTE_NAME}/${branch}`;
 
     const result: SyncResult = {
       action: 'sync',
@@ -1398,6 +1455,8 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     };
 
     // ── 1. Commit ──
+    const adopted = adoptProjectIdentity(git, repo, flowFolder, workspace);
+    if (adopted !== null) result.identity = { email: adopted, source: 'projects' };
     writeWorkspaceRepoFiles(repo);
     const message = (options.message?.trim() || defaultMessage(workspace)).replace(/\s+/g, ' ').slice(0, MAX_MESSAGE_LENGTH);
     result.committed = commitLocal(
@@ -1429,7 +1488,13 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
 
     const fetchOnce = (): { ok: true } | { ok: false; detail: string } => {
       const before = revParse(git, repo, trackingRef);
-      const fetched = attempt(git, [...NO_SYMLINKS, 'fetch', '-q', '--no-tags', '--', REMOTE_NAME, `+refs/heads/${branch}:${trackingRef}`], repo, true);
+      const refspecs = [`+refs/heads/${branch}:${trackingRef}`];
+      // A glob matches nothing without failing: this is how a member still on
+      // the old branch learns, in the same fetch, that the Workspace moved.
+      if (branch !== WORKSPACE_FALLBACK_BRANCH) {
+        refspecs.push(`+refs/heads/${WORKSPACE_FALLBACK_BRANCH}*:refs/remotes/${REMOTE_NAME}/${WORKSPACE_FALLBACK_BRANCH}*`);
+      }
+      const fetched = attempt(git, [...NO_SYMLINKS, 'fetch', '-q', '--no-tags', '--', REMOTE_NAME, ...refspecs], repo, true);
       if (!fetched.ok) {
         // A remote that does not have this branch yet is not an error: the first push creates it.
         if (/couldn't find remote ref/i.test(fetched.detail)) return { ok: true };
@@ -1461,10 +1526,33 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
       return result;
     };
 
+    /**
+     * Put the Workspace on the fallback branch, AT the current commit: the
+     * working tree is untouched and every local commit comes along; the next
+     * merge brings in what the remote holds there. Refused (false) when a local
+     * branch of that name already holds commits HEAD does not.
+     */
+    const moveTo = (reason: 'pull-request-required' | 'followed'): boolean => {
+      const target = WORKSPACE_FALLBACK_BRANCH;
+      const existing = revParse(git, repo, `refs/heads/${target}`);
+      if (existing !== null && !isAncestor(git, repo, existing, 'HEAD')) return false;
+      if (!attempt(git, ['switch', '-q', '-C', target], repo).ok) return false;
+      result.moved = { from: branch, to: target, reason };
+      branch = target;
+      trackingRef = `refs/remotes/${REMOTE_NAME}/${target}`;
+      result.branch = target;
+      return true;
+    };
+
     // A decision is made about the remote state the question was put about — no new fetch.
     if (resolveRequest === undefined) {
       const fetched = fetchOnce();
       if (!fetched.ok) return offline(fetched.detail);
+      // Another member already moved the Workspace: follow it (one merge brings
+      // in their work; this machine's own commits ride along).
+      if (branch !== WORKSPACE_FALLBACK_BRANCH && revParse(git, repo, `refs/remotes/${REMOTE_NAME}/${WORKSPACE_FALLBACK_BRANCH}`) !== null) {
+        moveTo('followed');
+      }
     }
 
     // ── 3. Merge ──
@@ -1511,6 +1599,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     };
 
     if (!options.push) return finish();
+    let movedForPush = false;
     for (let round = 0; round < 2; round += 1) {
       const tracking = revParse(git, repo, trackingRef);
       const ahead = countRange(git, repo, tracking === null ? 'HEAD' : `${trackingRef}..HEAD`);
@@ -1524,6 +1613,25 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
         return finish();
       }
       if (!REJECTED_PUSH.test(pushed.detail) || REMOTE_REJECTED.test(pushed.detail)) {
+        // The branch only takes pull requests: move to the fallback branch ONCE,
+        // bring in whatever is already there, and push again. This does not
+        // spend a round.
+        if (
+          !movedForPush &&
+          branch !== WORKSPACE_FALLBACK_BRANCH &&
+          classifyRejection(pushed.detail).kind === 'pull-request-required' &&
+          moveTo('pull-request-required')
+        ) {
+          movedForPush = true;
+          const fetched = fetchOnce();
+          if (!fetched.ok) {
+            finish();
+            return offline(fetched.detail);
+          }
+          if (!settle(mergeIncoming({ ...afterResolve, branch }, revParse(git, repo, trackingRef)))) return result;
+          round -= 1;
+          continue;
+        }
         // Not a moved remote: unreachable, or the remote itself declined it — retrying cannot help.
         finish();
         return offline(pushed.detail);
@@ -1535,7 +1643,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
         finish();
         return offline(fetched.detail);
       }
-      if (!settle(mergeIncoming(afterResolve, revParse(git, repo, trackingRef)))) return result;
+      if (!settle(mergeIncoming({ ...afterResolve, branch }, revParse(git, repo, trackingRef)))) return result;
     }
     finish();
     result.state = 'behind';

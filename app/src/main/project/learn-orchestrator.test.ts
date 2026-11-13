@@ -455,6 +455,8 @@ function makeHarness(options: {
   learnIgnore?: string[] | (() => Promise<string[]>)
   /** Make the project-structure read fail, to probe the #1169 error path. */
   projectReadFails?: boolean
+  /** Wired as the orchestrator's knowledge-sync hook. */
+  onKnowledgeWritten?: (rootPath: string) => void
 } = {}): Harness {
   // ONE in-memory store, shared by every suite that fakes this seam — the
   // orchestrator gets a single read-modify-write function, never a read and a
@@ -517,6 +519,7 @@ function makeHarness(options: {
     now: () => new Date('2026-07-15T12:00:00.000Z'),
     budget: options.budget ?? 10,
     onError: (message, error) => errors.push({ message, error }),
+    ...(options.onKnowledgeWritten !== undefined ? { onKnowledgeWritten: options.onKnowledgeWritten } : {}),
     ...(options.learnIgnore !== undefined
       ? {
           readLearnIgnore:
@@ -552,6 +555,39 @@ async function flush(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve))
   await new Promise((resolve) => setImmediate(resolve))
 }
+
+describe('LearnOrchestrator → knowledge sync', () => {
+  it('announces each job that RAN — learned or failed — so its knowledge is shared without a chat turn', async () => {
+    const written: string[] = []
+    const ok = makeHarness({ passResult: { ok: true, docPath: '/repo/doc.md', noteFingerprint: 'fp' }, onKnowledgeWritten: (root) => written.push(root) })
+    ok.orchestrator.enqueueModule('/repo', 'src/a', { reason: 'manual', deliberate: true })
+    await flush()
+    // POSITIVE first (#28): the job really ran.
+    expect(ok.passCalls).toHaveLength(1)
+    expect(written).toEqual(['/repo'])
+
+    const failed = makeHarness({ passResult: { ok: false, reason: 'boom' }, onKnowledgeWritten: (root) => written.push(root) })
+    failed.orchestrator.enqueueModule('/other', 'src/a', { reason: 'manual', deliberate: true })
+    await flush()
+    expect(failed.passCalls).toHaveLength(1)
+    expect(written).toEqual(['/repo', '/other'])
+  })
+
+  it('a listener that throws never breaks the queue', async () => {
+    const h = makeHarness({
+      passResult: { ok: true, docPath: '/repo/doc.md', noteFingerprint: 'fp' },
+      onKnowledgeWritten: () => {
+        throw new Error('sync is down')
+      },
+    })
+    h.orchestrator.enqueueModule('/repo', 'src/a', { reason: 'manual', deliberate: true })
+    h.orchestrator.enqueueModule('/repo', 'src/b', { reason: 'manual', deliberate: true })
+    await flush()
+    await flush()
+    expect(h.passCalls.map((call) => call.modulePath)).toEqual(['src/a', 'src/b'])
+    expect(h.errors.some((entry) => entry.message.startsWith('knowledge sync after learning'))).toBe(true)
+  })
+})
 
 describe('LearnOrchestrator.enqueueModule', () => {
   it('runs a pass and records learning → learned on success', async () => {

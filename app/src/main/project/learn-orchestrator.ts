@@ -718,6 +718,13 @@ export interface LearnOrchestratorDeps {
    * class of bug as the dead button it replaced.
    */
   onFeaturesDiscovered?: (event: { rootPath: string; added: number; reason: string | null }) => void
+  /**
+   * A learn job RAN and may have written knowledge (notes, learning state,
+   * features) under the root's `flow/`. Raised once per job that ran — success
+   * or failure, never for one dropped unrun — so the knowledge sync commits and
+   * shares it without waiting for a chat turn. Best-effort: a throw is logged.
+   */
+  onKnowledgeWritten?: (rootPath: string) => void
   /** Runs one learn pass. Default: runLearnPass (the real executor). */
   runPass?: (params: LearnPassParams) => Promise<LearnPassResult>
   /** Run the bundled CLI and capture stdout. Default: runBundledCliCapturing.
@@ -920,6 +927,7 @@ export class LearnOrchestrator {
     // discipline `drawFeatureView` already enforces for the drawing pass.
     const settled = (added: number, reason: string | null): void => {
       this.deps.onFeaturesDiscovered?.({ rootPath, added, reason })
+      if (added > 0) this.announceKnowledge(rootPath)
     }
     try {
       const discover = await this.runCli(rootPath, ['blueprint', 'features', 'discover'])
@@ -1805,6 +1813,7 @@ export class LearnOrchestrator {
       const verdict = await this.runJob(outcome.job)
       this.state = completeActive(this.state)
       this.noteMovement()
+      if (verdict !== null) this.announceKnowledge(outcome.job.rootPath)
       // AFTER the job has left the active slot: a basic discovery started
       // while this job was finishing counts it as one of its own, and must
       // hear it end.
@@ -1818,6 +1827,15 @@ export class LearnOrchestrator {
       ) {
         this.emitBasicDiscoveryFinished()
       }
+    }
+  }
+
+  /** Tell the knowledge sync a job wrote under this root; never lets a listener break the queue. */
+  private announceKnowledge(rootPath: string): void {
+    try {
+      this.deps.onKnowledgeWritten?.(rootPath)
+    } catch (error) {
+      this.onError(`knowledge sync after learning ${rootPath}`, String(error))
     }
   }
 
