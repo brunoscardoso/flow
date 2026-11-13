@@ -70,7 +70,7 @@ export function workspacePauseNotification(
       kind: 'state-change',
       rootId: workspaceNotificationRoot(slug),
       label,
-      title: 'Workspace sync has no access',
+      title: 'Shared repository refused the sync',
       body: status.detail,
       timestamp,
       level: 'error',

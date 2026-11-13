@@ -244,9 +244,30 @@ export interface SyncResult {
    * never published. Every one stays on this machine's disk.
    */
   untracked: string[];
+  /**
+   * `no-access` only: WHY the remote refused, so the app can say what is
+   * wrong instead of blaming access for a policy the remote enforces.
+   */
+  rejection?: SyncRejection;
   /** One sentence for `offline` / `no-access` / `behind` / `ask` / `review`. */
   detail?: string;
 }
+
+/**
+ * Why a remote refused a sync:
+ *  · `access` — authentication or permission (401/403, not found, denied).
+ *  · `author-not-allowed` — a policy on the remote refuses the commits' author
+ *    email (Azure DevOps VS403702, GitHub GH007). `email` is the refused
+ *    address when the remote names it.
+ *  · `pull-request-required` — the branch only accepts pull requests (Azure
+ *    DevOps TF402455, GitHub "must be made through a pull request").
+ *  · `declined` — any other `[remote rejected]` (a hook, a policy we do not name).
+ */
+export type SyncRejection =
+  | { kind: 'access' }
+  | { kind: 'author-not-allowed'; email: string | null }
+  | { kind: 'pull-request-required' }
+  | { kind: 'declined' };
 
 export interface TeamRulesReport {
   copied: string[];
@@ -394,6 +415,23 @@ const REMOTE_REJECTED = /\[remote rejected\]/i;
  */
 export function classifyRemoteFailure(detail: string): 'no-access' | 'offline' {
   return ACCESS_FAILURE.test(detail) || REMOTE_REJECTED.test(detail) ? 'no-access' : 'offline';
+}
+
+const AUTHOR_POLICY = /VS403702|GH007|author email '[^']+' which does not match|would publish a private email/i;
+const PULL_REQUEST_POLICY = /TF402455|must use a pull request|must be made through a pull request/i;
+
+/**
+ * For a `no-access` failure, name WHAT the remote refused. Policies are checked
+ * before access: a refusal a person can act on beats a generic "no access".
+ */
+export function classifyRejection(detail: string): SyncRejection {
+  if (AUTHOR_POLICY.test(detail)) {
+    const named = /author email '([^']+)'/i.exec(detail);
+    return { kind: 'author-not-allowed', email: named?.[1] ?? null };
+  }
+  if (PULL_REQUEST_POLICY.test(detail)) return { kind: 'pull-request-required' };
+  if (REMOTE_REJECTED.test(detail) && !ACCESS_FAILURE.test(detail)) return { kind: 'declined' };
+  return { kind: 'access' };
 }
 
 // ─── Workspace lookup ───────────────────────────────────────────────────────
@@ -1414,6 +1452,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
 
     const offline = (detail: string): SyncResult => {
       result.state = classifyRemoteFailure(detail);
+      if (result.state === 'no-access') result.rejection = classifyRejection(detail);
       result.ahead = countRange(git, repo, revParse(git, repo, trackingRef) === null ? 'HEAD' : `${trackingRef}..HEAD`);
       result.detail =
         result.state === 'no-access'

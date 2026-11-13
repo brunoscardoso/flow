@@ -474,6 +474,21 @@ describe('workspace sync engine — offline, behind, refusals', () => {
     expect(h.last()).toMatchObject({ state: 'error', detail: "Flow couldn't sync the Workspace just now. Try again in a moment." })
   })
 
+  it.each([
+    [{ kind: 'author-not-allowed', email: 'me@personal.example' }, "Acme's shared repository doesn't accept changes from me@personal.example. Your changes are kept on this computer."],
+    [{ kind: 'author-not-allowed', email: null }, "Acme's shared repository refused your changes because of the email address on them. Your changes are kept on this computer."],
+    [{ kind: 'pull-request-required' }, "Acme's shared repository only accepts changes through a pull request, so Flow can't send yours. Ask whoever manages it to let Flow update it directly. Your changes are kept on this computer."],
+    [{ kind: 'declined' }, "Acme's shared repository declined your changes because of a rule set by whoever manages it. Your changes are kept on this computer."],
+    [{ kind: 'access' }, "Flow can't reach Acme's shared repository with your access."],
+    [{ kind: 'something-newer' }, "Flow can't reach Acme's shared repository with your access."],
+  ])('no-access names the refusal %o, never the remote\'s own text', async (rejection, sentence) => {
+    const h = harness()
+    h.answer(SYNC_ARGV, result('no-access', { rejection, detail: 'VS403702 TF402455 https://dev.azure.com/acme/P/_git/ws', ahead: 1 }))
+    await h.engine.open(SLUG)
+    expect(h.last()).toMatchObject({ state: 'no-access', detail: sentence })
+    expect(JSON.stringify(h.last())).not.toMatch(/dev\.azure\.com|VS403702|TF402455/)
+  })
+
   it('no-access → its own state and sentence, ONE notification, and nothing retries until "Sync now"', async () => {
     const h = harness()
     h.answer(SYNC_ARGV, result('no-access', { detail: 'remote: Repository not found. https://github.com/acme/knowledge.git', ahead: 1 }))

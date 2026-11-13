@@ -26,9 +26,11 @@
  *    payload. Nothing retries a paused Workspace on its own: a turn, an open
  *    and a timer all leave it alone. Only "Sync now" or a decision (`resolve`)
  *    runs it again, and the pause clears when the CLI no longer asks.
- *  · `no-access` (the shared repository refused this person's access) waits
- *    for a person like a pause: no back-off, no timer, no turn or open runs
- *    it; "Sync now" tries again. One notification, on the transition.
+ *  · `no-access` (the shared repository refused the sync — this person's
+ *    access, or a policy such as an author-email rule or pull-request-only
+ *    branch, named by the CLI's `rejection`) waits for a person like a pause:
+ *    no back-off, no timer, no turn or open runs it; "Sync now" tries again.
+ *    One notification, on the transition.
  *  · QUIT NEVER STARTS A NETWORK MERGE. It runs `workspace sync --commit-only`
  *    for each Workspace with turns waiting — commit, nothing else — and the
  *    next open exchanges them.
@@ -224,12 +226,37 @@ function readReview(value: unknown): WorkspaceSyncReview {
 const CLI_STATES = ['synced', 'local-only', 'nothing-to-do', 'ask', 'review', 'behind', 'offline', 'no-access', 'committed'] as const
 type CliState = (typeof CLI_STATES)[number]
 
+/** Why the remote refused a `no-access` sync (the CLI's `rejection`); null when an older CLI did not say. */
+type CliRejection =
+  | { kind: 'access' }
+  | { kind: 'author-not-allowed'; email: string | null }
+  | { kind: 'pull-request-required' }
+  | { kind: 'declined' }
+
 interface CliResult {
   state: CliState
   name: string | null
   ahead: number
   asks: WorkspaceSyncAsk[]
   reviews: WorkspaceSyncReview[]
+  rejection: CliRejection | null
+}
+
+/** Lenient on purpose: an unknown or missing rejection falls back to the generic access sentence. */
+function readRejection(value: unknown): CliRejection | null {
+  if (!isRecord(value)) return null
+  switch (value['kind']) {
+    case 'access':
+    case 'pull-request-required':
+    case 'declined':
+      return { kind: value['kind'] }
+    case 'author-not-allowed': {
+      const email = value['email']
+      return { kind: 'author-not-allowed', email: typeof email === 'string' && email.trim() !== '' ? email : null }
+    }
+    default:
+      return null
+  }
 }
 
 type CliOutcome = { kind: 'result'; result: CliResult } | { kind: 'refused'; reason: string } | { kind: 'unavailable' }
@@ -248,6 +275,7 @@ function readResult(payload: Json): CliResult {
     ahead: typeof ahead === 'number' && Number.isFinite(ahead) && ahead > 0 ? Math.floor(ahead) : 0,
     asks: asks.map(readAsk),
     reviews: reviews.map(readReview),
+    rejection: readRejection(payload['rejection']),
   }
 }
 
@@ -261,6 +289,14 @@ export const WORKSPACE_SYNC_SENTENCES = {
   offline: (name: string) =>
     `Flow couldn't reach ${name}'s shared repository. Your changes are kept on this computer, and Flow will try again.`,
   noAccess: (name: string) => `Flow can't reach ${name}'s shared repository with your access.`,
+  authorNotAllowed: (name: string, email: string | null) =>
+    email === null
+      ? `${name}'s shared repository refused your changes because of the email address on them. Your changes are kept on this computer.`
+      : `${name}'s shared repository doesn't accept changes from ${email}. Your changes are kept on this computer.`,
+  pullRequestRequired: (name: string) =>
+    `${name}'s shared repository only accepts changes through a pull request, so Flow can't send yours. Ask whoever manages it to let Flow update it directly. Your changes are kept on this computer.`,
+  declined: (name: string) =>
+    `${name}'s shared repository declined your changes because of a rule set by whoever manages it. Your changes are kept on this computer.`,
   behind: (name: string) => `${name}'s shared repository changed while Flow was syncing. Flow will try again shortly.`,
   localOnly: (name: string) => `${name} has no shared repository yet, so its knowledge stays on this computer.`,
   busy: (name: string) => `${name} is already being synced on this computer. Flow will try again shortly.`,
@@ -295,6 +331,20 @@ export const UNNAMED_WORKSPACE = 'the Workspace'
 
 function nameIn(rec: { name: string | null }): string {
   return rec.name ?? UNNAMED_WORKSPACE
+}
+
+/** The remote's refusal, in its own terms — a policy is never reported as missing access. */
+function noAccessSentence(name: string, rejection: CliRejection | null): string {
+  switch (rejection?.kind) {
+    case 'author-not-allowed':
+      return WORKSPACE_SYNC_SENTENCES.authorNotAllowed(name, rejection.email)
+    case 'pull-request-required':
+      return WORKSPACE_SYNC_SENTENCES.pullRequestRequired(name)
+    case 'declined':
+      return WORKSPACE_SYNC_SENTENCES.declined(name)
+    default:
+      return WORKSPACE_SYNC_SENTENCES.noAccess(name)
+  }
 }
 
 function refusalSentence(reason: string, name: string): string {
@@ -601,7 +651,7 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
         // Waits for a person: retrying cannot grant access. "Sync now" tries again.
         clearTimers(rec)
         rec.retryAttempt = 0
-        set(rec, 'no-access', WORKSPACE_SYNC_SENTENCES.noAccess(nameIn(rec)))
+        set(rec, 'no-access', noAccessSentence(nameIn(rec), result.rejection))
         break
       case 'committed':
         // Only a commit-only run answers this; nothing was exchanged.

@@ -39,7 +39,7 @@ const merge = await import('./workspace-merge.js');
 const moveModule = await import('./workspace-move.js');
 
 const { WorkspaceRefusal, createWorkspace, joinWorkspace, linkRepo, defaultWorkspaceGit } = model;
-const { syncWorkspace, syncAllWorkspaces, classifyRemoteFailure, LOCK_TIMEOUT_MS } = syncModule;
+const { syncWorkspace, syncAllWorkspaces, classifyRemoteFailure, classifyRejection, LOCK_TIMEOUT_MS } = syncModule;
 const { moveFlowFolder } = moveModule;
 const { unionLines, mergeWorkspaceFile } = merge;
 
@@ -102,6 +102,25 @@ describe('workspace-merge pure parts', () => {
     // Two different projects given the same folder name would not validate.
     const slugClash = { ...base, projects: [project('local:a', 'a'), project('local:z', 'c')] };
     expect(mergeWorkspaceFile(JSON.stringify(base), JSON.stringify(slugClash), JSON.stringify(theirs))).toBeNull();
+  });
+});
+
+describe('classifyRejection', () => {
+  const AZURE_AUTHOR =
+    "error: remote unpack failed: error VS403702: The push was rejected because one or more commits contain author email 'someone@personal.example' which does not match the policy-specified patterns. To https://dev.azure.com/acme/P/_git/ws ! [remote rejected] HEAD -> main";
+  const AZURE_PR =
+    "To https://dev.azure.com/acme/P/_git/ws ! [remote rejected] HEAD -> main (TF402455: Pushes to this branch are not permitted; you must use a pull request to update this branch.) error: failed to push some refs";
+  it.each([
+    [AZURE_AUTHOR, { kind: 'author-not-allowed', email: 'someone@personal.example' }],
+    ['remote: error: GH007: Your push would publish a private email address. ! [remote rejected] main -> main (push declined due to email privacy restrictions)', { kind: 'author-not-allowed', email: null }],
+    [AZURE_PR, { kind: 'pull-request-required' }],
+    ['remote: error: GH006: Protected branch update failed for refs/heads/main. remote: error: Changes must be made through a pull request. ! [remote rejected] main -> main (protected branch hook declined)', { kind: 'pull-request-required' }],
+    ['! [remote rejected] HEAD -> main (pre-receive hook declined)', { kind: 'declined' }],
+    ["remote: Repository not found. fatal: repository 'https://github.com/acme/ws.git/' not found", { kind: 'access' }],
+    ["fatal: unable to access 'https://github.com/acme/ws.git/': The requested URL returned error: 403", { kind: 'access' }],
+  ])('%s → %o', (detail, expected) => {
+    expect(classifyRemoteFailure(detail)).toBe('no-access');
+    expect(classifyRejection(detail)).toEqual(expected);
   });
 });
 
