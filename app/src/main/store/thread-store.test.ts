@@ -1306,6 +1306,40 @@ describe('ThreadStore', () => {
     })
   })
 
+  // ── Run tweaks, per conversation (v42) ─────────────────────────────────
+
+  describe('run tweaks', () => {
+    it('reads none on a new thread and on an unknown one', () => {
+      const thread = store.createThread({ projectRoot: ROOT_A })
+      expect(store.getRunTweaks(thread.id)).toEqual({})
+      expect(store.getRunTweaks('no-such-thread')).toEqual({})
+    })
+
+    it('round-trips per project and belongs to ONE thread', () => {
+      const a = store.createThread({ projectRoot: ROOT_A })
+      const b = store.createThread({ projectRoot: ROOT_A })
+      store.setRunTweaks(a.id, { [ROOT_A]: { web: { ready: { kind: 'port', port: 3100 } }, db: { skip: true } } })
+      expect(store.getRunTweaks(a.id)).toEqual({
+        [ROOT_A]: { web: { ready: { kind: 'port', port: 3100 } }, db: { skip: true } },
+      })
+      expect(store.getRunTweaks(b.id)).toEqual({})
+    })
+
+    it('drops malformed fields, stores NULL when nothing remains, and refuses an unknown thread', () => {
+      const thread = store.createThread({ projectRoot: ROOT_A })
+      store.setRunTweaks(thread.id, { [ROOT_A]: { web: { ready: { kind: 'port', port: 0 } as never } } })
+      const row = db.prepare('SELECT run_tweaks FROM threads WHERE id = ?').get(thread.id) as { run_tweaks: string | null }
+      expect(row.run_tweaks).toBeNull()
+      expect(() => store.setRunTweaks('no-such-thread', {})).toThrow('unknown thread')
+    })
+
+    it('a corrupt column reads as none', () => {
+      const thread = store.createThread({ projectRoot: ROOT_A })
+      db.prepare('UPDATE threads SET run_tweaks = ? WHERE id = ?').run('{nope', thread.id)
+      expect(store.getRunTweaks(thread.id)).toEqual({})
+    })
+  })
+
   // ── Pinning ────────────────────────────────────────────────────────────
 
   describe('pin/unpin', () => {

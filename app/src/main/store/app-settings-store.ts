@@ -10,6 +10,7 @@ import { randomBytes } from 'node:crypto'
 
 import type { FlowDatabase } from './db'
 import { parseModelRouting, type ModelRouting } from '../../shared/model-routing'
+import { parseRunTweaks, type RunTweaks } from '../../shared/run-setup'
 import {
   WORKTREE_FLOWCONFIG_KEYS,
   WORKTREE_SETTING_KEYS,
@@ -109,6 +110,12 @@ const MAX_TASK_EXTRA_PROJECTS = 32
  */
 const KNOWLEDGE_LAST_SYNCED_PREFIX = 'knowledge_last_synced:'
 export type KnowledgeSyncScope = 'project' | 'workspace'
+
+/**
+ * A person's own tweaks to a project's Run setup (plan_project_run), per
+ * machine, as JSON keyed by step id. Key/value rows older builds ignore.
+ */
+const RUN_TWEAKS_PREFIX = 'run_tweaks:'
 
 /**
  * The word this installation claims queue items under.
@@ -626,6 +633,25 @@ export class AppSettingsStore {
   setCurrentWorkspace(slug: string | null): void {
     if (slug === null || slug.trim() === '') this.#deleteKey(CURRENT_WORKSPACE_KEY)
     else this.#setString(CURRENT_WORKSPACE_KEY, slug.trim())
+  }
+
+  /** This person's tweaks to a project's Run setup. Corrupt rows read as none. */
+  getRunTweaks(projectRoot: string): RunTweaks {
+    const raw = this.#getString(`${RUN_TWEAKS_PREFIX}${projectRoot}`)
+    if (raw === null) return {}
+    try {
+      return parseRunTweaks(JSON.parse(raw))
+    } catch {
+      return {}
+    }
+  }
+
+  /** Replace this person's tweaks to a project's Run setup; none left REMOVES the row. */
+  setRunTweaks(projectRoot: string, tweaks: RunTweaks): RunTweaks {
+    const clean = parseRunTweaks(tweaks)
+    if (Object.keys(clean).length === 0) this.#deleteKey(`${RUN_TWEAKS_PREFIX}${projectRoot}`)
+    else this.#setString(`${RUN_TWEAKS_PREFIX}${projectRoot}`, JSON.stringify(clean))
+    return clean
   }
 
   /**

@@ -272,3 +272,95 @@ export function resolveRunSteps(projects: RunProjectInput[]): ResolvedRunStep[] 
   }
   return resolved
 }
+
+// ─── tweaks ──────────────────────────────────────────────────────────────────
+
+/** A layer's tweaks to one project's steps, keyed by step id. */
+export type RunTweaks = Record<string, RunTweak>
+
+/** A conversation's tweaks: it can span projects, so they are keyed by project root first. */
+export type RunTweaksByProject = Record<string, RunTweaks>
+
+/**
+ * Read stored tweaks defensively — they come from a database row or a settings
+ * value an older or newer build may have written. Anything malformed is
+ * dropped field by field; this never throws.
+ */
+export function parseRunTweaks(raw: unknown): RunTweaks {
+  const out: RunTweaks = {}
+  if (!isRecord(raw)) return out
+  for (const [stepId, value] of Object.entries(raw)) {
+    if (!isRecord(value) || stepId === '') continue
+    const tweak: RunTweak = {}
+    if (typeof value.command === 'string' && value.command.trim() !== '') tweak.command = value.command.trim()
+    if (typeof value.skip === 'boolean') tweak.skip = value.skip
+    if (value.ready === null) tweak.ready = null
+    else if (value.ready !== undefined) {
+      const parsed = parseReady(value.ready)
+      if (parsed.ready !== undefined) tweak.ready = parsed.ready
+    }
+    if (Object.keys(tweak).length > 0) out[stepId] = tweak
+  }
+  return out
+}
+
+export function parseRunTweaksByProject(raw: unknown): RunTweaksByProject {
+  const out: RunTweaksByProject = {}
+  if (!isRecord(raw)) return out
+  for (const [root, value] of Object.entries(raw)) {
+    const tweaks = parseRunTweaks(value)
+    if (root !== '' && Object.keys(tweaks).length > 0) out[root] = tweaks
+  }
+  return out
+}
+
+// ─── suggestions and the scope's resolution ─────────────────────────────────
+
+/** A command a project already declares, offered by the first-time picker and the panel's chips. */
+export interface RunSuggestion {
+  projectRoot: string
+  projectName: string
+  name: string
+  command: string
+  /** Where it was found, as a plain label: "package.json", "Procfile", "README"… */
+  source: string
+}
+
+/** One project of a scope with every layer read, as `resolve` answers it. */
+export interface RunProjectLayers extends RunProjectInput {
+  /** False when the project has no shared setup yet. */
+  hasSharedSetup: boolean
+  /** Plain sentences about steps of the shared setup that could not be read. */
+  problems: string[]
+}
+
+export interface RunResolution {
+  scope: RunScope
+  scopeKey: string
+  projects: RunProjectLayers[]
+  steps: ResolvedRunStep[]
+}
+
+/** What a Save writes — one layer of one project in the scope. */
+export type RunSaveChange =
+  | { layer: 'shared'; projectRoot: string; setup: RunSetup }
+  | { layer: 'personal'; projectRoot: string; tweaks: RunTweaks }
+  | { layer: 'conversation'; projectRoot: string; tweaks: RunTweaks }
+
+/** A scope that has a Run going — the sidebar's running mark. */
+export interface RunScopeSummary {
+  scopeKey: string
+  rootPath: string
+  threadId: string | null
+  /** Steps whose process is going (or waiting to start). */
+  running: number
+}
+
+/** Everything the Run group and its panel draw for one scope. */
+export interface RunView {
+  resolution: RunResolution
+  state: RunGroupState
+}
+
+/** A Save's answer: the new view, or a plain sentence saying why nothing was saved. */
+export type RunSaveAnswer = { ok: true; view: RunView } | { ok: false; reason: string }

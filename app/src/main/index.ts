@@ -182,7 +182,19 @@ import { watchDeletedThreads } from './drive/thread-gone'
 import { releaseCheckoutOnThreadDeleted } from './worktree/checkout-on-thread-deleted'
 import { makeTodoMirror } from './tasks/todo-mirror'
 import { onThreadStatus as syncCardLane } from './tasks/task-lane-sync'
-import { TerminalManager, registerTerminalChannels } from './terminal'
+import {
+  TERMINAL_EXIT_EVENT,
+  TERMINAL_REMOVED_EVENT,
+  TerminalManager,
+  registerTerminalChannels,
+  type TerminalExitEvent,
+  type TerminalRemovedEvent,
+} from './terminal'
+import { registerRunChannels } from './run/ipc'
+import { createTcpConnect, waitForLine, waitForPort, waitForPortFree } from './run/ready-check'
+import { nodeRunStoreFs, RunSetupStore } from './run/run-setup-store'
+import { nodeSuggestFs, suggestRunSteps } from './run/run-suggest'
+import { RunSupervisor } from './run/run-supervisor'
 import { wireShellPersistence } from './terminal/shell-persistence'
 import { registerFileChannels } from './project/files'
 import {
@@ -550,6 +562,9 @@ let knowledgeRouter: KnowledgeRouter | null = null
 let disposeLoopsIpc: (() => void) | null = null
 let disposeSettingsIpc: (() => void) | null = null
 let disposeTerminalIpc: (() => void) | null = null
+/** The one owner of every project Run — disposed BEFORE the terminal manager on quit. */
+let runSupervisor: RunSupervisor | null = null
+let disposeRunIpc: (() => void) | null = null
 let disposeLspIpc: (() => Promise<void>) | null = null
 let disposeGitIpc: (() => void) | null = null
 let disposeReviewIpc: (() => void) | null = null
@@ -3487,6 +3502,66 @@ const understandFeature = async (request: {
     }
   }
 
+  // PROJECT RUN: the supervisor owns every Run's steps; its channels sit
+  // beside the terminal channels. Nothing runs until a person presses Run.
+  {
+    const manager = terminalManager
+    const connect = createTcpConnect()
+    const setups = new RunSetupStore({
+      fs: nodeRunStoreFs(),
+      threads: threadStore,
+      personal: appSettings,
+    })
+    runSupervisor = new RunSupervisor({
+      terminals: {
+        createUserTerminal: (request) => manager.createUserTerminal(request),
+        dispose: (terminalId) => manager.dispose(terminalId),
+        stopProcess: (terminalId) => manager.stopProcess(terminalId),
+        onExit: (listener) => {
+          const handler = (event: TerminalExitEvent): void => listener(event)
+          manager.on(TERMINAL_EXIT_EVENT, handler)
+          return () => manager.off(TERMINAL_EXIT_EVENT, handler)
+        },
+        onRemoved: (listener) => {
+          const handler = (event: TerminalRemovedEvent): void => listener(event)
+          manager.on(TERMINAL_REMOVED_EVENT, handler)
+          return () => manager.off(TERMINAL_REMOVED_EVENT, handler)
+        },
+      },
+      setups,
+      ready: {
+        portInUse: (port) => connect(port),
+        waitForPort: (port, timeoutMs) => waitForPort(port, { timeoutMs, connect }),
+        waitForLine: (terminalId, text, timeoutMs) =>
+          waitForLine(terminalId, text, { timeoutMs, observe: (observer) => manager.observeOutput(observer) }),
+        waitPortFree: (port, timeoutMs) => waitForPortFree(port, { timeoutMs, connect }),
+      },
+    })
+    const suggestFs = nodeSuggestFs()
+    disposeRunIpc = registerRunChannels({
+      supervisor: runSupervisor,
+      setups,
+      suggest: (scope) =>
+        suggestRunSteps(
+          setups.projectsOf(scope).map((project) => ({
+            root: project.root,
+            dir: project.cwd,
+            name: basename(project.root) || project.root,
+          })),
+          suggestFs,
+        ),
+      resolveRoot: (rootPath) =>
+        addressableRoots.isAddressable(rootPath) ? (addressableRoots.ownerCheckoutFor(rootPath) ?? rootPath) : null,
+      isTrustedSender: (event) =>
+        isAppMainFrame(
+          event,
+          (sender) => sender.getType() === 'window' && BrowserWindow.fromWebContents(sender) !== null,
+          (url) => isAppEntryUrl(url, rendererEntry()),
+        ),
+      broadcastUpdated: (state) => broadcast('run:updated', state),
+    })
+  }
+
   // LSP (typescript server registry) over the editor:* contract channels.
   mark('terminals')
   const lspManager = createDefaultLspManager()
@@ -4103,6 +4178,18 @@ async function disposeMainProcess(): Promise<void> {
     } catch (error) {
       console.error('[Main] Failed to dispose LSP:', error)
     }
+  }
+  // Every Run's processes end with the app (FR-10) — before the terminal
+  // manager, so the supervisor stops listening to terminals it is removing.
+  disposeRunIpc?.()
+  disposeRunIpc = null
+  if (runSupervisor) {
+    try {
+      runSupervisor.disposeAll()
+    } catch (error) {
+      console.error('[Main] Failed to dispose the Run supervisor:', error)
+    }
+    runSupervisor = null
   }
   disposeTerminalIpc?.()
   disposeTerminalIpc = null

@@ -297,6 +297,17 @@ const flowApi: FlowApi = {
     onRemoved: (listener) => subscribe('terminal:removed', listener),
     onCreated: (listener) => subscribe('terminal:created', listener),
   },
+  // A project's Run — intents to main's supervisor, and its state on transitions.
+  run: {
+    get: (request) => invoke('run:get', request),
+    save: (request) => invoke('run:save', request),
+    suggest: (request) => invoke('run:suggest', request),
+    start: (request) => invoke('run:start', request),
+    reload: (request) => invoke('run:reload', request),
+    stop: (request) => invoke('run:stop', request),
+    states: () => invoke('run:states', {}),
+    onUpdated: (listener) => subscribe('run:updated', listener),
+  },
   // #1352: the renderer's current zoom factor. View ▸ Zoom In/Out changes how
   // many device pixels a CSS px is, and the macOS traffic lights do NOT scale
   // with it — so any clearance expressed as a fixed CSS length drifts.

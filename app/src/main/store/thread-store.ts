@@ -13,6 +13,7 @@ import type { FlowDatabase } from './db'
 import { withTransaction } from './db'
 import { PROJECT_STATE_TABLE, THREAD_PROJECT_ROOT_COLUMN } from './storage-names'
 import type { SubtaskRecord, SubtaskState } from '../../shared/ipc-contract'
+import { parseRunTweaksByProject, type RunTweaksByProject } from '../../shared/run-setup'
 
 export type { SubtaskRecord, SubtaskState }
 
@@ -1436,6 +1437,37 @@ export class ThreadStore extends EventEmitter {
       throw new Error(`[ThreadStore] Cannot set the chain for unknown thread: ${threadId}`)
     }
     this.emitChange({ entity: 'thread', action: 'updated', threadId })
+  }
+
+  /**
+   * A conversation's own changes to the Run setup of each project in it,
+   * keyed by project root then step id (migration v42). An unknown thread,
+   * an empty column and a row an incompatible build wrote all read as none.
+   */
+  getRunTweaks(threadId: string): RunTweaksByProject {
+    const row = this.db.prepare('SELECT run_tweaks FROM threads WHERE id = ?').get(threadId) as
+      | { run_tweaks: string | null }
+      | undefined
+    if (row === undefined || row.run_tweaks === null || row.run_tweaks === '') return {}
+    try {
+      return parseRunTweaksByProject(JSON.parse(row.run_tweaks))
+    } catch {
+      return {}
+    }
+  }
+
+  /**
+   * THE ONLY WRITER of `threads.run_tweaks`. Stores the normalised tweaks (or
+   * NULL when none remain). Bookkeeping, not activity: `updated_at` is left
+   * alone and nothing is broadcast — the Run group reports its own changes.
+   */
+  setRunTweaks(threadId: string, tweaks: RunTweaksByProject): void {
+    const clean = parseRunTweaksByProject(tweaks)
+    const value = Object.keys(clean).length === 0 ? null : JSON.stringify(clean)
+    const result = this.db.prepare('UPDATE threads SET run_tweaks = ? WHERE id = ?').run(value, threadId)
+    if (result.changes === 0) {
+      throw new Error(`[ThreadStore] Cannot set Run tweaks for unknown thread: ${threadId}`)
+    }
   }
 
   /**
