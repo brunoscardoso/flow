@@ -8,9 +8,13 @@
  *   personal      app settings, per machine, per project.
  *   conversation  the conversation's own row (migration v42), per project.
  *
- * A conversation runs each project in ITS checkout when it has one, else in
- * the project folder (FR-9). The primary project's checkout is the thread's
- * `worktreePath`; an attached project's is its `thread_roots` row.
+ * ONE LIST PER RUN. A Run's steps are the PRIMARY project's setup — one file,
+ * one order. A step may run in another project, named by `runsIn`: one of the
+ * scope's projects (in the conversation's checkout of it when it has one, else
+ * its folder — FR-9), else a sibling of the same Workspace that is on this
+ * computer, else nowhere: the step is reported as unable to start. The other
+ * attached projects' own setup files are not merged in; each is the Run of a
+ * conversation whose primary project it is.
  *
  * Every write of the shared file is atomic (temp file + rename) and async —
  * nothing here blocks main (allowed-pattern #19). Every dependency is injected
@@ -24,6 +28,7 @@ import {
   resolveRunSteps,
   runScopeKey,
   serializeRunSetup,
+  type RunPlace,
   type RunProjectLayers,
   type RunResolution,
   type RunSaveChange,
@@ -76,6 +81,12 @@ export interface RunSetupStoreDeps {
   personal: RunPersonalSource
   /** A project's name as the app shows it. */
   projectName?: (root: string) => string
+  /**
+   * The folders, on this computer, of the other projects in the primary
+   * project's Workspace — async and cached by the caller; never a sync spawn
+   * (allowed-pattern #19). Absent or failing: no siblings.
+   */
+  workspaceSiblings?: (primaryRoot: string) => Promise<string[]>
 }
 
 /** A refusal a person reads — plain words, no path or setting (forbidden-pattern #12). */
@@ -115,6 +126,41 @@ export class RunSetupStore {
     return [primary, ...others]
   }
 
+  /** A project's name as the app shows it. */
+  nameOf(root: string): string {
+    return this.#deps.projectName?.(root) ?? (basename(root) || root)
+  }
+
+  /**
+   * Every project a step of this scope may run in: the scope's projects (the
+   * primary first, each in its working folder), then Workspace siblings on
+   * this computer that are not already listed (by folder or by name).
+   */
+  async placesOf(scope: RunScope): Promise<RunPlace[]> {
+    const places: RunPlace[] = this.projectsOf(scope).map((project) => ({
+      name: this.nameOf(project.root),
+      root: project.root,
+      cwd: project.cwd,
+      from: 'scope',
+    }))
+    const primary = places[0]?.root ?? scope.rootPath
+    let siblings: string[] = []
+    try {
+      siblings = (await this.#deps.workspaceSiblings?.(primary)) ?? []
+    } catch {
+      siblings = []
+    }
+    for (const root of siblings) {
+      if (typeof root !== 'string' || root === '') continue
+      const name = this.nameOf(root)
+      const taken = places.some(
+        (place) => place.root === root || place.name.toLowerCase() === name.toLowerCase(),
+      )
+      if (!taken) places.push({ name, root, cwd: root, from: 'workspace' })
+    }
+    return places
+  }
+
   /** The shared setup of one project, or null when it has none. */
   async readShared(projectRoot: string): Promise<{ setup: RunSetup | null; problems: string[] }> {
     let text: string | null
@@ -127,34 +173,35 @@ export class RunSetupStore {
     return parseRunSetup(text)
   }
 
-  /** Every layer of every project in the scope, and the merged steps with provenance. */
+  /** The primary project's layers, where each step runs, and the merged steps with provenance. */
   async resolve(scope: RunScope): Promise<RunResolution> {
     const conversation = scope.threadId === null ? {} : this.#deps.threads.getRunTweaks(scope.threadId)
-    const projects: RunProjectLayers[] = []
-    for (const project of this.projectsOf(scope)) {
-      const shared = await this.readShared(project.root)
-      projects.push({
-        root: project.root,
-        name: this.#deps.projectName?.(project.root) ?? (basename(project.root) || project.root),
-        cwd: project.cwd,
-        setup: shared.setup,
-        hasSharedSetup: shared.setup !== null,
-        problems: shared.problems,
-        personal: this.#deps.personal.getRunTweaks(project.root),
-        conversation: conversation[project.root] ?? {},
-      })
+    const places = await this.placesOf(scope)
+    const primary = this.projectsOf(scope)[0] ?? { root: scope.rootPath, cwd: scope.rootPath }
+    const shared = await this.readShared(primary.root)
+    const project: RunProjectLayers = {
+      root: primary.root,
+      name: this.nameOf(primary.root),
+      cwd: primary.cwd,
+      setup: shared.setup,
+      hasSharedSetup: shared.setup !== null,
+      problems: shared.problems,
+      personal: this.#deps.personal.getRunTweaks(primary.root),
+      conversation: conversation[primary.root] ?? {},
     }
-    return { scope, scopeKey: runScopeKey(scope), projects, steps: resolveRunSteps(projects) }
+    return { scope, scopeKey: runScopeKey(scope), project, places, steps: resolveRunSteps(project, places) }
   }
 
   /**
-   * Write one layer of one project in the scope. A project outside the scope
-   * is refused (the renderer never names a file to write), and so is a
-   * conversation layer without a conversation.
+   * Write one layer of the scope's primary project — the only setup a Run
+   * reads. Any other project is refused (the renderer never names a file to
+   * write), and so is a conversation layer without a conversation.
    */
   async save(scope: RunScope, change: RunSaveChange): Promise<void> {
-    const inScope = this.projectsOf(scope).some((project) => project.root === change.projectRoot)
-    if (!inScope) throw new RunSetupError('That project is not part of this Run, so nothing was saved.')
+    const primary = this.projectsOf(scope)[0]?.root ?? scope.rootPath
+    if (change.projectRoot !== primary) {
+      throw new RunSetupError('That project is not the one this Run belongs to, so nothing was saved.')
+    }
     switch (change.layer) {
       case 'shared':
         await this.#writeShared(change.projectRoot, change.setup)

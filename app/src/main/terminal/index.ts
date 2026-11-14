@@ -36,6 +36,7 @@ import type {
 } from '../../shared/ipc-contract'
 import { terminalExitMarker } from '../../shared/terminal-exit'
 import { armCommandTimeout } from './command-timeout'
+import { feedLine, newLineBuffer, type LineBuffer } from './line-buffer'
 import { BoundedOutputCollector } from './output-collector'
 import { PtySession, ScrollbackBuffer } from './pty-manager'
 
@@ -114,6 +115,11 @@ interface TerminalEntry {
   pty: PtySession | null
   /** In-flight executor runs (live-routing mode), killed on dispose. */
   commandPtys: Set<PtySession>
+  /**
+   * The line being typed — interactive user shells only (never a Run step or
+   * a one-command terminal), and only while someone listens for command lines.
+   */
+  line: LineBuffer | null
 }
 
 /**
@@ -128,10 +134,21 @@ export class TerminalManager extends EventEmitter {
   #outputObservers = new Set<TerminalOutputObserver>()
   #agentTerminalsByThread = new Map<string, string>()
   #options: TerminalManagerOptions
+  /** Told each plainly typed command line of an interactive user shell, by its project. */
+  #onCommandLine: ((projectRoot: string, line: string) => void) | null = null
 
   constructor(options: TerminalManagerOptions = {}) {
     super()
     this.#options = options
+  }
+
+  /**
+   * Listen for the command lines a person enters in an interactive user shell
+   * (the Run setup's usage suggestions). The key is the project the terminal
+   * belongs to — its owner's project, else its own root. One listener.
+   */
+  setCommandLineListener(listener: ((projectRoot: string, line: string) => void) | null): void {
+    this.#onCommandLine = listener
   }
 
   listTerminals(): TerminalInfo[] {
@@ -205,6 +222,7 @@ export class TerminalManager extends EventEmitter {
       scrollback: pty.scrollback,
       pty,
       commandPtys: new Set(),
+      line: request.command === undefined && request.run === undefined ? newLineBuffer() : null,
     }
     this.#entries.set(terminalId, entry)
 
@@ -272,6 +290,7 @@ export class TerminalManager extends EventEmitter {
       scrollback: new ScrollbackBuffer(),
       pty: null,
       commandPtys: new Set(),
+      line: null,
     })
     this.#agentTerminalsByThread.set(thread.threadId, terminalId)
     this.emit(TERMINAL_CREATED_EVENT, { ...info })
@@ -343,11 +362,27 @@ export class TerminalManager extends EventEmitter {
     }
     if (entry.pty) {
       entry.pty.write(data)
+      if (entry.line !== null && this.#onCommandLine !== null) this.#noteTyped(entry, data)
       return
     }
     // Take-over of an agent tab reaches any live executor-run command.
     for (const commandPty of entry.commandPtys) {
       commandPty.write(data)
+    }
+  }
+
+  /** The keystroke hot path: a string append; the listener hears only finished, plainly typed lines. */
+  #noteTyped(entry: TerminalEntry, data: string): void {
+    const lines = feedLine(entry.line!, data)
+    if (lines.length === 0) return
+    const projectRoot = entry.info.owner?.rootPath ?? entry.info.projectRoot
+    if (projectRoot === undefined || projectRoot === '') return
+    for (const line of lines) {
+      try {
+        this.#onCommandLine?.(projectRoot, line)
+      } catch (error) {
+        console.warn('[terminal] a command-line listener threw', error)
+      }
     }
   }
 

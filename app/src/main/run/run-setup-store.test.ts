@@ -76,15 +76,24 @@ describe('RunSetupStore', () => {
   })
   afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
-  function store(threads: Record<string, FakeThread> = {}, personal = fakePersonal()): RunSetupStore {
-    return new RunSetupStore({ fs: nodeRunStoreFs(), threads: fakeThreads(threads), personal })
+  function store(
+    threads: Record<string, FakeThread> = {},
+    personal = fakePersonal(),
+    workspaceSiblings?: (root: string) => Promise<string[]>,
+  ): RunSetupStore {
+    return new RunSetupStore({
+      fs: nodeRunStoreFs(),
+      threads: fakeThreads(threads),
+      personal,
+      ...(workspaceSiblings === undefined ? {} : { workspaceSiblings }),
+    })
   }
 
   it('a project with no shared setup resolves to no steps, and says so', async () => {
     const resolution = await store().resolve({ rootPath: shop, threadId: null })
     expect(resolution.scopeKey).toBe(`${shop}::`)
-    expect(resolution.projects).toHaveLength(1)
-    expect(resolution.projects[0]).toMatchObject({ root: shop, name: 'shop', cwd: shop, hasSharedSetup: false, setup: null })
+    expect(resolution.project).toMatchObject({ root: shop, name: 'shop', cwd: shop, hasSharedSetup: false, setup: null })
+    expect(resolution.places).toEqual([{ name: 'shop', root: shop, cwd: shop, from: 'scope' }])
     expect(resolution.steps).toEqual([])
   })
 
@@ -112,7 +121,7 @@ describe('RunSetupStore', () => {
     writeFileSync(sharedSetupPath(shop), '{"steps":[{"name":"x"}]}')
     const resolution = await store().resolve({ rootPath: shop, threadId: null })
     expect(resolution.steps).toEqual([])
-    expect(resolution.projects[0]?.problems).toHaveLength(1)
+    expect(resolution.project.problems).toHaveLength(1)
   })
 
   it('layers resolve in order: shared, then personal, then the conversation', async () => {
@@ -148,7 +157,19 @@ describe('RunSetupStore', () => {
     ])
   })
 
-  it("a conversation's checkouts are the working folders, primary first, then its other projects", async () => {
+  it("ONE list: only the primary project's setup is read; another project's own file is not merged", async () => {
+    const threads: Record<string, FakeThread> = {
+      t1: { projectRoot: shop, worktreePath: null, roots: [api], rootWorktrees: [], tweaks: {} },
+    }
+    const s = store(threads)
+    await s.save({ rootPath: shop, threadId: null }, { layer: 'shared', projectRoot: shop, setup: SETUP })
+    await s.save({ rootPath: api, threadId: null }, { layer: 'shared', projectRoot: api, setup: { version: 1, steps: [SETUP.steps[1]!] } })
+    const resolution = await s.resolve({ rootPath: shop, threadId: 't1' })
+    expect(resolution.steps.map((step) => step.key)).toEqual([`${shop}::db`, `${shop}::web`])
+    expect(resolution.places.map((place) => place.name)).toEqual(['shop', 'api'])
+  })
+
+  it("a step runs in the named project's conversation checkout, else its folder; keys stay the primary's", async () => {
     const threads: Record<string, FakeThread> = {
       t1: {
         projectRoot: shop,
@@ -160,37 +181,83 @@ describe('RunSetupStore', () => {
       t2: { projectRoot: shop, worktreePath: null, roots: [api], rootWorktrees: [], tweaks: {} },
     }
     const s = store(threads)
-    await s.save({ rootPath: shop, threadId: null }, { layer: 'shared', projectRoot: shop, setup: SETUP })
-    await s.save({ rootPath: api, threadId: null }, { layer: 'shared', projectRoot: api, setup: { version: 1, steps: [SETUP.steps[1]!] } })
+    const cross: RunSetup = {
+      version: 1,
+      steps: [
+        { id: 'temporal', name: 'temporal', command: 'temporal server start-dev', start: 'now', runsIn: 'api' },
+        { id: 'web', name: 'Web', command: 'npm run dev', start: 'after-previous' },
+      ],
+    }
+    await s.save({ rootPath: shop, threadId: null }, { layer: 'shared', projectRoot: shop, setup: cross })
 
     const isolated = await s.resolve({ rootPath: shop, threadId: 't1' })
-    expect(isolated.steps.map((step) => [step.key, step.cwd])).toEqual([
-      [`${shop}::db`, join(dir, '.shop-threads', 'blue')],
-      [`${shop}::web`, join(dir, '.shop-threads', 'blue')],
-      [`${api}::web`, join(dir, '.api-threads', 'blue')],
+    expect(isolated.steps.map((step) => [step.key, step.projectRoot, step.cwd])).toEqual([
+      [`${shop}::temporal`, api, join(dir, '.api-threads', 'blue')],
+      [`${shop}::web`, shop, join(dir, '.shop-threads', 'blue')],
     ])
     const plain = await s.resolve({ rootPath: shop, threadId: 't2' })
-    expect(plain.steps.map((step) => step.cwd)).toEqual([shop, shop, api])
+    expect(plain.steps.map((step) => step.cwd)).toEqual([api, shop])
   })
 
-  it('refuses a project outside the scope, and a conversation layer without a conversation', async () => {
-    const s = store()
+  it('a step naming a Workspace sibling on this computer runs in its folder; an unknown one is blocked', async () => {
+    const core = join(dir, 'jupiter-core')
+    mkdirSync(core)
+    const s = store({}, fakePersonal(), async (root) => (root === shop ? [core, shop] : []))
+    await s.save(
+      { rootPath: shop, threadId: null },
+      {
+        layer: 'shared',
+        projectRoot: shop,
+        setup: {
+          version: 1,
+          steps: [
+            { id: 'temporal', name: 'temporal', command: 'temporal server start-dev', start: 'now', runsIn: 'jupiter-core' },
+            { id: 'ghost', name: 'ghost', command: 'x', start: 'after-previous', runsIn: 'billing' },
+          ],
+        },
+      },
+    )
+    const resolution = await s.resolve({ rootPath: shop, threadId: null })
+    expect(resolution.places).toEqual([
+      { name: 'shop', root: shop, cwd: shop, from: 'scope' },
+      { name: 'jupiter-core', root: core, cwd: core, from: 'workspace' },
+    ])
+    expect(resolution.steps[0]).toMatchObject({ projectRoot: core, cwd: core, projectName: 'jupiter-core' })
+    expect(resolution.steps[0]?.unavailable).toBeUndefined()
+    expect(resolution.steps[1]?.unavailable).toBe("billing is not on this computer, so this step can't start.")
+  })
+
+  it('a Workspace read that fails leaves the scope projects only', async () => {
+    const s = store({}, fakePersonal(), async () => {
+      throw new Error('cli down')
+    })
+    expect((await s.placesOf({ rootPath: shop, threadId: null })).map((place) => place.name)).toEqual(['shop'])
+  })
+
+  it('refuses any project but the primary, and a conversation layer without a conversation', async () => {
+    const threads: Record<string, FakeThread> = {
+      t1: { projectRoot: shop, worktreePath: null, roots: [api], rootWorktrees: [], tweaks: {} },
+    }
+    const s = store(threads)
     await expect(
       s.save({ rootPath: shop, threadId: null }, { layer: 'shared', projectRoot: api, setup: SETUP }),
-    ).rejects.toThrow('not part of this Run')
+    ).rejects.toThrow('not the one this Run belongs to')
+    // An attached project of the conversation is not the Run's setup either.
+    await expect(
+      s.save({ rootPath: shop, threadId: 't1' }, { layer: 'conversation', projectRoot: api, tweaks: {} }),
+    ).rejects.toBeInstanceOf(RunSetupError)
     await expect(
       s.save({ rootPath: shop, threadId: null }, { layer: 'conversation', projectRoot: shop, tweaks: {} }),
     ).rejects.toThrow('inside a conversation')
   })
 
-  it('keeps conversation tweaks per project, and an empty save removes that project only', async () => {
+  it('keeps conversation tweaks under the primary project, and an empty save removes them', async () => {
     const threads: Record<string, FakeThread> = {
-      t1: { projectRoot: shop, worktreePath: null, roots: [api], rootWorktrees: [], tweaks: {} },
+      t1: { projectRoot: shop, worktreePath: null, roots: [api], rootWorktrees: [], tweaks: { [api]: { web: { command: 'x' } } } },
     }
     const s = store(threads)
     const scope = { rootPath: shop, threadId: 't1' }
     await s.save(scope, { layer: 'conversation', projectRoot: shop, tweaks: { web: { skip: true } } })
-    await s.save(scope, { layer: 'conversation', projectRoot: api, tweaks: { web: { command: 'x' } } })
     expect(threads.t1!.tweaks).toEqual({ [shop]: { web: { skip: true } }, [api]: { web: { command: 'x' } } })
     await s.save(scope, { layer: 'conversation', projectRoot: shop, tweaks: {} })
     expect(threads.t1!.tweaks).toEqual({ [api]: { web: { command: 'x' } } })

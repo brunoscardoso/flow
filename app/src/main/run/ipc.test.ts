@@ -29,7 +29,8 @@ function harness(options: { trusted?: boolean; saveError?: Error } = {}) {
   const resolution = (scope: RunScope): RunResolution => ({
     scope,
     scopeKey: runScopeKey(scope),
-    projects: [],
+    project: { root: ROOT, name: 'shop', cwd: ROOT, setup: null, personal: {}, conversation: {}, hasSharedSetup: false, problems: [] },
+    places: [],
     steps: [
       {
         key: `${ROOT}::web`,

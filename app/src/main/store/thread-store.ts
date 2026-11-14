@@ -2088,6 +2088,40 @@ export class ThreadStore extends EventEmitter {
     })
   }
 
+  /**
+   * The commands the agent started IN THE BACKGROUND in a project's
+   * conversations (Bash calls with `run_in_background: true`), newest first,
+   * at most `limit` — the Run setup's "the agent started it" suggestions. A
+   * narrow read: two columns, a bounded row count, no output blobs
+   * (allowed-pattern #18). Rows whose input cannot be read are skipped.
+   */
+  listBackgroundCommands(projectRoot: string, limit = 200): Array<{ command: string; startedAt: string }> {
+    const bounded = Math.max(1, Math.min(1000, Math.floor(limit)))
+    const rows = this.db
+      .prepare(
+        `SELECT tc.input_json AS input, tc.started_at AS startedAt FROM tool_calls tc
+         JOIN threads t ON t.id = tc.thread_id
+         WHERE tc.tool_name = 'Bash'
+           AND t.${THREAD_PROJECT_ROOT_COLUMN} = ?
+           AND instr(tc.input_json, 'run_in_background') > 0
+         ORDER BY tc.started_at DESC LIMIT ?`,
+      )
+      .all(projectRoot, bounded) as Array<{ input: string | null; startedAt: string }>
+    const out: Array<{ command: string; startedAt: string }> = []
+    for (const row of rows) {
+      if (row.input === null) continue
+      try {
+        const input = JSON.parse(row.input) as { command?: unknown; run_in_background?: unknown }
+        if (input.run_in_background !== true || typeof input.command !== 'string') continue
+        const command = input.command.trim()
+        if (command !== '') out.push({ command, startedAt: row.startedAt })
+      } catch {
+        // A row an older build wrote in another shape: not a suggestion.
+      }
+    }
+    return out
+  }
+
   /** Point-read one tool call. PERF: the stream bridge finalizes every tool
    *  call — a list-and-find there materialized the whole thread's output
    *  blobs per completion. */

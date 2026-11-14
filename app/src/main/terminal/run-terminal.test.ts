@@ -104,4 +104,24 @@ describe('TerminalManager — run terminals', () => {
     const agent = manager.ensureAgentTerminal({ threadId: 't1', projectRoot: '/r' })
     expect(manager.stopProcess(agent.terminalId)).toBe(false)
   })
+
+  it('hears plainly typed command lines of an interactive shell, keyed by its project, and never a Run terminal', () => {
+    const manager = new TerminalManager()
+    const heard: Array<[string, string]> = []
+    const shell = manager.createUserTerminal({
+      rootId: '/repos/.project-threads/blue',
+      cols: 80,
+      rows: 24,
+      owner: { rootPath: '/repos/project', threadId: 't1' },
+    })
+    const step = manager.createUserTerminal({ rootId: '/repos/project', cols: 80, rows: 24, command: 'npm run dev', run: RUN })
+    // Nobody listening yet: nothing is buffered.
+    manager.write(shell.terminalId, 'ls\r')
+    manager.setCommandLineListener((root, line) => heard.push([root, line]))
+    for (const key of 'npm run dev') manager.write(shell.terminalId, key)
+    manager.write(shell.terminalId, '\r')
+    manager.write(shell.terminalId, '\x1b[A\r')
+    manager.write(step.terminalId, 'q\r')
+    expect(heard).toEqual([['/repos/project', 'npm run dev']])
+  })
 })

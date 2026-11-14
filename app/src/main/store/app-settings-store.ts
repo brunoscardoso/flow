@@ -116,6 +116,8 @@ export type KnowledgeSyncScope = 'project' | 'workspace'
  * machine, as JSON keyed by step id. Key/value rows older builds ignore.
  */
 const RUN_TWEAKS_PREFIX = 'run_tweaks:'
+/** One project's recorded terminal commands (command-usage.ts is the one writer). */
+const RUN_USAGE_PREFIX = 'run_usage:'
 
 /**
  * The word this installation claims queue items under.
@@ -652,6 +654,23 @@ export class AppSettingsStore {
     if (Object.keys(clean).length === 0) this.#deleteKey(`${RUN_TWEAKS_PREFIX}${projectRoot}`)
     else this.#setString(`${RUN_TWEAKS_PREFIX}${projectRoot}`, JSON.stringify(clean))
     return clean
+  }
+
+  /** The raw recorded terminal commands of a project (parsed by command-usage.ts), or null. */
+  getRunUsage(projectRoot: string): unknown {
+    const raw = this.#getString(`${RUN_USAGE_PREFIX}${projectRoot}`)
+    if (raw === null) return null
+    try {
+      return JSON.parse(raw) as unknown
+    } catch {
+      return null
+    }
+  }
+
+  /** Replace a project's recorded terminal commands; an empty list REMOVES the row. */
+  setRunUsage(projectRoot: string, entries: readonly unknown[]): void {
+    if (entries.length === 0) this.#deleteKey(`${RUN_USAGE_PREFIX}${projectRoot}`)
+    else this.#setString(`${RUN_USAGE_PREFIX}${projectRoot}`, JSON.stringify(entries))
   }
 
   /**

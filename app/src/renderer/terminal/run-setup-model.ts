@@ -1,8 +1,9 @@
 /**
- * THE SETUP PANEL'S DRAFT — editing a project's Run steps before Save: add,
- * remove, move, change; the sentences that say what is wrong; which layer a
- * Save writes (Everyone / Just me / This conversation); and the one sentence
- * that says what Save will do to a Run that is going.
+ * THE SETUP PANEL'S DRAFT — editing the Run's ONE ordered list of steps before
+ * Save: add, remove, move, change, and which project each step runs in; the
+ * sentences that say what is wrong; which layer a Save writes (Everyone / Just
+ * me / This conversation); the one sentence that says what Save will do to a
+ * Run that is going; and the short "Suggested" list.
  *
  * DOM-free. Every sentence is shown to a person (forbidden-pattern #12): it
  * names steps and states, never a file, a setting or a command line. Main
@@ -17,6 +18,7 @@ import {
   newStepId,
   type RunGroupState,
   type RunLayer,
+  type RunPlace,
   type RunProjectLayers,
   type RunReady,
   type RunSaveChange,
@@ -42,6 +44,8 @@ export interface DraftStep {
   readyTimeoutMs?: number
   /** Tweak layers only: the step is skipped. */
   skipped: boolean
+  /** The NAME of the project it runs in; null = the setup's own project. */
+  runsIn: string | null
   /** Where a step added from a suggestion came from: "jupiter-app · package.json". */
   origin: string | null
 }
@@ -73,37 +77,55 @@ export const LAYER_TITLES: Record<RunLayer, string> = {
 export const SETUP_STRINGS = {
   title: 'Run setup',
   close: 'Close setup',
+  intro: 'Steps start in order, each in its own terminal.',
   savesFor: 'Saves for',
-  suggested: 'Suggested:',
+  suggested: 'Suggested',
+  add: 'Add',
   addStep: '+ Add a step',
-  newStep: 'New step',
   name: 'Name',
   command: 'Command',
+  runsIn: 'Runs in',
   starts: 'Starts',
   readyWhen: 'Ready when',
   startsNow: 'Right away',
-  startsAfter: 'After the step above',
-  readyNone: 'It has started',
+  readyNone: 'Nothing',
   readyPort: 'A port answers',
   readyLine: 'A line appears',
   portPlaceholder: 'Port',
   linePlaceholder: 'Text to wait for',
+  namePlaceholder: 'Name',
+  commandPlaceholder: 'Command to run',
   moveUp: 'Move up',
   moveDown: 'Move down',
   remove: 'Remove step',
   skip: 'Skip this step',
   unskip: 'Run this step again',
-  skipped: 'skipped',
+  skipped: 'Skipped',
   cancel: 'Cancel',
   save: 'Save',
+  saveAndRun: 'Save and run',
   saving: 'Saving…',
-  project: 'Project',
-  empty: 'No steps yet. Add the first one below.',
+  askAgent: 'Ask the agent to set it up',
+  askAgentTitle: 'Send a message asking the agent to propose the steps',
+  askAgentNoConversation: 'Open a conversation to ask the agent',
+  showLess: 'Show fewer',
+  empty: 'Add the first process to start, or pick one below.',
   structureOnlyEveryone:
-    'Only Everyone can add, rename or reorder steps. Just me and This conversation can change a command, a ready check, or skip a step.',
+    'Only Everyone can add, rename, reorder or move a step to another project. Just me and This conversation can change a command, a ready check, or skip a step.',
   noConversation: 'Open a conversation to keep changes for it alone.',
   dragHandle: 'Drag to reorder',
+  notHere: 'not on this computer',
 } as const
+
+/** "Show all (12)". */
+export function showAllLabel(count: number): string {
+  return `Show all (${count})`
+}
+
+/** What a suggestion already in the draft says instead of its Add button. */
+export function addedAsLabel(position: number): string {
+  return `Added as step ${position}`
+}
 
 // ─── building a draft ────────────────────────────────────────────────────────
 
@@ -123,6 +145,16 @@ function applyTweak(step: DraftStep, tweak: RunTweak | undefined): DraftStep {
   return next
 }
 
+function sameProject(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase()
+}
+
+/** A step's `runsIn` as the draft keeps it: null when it names the setup's own project. */
+function ownProject(runsIn: string | null | undefined, projectName: string): string | null {
+  if (runsIn === undefined || runsIn === null || runsIn.trim() === '' || sameProject(runsIn, projectName)) return null
+  return runsIn.trim()
+}
+
 function layersBelow(layer: RunLayer): Array<'personal'> {
   return layer === 'conversation' ? ['personal'] : []
 }
@@ -139,6 +171,7 @@ function baseSteps(project: RunProjectLayers, layer: RunLayer): DraftStep[] {
       ...readyFields(step.ready),
       ...(step.readyTimeoutMs !== undefined ? { readyTimeoutMs: step.readyTimeoutMs } : {}),
       skipped: false,
+      runsIn: ownProject(step.runsIn, project.name),
       origin: null,
     }
     for (const below of layersBelow(layer)) draft = applyTweak(draft, project[below][step.id])
@@ -161,21 +194,17 @@ export function startDraft(project: RunProjectLayers, layer: RunLayer): RunSetup
   }
 }
 
-/** A draft for a project with no setup yet, starting from the suggestions the person ticked. */
-export function draftFromSuggestions(
-  project: Pick<RunProjectLayers, 'root' | 'name'>,
-  ticked: readonly RunSuggestion[],
-): RunSetupDraft {
-  let draft: RunSetupDraft = {
-    projectRoot: project.root,
-    projectName: project.name,
-    layer: 'shared',
-    steps: [],
-    removed: [],
-    original: [],
-  }
+/** A draft starting from the suggestions the person ticked (added after any saved steps). */
+export function draftFromSuggestions(project: RunProjectLayers, ticked: readonly RunSuggestion[]): RunSetupDraft {
+  let draft = startDraft(project, 'shared')
   for (const suggestion of ticked) draft = addSuggestion(draft, suggestion)
   return draft
+}
+
+/** "Set up Run": the setup as it is, with one empty step to fill in when it has none. */
+export function draftToSetUp(project: RunProjectLayers): RunSetupDraft {
+  const draft = startDraft(project, 'shared')
+  return draft.steps.length === 0 ? addStep(draft) : draft
 }
 
 // ─── editing ─────────────────────────────────────────────────────────────────
@@ -188,7 +217,10 @@ function takenIds(draft: RunSetupDraft): string[] {
   return [...draft.steps.map((step) => step.id), ...draft.removed]
 }
 
-export function addStep(draft: RunSetupDraft, fields: Partial<Pick<DraftStep, 'name' | 'command' | 'origin'>> = {}): RunSetupDraft {
+export function addStep(
+  draft: RunSetupDraft,
+  fields: Partial<Pick<DraftStep, 'name' | 'command' | 'origin' | 'runsIn'>> = {},
+): RunSetupDraft {
   if (!isStructural(draft.layer)) return draft
   const name = fields.name ?? ''
   const step: DraftStep = {
@@ -200,15 +232,30 @@ export function addStep(draft: RunSetupDraft, fields: Partial<Pick<DraftStep, 'n
     readyKind: 'none',
     readyValue: '',
     skipped: false,
+    runsIn: ownProject(fields.runsIn, draft.projectName),
     origin: fields.origin ?? null,
   }
   return { ...draft, steps: [...draft.steps, step] }
 }
 
+/** A name no other step of the draft has: the suggestion's, else with its project, else numbered. */
+function freeName(draft: RunSetupDraft, wanted: string, projectName: string): string {
+  const taken = new Set(draft.steps.map((step) => step.name.trim().toLowerCase()))
+  const base = wanted.trim() === '' ? 'step' : wanted.trim()
+  if (!taken.has(base.toLowerCase())) return base
+  const withProject = `${base} (${projectName})`
+  if (!taken.has(withProject.toLowerCase())) return withProject
+  let n = 2
+  while (taken.has(`${base} ${n}`.toLowerCase())) n += 1
+  return `${base} ${n}`
+}
+
+/** Add a suggestion as a step that runs in the suggestion's project, its command filled in. */
 export function addSuggestion(draft: RunSetupDraft, suggestion: RunSuggestion): RunSetupDraft {
   return addStep(draft, {
-    name: suggestion.name,
+    name: freeName(draft, suggestion.name, suggestion.projectName),
     command: suggestion.command,
+    runsIn: suggestion.projectName,
     origin: `${suggestion.projectName} · ${suggestion.source}`,
   })
 }
@@ -240,7 +287,9 @@ export function moveStep(draft: RunSetupDraft, id: string, to: number): RunSetup
 /** Fields a tweak layer may change; the rest belong to Everyone. */
 const TWEAKABLE: ReadonlySet<keyof DraftStep> = new Set(['command', 'readyKind', 'readyValue', 'skipped'])
 
-export type StepPatch = Partial<Pick<DraftStep, 'name' | 'command' | 'start' | 'readyKind' | 'readyValue' | 'skipped'>>
+export type StepPatch = Partial<
+  Pick<DraftStep, 'name' | 'command' | 'start' | 'readyKind' | 'readyValue' | 'skipped' | 'runsIn'>
+>
 
 export function changeStep(draft: RunSetupDraft, id: string, patch: StepPatch): RunSetupDraft {
   const allowed: StepPatch = {}
@@ -248,6 +297,7 @@ export function changeStep(draft: RunSetupDraft, id: string, patch: StepPatch): 
     if (isStructural(draft.layer) ? key !== 'skipped' : TWEAKABLE.has(key)) allowed[key] = value
   }
   if (Object.keys(allowed).length === 0) return draft
+  if ('runsIn' in allowed) allowed.runsIn = ownProject(allowed.runsIn, draft.projectName)
   return {
     ...draft,
     steps: draft.steps.map((step) => (step.id === id ? { ...step, ...allowed } : step)),
@@ -293,6 +343,9 @@ export function validateDraft(draft: RunSetupDraft, options: { hasConversation: 
     if (step.readyKind === 'line' && step.readyValue.trim() === '') {
       problems.push(`${label} waits for a line, but the text to wait for is empty.`)
     }
+    if (index === 0 && step.start === 'after-previous' && !step.skipped) {
+      problems.push(`${label} is the first step, so it has no step to wait for. Set it to start right away.`)
+    }
   })
   for (const step of draft.steps) {
     const key = step.name.trim().toLowerCase()
@@ -311,6 +364,7 @@ function sameRun(a: DraftStep, b: DraftStep): boolean {
     a.name.trim() === b.name.trim() &&
     a.command.trim() === b.command.trim() &&
     a.start === b.start &&
+    (a.runsIn ?? '') === (b.runsIn ?? '') &&
     a.readyKind === b.readyKind &&
     (a.readyKind === 'none' || a.readyValue.trim() === b.readyValue.trim()) &&
     a.skipped === b.skipped
@@ -368,6 +422,7 @@ function toRunStep(step: DraftStep): RunStep {
   const ready = readyOf(step)
   if (ready !== undefined && ready !== 'invalid') out.ready = ready
   if (step.readyTimeoutMs !== undefined) out.readyTimeoutMs = step.readyTimeoutMs
+  if (step.runsIn !== null && step.runsIn.trim() !== '') out.runsIn = step.runsIn.trim()
   return out
 }
 
@@ -470,22 +525,146 @@ export function saveSentence(draft: RunSetupDraft, state: RunGroupState | null):
   return parts.join(' ')
 }
 
-/** The short line under a step row: when it starts and when it counts as ready. */
+/** The step's name as other rows speak of it. */
+function stepWord(step: DraftStep | undefined | null, fallback: string): string {
+  const name = step?.name.trim() ?? ''
+  return name === '' ? fallback : name
+}
+
+/**
+ * The "Starts" choices for the step at `index`, named after the step above:
+ * "After temporal" when it has no ready check, "When temporal is ready" when
+ * it has one (the Run waits for exactly that). The first step can only start
+ * right away — the option is offered (disabled) only if it already says so.
+ */
+export function startsOptions(
+  steps: readonly DraftStep[],
+  index: number,
+): Array<{ value: 'now' | 'after-previous'; label: string; disabled: boolean }> {
+  const previous = index > 0 ? steps[index - 1] : null
+  const name = stepWord(previous, 'the step above')
+  const after =
+    previous === null
+      ? 'After the step above'
+      : previous.readyKind === 'none'
+        ? `After ${name}`
+        : `When ${name} is ready`
+  return [
+    { value: 'now', label: SETUP_STRINGS.startsNow, disabled: false },
+    { value: 'after-previous', label: after, disabled: previous === null },
+  ]
+}
+
+/** The short line for a step: when it starts and when it counts as ready. */
 export function startsLabel(steps: readonly DraftStep[], index: number): string {
   const step = steps[index]
-  const previous = index > 0 ? steps[index - 1] : null
+  const option = startsOptions(steps, index).find((candidate) => candidate.value === step.start)
   const when =
-    step.start === 'after-previous' && previous !== null
-      ? `after ${previous.name.trim() || 'the step above'}`
+    step.start === 'after-previous' && index > 0 && option !== undefined
+      ? option.label.charAt(0).toLowerCase() + option.label.slice(1)
       : 'right away'
   if (step.readyKind === 'port' && step.readyValue.trim() !== '') return `${when} · ready on port ${step.readyValue.trim()}`
   if (step.readyKind === 'line' && step.readyValue.trim() !== '') return `${when} · ready on a line`
   return when
 }
 
-/** Said under the sentence when other projects of the scope have unsaved changes too. */
-export function otherProjectsSentence(names: readonly string[]): string | null {
-  if (names.length === 0) return null
-  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
-  return `Your changes to ${list} are saved too.`
+// ─── where a step runs ───────────────────────────────────────────────────────
+
+export interface RunsInChoice {
+  /** '' is the setup's own project. */
+  value: string
+  label: string
+  /** Named by the step but not one of the projects Flow can run it in here. */
+  missing: boolean
+}
+
+/**
+ * The "Runs in" choices for a step: the setup's own project first, then every
+ * other project a step can run in here. A project the step names that is not
+ * among them is kept (marked), so opening the panel never loses it.
+ */
+export function runsInChoices(
+  draft: RunSetupDraft,
+  places: readonly Pick<RunPlace, 'name' | 'root'>[],
+  step: Pick<DraftStep, 'runsIn'>,
+): RunsInChoice[] {
+  const out: RunsInChoice[] = [{ value: '', label: draft.projectName, missing: false }]
+  for (const place of places) {
+    if (place.root === null || sameProject(place.name, draft.projectName)) continue
+    if (out.some((choice) => sameProject(choice.label, place.name))) continue
+    out.push({ value: place.name, label: place.name, missing: false })
+  }
+  if (step.runsIn !== null && !out.some((choice) => sameProject(choice.value, step.runsIn ?? ''))) {
+    out.push({ value: step.runsIn, label: `${step.runsIn} · ${SETUP_STRINGS.notHere}`, missing: true })
+  }
+  return out
+}
+
+// ─── the "Suggested" list ────────────────────────────────────────────────────
+
+/** How many suggestions show before "Show all". */
+export const TOP_SUGGESTIONS = 4
+
+function normalizeCommand(command: string): string {
+  return command.replace(/\s+/g, ' ').trim()
+}
+
+function matches(draft: RunSetupDraft, step: DraftStep, suggestion: RunSuggestion): boolean {
+  return (
+    normalizeCommand(step.command) === normalizeCommand(suggestion.command) &&
+    sameProject(step.runsIn ?? draft.projectName, suggestion.projectName)
+  )
+}
+
+export interface OfferedSuggestion {
+  suggestion: RunSuggestion
+  /** "jupiter-app · you ran it 6 times" */
+  meta: string
+  /** 1-based position of the step it was added as in this draft, or null. */
+  addedAs: number | null
+}
+
+export interface SuggestionGroup {
+  projectName: string
+  items: OfferedSuggestion[]
+}
+
+export interface OfferedSuggestions {
+  top: OfferedSuggestion[]
+  groups: SuggestionGroup[]
+  total: number
+}
+
+/**
+ * What the "Suggested" list offers: suggestions arrive ranked (usage first);
+ * one per (project, command); a command already a SAVED step is left out; one
+ * added in this draft stays, saying which step it became. `top` is the first
+ * few; `groups` is everything, grouped by project in first-seen order.
+ */
+export function offeredSuggestions(
+  draft: RunSetupDraft,
+  suggestions: readonly RunSuggestion[],
+  limit = TOP_SUGGESTIONS,
+): OfferedSuggestions {
+  const seen = new Set<string>()
+  const items: OfferedSuggestion[] = []
+  for (const suggestion of suggestions) {
+    const key = `${suggestion.projectName.toLowerCase()}::${normalizeCommand(suggestion.command)}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    if (draft.steps.some((step) => !step.isNew && matches(draft, step, suggestion))) continue
+    const index = draft.steps.findIndex((step) => step.isNew && matches(draft, step, suggestion))
+    items.push({
+      suggestion,
+      meta: `${suggestion.projectName} · ${suggestion.source}`,
+      addedAs: index < 0 ? null : index + 1,
+    })
+  }
+  const groups: SuggestionGroup[] = []
+  for (const item of items) {
+    const group = groups.find((candidate) => sameProject(candidate.projectName, item.suggestion.projectName))
+    if (group !== undefined) group.items.push(item)
+    else groups.push({ projectName: item.suggestion.projectName, items: [item] })
+  }
+  return { top: items.slice(0, limit), groups, total: items.length }
 }

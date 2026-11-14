@@ -6,6 +6,7 @@ import {
   resolveRunSteps,
   runScopeKey,
   type RunGroupState,
+  type RunPlace,
   type RunResolution,
   type RunScope,
   type RunSetup,
@@ -109,14 +110,20 @@ class FakeReady implements RunReadyChecks {
   }
 }
 
-function setupStore(initial: RunSetup): { resolve(scope: RunScope): Promise<RunResolution>; setup: RunSetup; resolves: number } {
+function setupStore(initial: RunSetup): {
+  resolve(scope: RunScope): Promise<RunResolution>
+  setup: RunSetup
+  resolves: number
+  places: RunPlace[]
+} {
   const holder = {
     setup: initial,
     resolves: 0,
+    places: [] as RunPlace[],
     resolve: async (scope: RunScope): Promise<RunResolution> => {
       holder.resolves += 1
-      const projects = [{ root: ROOT, name: 'shop', cwd: '/repos/.shop-threads/blue', setup: holder.setup, personal: {}, conversation: {}, hasSharedSetup: true, problems: [] }]
-      return { scope, scopeKey: runScopeKey(scope), projects, steps: resolveRunSteps(projects) }
+      const project = { root: ROOT, name: 'shop', cwd: '/repos/.shop-threads/blue', setup: holder.setup, personal: {}, conversation: {}, hasSharedSetup: true, problems: [] }
+      return { scope, scopeKey: runScopeKey(scope), project, places: holder.places, steps: resolveRunSteps(project, holder.places) }
     },
   }
   return holder
@@ -211,6 +218,47 @@ describe('RunSupervisor — start', () => {
     await h.supervisor.start(SCOPE)
     await flush()
     expect(h.terminals.commands()).toEqual(['db', 'tailwind -w'])
+  })
+
+  it('runs a step in the project it names, in that project folder', async () => {
+    const h = harness({
+      version: 1,
+      steps: [
+        { id: 'temporal', name: 'temporal', command: 'temporal server start-dev', start: 'now', runsIn: 'core' },
+        { id: 'app', name: 'app', command: 'npm run dev', start: 'after-previous' },
+      ],
+    })
+    h.store.places = [{ name: 'core', root: '/repos/core', cwd: '/repos/core', from: 'workspace' }]
+    await h.supervisor.start(SCOPE)
+    await flush()
+    expect(h.terminals.created[0]).toMatchObject({ rootId: '/repos/core', cwd: '/repos/core', run: { projectRoot: '/repos/core' } })
+    expect(h.terminals.created[1]).toMatchObject({ rootId: ROOT, cwd: '/repos/.shop-threads/blue' })
+  })
+
+  it('a step whose project is not on this computer is blocked, later steps wait, and no Reload starts it', async () => {
+    const h = harness({
+      version: 1,
+      steps: [
+        { id: 'temporal', name: 'temporal', command: 'temporal server start-dev', start: 'now', runsIn: 'core' },
+        { id: 'app', name: 'app', command: 'npm run dev', start: 'after-previous' },
+      ],
+    })
+    // Before any Run, the idle state already says why.
+    expect((await h.store.resolve(SCOPE)).steps[0]?.unavailable).toBe("core is not on this computer, so this step can't start.")
+    await h.supervisor.start(SCOPE)
+    await flush()
+    expect(h.terminals.created).toHaveLength(0)
+    expect(h.supervisor.state(SCOPE).steps[0]).toMatchObject({
+      status: 'blocked',
+      notHere: true,
+      detail: "core is not on this computer, so this step can't start.",
+    })
+    expect(h.supervisor.state(SCOPE).steps[1]).toMatchObject({ status: 'idle', detail: 'Not started, because “temporal” is not ready.' })
+
+    await h.supervisor.reload(SCOPE, `${ROOT}::temporal`, true)
+    await flush()
+    expect(h.terminals.created).toHaveLength(0)
+    expect(h.statusOf()[0]).toEqual(['temporal', 'blocked'])
   })
 
   it('a port already in use blocks the step with a reason; Reload on it starts it anyway', async () => {

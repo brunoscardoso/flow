@@ -7,8 +7,6 @@ import {
   pendingTabAction,
   pendingTabId,
   pendingTabTooltip,
-  pickerRows,
-  pickerText,
   pillFace,
   RUN_MARK_TITLE,
   RUN_STRINGS,
@@ -44,7 +42,8 @@ function view(steps: RunStepState[], active = false, setupCount = steps.length):
     resolution: {
       scope: { rootPath: ROOT, threadId: 'thread-1' },
       scopeKey: `${ROOT}::thread-1`,
-      projects: [],
+      project: { root: ROOT, name: 'jupiter', cwd: ROOT, setup: null, personal: {}, conversation: {}, hasSharedSetup: false, problems: [] },
+      places: [],
       steps: Array.from({ length: setupCount }, (_, i) => ({
         key: `${ROOT}::s${i}`,
         projectRoot: ROOT,
@@ -159,32 +158,25 @@ describe('orderRunTabs (note 9)', () => {
   })
 })
 
-describe('the first-time picker', () => {
+describe('asking the agent', () => {
   const found: RunSuggestion[] = [
-    { projectRoot: ROOT, projectName: 'jupiter-core', name: 'temporal', command: 'temporal server start-dev', source: 'README' },
-    { projectRoot: ROOT, projectName: 'jupiter-core', name: 'temporal', command: 'temporal server start-dev', source: 'Procfile' },
     { projectRoot: '/work/app', projectName: 'jupiter-app', name: 'dev', command: 'npm run dev', source: 'package.json' },
   ]
 
-  it('lists each command once with its project and source', () => {
-    expect(pickerRows(found).map((r) => [r.command, r.meta])).toEqual([
-      ['temporal server start-dev', 'jupiter-core · README'],
-      ['npm run dev', 'jupiter-app · package.json'],
-    ])
-  })
-
-  it('names the projects it looked at', () => {
-    expect(pickerText('jupiter', ['jupiter-core', 'jupiter-app'], 2)).toEqual({
-      title: 'Start jupiter with one button',
-      body: 'Flow looked at jupiter-core and jupiter-app and found these. Tick what you run, then put them in order.',
-    })
-    expect(pickerText('jupiter', [], 0).body).toContain('found nothing to start in jupiter')
-  })
-
-  it('asks the agent to propose, not to start anything', () => {
-    const prompt = askAgentPrompt('jupiter', found.slice(2))
+  it('asks the agent to propose, not to start anything, naming where steps may run', () => {
+    const prompt = askAgentPrompt('jupiter', found, ['jupiter', 'jupiter-core', 'jupiter-app'])
     expect(prompt).toContain('Do not start anything')
+    expect(prompt).toContain('the project it runs in')
+    expect(prompt).toContain('A step can also run in jupiter-core, jupiter-app.')
     expect(prompt).toContain('- npm run dev (jupiter-app, package.json)')
+  })
+})
+
+describe('a step whose project is not on this computer', () => {
+  it("says it can't start, and clicking its tab after a Run does nothing", () => {
+    const lost = step('temporal', 'blocked', { terminalId: null, notHere: true, detail: "jupiter-core is not on this computer, so this step can't start." })
+    expect(stepTabFace(lost)).toMatchObject({ label: "temporal · can't start", tone: 'bad', tooltip: lost.detail })
+    expect(pendingTabAction(lost, group([lost]))).toBe('none')
   })
 })
 
@@ -242,7 +234,7 @@ function uiStrings(): string[] {
     if (face.summary !== null) all.push(face.summary)
     all.push(face.summaryTitle)
   }
-  all.push(...Object.values(pickerText('jupiter', ['jupiter-core'], 1)), ...Object.values(pickerText('jupiter', [], 0)))
+  all.push(stepTabFace(step('x', 'blocked', { notHere: true })).label, stepTabFace(step('x', 'blocked', { notHere: true })).tooltip)
   return all.filter((text) => text !== '')
 }
 

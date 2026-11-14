@@ -1,7 +1,8 @@
 /**
  * THE RUN GROUP — the pill at the start of the terminal tab bar (Run · "4
  * running" · Reload all · Stop all · Setup), or a dashed "Set up Run" before a
- * setup exists; plus the setup panel and the first-time picker it opens.
+ * setup exists, which opens the setup panel straight away with one empty step
+ * (the panel carries the suggestions and "Ask the agent to set it up").
  *
  * The scope is the conversation on screen (the terminal panel's owner scope):
  * its project and its thread. Main owns every Run (allowed-pattern #14) — this
@@ -22,20 +23,12 @@ import {
   type RunView,
 } from '../../shared/run-setup'
 import { baseName } from '../project-label'
-import {
-  askAgentPrompt,
-  pendingTabAction,
-  pickerText,
-  pillFace,
-  RUN_STRINGS,
-  type RunDotTone,
-} from './run-group-model'
-import { addSuggestion, startDraft, type RunSetupDraft } from './run-setup-model'
-import { RunSetupPanel, showRunPicker } from './run-setup-panel'
+import { askAgentPrompt, pendingTabAction, pillFace, RUN_STRINGS, type RunDotTone } from './run-group-model'
+import { RunSetupPanel } from './run-setup-panel'
 
 export interface RunGroupDeps {
   api: FlowApi
-  /** The terminal area the setup panel and picker dock in (positioned). */
+  /** The terminal area the setup panel docks in (positioned). */
   dock: HTMLElement
   /** True while the terminal panel is on screen. */
   isOnScreen(): boolean
@@ -79,7 +72,6 @@ export class RunGroupView {
   #inflight = false
   #suggestions: RunSuggestion[] | null = null
   readonly #panel: RunSetupPanel
-  #closePicker: (() => void) | null = null
 
   constructor(deps: RunGroupDeps) {
     injectRunStyles()
@@ -98,6 +90,8 @@ export class RunGroupView {
       },
       state: () => this.#view?.state ?? null,
       hasConversation: () => this.#scope !== null && this.#scope.threadId !== null,
+      startRun: () => this.#act((run, scope) => run.start({ scope })),
+      askAgent: () => this.#askAgent(),
       onSaved: (view) => this.#setView(view),
       onClosed: () => this.#renderPill(),
     })
@@ -120,8 +114,6 @@ export class RunGroupView {
     this.#stale = true
     this.#inflight = false
     this.#seq += 1
-    this.#closePicker?.()
-    this.#closePicker = null
     if (this.#panel.isOpen) this.#panel.close()
     this.#renderPill()
     this.#deps.onChange()
@@ -261,61 +253,25 @@ export class RunGroupView {
     })
   }
 
-  async #openPicker(): Promise<void> {
-    const view = this.#view
+  /**
+   * "Ask the agent to set it up": a message in this conversation, sent through
+   * the composer like the chat cards' buttons, which the person can read and
+   * interrupt. Null without a conversation — the button says why.
+   */
+  #askAgent(): (() => void) | null {
     const scope = this.#scope
-    if (view === null || scope === null || this.#closePicker !== null) return
-    const found = await this.#loadSuggestions()
-    if (this.#view !== view) return
-    const scopeName = view.resolution.projects[0]?.name ?? baseName(scope.rootPath)
-    const projects = view.resolution.projects
-    const inScope = found.filter((suggestion) => projects.some((project) => project.root === suggestion.projectRoot))
+    const view = this.#view
+    if (scope === null || scope.threadId === null || view === null) return null
     const threadId = scope.threadId
-    this.#closePicker = showRunPicker({
-      host: this.#deps.dock,
-      text: pickerText(
-        scopeName,
-        projects.map((project) => project.name),
-        inScope.length,
-      ),
-      suggestions: inScope,
-      onAsk:
-        threadId === null
-          ? null
-          : () => {
-              this.#closePicker = null
-              // The composer's own send, like the chat cards' buttons: a message
-              // in this conversation the person can read and interrupt.
-              document.dispatchEvent(
-                new CustomEvent('flow:send-prompt', { detail: { threadId, text: askAgentPrompt(scopeName, inScope) } }),
-              )
-            },
-      onEmpty: () => {
-        this.#closePicker = null
-        this.#openPanelWith(view, new Map())
-      },
-      onContinue: (ticked) => {
-        this.#closePicker = null
-        const drafts = new Map<string, RunSetupDraft>()
-        for (const project of projects) {
-          let draft = startDraft(project, 'shared')
-          for (const suggestion of ticked) {
-            if (suggestion.projectRoot === project.root) draft = addSuggestion(draft, suggestion)
-          }
-          if (draft.steps.length > 0) drafts.set(project.root, draft)
-        }
-        this.#openPanelWith(view, drafts)
-      },
-      onClose: () => {
-        this.#closePicker = null
-      },
-    })
-  }
-
-  #openPanelWith(view: RunView, drafts: Map<string, RunSetupDraft>): void {
-    if (this.#view !== view) return
-    this.#panel.open(view, { suggestions: this.#suggestions ?? [], drafts })
-    this.#renderPill()
+    return () => {
+      const scopeName = view.resolution.project.name || baseName(scope.rootPath)
+      const names = view.resolution.places.map((place) => place.name)
+      const found = this.#suggestions ?? []
+      this.#panel.close()
+      document.dispatchEvent(
+        new CustomEvent('flow:send-prompt', { detail: { threadId, text: askAgentPrompt(scopeName, found, names) } }),
+      )
+    }
   }
 
   // ─── drawing ───────────────────────────────────────────────────────────────
@@ -337,7 +293,7 @@ export class RunGroupView {
       glyph.setAttribute('name', 'play')
       glyph.setAttribute('size', '10')
       start.append(glyph, document.createTextNode(RUN_STRINGS.setUp))
-      start.addEventListener('click', () => void this.#openPicker())
+      start.addEventListener('click', () => this.#toggleSetup())
       root.appendChild(start)
       root.appendChild(separator())
       return
@@ -459,7 +415,7 @@ function injectRunStyles(): void {
 
     .fl-run-setup {
       position: absolute; top: 0; right: 0; bottom: 0; z-index: 5;
-      width: min(560px, 100%); box-sizing: border-box;
+      width: min(680px, 100%); box-sizing: border-box; container-type: inline-size;
       display: flex; flex-direction: column; gap: var(--fl-space-sm);
       padding: var(--fl-space-md); overflow-y: auto;
       background: var(--fl-color-bg);
@@ -472,57 +428,53 @@ function injectRunStyles(): void {
     .fl-run-grow { flex: 1 1 auto; }
     .fl-run-muted { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); margin: 0; }
     .fl-run-note { margin: 0; color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); line-height: 1.5; }
-    .fl-run-field-row { display: flex; align-items: center; gap: var(--fl-space-sm); }
-    .fl-run-label { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); }
+    .fl-run-label { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); white-space: nowrap; }
     .fl-run-segment { display: inline-flex; border: var(--fl-border-width) solid var(--fl-color-border); border-radius: var(--fl-radius-sm); overflow: hidden; }
     .fl-run-segment-btn {
       height: 22px; padding: 0 var(--fl-space-sm); border: none; background: transparent;
       color: var(--fl-color-text-secondary); font-family: var(--fl-font-ui);
-      font-size: var(--fl-text-caption-size); cursor: pointer;
+      font-size: var(--fl-text-caption-size); cursor: pointer; white-space: nowrap;
     }
     .fl-run-segment-btn + .fl-run-segment-btn { border-left: var(--fl-border-width) solid var(--fl-color-border); }
     .fl-run-segment-btn.active { background: var(--fl-color-accent-muted); color: var(--fl-color-text); }
     .fl-run-segment-btn:disabled { opacity: 0.45; cursor: default; }
     .fl-run-steps { display: flex; flex-direction: column; gap: var(--fl-space-xs); }
-    .fl-run-step {
-      display: flex; flex-direction: column; gap: var(--fl-space-sm);
-      padding: var(--fl-space-sm) var(--fl-space-sm);
+    .fl-run-card {
+      display: flex; align-items: stretch; gap: var(--fl-space-sm);
+      padding: var(--fl-space-sm);
       background: var(--fl-color-surface);
       border: var(--fl-border-width) solid var(--fl-color-border);
       border-radius: var(--fl-radius-md);
     }
-    .fl-run-step.expanded { background: var(--fl-color-accent-muted); border-color: var(--fl-color-accent); }
-    .fl-run-step.skipped .fl-run-step-name, .fl-run-step.skipped .fl-run-step-command { opacity: 0.5; text-decoration: line-through; }
-    .fl-run-step.dragging { opacity: 0.5; }
-    .fl-run-step-line { display: flex; align-items: center; gap: var(--fl-space-sm); cursor: pointer; min-width: 0; }
+    .fl-run-card:focus-within { border-color: var(--fl-color-accent); }
+    .fl-run-card.dragging { opacity: 0.5; }
+    .fl-run-card.skipped .fl-run-card-body { opacity: 0.55; }
+    .fl-run-card-move { flex: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
+    .fl-run-card-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: var(--fl-space-xs); }
+    .fl-run-card-line { display: flex; align-items: center; gap: var(--fl-space-sm); min-width: 0; }
+    .fl-run-card-line.small { flex-wrap: wrap; row-gap: var(--fl-space-xs); }
+    .fl-run-card-tools { flex: none; display: flex; align-items: flex-start; }
+    .fl-run-inline { display: inline-flex; align-items: center; gap: var(--fl-space-xs); min-width: 0; }
+    .fl-run-name { flex: 0 1 140px; width: 140px; font-weight: var(--fl-text-ui-weight-medium); }
+    .fl-run-command { flex: 1 1 auto; width: 100%; }
+    .fl-run-port { width: 72px; }
+    .fl-run-skipped { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); font-style: italic; }
     .fl-run-handle {
       flex: none; width: 8px; height: 14px; cursor: grab;
       background-image: radial-gradient(circle, var(--fl-color-text-secondary) 1px, transparent 1.2px);
       background-size: 4px 4px; opacity: 0.6;
     }
     .fl-run-handle.inert { cursor: default; opacity: 0.25; }
-    .fl-run-step-name { flex: none; width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--fl-text-ui-weight-medium); }
-    .fl-run-step-name.accent { width: auto; color: var(--fl-color-accent); }
-    .fl-run-origin { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); }
-    .fl-run-step-command {
-      flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-      font-family: var(--fl-font-mono); font-size: var(--fl-text-mono-size); color: var(--fl-color-text-secondary);
-    }
-    .fl-run-step-when { flex: none; color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); white-space: nowrap; }
-    .fl-run-step-tools { flex: none; display: inline-flex; gap: 2px; }
-    .fl-run-editor { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: var(--fl-space-sm); }
-    .fl-run-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-    .fl-run-field .fl-run-input + .fl-run-input { margin-top: var(--fl-space-xs); }
     .fl-run-input {
       height: 26px; box-sizing: border-box; padding: 0 var(--fl-space-sm); min-width: 0;
-      background: var(--fl-color-surface); color: var(--fl-color-text);
+      background: var(--fl-color-bg); color: var(--fl-color-text);
       border: var(--fl-border-width) solid var(--fl-color-border); border-radius: var(--fl-radius-sm);
       font-family: var(--fl-font-ui); font-size: var(--fl-text-ui-size);
     }
+    .fl-run-input.small { height: 22px; font-size: var(--fl-text-caption-size); padding: 0 var(--fl-space-xs); max-width: 220px; }
     .fl-run-input.mono { font-family: var(--fl-font-mono); font-size: var(--fl-text-mono-size); }
     .fl-run-input:focus { outline: none; border-color: var(--fl-color-focus-ring); }
     .fl-run-input:disabled { opacity: 0.6; }
-    .fl-run-chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--fl-space-xs); }
     .fl-run-chip {
       height: 24px; padding: 0 var(--fl-space-sm);
       border: var(--fl-border-width) solid var(--fl-color-border); border-radius: var(--fl-radius-pill);
@@ -531,8 +483,34 @@ function injectRunStyles(): void {
     }
     .fl-run-chip.dashed { background: transparent; border-style: dashed; }
     .fl-run-chip:hover { border-color: var(--fl-color-accent); }
-    .fl-run-setup-foot { display: flex; align-items: center; gap: var(--fl-space-sm); }
-    .fl-run-foot-text { flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); line-height: 1.45; }
+    .fl-run-add { align-self: flex-start; }
+    .fl-run-suggested { display: flex; flex-direction: column; gap: var(--fl-space-xs); }
+    .fl-run-suggested:empty { display: none; }
+    .fl-run-section-title { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); font-weight: var(--fl-text-ui-weight-medium); margin-top: var(--fl-space-xs); }
+    .fl-run-suggest-list { display: flex; flex-direction: column; gap: 2px; }
+    .fl-run-suggest-list.scroll { max-height: 280px; overflow-y: auto; }
+    .fl-run-group-title { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); font-weight: var(--fl-text-ui-weight-medium); padding: var(--fl-space-xs) 0 0; }
+    .fl-run-suggest-row {
+      display: flex; align-items: center; gap: var(--fl-space-sm);
+      padding: var(--fl-space-xs) var(--fl-space-sm); border-radius: var(--fl-radius-sm);
+      background: var(--fl-color-surface);
+    }
+    .fl-run-suggest-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+    .fl-run-suggest-command { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--fl-font-mono); font-size: var(--fl-text-mono-size); }
+    .fl-run-added { white-space: nowrap; }
+    .fl-run-link {
+      align-self: flex-start; padding: 0; border: none; background: transparent;
+      color: var(--fl-color-accent); font-family: var(--fl-font-ui); font-size: var(--fl-text-caption-size); cursor: pointer;
+    }
+    .fl-run-link:hover { text-decoration: underline; }
+    .fl-run-link:disabled { color: var(--fl-color-text-secondary); cursor: default; text-decoration: none; }
+    .fl-run-setup-foot {
+      display: flex; flex-direction: column; gap: var(--fl-space-sm);
+      padding-top: var(--fl-space-sm); border-top: var(--fl-border-width) solid var(--fl-color-separator);
+    }
+    .fl-run-foot-text { display: flex; flex-direction: column; gap: 2px; color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); line-height: 1.45; }
+    .fl-run-foot-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--fl-space-sm); }
+    .fl-run-saves-for { display: inline-flex; align-items: center; gap: var(--fl-space-xs); }
     .fl-run-error { color: var(--fl-color-error); }
     .fl-run-btn {
       flex: none; height: 28px; padding: 0 var(--fl-space-md);
@@ -540,35 +518,14 @@ function injectRunStyles(): void {
       background: transparent; color: var(--fl-color-text);
       font-family: var(--fl-font-ui); font-size: var(--fl-text-ui-size); cursor: pointer;
     }
+    .fl-run-btn.small { height: 22px; padding: 0 var(--fl-space-sm); font-size: var(--fl-text-caption-size); }
     .fl-run-btn:hover { background: var(--fl-color-surface-raised); }
     .fl-run-btn.primary { background: var(--fl-color-accent); border-color: var(--fl-color-accent); color: var(--fl-color-on-accent); font-weight: var(--fl-text-ui-weight-medium); }
     .fl-run-btn:disabled { opacity: 0.45; cursor: default; }
-
-    .fl-run-picker-overlay {
-      position: absolute; inset: 0; z-index: 6;
-      display: flex; align-items: center; justify-content: center;
-      padding: var(--fl-space-md); box-sizing: border-box;
-      background: color-mix(in srgb, var(--fl-color-bg) 60%, transparent);
+    @container (max-width: 520px) {
+      .fl-run-card-line:not(.small) { flex-wrap: wrap; }
+      .fl-run-name { flex: 1 1 100%; width: auto; }
     }
-    .fl-run-picker {
-      width: min(620px, 100%); max-height: 100%; overflow-y: auto; box-sizing: border-box;
-      display: flex; flex-direction: column; gap: var(--fl-space-md);
-      padding: var(--fl-space-lg);
-      background: var(--fl-color-surface-raised);
-      border: var(--fl-border-width) solid var(--fl-color-border); border-radius: var(--fl-radius-lg);
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-      font-family: var(--fl-font-ui); font-size: var(--fl-text-ui-size); color: var(--fl-color-text);
-    }
-    .fl-run-picker-title { font-size: var(--fl-text-heading-size); font-weight: var(--fl-text-ui-weight-medium); }
-    .fl-run-picker-body { margin: 0; color: var(--fl-color-text-secondary); line-height: 1.5; }
-    .fl-run-picker-list { display: flex; flex-direction: column; gap: var(--fl-space-xs); }
-    .fl-run-picker-row {
-      display: flex; align-items: center; gap: var(--fl-space-sm);
-      padding: var(--fl-space-sm); border-radius: var(--fl-radius-md);
-      background: var(--fl-color-surface); cursor: pointer;
-    }
-    .fl-run-picker-command { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--fl-font-mono); font-size: var(--fl-text-mono-size); }
-    .fl-run-picker-actions { display: flex; align-items: center; gap: var(--fl-space-sm); }
   `
   document.head.appendChild(style)
 }

@@ -8,6 +8,8 @@
  *     passed) — or merely started, when that step has no check.
  *   - A step whose port is already answering before it starts is BLOCKED with
  *     a reason; Reload on it starts it anyway.
+ *   - A step whose project is not on this computer is BLOCKED too, and no
+ *     Reload — forced or not — starts it: there is nowhere to run it.
  *   - Reload all / Reload one / Stop all / apply a saved setup (start new,
  *     restart changed, stop removed, keep the rest).
  *   - State is broadcast only when it CHANGED (allowed-pattern #17): changes
@@ -144,6 +146,7 @@ function sameDefinition(a: ResolvedRunStep, b: ResolvedRunStep): boolean {
     a.command === b.command &&
     a.cwd === b.cwd &&
     a.start === b.start &&
+    a.unavailable === b.unavailable &&
     a.readyTimeoutMs === b.readyTimeoutMs &&
     JSON.stringify(a.ready ?? null) === JSON.stringify(b.ready ?? null)
   )
@@ -179,7 +182,8 @@ export function idleGroupState(scopeKey: string, steps: ResolvedRunStep[]): RunG
       status: 'idle',
       terminalId: null,
       exitCode: null,
-      detail: null,
+      detail: step.unavailable ?? null,
+      ...(step.unavailable !== undefined ? { notHere: true } : {}),
     })),
   }
 }
@@ -423,6 +427,12 @@ export class RunSupervisor {
   }
 
   async #startStep(run: ScopeRun, step: StepRun, force: boolean, current: (step: StepRun) => boolean): Promise<void> {
+    if (step.step.unavailable !== undefined) {
+      // Nowhere to run it: not even a forced Reload starts it.
+      this.#set(run, step, { status: 'blocked', exitCode: null, detail: step.step.unavailable })
+      step.gate.resolve(false)
+      return
+    }
     const port = portOf(step.step)
     if (port !== null && !force) {
       let busy = false
@@ -626,6 +636,7 @@ export class RunSupervisor {
       terminalId: step.terminalId,
       exitCode: step.exitCode,
       detail: step.detail,
+      ...(step.step.unavailable !== undefined ? { notHere: true } : {}),
     }))
     return { scopeKey: run.key, active: this.#isActive(run), steps }
   }

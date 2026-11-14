@@ -193,6 +193,7 @@ import {
 import { registerRunChannels } from './run/ipc'
 import { createTcpConnect, waitForLine, waitForPort, waitForPortFree } from './run/ready-check'
 import { nodeRunStoreFs, RunSetupStore } from './run/run-setup-store'
+import { CommandUsageStore, mergeSuggestions, usageSuggestions } from './run/command-usage'
 import { nodeSuggestFs, suggestRunSteps } from './run/run-suggest'
 import { RunSupervisor } from './run/run-supervisor'
 import { wireShellPersistence } from './terminal/shell-persistence'
@@ -564,6 +565,10 @@ let disposeSettingsIpc: (() => void) | null = null
 let disposeTerminalIpc: (() => void) | null = null
 /** The one owner of every project Run — disposed BEFORE the terminal manager on quit. */
 let runSupervisor: RunSupervisor | null = null
+/** The commands typed into Flow's terminals, per project — flushed on quit. */
+let commandUsage: CommandUsageStore | null = null
+/** How long opening a Run waits for the Workspace read before treating siblings as unknown. */
+const WORKSPACE_SIBLINGS_WAIT_MS = 4_000
 let disposeRunIpc: (() => void) | null = null
 let disposeLspIpc: (() => Promise<void>) | null = null
 let disposeGitIpc: (() => void) | null = null
@@ -3524,7 +3529,28 @@ const understandFeature = async (request: {
       fs: nodeRunStoreFs(),
       threads: threadStore,
       personal: appSettings,
+      // A step may run in another project of the primary project's Workspace
+      // that is on this computer. The registry's `workspace status --target`
+      // read is an async spawn, cached a few seconds and shared in flight
+      // (never sync — allowed-pattern #19); a slow first read is bounded so
+      // opening the Run never waits on it for long.
+      workspaceSiblings: async (primaryRoot) => {
+        const answer = await Promise.race([
+          workspaces.statusFor(primaryRoot),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), WORKSPACE_SIBLINGS_WAIT_MS)),
+        ])
+        if (answer === null || !answer.ok || answer.membership.workspace === null) return []
+        return answer.membership.siblings
+          .map((sibling) => sibling.localPath)
+          .filter((path): path is string => typeof path === 'string' && path !== '' && path !== primaryRoot)
+      },
     })
+    // USAGE SUGGESTIONS (a): the commands a person enters in Flow's own
+    // interactive shells, keyed by the terminal's project; one writer, written
+    // to the app settings after a quiet moment, never per keystroke.
+    const usage = new CommandUsageStore({ settings: appSettings })
+    commandUsage = usage
+    manager.setCommandLineListener((projectRoot, line) => usage.record(projectRoot, line))
     runSupervisor = new RunSupervisor({
       terminals: {
         createUserTerminal: (request) => manager.createUserTerminal(request),
@@ -3554,15 +3580,28 @@ const understandFeature = async (request: {
     disposeRunIpc = registerRunChannels({
       supervisor: runSupervisor,
       setups,
-      suggest: (scope) =>
-        suggestRunSteps(
-          setups.projectsOf(scope).map((project) => ({
-            root: project.root,
-            dir: project.cwd,
-            name: basename(project.root) || project.root,
-          })),
+      // Every project a step may run in: what the person typed there (a), what
+      // the agent started in the background in its conversations (b — a
+      // bounded two-column read of tool_calls), then what its files declare.
+      suggest: async (scope) => {
+        const places = (await setups.placesOf(scope)).filter(
+          (place): place is typeof place & { root: string } => place.root !== null,
+        )
+        const now = Date.now()
+        const used = places.flatMap((place) =>
+          usageSuggestions(
+            { root: place.root, name: place.name },
+            usage.entries(place.root),
+            threadStore.listBackgroundCommands(place.root, 200),
+            now,
+          ),
+        )
+        const files = await suggestRunSteps(
+          places.map((place) => ({ root: place.root, dir: place.cwd ?? place.root, name: place.name })),
           suggestFs,
-        ),
+        )
+        return mergeSuggestions(used, files)
+      },
       resolveRoot: (rootPath) =>
         addressableRoots.isAddressable(rootPath) ? (addressableRoots.ownerCheckoutFor(rootPath) ?? rootPath) : null,
       isTrustedSender: (event) =>
@@ -4196,6 +4235,8 @@ async function disposeMainProcess(): Promise<void> {
   // manager, so the supervisor stops listening to terminals it is removing.
   disposeRunIpc?.()
   disposeRunIpc = null
+  commandUsage?.flush()
+  commandUsage = null
   if (runSupervisor) {
     try {
       runSupervisor.disposeAll()

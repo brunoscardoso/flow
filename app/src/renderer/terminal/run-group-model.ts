@@ -34,12 +34,6 @@ export const RUN_STRINGS = {
   reloadStepTitle: 'Restart only this step',
   startStepTitle: 'Not started. Click to start this step.',
   startRunTitle: 'Not started. Click to start the Run.',
-  pickerAsk: 'Ask the agent to set it up',
-  pickerAskTitle: 'Send a message asking the agent to propose the steps',
-  pickerAskNoConversation: 'Open a conversation to ask the agent',
-  pickerEmpty: 'Start empty',
-  pickerContinue: 'Continue to setup',
-  pickerClose: 'Close',
   stopped: 'Stopped',
   loading: 'Reading the setup…',
   failedToRead: 'The Run setup could not be read.',
@@ -103,7 +97,7 @@ export function pillFace(view: RunView | null): RunPillFace {
   const steps = view.state.steps.length > 0 ? view.state.steps : null
   const setupCount = view.resolution.steps.length
   // Every step skipped in a tweak layer is still a setup — the pill offers Setup, not "Set up Run".
-  const hasShared = view.resolution.projects.some((project) => (project.setup?.steps.length ?? 0) > 0)
+  const hasShared = (view.resolution.project.setup?.steps.length ?? 0) > 0
   if (steps === null && setupCount === 0 && !hasShared) {
     return { ...hidden, mode: 'set-up' }
   }
@@ -173,6 +167,7 @@ export function stepTabFace(step: RunStepState): RunStepTabFace {
     case 'waiting':
       return face('waiting', 'busy', `“${name}” is waiting.`)
     case 'blocked':
+      if (step.notHere === true) return face("can't start", 'bad', `“${name}” can't start on this computer.`)
       return face('port busy', 'bad', `“${name}” was not started because its port is in use.`)
     case 'timed-out':
       return face('not ready', 'bad', `“${name}” did not become ready in time.`)
@@ -193,12 +188,15 @@ export type PendingTabAction = 'start-run' | 'reload-step' | 'none'
 
 export function pendingTabAction(step: RunStepState, state: RunGroupState): PendingTabAction {
   if (step.status === 'waiting' || step.status === 'starting') return 'none'
+  // Its project is not on this computer: clicking can start nothing.
+  if (step.notHere === true && groupHasRun(state)) return 'none'
   if (!groupHasRun(state)) return 'start-run'
   return 'reload-step'
 }
 
 export function pendingTabTooltip(step: RunStepState, state: RunGroupState): string {
   const action = pendingTabAction(step, state)
+  if (step.notHere === true && step.detail !== null) return step.detail
   if (step.status === 'idle') {
     if (action === 'start-run') return RUN_STRINGS.startRunTitle
     if (action === 'reload-step') return RUN_STRINGS.startStepTitle
@@ -260,66 +258,24 @@ export function stepOfTerminal(state: RunGroupState | null, terminalId: string |
   return state.steps.find((step) => step.terminalId === terminalId) ?? null
 }
 
-// ─── the first-time picker ───────────────────────────────────────────────────
-
-export interface RunPickerRow {
-  /** Stable per row: project + command. */
-  id: string
-  command: string
-  /** "jupiter-app · package.json" */
-  meta: string
-  suggestion: RunSuggestion
-}
-
-export function pickerRowId(suggestion: RunSuggestion): string {
-  return `${suggestion.projectRoot}::${suggestion.command}`
-}
-
-/** One row per distinct command, in the order Flow found them. Nothing is ticked until the person ticks it. */
-export function pickerRows(suggestions: readonly RunSuggestion[]): RunPickerRow[] {
-  const seen = new Set<string>()
-  const rows: RunPickerRow[] = []
-  for (const suggestion of suggestions) {
-    const id = pickerRowId(suggestion)
-    if (seen.has(id)) continue
-    seen.add(id)
-    rows.push({ id, command: suggestion.command, meta: `${suggestion.projectName} · ${suggestion.source}`, suggestion })
-  }
-  return rows
-}
-
-function listNames(names: readonly string[]): string {
-  if (names.length <= 1) return names[0] ?? ''
-  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
-}
-
-export interface RunPickerText {
-  title: string
-  body: string
-}
-
-/** The picker's heading and its one sentence. */
-export function pickerText(scopeName: string, projectNames: readonly string[], rowCount: number): RunPickerText {
-  const where = listNames(projectNames.length > 0 ? projectNames : [scopeName])
-  return {
-    title: `Start ${scopeName} with one button`,
-    body:
-      rowCount > 0
-        ? `Flow looked at ${where} and found these. Tick what you run, then put them in order.`
-        : `Flow found nothing to start in ${where}. Start empty and add the steps you run, or ask the agent.`,
-  }
-}
+// ─── asking the agent ────────────────────────────────────────────────────────
 
 /**
  * The message "Ask the agent to set it up" sends — a message in the person's
  * own conversation (not UI copy). The agent proposes; the person saves.
  */
-export function askAgentPrompt(scopeName: string, found: readonly RunSuggestion[]): string {
+export function askAgentPrompt(
+  scopeName: string,
+  found: readonly RunSuggestion[],
+  projectNames: readonly string[] = [],
+): string {
+  const others = projectNames.filter((name) => name !== scopeName)
   const lines = [
-    `Help me set up Run for ${scopeName}: the processes I start every working session, each in its own terminal, in order.`,
-    'Look at how this project is started locally and propose the steps. For each step give a name, the command, and when it starts: right away, or after the step above — and whether that step counts as ready when a port answers or when a line appears in its output.',
+    `Help me set up Run for ${scopeName}: the processes I start every working session, each in its own terminal, in one order.`,
+    'Look at how this project is started locally and propose the steps. For each step give a name, the command, the project it runs in, and when it starts: right away, or after the step above — and whether that step counts as ready when a port answers or when a line appears in its output.',
     'Do not start anything; I will add the steps in the Run setup myself.',
   ]
+  if (others.length > 0) lines.splice(2, 0, `A step can also run in ${others.join(', ')}.`)
   if (found.length > 0) {
     lines.push('', 'Flow already found these commands:')
     for (const suggestion of found) lines.push(`- ${suggestion.command} (${suggestion.projectName}, ${suggestion.source})`)

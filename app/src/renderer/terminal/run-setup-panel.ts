@@ -1,41 +1,45 @@
 /**
  * THE RUN SETUP PANEL — docked on the right of the terminal area, over the
- * running terminals, so changing a step never hides what is running; and the
- * first-time picker that lists what Flow found in the projects.
+ * running terminals, so changing a step never hides what is running. "Set up
+ * Run" opens it straight away with one empty step to fill in.
+ *
+ * ONE ORDERED LIST. Every step of the Run is a card: line 1 its name and
+ * command, line 2 the project it runs in, when it starts and when it counts as
+ * ready; move up / drag / move down on the left, remove on the right. Below
+ * the list: "+ Add a step", the short "Suggested" list (its full list behind
+ * "Show all"), and "Ask the agent to set it up". The footer says what Save
+ * will do, holds the small "Saves for" control, and Save (or Save and run).
  *
  * All editing logic lives in `run-setup-model.ts` (pure, tested); this file
- * only draws a draft and turns clicks into model calls. Nothing here runs a
- * command: Save sends one request per changed project and main decides what
- * starts, restarts or stops (allowed-pattern #14).
+ * only draws the draft and turns clicks into model calls. Nothing here runs a
+ * command: Save sends one request and main decides what starts, restarts or
+ * stops (allowed-pattern #14).
  */
-import type {
-  RunGroupState,
-  RunLayer,
-  RunProjectLayers,
-  RunSaveAnswer,
-  RunSaveChange,
-  RunSuggestion,
-  RunView,
-} from '../../shared/run-setup'
-import { pickerRows, RUN_STRINGS, type RunPickerText } from './run-group-model'
+import type { RunGroupState, RunLayer, RunSaveAnswer, RunSaveChange, RunSuggestion, RunView } from '../../shared/run-setup'
+import { RUN_STRINGS } from './run-group-model'
 import {
+  addedAsLabel,
   addStep,
   addSuggestion,
   changeStep,
+  draftToSetUp,
   isDirty,
   isStructural,
   LAYER_LABELS,
   LAYER_TITLES,
   moveStep,
-  otherProjectsSentence,
+  offeredSuggestions,
   removeStep,
+  runsInChoices,
   saveChange,
   saveSentence,
   SETUP_STRINGS,
+  showAllLabel,
   startDraft,
-  startsLabel,
+  startsOptions,
   validateDraft,
   type DraftStep,
+  type OfferedSuggestion,
   type ReadyKind,
   type RunSetupDraft,
 } from './run-setup-model'
@@ -47,6 +51,10 @@ export interface RunSetupPanelDeps {
   /** The group's live state — for the sentence saying what Save will do. */
   state(): RunGroupState | null
   hasConversation(): boolean
+  /** Start the Run (Save and run). */
+  startRun(): void
+  /** Ask the agent in this conversation, or null when there is none. */
+  askAgent(): (() => void) | null
   onSaved(view: RunView): void
   onClosed(): void
 }
@@ -81,18 +89,36 @@ function iconButton(icon: string, label: string, onClick: () => void): HTMLButto
   return node
 }
 
+function select<T extends string>(
+  options: ReadonlyArray<{ value: T; label: string; disabled?: boolean }>,
+  value: T,
+  label: string,
+): HTMLSelectElement {
+  const node = el('select', 'fl-run-input small')
+  node.setAttribute('aria-label', label)
+  for (const option of options) {
+    const item = el('option', undefined, option.label)
+    item.value = option.value
+    item.selected = option.value === value
+    item.disabled = option.disabled === true && option.value !== value
+    node.appendChild(item)
+  }
+  return node
+}
+
 export class RunSetupPanel {
   readonly #deps: RunSetupPanelDeps
   #root: HTMLElement | null = null
   #view: RunView | null = null
-  #drafts = new Map<string, RunSetupDraft>()
-  #current = ''
-  #expanded: string | null = null
+  #draft: RunSetupDraft | null = null
   #suggestions: RunSuggestion[] = []
+  #showAll = false
   #saving = false
   #error: string | null = null
   #footer: HTMLElement | null = null
   #dragId: string | null = null
+  /** The step whose name field takes focus after the next render. */
+  #focusId: string | null = null
   readonly #onKey = (event: KeyboardEvent): void => {
     if (event.key === 'Escape' && this.#root !== null && this.#root.contains(document.activeElement)) {
       event.stopPropagation()
@@ -108,18 +134,14 @@ export class RunSetupPanel {
     return this.#root !== null
   }
 
-  /** Open on a view; `drafts` seeds unsaved steps (the picker's ticks). */
-  open(view: RunView, options: { suggestions?: RunSuggestion[]; drafts?: Map<string, RunSetupDraft> } = {}): void {
+  /** Open on a view; with no setup yet, the draft starts with one empty step. */
+  open(view: RunView, options: { suggestions?: RunSuggestion[]; draft?: RunSetupDraft } = {}): void {
     this.#view = view
     this.#suggestions = options.suggestions ?? this.#suggestions
-    this.#drafts = options.drafts ?? new Map()
-    const projects = view.resolution.projects
-    this.#current = [...this.#drafts.keys()][0] ?? projects[0]?.root ?? ''
-    for (const project of projects) {
-      if (!this.#drafts.has(project.root)) this.#drafts.set(project.root, startDraft(project, 'shared'))
-    }
+    this.#draft = options.draft ?? draftToSetUp(view.resolution.project)
+    this.#showAll = false
     this.#error = null
-    this.#expanded = this.#firstNewStep()
+    this.#focusId = this.#draft.steps.find((step) => step.isNew && step.name === '')?.id ?? null
     if (this.#root === null) {
       this.#root = el('div', 'fl-run-setup')
       this.#root.setAttribute('role', 'dialog')
@@ -135,48 +157,32 @@ export class RunSetupPanel {
     this.#root.remove()
     this.#root = null
     this.#footer = null
-    this.#drafts.clear()
+    this.#draft = null
     this.#deps.onClosed()
   }
 
-  /** Suggestions arrived after opening — the chips update. */
+  /** Suggestions arrived after opening — the list updates. */
   setSuggestions(suggestions: RunSuggestion[]): void {
     this.#suggestions = suggestions
     if (this.#root !== null) this.#render()
   }
 
-  /** The Run's state moved — only the sentence can change. */
+  /** The Run's state moved — only the footer can change. */
   stateChanged(): void {
     this.#renderFooter()
   }
 
-  /** The setup changed elsewhere: untouched drafts take the new steps. */
+  /** The setup changed elsewhere: an untouched draft takes the new steps. */
   setView(view: RunView): void {
     this.#view = view
     if (this.#root === null) return
-    for (const project of view.resolution.projects) {
-      const draft = this.#drafts.get(project.root)
-      if (draft === undefined || !isDirty(draft)) this.#drafts.set(project.root, startDraft(project, draft?.layer ?? 'shared'))
-    }
+    const draft = this.#draft
+    if (draft === null || !isDirty(draft)) this.#draft = startDraft(view.resolution.project, draft?.layer ?? 'shared')
     this.#render()
   }
 
-  // ─── state helpers ─────────────────────────────────────────────────────────
-
-  #project(root = this.#current): RunProjectLayers | null {
-    return this.#view?.resolution.projects.find((project) => project.root === root) ?? null
-  }
-
-  #draft(): RunSetupDraft | null {
-    return this.#drafts.get(this.#current) ?? null
-  }
-
-  #firstNewStep(): string | null {
-    return this.#drafts.get(this.#current)?.steps.find((step) => step.isNew)?.id ?? null
-  }
-
   #update(next: RunSetupDraft, rerender = true): void {
-    this.#drafts.set(next.projectRoot, next)
+    this.#draft = next
     this.#error = null
     if (rerender) this.#render()
     else this.#renderFooter()
@@ -186,8 +192,9 @@ export class RunSetupPanel {
 
   #render(): void {
     const root = this.#root
-    const draft = this.#draft()
+    const draft = this.#draft
     if (root === null) return
+    const scrollTop = root.scrollTop
     root.textContent = ''
 
     const head = el('div', 'fl-run-setup-head')
@@ -197,295 +204,316 @@ export class RunSetupPanel {
     head.appendChild(iconButton('close', SETUP_STRINGS.close, () => this.close()))
     root.appendChild(head)
 
-    const projects = this.#view?.resolution.projects ?? []
-    if (projects.length > 1) root.appendChild(this.#projectPicker(projects))
     if (draft === null) {
       root.appendChild(el('p', 'fl-run-muted', RUN_STRINGS.failedToRead))
       return
     }
-    root.appendChild(this.#layerPicker(draft))
-    if (!isStructural(draft.layer)) root.appendChild(el('p', 'fl-run-note', SETUP_STRINGS.structureOnlyEveryone))
+    const structural = isStructural(draft.layer)
+    root.appendChild(el('p', 'fl-run-note', structural ? SETUP_STRINGS.intro : SETUP_STRINGS.structureOnlyEveryone))
+    for (const problem of this.#view?.resolution.project.problems ?? []) root.appendChild(el('p', 'fl-run-note', problem))
 
     const list = el('div', 'fl-run-steps')
     if (draft.steps.length === 0) list.appendChild(el('p', 'fl-run-muted', SETUP_STRINGS.empty))
-    draft.steps.forEach((step, index) => list.appendChild(this.#stepRow(draft, step, index)))
+    draft.steps.forEach((step, index) => list.appendChild(this.#card(draft, step, index)))
     root.appendChild(list)
 
-    if (isStructural(draft.layer)) root.appendChild(this.#chips(draft))
+    if (structural) {
+      const add = button('fl-run-chip dashed', SETUP_STRINGS.addStep, () => {
+        const next = addStep(draft)
+        this.#focusId = next.steps[next.steps.length - 1]?.id ?? null
+        this.#update(next)
+      })
+      add.classList.add('fl-run-add')
+      root.appendChild(add)
+      root.appendChild(this.#suggested(draft))
+    }
+
+    const ask = this.#deps.askAgent()
+    const askButton = button(
+      'fl-run-link',
+      SETUP_STRINGS.askAgent,
+      () => ask?.(),
+      ask === null ? SETUP_STRINGS.askAgentNoConversation : SETUP_STRINGS.askAgentTitle,
+    )
+    askButton.disabled = ask === null
+    root.appendChild(askButton)
+
     root.appendChild(el('span', 'fl-run-grow'))
     this.#footer = el('div', 'fl-run-setup-foot')
     root.appendChild(this.#footer)
     this.#renderFooter()
-  }
+    root.scrollTop = scrollTop
 
-  #projectPicker(projects: RunProjectLayers[]): HTMLElement {
-    const row = el('label', 'fl-run-field-row')
-    row.appendChild(el('span', 'fl-run-label', SETUP_STRINGS.project))
-    const select = el('select', 'fl-run-input')
-    for (const project of projects) {
-      const option = el('option', undefined, project.name)
-      option.value = project.root
-      option.selected = project.root === this.#current
-      select.appendChild(option)
+    const focusId = this.#focusId
+    this.#focusId = null
+    if (focusId !== null) {
+      queueMicrotask(() => root.querySelector<HTMLInputElement>(`[data-step-id="${CSS.escape(focusId)}"] .fl-run-name`)?.focus())
     }
-    select.addEventListener('change', () => {
-      this.#current = select.value
-      this.#expanded = this.#firstNewStep()
-      this.#render()
-    })
-    row.appendChild(select)
-    return row
   }
 
-  #layerPicker(draft: RunSetupDraft): HTMLElement {
-    const row = el('div', 'fl-run-field-row')
-    row.appendChild(el('span', 'fl-run-label', SETUP_STRINGS.savesFor))
+  #card(draft: RunSetupDraft, step: DraftStep, index: number): HTMLElement {
+    const structural = isStructural(draft.layer)
+    const current = (): RunSetupDraft => this.#draft ?? draft
+    const card = el('div', 'fl-run-card')
+    card.classList.toggle('skipped', step.skipped)
+    card.dataset['stepId'] = step.id
+
+    // Left: move up, drag, move down.
+    const move = el('div', 'fl-run-card-move')
+    const up = iconButton('chevron-up', SETUP_STRINGS.moveUp, () => this.#update(moveStep(current(), step.id, index - 1)))
+    up.disabled = !structural || index === 0
+    const handle = el('span', 'fl-run-handle')
+    handle.setAttribute('aria-hidden', 'true')
+    const down = iconButton('chevron-down', SETUP_STRINGS.moveDown, () => this.#update(moveStep(current(), step.id, index + 1)))
+    down.disabled = !structural || index === draft.steps.length - 1
+    move.append(up, handle, down)
+    if (structural) {
+      handle.title = SETUP_STRINGS.dragHandle
+      // Only the handle starts a drag, so text in the fields stays selectable.
+      handle.addEventListener('mousedown', () => {
+        card.draggable = true
+      })
+      card.addEventListener('dragstart', (event) => {
+        this.#dragId = step.id
+        event.dataTransfer?.setData('text/plain', step.id)
+        card.classList.add('dragging')
+      })
+      card.addEventListener('dragend', () => {
+        this.#dragId = null
+        card.draggable = false
+        card.classList.remove('dragging')
+      })
+      card.addEventListener('dragover', (event) => {
+        if (this.#dragId !== null && this.#dragId !== step.id) event.preventDefault()
+      })
+      card.addEventListener('drop', (event) => {
+        event.preventDefault()
+        const dragged = this.#dragId
+        this.#dragId = null
+        if (dragged !== null && dragged !== step.id) this.#update(moveStep(current(), dragged, index))
+      })
+    } else {
+      handle.classList.add('inert')
+    }
+    card.appendChild(move)
+
+    const body = el('div', 'fl-run-card-body')
+
+    // Line 1: name, then the command.
+    const line1 = el('div', 'fl-run-card-line')
+    const name = el('input', 'fl-run-input fl-run-name')
+    name.value = step.name
+    name.placeholder = SETUP_STRINGS.namePlaceholder
+    name.setAttribute('aria-label', SETUP_STRINGS.name)
+    name.disabled = !structural
+    name.addEventListener('input', () => this.#update(changeStep(current(), step.id, { name: name.value }), false))
+    // The next step's "Starts" names this one: redraw once the name is settled.
+    name.addEventListener('change', () => this.#render())
+    const command = el('input', 'fl-run-input mono fl-run-command')
+    command.value = step.command
+    command.placeholder = SETUP_STRINGS.commandPlaceholder
+    command.setAttribute('aria-label', SETUP_STRINGS.command)
+    command.spellcheck = false
+    command.addEventListener('input', () => this.#update(changeStep(current(), step.id, { command: command.value }), false))
+    line1.append(name, command)
+    body.appendChild(line1)
+
+    // Line 2: runs in, starts, ready when.
+    const line2 = el('div', 'fl-run-card-line small')
+    const inline = (label: string, ...controls: HTMLElement[]): HTMLElement => {
+      const wrap = el('label', 'fl-run-inline')
+      wrap.appendChild(el('span', 'fl-run-label', label))
+      wrap.append(...controls)
+      return wrap
+    }
+    const places = this.#view?.resolution.places ?? []
+    const runsIn = select(runsInChoices(draft, places, step), step.runsIn ?? '', SETUP_STRINGS.runsIn)
+    runsIn.disabled = !structural
+    runsIn.addEventListener('change', () =>
+      this.#update(changeStep(current(), step.id, { runsIn: runsIn.value === '' ? null : runsIn.value })),
+    )
+    const starts = select(startsOptions(draft.steps, index), step.start, SETUP_STRINGS.starts)
+    starts.disabled = !structural
+    starts.addEventListener('change', () =>
+      this.#update(changeStep(current(), step.id, { start: starts.value === 'after-previous' ? 'after-previous' : 'now' })),
+    )
+    const readyKind = select<ReadyKind>(
+      [
+        { value: 'none', label: SETUP_STRINGS.readyNone },
+        { value: 'port', label: SETUP_STRINGS.readyPort },
+        { value: 'line', label: SETUP_STRINGS.readyLine },
+      ],
+      step.readyKind,
+      SETUP_STRINGS.readyWhen,
+    )
+    readyKind.addEventListener('change', () =>
+      this.#update(changeStep(current(), step.id, { readyKind: readyKind.value as ReadyKind })),
+    )
+    const readyControls: HTMLElement[] = [readyKind]
+    if (step.readyKind !== 'none') {
+      const value = el('input', step.readyKind === 'port' ? 'fl-run-input small fl-run-port' : 'fl-run-input small mono')
+      value.value = step.readyValue
+      value.placeholder = step.readyKind === 'port' ? SETUP_STRINGS.portPlaceholder : SETUP_STRINGS.linePlaceholder
+      value.setAttribute('aria-label', value.placeholder)
+      value.spellcheck = false
+      if (step.readyKind === 'port') value.inputMode = 'numeric'
+      value.addEventListener('input', () => this.#update(changeStep(current(), step.id, { readyValue: value.value }), false))
+      readyControls.push(value)
+    }
+    line2.append(
+      inline(SETUP_STRINGS.runsIn, runsIn),
+      inline(SETUP_STRINGS.starts, starts),
+      inline(SETUP_STRINGS.readyWhen, ...readyControls),
+    )
+    if (step.skipped) line2.appendChild(el('span', 'fl-run-skipped', SETUP_STRINGS.skipped))
+    body.appendChild(line2)
+    card.appendChild(body)
+
+    // Right: remove (Everyone) or skip (a tweak layer cannot delete a shared step).
+    const tools = el('div', 'fl-run-card-tools')
+    if (structural) {
+      tools.appendChild(iconButton('trash', SETUP_STRINGS.remove, () => this.#update(removeStep(current(), step.id))))
+    } else {
+      tools.appendChild(
+        iconButton(step.skipped ? 'plus' : 'minus', step.skipped ? SETUP_STRINGS.unskip : SETUP_STRINGS.skip, () =>
+          this.#update(removeStep(current(), step.id)),
+        ),
+      )
+    }
+    card.appendChild(tools)
+    return card
+  }
+
+  #suggested(draft: RunSetupDraft): HTMLElement {
+    const offered = offeredSuggestions(draft, this.#suggestions)
+    const section = el('div', 'fl-run-suggested')
+    if (offered.total === 0) return section
+    section.appendChild(el('div', 'fl-run-section-title', SETUP_STRINGS.suggested))
+    const row = (item: OfferedSuggestion, meta: string): HTMLElement => {
+      const line = el('div', 'fl-run-suggest-row')
+      const text = el('div', 'fl-run-suggest-text')
+      text.appendChild(el('span', 'fl-run-suggest-command', item.suggestion.command))
+      text.appendChild(el('span', 'fl-run-muted', meta))
+      line.appendChild(text)
+      if (item.addedAs !== null) {
+        line.appendChild(el('span', 'fl-run-muted fl-run-added', addedAsLabel(item.addedAs)))
+      } else {
+        line.appendChild(
+          button('fl-run-btn small', SETUP_STRINGS.add, () => this.#update(addSuggestion(this.#draft ?? draft, item.suggestion))),
+        )
+      }
+      return line
+    }
+    if (!this.#showAll) {
+      const list = el('div', 'fl-run-suggest-list')
+      for (const item of offered.top) list.appendChild(row(item, item.meta))
+      section.appendChild(list)
+      if (offered.total > offered.top.length) {
+        section.appendChild(
+          button('fl-run-link', showAllLabel(offered.total), () => {
+            this.#showAll = true
+            this.#render()
+          }),
+        )
+      }
+      return section
+    }
+    const list = el('div', 'fl-run-suggest-list scroll')
+    for (const group of offered.groups) {
+      list.appendChild(el('div', 'fl-run-group-title', group.projectName))
+      for (const item of group.items) list.appendChild(row(item, item.suggestion.source))
+    }
+    section.appendChild(list)
+    section.appendChild(
+      button('fl-run-link', SETUP_STRINGS.showLess, () => {
+        this.#showAll = false
+        this.#render()
+      }),
+    )
+    return section
+  }
+
+  #layerControl(draft: RunSetupDraft): HTMLElement {
+    const wrap = el('div', 'fl-run-saves-for')
+    wrap.appendChild(el('span', 'fl-run-label', SETUP_STRINGS.savesFor))
     const group = el('div', 'fl-run-segment')
     group.setAttribute('role', 'radiogroup')
     group.setAttribute('aria-label', SETUP_STRINGS.savesFor)
     for (const layer of LAYERS) {
       const unavailable = layer === 'conversation' && !this.#deps.hasConversation()
-      const option = button('fl-run-segment-btn', LAYER_LABELS[layer], () => {
-        if (layer === draft.layer) return
-        const project = this.#project(draft.projectRoot)
-        if (project === null) return
-        // A layer is its own draft: switching starts from what that layer says now.
-        this.#update(startDraft(project, layer))
-      }, unavailable ? SETUP_STRINGS.noConversation : LAYER_TITLES[layer])
+      const option = button(
+        'fl-run-segment-btn',
+        LAYER_LABELS[layer],
+        () => {
+          if (layer === draft.layer) return
+          const project = this.#view?.resolution.project
+          if (project === undefined) return
+          // A layer is its own draft: switching starts from what that layer says now.
+          this.#update(startDraft(project, layer))
+        },
+        unavailable ? SETUP_STRINGS.noConversation : LAYER_TITLES[layer],
+      )
       option.setAttribute('role', 'radio')
       option.setAttribute('aria-checked', String(layer === draft.layer))
       option.classList.toggle('active', layer === draft.layer)
       option.disabled = unavailable
       group.appendChild(option)
     }
-    row.appendChild(group)
-    return row
-  }
-
-  #stepRow(draft: RunSetupDraft, step: DraftStep, index: number): HTMLElement {
-    const structural = isStructural(draft.layer)
-    const expanded = this.#expanded === step.id
-    const row = el('div', 'fl-run-step')
-    row.classList.toggle('expanded', expanded)
-    row.classList.toggle('skipped', step.skipped)
-    row.dataset['stepId'] = step.id
-
-    const line = el('div', 'fl-run-step-line')
-    const handle = el('span', 'fl-run-handle')
-    handle.setAttribute('aria-hidden', 'true')
-    if (structural) {
-      handle.title = SETUP_STRINGS.dragHandle
-      row.draggable = true
-      row.addEventListener('dragstart', (event) => {
-        this.#dragId = step.id
-        event.dataTransfer?.setData('text/plain', step.id)
-        row.classList.add('dragging')
-      })
-      row.addEventListener('dragend', () => {
-        this.#dragId = null
-        row.classList.remove('dragging')
-      })
-      row.addEventListener('dragover', (event) => {
-        if (this.#dragId !== null && this.#dragId !== step.id) event.preventDefault()
-      })
-      row.addEventListener('drop', (event) => {
-        event.preventDefault()
-        const dragged = this.#dragId
-        this.#dragId = null
-        if (dragged !== null && dragged !== step.id) this.#update(moveStep(draft, dragged, index))
-      })
-    } else {
-      handle.classList.add('inert')
-    }
-    line.appendChild(handle)
-
-    if (expanded && step.isNew) {
-      line.appendChild(el('span', 'fl-run-step-name accent', SETUP_STRINGS.newStep))
-      if (step.origin !== null) line.appendChild(el('span', 'fl-run-origin', `from ${step.origin}`))
-      line.appendChild(el('span', 'fl-run-grow'))
-    } else {
-      line.appendChild(el('span', 'fl-run-step-name', step.name.trim() === '' ? `Step ${index + 1}` : step.name))
-      line.appendChild(el('span', 'fl-run-step-command', step.command))
-      line.appendChild(
-        el('span', 'fl-run-step-when', step.skipped ? SETUP_STRINGS.skipped : startsLabel(draft.steps, index)),
-      )
-    }
-
-    const tools = el('span', 'fl-run-step-tools')
-    if (structural) {
-      const up = iconButton('chevron-up', SETUP_STRINGS.moveUp, () => this.#update(moveStep(draft, step.id, index - 1)))
-      up.disabled = index === 0
-      const down = iconButton('chevron-down', SETUP_STRINGS.moveDown, () =>
-        this.#update(moveStep(draft, step.id, index + 1)),
-      )
-      down.disabled = index === draft.steps.length - 1
-      tools.append(up, down)
-      tools.appendChild(iconButton('trash', SETUP_STRINGS.remove, () => this.#update(removeStep(draft, step.id))))
-    } else {
-      tools.appendChild(
-        iconButton(step.skipped ? 'plus' : 'minus', step.skipped ? SETUP_STRINGS.unskip : SETUP_STRINGS.skip, () =>
-          this.#update(removeStep(draft, step.id)),
-        ),
-      )
-    }
-    line.appendChild(tools)
-    line.addEventListener('click', () => {
-      this.#expanded = expanded ? null : step.id
-      this.#render()
-    })
-    row.appendChild(line)
-    if (expanded) row.appendChild(this.#editor(draft, step, index))
-    return row
-  }
-
-  #editor(draft: RunSetupDraft, step: DraftStep, index: number): HTMLElement {
-    const structural = isStructural(draft.layer)
-    const grid = el('div', 'fl-run-editor')
-    const current = (): RunSetupDraft => this.#draft() ?? draft
-
-    const field = (label: string, control: HTMLElement): HTMLElement => {
-      const wrap = el('label', 'fl-run-field')
-      wrap.appendChild(el('span', 'fl-run-label', label))
-      wrap.appendChild(control)
-      return wrap
-    }
-
-    const name = el('input', 'fl-run-input')
-    name.value = step.name
-    name.disabled = !structural
-    name.addEventListener('input', () => this.#update(changeStep(current(), step.id, { name: name.value }), false))
-
-    const command = el('input', 'fl-run-input mono')
-    command.value = step.command
-    command.spellcheck = false
-    command.addEventListener('input', () => this.#update(changeStep(current(), step.id, { command: command.value }), false))
-
-    const starts = el('select', 'fl-run-input')
-    for (const [value, label] of [
-      ['now', SETUP_STRINGS.startsNow],
-      ['after-previous', SETUP_STRINGS.startsAfter],
-    ] as const) {
-      const option = el('option', undefined, label)
-      option.value = value
-      option.selected = step.start === value
-      option.disabled = value === 'after-previous' && index === 0
-      starts.appendChild(option)
-    }
-    starts.disabled = !structural
-    starts.addEventListener('change', () =>
-      this.#update(changeStep(current(), step.id, { start: starts.value === 'after-previous' ? 'after-previous' : 'now' })),
-    )
-
-    const readyKind = el('select', 'fl-run-input')
-    for (const [value, label] of [
-      ['none', SETUP_STRINGS.readyNone],
-      ['port', SETUP_STRINGS.readyPort],
-      ['line', SETUP_STRINGS.readyLine],
-    ] as const) {
-      const option = el('option', undefined, label)
-      option.value = value
-      option.selected = step.readyKind === value
-      readyKind.appendChild(option)
-    }
-    readyKind.addEventListener('change', () =>
-      this.#update(changeStep(current(), step.id, { readyKind: readyKind.value as ReadyKind })),
-    )
-
-    grid.appendChild(field(SETUP_STRINGS.name, name))
-    grid.appendChild(field(SETUP_STRINGS.command, command))
-    grid.appendChild(field(SETUP_STRINGS.starts, starts))
-    const readyWrap = field(SETUP_STRINGS.readyWhen, readyKind)
-    grid.appendChild(readyWrap)
-    if (step.readyKind !== 'none') {
-      const value = el('input', step.readyKind === 'port' ? 'fl-run-input' : 'fl-run-input mono')
-      value.value = step.readyValue
-      value.placeholder = step.readyKind === 'port' ? SETUP_STRINGS.portPlaceholder : SETUP_STRINGS.linePlaceholder
-      value.setAttribute('aria-label', value.placeholder)
-      if (step.readyKind === 'port') value.inputMode = 'numeric'
-      value.addEventListener('input', () => this.#update(changeStep(current(), step.id, { readyValue: value.value }), false))
-      readyWrap.appendChild(value)
-    }
-    queueMicrotask(() => {
-      if (step.isNew && step.name === '') name.focus()
-    })
-    return grid
-  }
-
-  #chips(draft: RunSetupDraft): HTMLElement {
-    const row = el('div', 'fl-run-chips')
-    const have = new Set(draft.steps.map((step) => step.command.trim()))
-    const offered = this.#suggestions.filter(
-      (suggestion) => suggestion.projectRoot === draft.projectRoot && !have.has(suggestion.command.trim()),
-    )
-    if (offered.length > 0) row.appendChild(el('span', 'fl-run-muted', SETUP_STRINGS.suggested))
-    const seen = new Set<string>()
-    for (const suggestion of offered) {
-      if (seen.has(suggestion.command)) continue
-      seen.add(suggestion.command)
-      const chip = button('fl-run-chip', `+ ${suggestion.command}`, () => {
-        const next = addSuggestion(draft, suggestion)
-        this.#expanded = next.steps[next.steps.length - 1]?.id ?? null
-        this.#update(next)
-      }, `${suggestion.projectName} · ${suggestion.source}`)
-      row.appendChild(chip)
-    }
-    row.appendChild(
-      button('fl-run-chip dashed', SETUP_STRINGS.addStep, () => {
-        const next = addStep(draft)
-        this.#expanded = next.steps[next.steps.length - 1]?.id ?? null
-        this.#update(next)
-      }),
-    )
-    return row
+    wrap.appendChild(group)
+    return wrap
   }
 
   #renderFooter(): void {
     const foot = this.#footer
-    const draft = this.#draft()
+    const draft = this.#draft
     if (foot === null || draft === null) return
     foot.textContent = ''
     const problems = isDirty(draft) ? validateDraft(draft, { hasConversation: this.#deps.hasConversation() }) : []
-    const others = [...this.#drafts.values()].filter((other) => other.projectRoot !== draft.projectRoot && isDirty(other))
-    const otherProblems = others.flatMap((other) =>
-      validateDraft(other, { hasConversation: this.#deps.hasConversation() }).map((text) => `${other.projectName}: ${text}`),
-    )
     const text = el('div', 'fl-run-foot-text')
     if (this.#error !== null) {
       text.appendChild(el('span', 'fl-run-error', this.#error))
-    } else if (problems.length + otherProblems.length > 0) {
-      for (const problem of [...problems, ...otherProblems]) text.appendChild(el('span', 'fl-run-error', problem))
+    } else if (problems.length > 0) {
+      for (const problem of problems) text.appendChild(el('span', 'fl-run-error', problem))
     } else {
       text.appendChild(el('span', undefined, saveSentence(draft, this.#deps.state())))
-      const also = otherProjectsSentence(others.map((other) => other.projectName))
-      if (also !== null) text.appendChild(el('span', undefined, also))
     }
     foot.appendChild(text)
-    foot.appendChild(button('fl-run-btn', SETUP_STRINGS.cancel, () => this.close()))
-    const dirty = isDirty(draft) || others.length > 0
-    const save = button('fl-run-btn primary', this.#saving ? SETUP_STRINGS.saving : SETUP_STRINGS.save, () => void this.#save())
-    save.disabled = this.#saving || !dirty || problems.length + otherProblems.length > 0
-    foot.appendChild(save)
+
+    const actions = el('div', 'fl-run-foot-actions')
+    actions.appendChild(this.#layerControl(draft))
+    actions.appendChild(el('span', 'fl-run-grow'))
+    actions.appendChild(button('fl-run-btn', SETUP_STRINGS.cancel, () => this.close()))
+    const blocked = this.#saving || !isDirty(draft) || problems.length > 0
+    const nothingGoing = !(this.#deps.state()?.active ?? false)
+    const save = button(
+      nothingGoing ? 'fl-run-btn' : 'fl-run-btn primary',
+      this.#saving ? SETUP_STRINGS.saving : SETUP_STRINGS.save,
+      () => void this.#save(false),
+    )
+    save.disabled = blocked
+    actions.appendChild(save)
+    if (nothingGoing) {
+      const saveAndRun = button('fl-run-btn primary', SETUP_STRINGS.saveAndRun, () => void this.#save(true))
+      saveAndRun.disabled = blocked || draft.steps.every((step) => step.skipped)
+      actions.appendChild(saveAndRun)
+    }
+    foot.appendChild(actions)
   }
 
-  async #save(): Promise<void> {
-    if (this.#saving) return
-    const dirty = [...this.#drafts.values()].filter(isDirty)
-    if (dirty.length === 0) return
+  async #save(thenRun: boolean): Promise<void> {
+    const draft = this.#draft
+    const project = this.#view?.resolution.project
+    if (this.#saving || draft === null || project === undefined || !isDirty(draft)) return
     this.#saving = true
     this.#renderFooter()
-    let lastView: RunView | null = null
+    let view: RunView | null = null
     try {
-      for (const draft of dirty) {
-        const project = this.#project(draft.projectRoot)
-        if (project === null) continue
-        const answer = await this.#deps.save(saveChange(draft, project))
-        if (!answer.ok) {
-          this.#error = answer.reason
-          return
-        }
-        lastView = answer.view
-        this.#drafts.delete(draft.projectRoot)
+      const answer = await this.#deps.save(saveChange(draft, project))
+      if (!answer.ok) {
+        this.#error = answer.reason
+        return
       }
+      view = answer.view
     } catch (error) {
       console.warn('flow: saving the Run setup failed', error)
       this.#error = RUN_STRINGS.failedToAct
@@ -494,98 +522,9 @@ export class RunSetupPanel {
       this.#saving = false
       if (this.#error !== null) this.#renderFooter()
     }
-    if (lastView !== null) this.#deps.onSaved(lastView)
+    if (view === null) return
+    this.#deps.onSaved(view)
     this.close()
+    if (thenRun) this.#deps.startRun()
   }
-}
-
-// ─── the first-time picker ───────────────────────────────────────────────────
-
-export interface RunPickerOptions {
-  host: HTMLElement
-  text: RunPickerText
-  suggestions: RunSuggestion[]
-  /** Null when there is no conversation to ask in — the button says why. */
-  onAsk: (() => void) | null
-  onEmpty: () => void
-  onContinue: (ticked: RunSuggestion[]) => void
-  onClose: () => void
-}
-
-/** Show the picker card over the terminal area. Returns its removal. */
-export function showRunPicker(options: RunPickerOptions): () => void {
-  const overlay = el('div', 'fl-run-picker-overlay')
-  const card = el('div', 'fl-run-picker')
-  card.setAttribute('role', 'dialog')
-  card.setAttribute('aria-label', options.text.title)
-  const remove = (): void => {
-    overlay.remove()
-  }
-  const finish = (then: () => void) => (): void => {
-    remove()
-    then()
-  }
-
-  const head = el('div', 'fl-run-setup-head')
-  head.appendChild(el('span', 'fl-run-picker-title', options.text.title))
-  head.appendChild(el('span', 'fl-run-grow'))
-  head.appendChild(iconButton('close', RUN_STRINGS.pickerClose, finish(options.onClose)))
-  card.appendChild(head)
-  card.appendChild(el('p', 'fl-run-picker-body', options.text.body))
-
-  const ticked = new Set<string>()
-  const rows = pickerRows(options.suggestions)
-  const continueButton = button('fl-run-btn primary', RUN_STRINGS.pickerContinue, () => {
-    remove()
-    options.onContinue(rows.filter((row) => ticked.has(row.id)).map((row) => row.suggestion))
-  })
-  if (rows.length > 0) {
-    const list = el('div', 'fl-run-picker-list')
-    for (const row of rows) {
-      const label = el('label', 'fl-run-picker-row')
-      const box = el('input')
-      box.type = 'checkbox'
-      box.addEventListener('change', () => {
-        if (box.checked) ticked.add(row.id)
-        else ticked.delete(row.id)
-        continueButton.disabled = ticked.size === 0
-      })
-      label.appendChild(box)
-      label.appendChild(el('span', 'fl-run-picker-command', row.command))
-      label.appendChild(el('span', 'fl-run-muted', row.meta))
-      list.appendChild(label)
-    }
-    card.appendChild(list)
-  }
-  continueButton.disabled = true
-
-  const actions = el('div', 'fl-run-picker-actions')
-  const ask = button(
-    'fl-run-btn',
-    RUN_STRINGS.pickerAsk,
-    () => {
-      if (options.onAsk !== null) finish(options.onAsk)()
-    },
-    options.onAsk === null ? RUN_STRINGS.pickerAskNoConversation : RUN_STRINGS.pickerAskTitle,
-  )
-  ask.disabled = options.onAsk === null
-  actions.appendChild(ask)
-  actions.appendChild(el('span', 'fl-run-grow'))
-  actions.appendChild(button('fl-run-btn', RUN_STRINGS.pickerEmpty, finish(options.onEmpty)))
-  if (rows.length > 0) actions.appendChild(continueButton)
-  card.appendChild(actions)
-
-  overlay.appendChild(card)
-  overlay.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      event.stopPropagation()
-      finish(options.onClose)()
-    }
-  })
-  overlay.addEventListener('click', (event) => {
-    if (event.target === overlay) finish(options.onClose)()
-  })
-  options.host.appendChild(overlay)
-  queueMicrotask(() => card.querySelector<HTMLElement>('input, button.primary, button')?.focus())
-  return remove
 }

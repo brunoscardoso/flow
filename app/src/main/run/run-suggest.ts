@@ -63,6 +63,65 @@ async function fromPackageJson(root: string, fs: SuggestFs): Promise<Candidate[]
   return out
 }
 
+// ─── a command line on its own ───────────────────────────────────────────────
+
+/** Words that mark a command as a process that keeps running. */
+const LONG_RUNNING_WORD = /^(dev|develop|start|serve|server|watch|storybook|preview|up|start-dev|run-dev)$/i
+/** Words that mark a command as one that does a job and ends. */
+const ONE_SHOT_WORD =
+  /^(build|test|tests|lint|format|fmt|typecheck|check|prepare|install|i|ci|add|remove|uninstall|clean|release|deploy|publish|e2e|coverage|gen|generate|migrate|seed|init|login|logout|version|help|--help|-h|--version|-v)$/i
+/** Programs that are never a step of a Run: they show, move or change something and end. */
+const ONE_SHOT_PROGRAMS = new Set([
+  'cd', 'ls', 'll', 'la', 'l', 'pwd', 'git', 'gh', 'cat', 'bat', 'less', 'more', 'head', 'tail', 'clear', 'reset',
+  'exit', 'logout', 'echo', 'printf', 'man', 'which', 'type', 'whoami', 'history', 'vim', 'vi', 'nvim', 'nano',
+  'emacs', 'code', 'cursor', 'open', 'rm', 'mv', 'cp', 'mkdir', 'rmdir', 'touch', 'chmod', 'chown', 'ln', 'kill',
+  'killall', 'pkill', 'ps', 'top', 'htop', 'btop', 'grep', 'rg', 'find', 'fd', 'ssh', 'scp', 'export', 'source',
+  '.', 'alias', 'unset', 'env', 'printenv', 'set', 'date', 'du', 'df', 'tree', 'wc', 'sort', 'diff', 'curl',
+  'wget', 'jq', 'brew', 'nvm', 'pyenv', 'lsof', 'claude', 'planflow-ai', 'z', 'j', 'sudo',
+])
+
+/** The words of a command line, without leading `FOO=bar` assignments. */
+function commandWords(command: string): string[] {
+  const words = command.trim().split(/\s+/).filter((word) => word !== '')
+  let at = 0
+  while (at < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[at]!)) at += 1
+  return words.slice(at)
+}
+
+/** True for a command that does a job and ends — never offered as a step. */
+export function looksOneShotCommand(command: string): boolean {
+  const words = commandWords(command)
+  if (words.length === 0) return true
+  const program = words[0]!.split('/').pop() ?? words[0]!
+  if (ONE_SHOT_PROGRAMS.has(program.toLowerCase())) return true
+  return words.slice(1).some((word) => ONE_SHOT_WORD.test(word) || ONE_SHOT_SCRIPT.test(word))
+}
+
+/** True for a command that looks like it keeps running (a server, a watcher, `compose up`). */
+export function looksLongRunningCommand(command: string): boolean {
+  if (looksOneShotCommand(command)) return false
+  const words = commandWords(command)
+  return words.slice(1).some((word) => LONG_RUNNING_WORD.test(word) || LONG_RUNNING_SCRIPT.test(word))
+}
+
+/** A short name for a command line: `npm run dev` → "dev", `docker compose up kafka` → "kafka". */
+export function nameForCommand(command: string): string {
+  const words = commandWords(command)
+  if (words.length === 0) return 'step'
+  const program = (words[0]!.split('/').pop() ?? words[0]!).toLowerCase()
+  if (['npm', 'pnpm', 'yarn', 'bun'].includes(program)) {
+    if (words[1] === 'run' && words[2] !== undefined) return words[2]
+    if (words[1] !== undefined) return words[1]
+  }
+  if ((program === 'docker' && words[1] === 'compose') || program === 'docker-compose') {
+    const rest = words.slice(program === 'docker' ? 3 : 2).filter((word) => !word.startsWith('-'))
+    if (rest.length > 0) return rest.join(' ')
+    return 'compose'
+  }
+  if (program === 'make' && words[1] !== undefined) return words[1]
+  return words.slice(0, 2).join(' ')
+}
+
 // ─── Procfile ────────────────────────────────────────────────────────────────
 
 async function fromProcfile(root: string, fs: SuggestFs): Promise<Candidate[]> {

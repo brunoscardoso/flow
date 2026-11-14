@@ -16,6 +16,12 @@ export interface RunStep {
   start: 'now' | 'after-previous'
   ready?: RunReady
   readyTimeoutMs?: number
+  /**
+   * The NAME of the project this step runs in — the name the app shows, which
+   * is the same on every computer (a folder path is not). Absent: the setup's
+   * own project.
+   */
+  runsIn?: string
 }
 
 export interface RunSetup {
@@ -54,6 +60,12 @@ export interface ResolvedRunStep {
   ready?: RunReady
   readyTimeoutMs: number
   from: { command: RunLayer; ready: RunLayer }
+  /**
+   * Set when the step cannot start where it runs — its project is not on this
+   * computer. A plain sentence; the supervisor reports the step blocked with
+   * it, and nothing (not even a forced Reload) starts it.
+   */
+  unavailable?: string
 }
 
 export type RunStepStatus =
@@ -76,6 +88,8 @@ export interface RunStepState {
   exitCode: number | null
   /** Plain-words reason, e.g. what the step is waiting for. */
   detail: string | null
+  /** True when the project the step runs in is not on this computer — it cannot start at all. */
+  notHere?: boolean
 }
 
 export interface RunGroupState {
@@ -142,6 +156,9 @@ function parseReady(raw: unknown): { ready?: RunReady; problem?: string } {
   return { problem: 'a ready check of an unknown kind' }
 }
 
+/** A project name far longer than any real one. */
+const MAX_PROJECT_NAME = 256
+
 export function parseRunSetup(text: string): { setup: RunSetup; problems: string[] } {
   const problems: string[] = []
   let raw: unknown
@@ -186,6 +203,13 @@ export function parseRunSetup(text: string): { setup: RunSetup; problems: string
       start: entry.start === 'after-previous' ? 'after-previous' : 'now',
     }
     if (parsedReady.ready !== undefined) step.ready = parsedReady.ready
+    if (entry.runsIn !== undefined && entry.runsIn !== null) {
+      if (typeof entry.runsIn === 'string' && entry.runsIn.trim() !== '' && entry.runsIn.length <= MAX_PROJECT_NAME) {
+        step.runsIn = entry.runsIn.trim()
+      } else {
+        problems.push(`The step "${name}" names a project it runs in that could not be read, so it runs in this project.`)
+      }
+    }
     if (typeof entry.readyTimeoutMs === 'number' && Number.isFinite(entry.readyTimeoutMs)) {
       step.readyTimeoutMs = clampReadyTimeout(entry.readyTimeoutMs)
     }
@@ -206,6 +230,7 @@ export function serializeRunSetup(setup: RunSetup): string {
       out.ready = step.ready.kind === 'port' ? { kind: 'port', port: step.ready.port } : { kind: 'line', text: step.ready.text }
     }
     if (step.readyTimeoutMs !== undefined) out.readyTimeoutMs = step.readyTimeoutMs
+    if (step.runsIn !== undefined && step.runsIn.trim() !== '') out.runsIn = step.runsIn.trim()
     return out
   })
   return `${JSON.stringify({ version: 1, steps }, null, 2)}\n`
@@ -213,6 +238,21 @@ export function serializeRunSetup(setup: RunSetup): string {
 
 // ─── resolve ─────────────────────────────────────────────────────────────────
 
+/**
+ * A project a step can run in: one of the scope's projects (the conversation's
+ * own, in its checkout when it has one) or a sibling of the same Workspace
+ * that is on this computer. `root` is null for a project that is named but not
+ * here — kept so a step naming it still shows.
+ */
+export interface RunPlace {
+  name: string
+  root: string | null
+  /** Where its steps run: the conversation's checkout, else the project folder. Null with `root`. */
+  cwd: string | null
+  from: 'scope' | 'workspace'
+}
+
+/** The setup's own project with every layer read, and where its steps may run. */
 export interface RunProjectInput {
   root: string
   name: string
@@ -222,53 +262,84 @@ export interface RunProjectInput {
   conversation: Record<string, RunTweak>
 }
 
-export function resolveRunSteps(projects: RunProjectInput[]): ResolvedRunStep[] {
+/** The sentence a step gets when the project it runs in is not on this computer. */
+export function notHereSentence(projectName: string): string {
+  return `${projectName} is not on this computer, so this step can't start.`
+}
+
+function sameName(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase()
+}
+
+/** Where a step runs: the setup's own project, a place by name, or a sentence why it can't. */
+export function placeOfStep(
+  step: Pick<RunStep, 'runsIn'>,
+  project: Pick<RunProjectInput, 'root' | 'name' | 'cwd'>,
+  places: readonly RunPlace[],
+): { root: string; name: string; cwd: string; unavailable?: string } {
+  const wanted = step.runsIn
+  if (wanted === undefined || wanted.trim() === '' || sameName(wanted, project.name)) {
+    return { root: project.root, name: project.name, cwd: project.cwd }
+  }
+  const place = places.find((candidate) => candidate.root !== null && sameName(candidate.name, wanted))
+  if (place !== undefined && place.root !== null) {
+    return { root: place.root, name: place.name, cwd: place.cwd ?? place.root }
+  }
+  return { root: project.root, name: wanted, cwd: project.cwd, unavailable: notHereSentence(wanted) }
+}
+
+/**
+ * The Run's steps: the setup's ONE ordered list, each step with the layers
+ * merged and the project it runs in resolved. A step's key stays the setup's
+ * own project and the step id, whichever project it runs in — tweaks follow it.
+ */
+export function resolveRunSteps(project: RunProjectInput, places: readonly RunPlace[] = []): ResolvedRunStep[] {
   const resolved: ResolvedRunStep[] = []
-  for (const project of projects) {
-    for (const step of project.setup?.steps ?? []) {
-      const personal = project.personal[step.id]
-      const conversation = project.conversation[step.id]
-      // The nearest layer that SAYS something wins; a conversation's `skip: false` undoes a personal skip.
-      const skip = conversation?.skip ?? personal?.skip ?? false
-      if (skip) continue
+  for (const step of project.setup?.steps ?? []) {
+    const personal = project.personal[step.id]
+    const conversation = project.conversation[step.id]
+    // The nearest layer that SAYS something wins; a conversation's `skip: false` undoes a personal skip.
+    const skip = conversation?.skip ?? personal?.skip ?? false
+    if (skip) continue
 
-      let command = step.command
-      let commandFrom: RunLayer = 'shared'
-      if (personal?.command !== undefined) {
-        command = personal.command
-        commandFrom = 'personal'
-      }
-      if (conversation?.command !== undefined) {
-        command = conversation.command
-        commandFrom = 'conversation'
-      }
-
-      let ready: RunReady | undefined = step.ready
-      let readyFrom: RunLayer = 'shared'
-      if (personal?.ready !== undefined) {
-        ready = personal.ready ?? undefined
-        readyFrom = 'personal'
-      }
-      if (conversation?.ready !== undefined) {
-        ready = conversation.ready ?? undefined
-        readyFrom = 'conversation'
-      }
-
-      const out: ResolvedRunStep = {
-        key: `${project.root}::${step.id}`,
-        projectRoot: project.root,
-        projectName: project.name,
-        cwd: project.cwd,
-        id: step.id,
-        name: step.name,
-        command,
-        start: step.start,
-        readyTimeoutMs: clampReadyTimeout(step.readyTimeoutMs),
-        from: { command: commandFrom, ready: readyFrom },
-      }
-      if (ready !== undefined) out.ready = ready
-      resolved.push(out)
+    let command = step.command
+    let commandFrom: RunLayer = 'shared'
+    if (personal?.command !== undefined) {
+      command = personal.command
+      commandFrom = 'personal'
     }
+    if (conversation?.command !== undefined) {
+      command = conversation.command
+      commandFrom = 'conversation'
+    }
+
+    let ready: RunReady | undefined = step.ready
+    let readyFrom: RunLayer = 'shared'
+    if (personal?.ready !== undefined) {
+      ready = personal.ready ?? undefined
+      readyFrom = 'personal'
+    }
+    if (conversation?.ready !== undefined) {
+      ready = conversation.ready ?? undefined
+      readyFrom = 'conversation'
+    }
+
+    const place = placeOfStep(step, project, places)
+    const out: ResolvedRunStep = {
+      key: `${project.root}::${step.id}`,
+      projectRoot: place.root,
+      projectName: place.name,
+      cwd: place.cwd,
+      id: step.id,
+      name: step.name,
+      command,
+      start: step.start,
+      readyTimeoutMs: clampReadyTimeout(step.readyTimeoutMs),
+      from: { command: commandFrom, ready: readyFrom },
+    }
+    if (ready !== undefined) out.ready = ready
+    if (place.unavailable !== undefined) out.unavailable = place.unavailable
+    resolved.push(out)
   }
   return resolved
 }
@@ -316,14 +387,24 @@ export function parseRunTweaksByProject(raw: unknown): RunTweaksByProject {
 
 // ─── suggestions and the scope's resolution ─────────────────────────────────
 
-/** A command a project already declares, offered by the first-time picker and the panel's chips. */
+/**
+ * A command offered by the setup panel's "Suggested" list: one a project
+ * declares in its files, or one the person (or the agent) has been running.
+ */
 export interface RunSuggestion {
   projectRoot: string
   projectName: string
   name: string
   command: string
-  /** Where it was found, as a plain label: "package.json", "Procfile", "README"… */
+  /**
+   * Where it came from, as plain words: "package.json", "Procfile", "README",
+   * "you ran it 6 times", "the agent started it"…
+   */
   source: string
+  /** 'usage' ranks above 'file'. Absent reads as 'file'. */
+  kind?: 'usage' | 'file'
+  /** Usage only: the higher, the sooner it is offered (count × recency). */
+  score?: number
 }
 
 /** One project of a scope with every layer read, as `resolve` answers it. */
@@ -337,11 +418,18 @@ export interface RunProjectLayers extends RunProjectInput {
 export interface RunResolution {
   scope: RunScope
   scopeKey: string
-  projects: RunProjectLayers[]
+  /** The scope's primary project: its setup is the Run's one ordered list. */
+  project: RunProjectLayers
+  /**
+   * Every project a step may run in, for the panel's "Runs in" choice: the
+   * scope's projects first (the primary at the top), then Workspace siblings
+   * on this computer.
+   */
+  places: RunPlace[]
   steps: ResolvedRunStep[]
 }
 
-/** What a Save writes — one layer of one project in the scope. */
+/** What a Save writes — one layer of the scope's primary project. */
 export type RunSaveChange =
   | { layer: 'shared'; projectRoot: string; setup: RunSetup }
   | { layer: 'personal'; projectRoot: string; tweaks: RunTweaks }

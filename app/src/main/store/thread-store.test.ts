@@ -503,6 +503,28 @@ describe('ThreadStore', () => {
       expect(store.latestWriterThreadFor(ROOT_A, 'flow/plans/plan_never_v1.md')).toBeNull()
     })
 
+    it("listBackgroundCommands: the project's Bash calls started in the background, newest first, bounded", () => {
+      const a = store.createThread({ projectRoot: ROOT_A })
+      const b = store.createThread({ projectRoot: ROOT_B })
+      const bash = (threadId: string, input: Record<string, unknown>, startedAt: string): void => {
+        store.recordToolCall({ threadId, toolName: 'Bash', inputJson: JSON.stringify(input), startedAt })
+      }
+      bash(a.id, { command: 'npm run dev', run_in_background: true }, '2026-11-01T00:00:00.000Z')
+      bash(a.id, { command: 'temporal server start-dev', run_in_background: true }, '2026-11-02T00:00:00.000Z')
+      bash(a.id, { command: 'npm test' }, '2026-11-03T00:00:00.000Z')
+      bash(a.id, { command: 'echo run_in_background', run_in_background: false }, '2026-11-04T00:00:00.000Z')
+      bash(b.id, { command: 'make up', run_in_background: true }, '2026-11-05T00:00:00.000Z')
+      store.recordToolCall({ threadId: a.id, toolName: 'Read', inputJson: JSON.stringify({ run_in_background: true, command: 'x' }) })
+
+      expect(store.listBackgroundCommands(ROOT_A)).toEqual([
+        { command: 'temporal server start-dev', startedAt: '2026-11-02T00:00:00.000Z' },
+        { command: 'npm run dev', startedAt: '2026-11-01T00:00:00.000Z' },
+      ])
+      // The bound is on rows read, newest first: the two newest candidates hold one background call.
+      expect(store.listBackgroundCommands(ROOT_A, 2)).toEqual([{ command: 'temporal server start-dev', startedAt: '2026-11-02T00:00:00.000Z' }])
+      expect(store.listBackgroundCommands(ROOT_B).map((row) => row.command)).toEqual(['make up'])
+    })
+
     it('names a thread that wrote the doc into a project ATTACHED to it (live 2026-10-09)', () => {
       // The live report: a thread started in one project wrote its discovery
       // into a sibling it had attached; scoped to the primary root alone, the
