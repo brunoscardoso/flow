@@ -23,6 +23,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     imported: false,
     pinnedAt: null,
     bypassPermissions: false,
+    autopilot: false,
     additionalRoots: [],
     originLoop: 'find',
     originAim: 'tenant ids',

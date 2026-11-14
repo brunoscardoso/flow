@@ -200,6 +200,12 @@ export interface IpcDependencies {
    * harnesses can omit it — `tasks:mergePr` then answers "not available".
    */
   mergeTaskPr?: (taskId: string) => Promise<import('../../shared/ipc-contract').TaskMergeResult>
+  /**
+   * Apply a conversation's permission switch to its live session as well as
+   * its row (AgentManager.setThreadPermissions). Optional so tests/harnesses
+   * can omit it; the row alone is written then, and the next session reads it.
+   */
+  applyThreadPermissions?: (threadId: string, bypassPermissions: boolean) => Promise<void>
   /** Image-attachment persistence + read (#456). */
   attachmentStore: AttachmentStore
   /** App-wide settings — threads:create reads the persisted model+effort
@@ -524,6 +530,7 @@ function toThreadSummary(
     imported: record.importedAt !== null,
     pinnedAt: record.pinnedAt,
     bypassPermissions: record.bypassPermissions,
+    autopilot: record.autopilot,
     additionalRoots,
     originLoop: record.originLoop,
     originAim: record.originAim,
@@ -558,6 +565,7 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
     boardLoop,
     autopilotChain,
     mergeTaskPr,
+    applyThreadPermissions,
     attachmentStore,
     appSettings,
     telemetry,
@@ -651,7 +659,7 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
   })
   handle(
     'threads:create',
-    ({ projectRoot, title, model, effort, additionalRoots, originLoop, originAim, originKey }) => {
+    ({ projectRoot, title, model, effort, additionalRoots, originLoop, originAim, originKey, autopilot }) => {
       // The persisted model+effort preference (#848) is applied INSIDE
       // ThreadStore.createThread — the one code path every creator shares
       // (#885 found task threads and imports bypassing a handler-level check).
@@ -665,6 +673,7 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
         ...(originLoop === undefined ? {} : { originLoop }),
         ...(originAim === undefined ? {} : { originAim }),
         ...(originKey === undefined ? {} : { originKey }),
+        ...(autopilot === true ? { autopilot: true } : {}),
       })
       const extras = additionalRoots ?? []
       if (extras.length > 0) {
@@ -686,8 +695,14 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
       return toThreadSummary(thread, threadStore.getThreadRoots(thread.id))
     },
   )
-  handle('threads:update', ({ threadId, patch }) => {
-    const summary = toThreadSummary(threadStore.updateThread(threadId, patch))
+  handle('threads:update', async ({ threadId, patch }) => {
+    const { bypassPermissions, ...rest } = patch
+    if (bypassPermissions !== undefined && applyThreadPermissions !== undefined) {
+      await applyThreadPermissions(threadId, bypassPermissions)
+    }
+    const summary = toThreadSummary(
+      threadStore.updateThread(threadId, applyThreadPermissions === undefined ? patch : rest),
+    )
     // #1447: a task and its 1:1 chat are ONE object with ONE name. `tasks:update`
     // already mirrors a rename onto the thread; this is the missing other
     // direction. Without it, renaming the chat — which is what the sidebar

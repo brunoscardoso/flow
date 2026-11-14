@@ -177,14 +177,14 @@ test.describe('flow 11 — the settings family: stacking and Enter', () => {
     // Reopened after the force-close, the Flow panel stays live: its Autopilot
     // toggle writes flow/.flowconfig.
     //
-    // THE FILE, NOT THE STATUS BAR. Autopilot left the status bar — it is a
-    // control in the composer now, where the turn it affects is being typed —
-    // so the bar stopped carrying the word and this assertion had been red
-    // since. The config file is the store either way, and asserting it is what
-    // the case was always really about: the write still lands.
+    // THE FILE, NOT THE STATUS BAR. The config file is the store, and
+    // asserting it is what the case was always really about: the write still
+    // lands. (It used to flip Autopilot, which is chosen per conversation now
+    // and no longer a panel field; Wave execution defaults ON, so the click
+    // writes it OFF.)
     await openFlowSettings(window, root)
     await window
-      .locator('.fl-fs-row', { hasText: 'Autopilot' })
+      .locator('.fl-fs-row', { hasText: 'Wave execution' })
       .locator('.fl-fs-toggle')
       .first()
       .click()
@@ -196,7 +196,7 @@ test.describe('flow 11 — the settings family: stacking and Enter', () => {
       .poll(() => (existsSync(flowconfig) ? readFileSync(flowconfig, 'utf-8') : ''), {
         timeout: 10_000,
       })
-      .toContain('autopilot: true')
+      .toContain('wave_execution: false')
 
     expect(appErrors(errors)).toEqual([])
   })

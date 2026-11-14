@@ -1278,6 +1278,34 @@ describe('ThreadStore', () => {
     })
   })
 
+  // ── Autopilot, per conversation ────────────────────────────────────────
+
+  describe('autopilot', () => {
+    it('is off on a new thread unless the create asks for it', () => {
+      const off = store.createThread({ projectRoot: ROOT_A })
+      expect(off.autopilot).toBe(false)
+      expect(store.getThread(off.id)?.autopilot).toBe(false)
+      const on = store.createThread({ projectRoot: ROOT_A, autopilot: true })
+      expect(on.autopilot).toBe(true)
+      expect(store.getThread(on.id)?.autopilot).toBe(true)
+    })
+
+    it('round-trips through update, and belongs to ONE thread', () => {
+      const a = store.createThread({ projectRoot: ROOT_A })
+      const b = store.createThread({ projectRoot: ROOT_A })
+      expect(store.updateThread(a.id, { autopilot: true }).autopilot).toBe(true)
+      expect(store.getThread(a.id)?.autopilot).toBe(true)
+      // Same project, other conversation: untouched.
+      expect(store.getThread(b.id)?.autopilot).toBe(false)
+      expect(store.updateThread(a.id, { autopilot: false }).autopilot).toBe(false)
+    })
+
+    it('an update that does not touch it leaves it intact', () => {
+      const thread = store.createThread({ projectRoot: ROOT_A, autopilot: true })
+      expect(store.updateThread(thread.id, { title: 'renamed' }).autopilot).toBe(true)
+    })
+  })
+
   // ── Pinning ────────────────────────────────────────────────────────────
 
   describe('pin/unpin', () => {

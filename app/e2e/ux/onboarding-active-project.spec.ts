@@ -19,12 +19,13 @@ import { basename, join, resolve } from 'node:path'
  * `project.active()` (ADR-002 — the app's own answer to "which project
  * am I in"; the titlebar switcher, Files tree, editor and terminals all bind to
  * it), falling back to `roots()[0]` only when nothing is active. One resolution
- * feeds the confirmation label, markRootOnboarded and `session.rootPath`, so the
- * step's text and the mode step's `.flowconfig` write can never disagree.
+ * feeds the confirmation label, markRootOnboarded and `session.rootPath`.
+ * The "Before the agent acts" step writes no project file at all (autopilot is
+ * chosen per conversation), so neither project's `.flowconfig` may change.
  *
  * This probe seeds two real repos (alpha added first, bravo added second and made
  * active via the real setActiveProject IPC), reopens the wizard, and reads both the
- * confirmation text and the on-disk effect of the mode choice — independently, from
+ * confirmation text and the on-disk (non-)effect of the choice — independently, from
  * disk, never trusting the wizard's own "✓ Ready." claim.
  */
 
@@ -215,12 +216,12 @@ async function walkToProjectStep(userDataDir: string): Promise<Ctx & { shown: st
   return { app, win, alpha, bravo, errors, shown }
 }
 
-async function chooseAutonomousAndFinish(win: Page): Promise<void> {
+async function chooseDontAskAndFinish(win: Page): Promise<void> {
   const wizard = win.locator(WIZARD)
   await expect.poll(() => nextDisabled(win)).toBe(false)
   await wizard.locator('.fl-wizard-btn', { hasText: 'Next' }).click()
-  await expect(wizard.locator('.fl-settings-header')).toContainText('Choose a mode')
-  const autonomous = wizard.locator('.fl-wizard-btn', { hasText: 'Autonomous' })
+  await expect(wizard.locator('.fl-settings-header')).toContainText('Before the agent acts')
+  const autonomous = wizard.locator('.fl-wizard-btn', { hasText: "Don't ask" })
   await autonomous.click()
   await expect(autonomous).toHaveClass(/fl-wizard-btn--primary/, { timeout: 5000 })
   await expect.poll(() => nextDisabled(win)).toBe(false)
@@ -243,7 +244,7 @@ function cleanup(ctx: (Ctx & { shown?: string }) | null, userDataDir: string): P
 
 // ── GUARD (#1038): the wizard follows the ACTIVE project ──────────────────────
 test(
-  'the reopened wizard confirms the ACTIVE project and writes the mode into it',
+  'the reopened wizard confirms the ACTIVE project and writes no project file',
   async () => {
     const userDataDir = mkdtempSync(join(tmpdir(), 'flow-e2e-onboard-active2-'))
     let ctx: (Ctx & { shown: string }) | null = null
@@ -256,12 +257,12 @@ test(
       expect(shown).not.toContain(basename(alpha))
       await win.screenshot({ path: `${SCREENS}/onboarding-active-project.png` })
 
-      // ...and the autonomy choice must land in the active project's config,
-      // never in a different project the user is not looking at.
-      await chooseAutonomousAndFinish(win)
-      await expect
-        .poll(() => flowConfig(bravo), { timeout: 5000 })
-        .toMatch(/autopilot:\s*true/)
+      // ...and the choice is an app setting: neither project is reconfigured.
+      // The wizard closing (Finish committed) is the positive the absence rests on.
+      await chooseDontAskAndFinish(win)
+      expect(flowConfig(bravo), 'the active project must not be reconfigured').not.toMatch(
+        /autopilot:\s*true/,
+      )
       expect(flowConfig(alpha), 'the inactive project must not be reconfigured').not.toMatch(
         /autopilot:\s*true/,
       )

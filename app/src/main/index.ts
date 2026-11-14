@@ -180,7 +180,6 @@ import { tailConfigFrom } from './drive/chain-tail'
 import { makeRiskCheck, makeStageCheck } from './drive/chain-gates'
 import { watchDeletedThreads } from './drive/thread-gone'
 import { releaseCheckoutOnThreadDeleted } from './worktree/checkout-on-thread-deleted'
-import { LEGACY_AUTOPILOT_FILE, autopilotEnabledIn } from './flow/autopilot'
 import { makeTodoMirror } from './tasks/todo-mirror'
 import { onThreadStatus as syncCardLane } from './tasks/task-lane-sync'
 import { TerminalManager, registerTerminalChannels } from './terminal'
@@ -1523,16 +1522,12 @@ function bootstrapMainProcess(): void {
     // ASYNC, because this is main: a synchronous read of a project's config on
     // the process that answers every IPC call is a stall every window waits
     // behind (allowed-pattern #19). Fail-soft — a project with no config file
-    // has expressed no opinion, and no opinion means autopilot is off.
+    // publishes with the defaults. Only the publish settings are read: whether
+    // autopilot may run is the conversation's own flag now.
     readProjectSettings: async (rootPath) => {
-      const flowDir = join(rootPath, 'flow')
-      const text = await fsPromises.readFile(join(flowDir, '.flowconfig'), 'utf8').catch(() => null)
+      const text = await fsPromises.readFile(join(rootPath, 'flow', '.flowconfig'), 'utf8').catch(() => null)
       const config = text === null ? {} : parseFlowconfigText(text)
-      const legacy = await fsPromises
-        .access(join(flowDir, LEGACY_AUTOPILOT_FILE))
-        .then(() => true)
-        .catch(() => false)
-      return { autopilot: autopilotEnabledIn(config, legacy), tail: tailConfigFrom(config) }
+      return { tail: tailConfigFrom(config) }
     },
     // THE STAGE GATE, BEFORE THE NEXT RUNG IS ISSUED — the seam #1915 shipped
     // without (review C2). The ladder, the gate and its 122 tests existed and
@@ -2900,6 +2895,13 @@ const understandFeature = async (request: {
       agentManager === null
         ? { ok: false, detail: 'Stopping a subtask is not available right now.' }
         : agentManager.stopSubtask(threadId, ticket),
+    // A conversation's own "asks first" switch reaches its LIVE session, not
+    // just the stored row (late-bound like stopSubtask). With no manager yet,
+    // the row is written and the next session reads it.
+    applyThreadPermissions: async (threadId, bypassPermissions) => {
+      if (agentManager === null) threadStore.updateThread(threadId, { bypassPermissions })
+      else await agentManager.setThreadPermissions(threadId, bypassPermissions)
+    },
     // #1484: removing a project closes its shells too — otherwise the PTYs
     // outlive the project with no tab, no menu entry and no route back.
     disposeTerminalsForRoot: (rootPath) => {

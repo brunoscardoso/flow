@@ -167,6 +167,11 @@ export interface ThreadDraft {
    */
   model: string
   effort: string
+  /**
+   * Autopilot for THIS conversation, chosen before it exists. OPTIONAL, AND
+   * ABSENT IS OFF — what every conversation starts with.
+   */
+  autopilot?: boolean
   /** Images to send with the description, as its first message. */
   attachments: MessageAttachmentInput[]
   /**

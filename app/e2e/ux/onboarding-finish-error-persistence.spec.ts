@@ -11,7 +11,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
-  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
@@ -46,9 +45,8 @@ import { join, resolve } from 'node:path'
  * HARNESS TRAPS (each cost a wrong reading first — see the sweep log):
  *  - The Finish-failure line has NO stable class hook (`.fl-wizard-error` has no
  *    CSS rule); assert on the wizard's own innerText, not a styled locator.
- *  - The seeded project must be `autopilot: true` + app bypass ON, or the mode
- *    step reflects Manual and clicking Manual is a no-op write that never
- *    reaches the disk assertion.
+ *  - The app bypass must be seeded ON, or the step reflects Ask me first and
+ *    the Finish under test would commit no change.
  *  - Blocking `app_settings` writes with a BEFORE INSERT trigger only bites
  *    INSERTs; the seed pre-inserts `autonomy_bypass_default` so the commit's
  *    upsert of `onboarding_completed` is the row that actually aborts.
@@ -138,7 +136,7 @@ async function seedRepo(win: Page): Promise<string> {
   execFileSync('git', ['init', '-q'], { cwd: dir })
   writeFileSync(join(dir, '.git', 'info', 'exclude'), '.claude/\nflow\n.gitignore\n')
   mkdirSync(join(dir, 'flow'), { recursive: true })
-  writeFileSync(join(dir, 'flow', '.flowconfig'), 'autopilot: true\n')
+  writeFileSync(join(dir, 'flow', '.flowconfig'), '')
   await win.evaluate(async (p) => {
     const api = (
       window as unknown as {
@@ -179,15 +177,6 @@ async function bypassDefault(win: Page): Promise<{ completed: boolean; bypass: b
   })
 }
 
-function autopilotOnDisk(dir: string): string | null {
-  const path = join(dir, 'flow', '.flowconfig')
-  if (!existsSync(path)) return null
-  const line = readFileSync(path, 'utf-8')
-    .split('\n')
-    .find((l) => l.trim().startsWith('autopilot:'))
-  return line ? line.split(':')[1].trim() : null
-}
-
 async function nextDisabled(win: Page): Promise<boolean> {
   return win
     .locator(`${WIZARD} .fl-wizard-btn`, { hasText: /^(Next|Finish|Saving…)$/ })
@@ -210,7 +199,7 @@ async function openWizardToMode(win: Page): Promise<void> {
     'Choose your agent',
     'Connect a Claude account',
     'Open a project',
-    'Choose a mode',
+    'Before the agent acts',
   ]) {
     await expect.poll(() => nextDisabled(win), { timeout: 20_000 }).toBe(false)
     await wizard.locator('.fl-wizard-btn', { hasText: /^Next$/ }).click()
@@ -252,8 +241,6 @@ interface Measurement {
   secondFailureText: string
   /** The button after the 2nd failed Finish — proof it fired and settled. */
   buttonAfterSecondFinish: string
-  /** The settings summary's Autopilot row after Back → switch mode → Next. */
-  autopilotRow: string
   /** The store's own answer: the commit never landed in any of this. */
   bypassStillOn: boolean
   onboardingCompleted: boolean
@@ -262,9 +249,9 @@ interface Measurement {
 }
 
 /**
- * Boot with an account + an autopilot-on project + the app-wide bypass ON, do
- * what a user turning autonomy OFF does (Getting Started → Mode → Manual →
- * Finish) against a store that rejects the commit — then keep using the wizard
+ * Boot with an account + a project + the app-wide bypass ON, do what a user
+ * who wants the agent to ask again does (Getting Started → Before the agent
+ * acts → Ask me first → Finish) against a store that rejects the commit — then keep using the wizard
  * the way the "Try Finish again" message invites: check the earlier steps
  * (Back), come forward, Finish again.
  */
@@ -292,8 +279,9 @@ async function driveFailThenNavigate(
 
     await openWizardToMode(win)
     const wizard = win.locator(WIZARD)
-    await wizard.locator('.fl-wizard-btn', { hasText: /^Manual/ }).click()
-    await expect.poll(() => autopilotOnDisk(repo), { timeout: 10_000 }).toBe('false')
+    const askFirst = wizard.locator('.fl-wizard-btn', { hasText: /^Ask me first/ })
+    await askFirst.click()
+    await expect(askFirst).toHaveClass(/fl-wizard-btn--primary/, { timeout: 5000 })
 
     blockSettingsWrites(userDataDir)
 
@@ -311,8 +299,8 @@ async function driveFailThenNavigate(
     }
 
     // ── Back: the user re-checks the choices the wizard just failed to save.
-    await backWizardTo(win, 'Choose a mode') // Workspace → Settings → Sign in → Mode
-    await expect(wizard.locator('.fl-settings-header')).toContainText('Choose a mode')
+    await backWizardTo(win, 'Before the agent acts') // Workspace → Settings → Sign in → Mode
+    await expect(wizard.locator('.fl-settings-header')).toContainText('Before the agent acts')
     await win.waitForTimeout(800)
     const modeStepText = (await wizard.innerText()).replace(/\s+/g, ' ').trim()
     const toldAfterBack = COMPLAINT.test(await win.evaluate(() => document.body.innerText))
@@ -338,19 +326,6 @@ async function driveFailThenNavigate(
       await win.screenshot({ path: `${SCREENS}/onboarding-finish-err-03-second-fail.png` })
     }
 
-    // ── Adjacent seam: Back → change the mode → Next. Does the "Your project
-    // settings" summary (#1207) re-report the NEW choice, or a stale one?
-    await backWizardTo(win, 'Choose a mode') // Workspace → Settings → Sign in → Mode
-    await expect(wizard.locator('.fl-settings-header')).toContainText('Choose a mode')
-    await wizard.locator('.fl-wizard-btn', { hasText: /^Autonomous/ }).click()
-    await expect.poll(() => autopilotOnDisk(repo), { timeout: 10_000 }).toBe('true')
-    // Mode → (Sign in to Flow) → Settings.
-    await advanceWizardTo(win, 'Your project settings')
-    await win.waitForTimeout(1500)
-    const autopilotRow = (
-      await wizard.locator('[data-setting-key="autopilot"]').first().innerText()
-    ).trim()
-
     const wizardStillUp = (await win.locator(WIZARD).count()) > 0
     const after = await bypassDefault(win)
     unblockSettingsWrites(userDataDir)
@@ -363,7 +338,6 @@ async function driveFailThenNavigate(
       toldOnSecondFailure,
       secondFailureText,
       buttonAfterSecondFinish,
-      autopilotRow,
       bypassStillOn: after.bypass,
       onboardingCompleted: after.completed,
       wizardStillUp,
@@ -413,16 +387,6 @@ test('LIVE: the FIRST failed Finish is announced and keeps the wizard open (#135
     completed: false,
   })
   expect(m.errors, 'no uncaught renderer errors').toEqual([])
-})
-
-/**
- * The adjacent seam, measured healthy and worth keeping: Back → switch the mode
- * → Next re-reports the NEW choice in "Your project settings" (#1207), rather
- * than the summary the step rendered the first time through.
- */
-test('LIVE: the settings summary re-reports a mode changed via Back (#1207)', async () => {
-  const m = await drive()
-  expect(m.autopilotRow).toBe('Autopilot — On')
 })
 
 // ── Tripwires for #1461 — un-fixme when the notice moves into wizard state ──

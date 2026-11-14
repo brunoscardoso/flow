@@ -43,6 +43,8 @@ function harness(
     id: 'th1',
     projectRoot: '/repo',
     title: 'A conversation',
+    // Autopilot is the CONVERSATION's own column now, not the project's.
+    autopilot: options.autopilot ?? true,
     get status() {
       return status
     },
@@ -60,7 +62,6 @@ function harness(
       sent.push(content)
     },
     readProjectSettings: async () => ({
-      autopilot: options.autopilot ?? true,
       tail: options.tail ?? { commit: false, push: false, pr: false },
     }),
     // The ladder's gate, answering yes — every case here is about something
@@ -234,11 +235,24 @@ describe('AutopilotChain: it stops', () => {
 })
 
 describe('AutopilotChain: it refuses', () => {
-  it('starts nothing for a project with autopilot switched off', async () => {
+  it('starts nothing for a conversation with autopilot switched off', async () => {
     const h = harness({ autopilot: false })
     const status = await h.chain.begin('th1')
     expect(h.sent).toEqual([])
     expect(status).toMatchObject({ running: false, stoppedReason: AUTOPILOT_OFF })
+  })
+
+  it('the board loop starts it on a conversation with autopilot off — the card is the consent', async () => {
+    const h = harness({ autopilot: false })
+    const status = await h.chain.begin('th1', { autonomous: true })
+    expect(status.running).toBe(true)
+    expect(h.sent).toHaveLength(1)
+  })
+
+  it('the conversation decides, not the project: on here starts it', async () => {
+    const h = harness({ autopilot: true })
+    const status = await h.chain.begin('th1')
+    expect(status).toMatchObject({ running: true, stoppedReason: null })
   })
 
   it('starts nothing on a conversation that is no longer here', async () => {

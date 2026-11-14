@@ -201,15 +201,15 @@ test('full wizard: seeded account+project unlock Project→Mode→Settings→Fin
 
     // Step 4: Mode — the SAFE default is pre-reflected. Since #790 (the #716 fix),
     // the Mode step mirrors Connect/Project by auto-detecting persisted state: it
-    // maps the saved autonomy default (autopilot off ⇒ Manual on a fresh project)
-    // onto the step, so Manual arrives pre-highlighted and Next is ungated — never
-    // Autonomous, so a user who skims can only fall through to the conservative
+    // maps the saved app-wide default (bypass off ⇒ Ask me first on a fresh project)
+    // onto the step, so Ask me first arrives pre-highlighted and Next is ungated — never
+    // Don't ask, so a user who skims can only fall through to the conservative
     // mode. (This intentionally superseded the older "no default selection"
     // assertion this spec shipped with in #529.) Assertions poll because the
     // reflection resolves via an async getOnboarding IPC round-trip.
-    await expect(wizard.locator('.fl-settings-header')).toContainText('Choose a mode')
-    const manual = wizard.locator('.fl-wizard-btn', { hasText: 'Manual' })
-    const autonomous = wizard.locator('.fl-wizard-btn', { hasText: 'Autonomous' })
+    await expect(wizard.locator('.fl-settings-header')).toContainText('Before the agent acts')
+    const manual = wizard.locator('.fl-wizard-btn', { hasText: 'Ask me first' })
+    const autonomous = wizard.locator('.fl-wizard-btn', { hasText: "Don't ask" })
     await expect(manual).toHaveClass(/fl-wizard-btn--primary/)
     await expect(autonomous).not.toHaveClass(/fl-wizard-btn--primary/)
     await expect
@@ -273,24 +273,24 @@ test('mode step: switching selection moves the single highlight, and Back from S
     const wizard = win.locator(WIZARD)
 
     // Advance Welcome → Connect → Project → Mode.
-    await advanceWizardTo(win, 'Choose a mode')
-    await expect(wizard.locator('.fl-settings-header')).toContainText('Choose a mode')
+    await advanceWizardTo(win, 'Before the agent acts')
+    await expect(wizard.locator('.fl-settings-header')).toContainText('Before the agent acts')
 
-    const manual = wizard.locator('.fl-wizard-btn', { hasText: 'Manual' })
-    const autonomous = wizard.locator('.fl-wizard-btn', { hasText: 'Autonomous' })
+    const manual = wizard.locator('.fl-wizard-btn', { hasText: 'Ask me first' })
+    const autonomous = wizard.locator('.fl-wizard-btn', { hasText: "Don't ask" })
 
-    // Pick Manual → exactly Manual is highlighted.
+    // Pick Ask me first → exactly Ask me first is highlighted.
     await manual.click()
     await expect(manual).toHaveClass(/fl-wizard-btn--primary/)
     await expect(autonomous).not.toHaveClass(/fl-wizard-btn--primary/)
 
-    // Switch to Autonomous → the highlight MOVES; Manual is no longer selected
+    // Switch to Don't ask → the highlight MOVES; Ask me first is no longer selected
     // (a mode picker must never show two modes selected at once).
     await autonomous.click()
     await expect(autonomous).toHaveClass(/fl-wizard-btn--primary/)
     await expect(manual).not.toHaveClass(/fl-wizard-btn--primary/)
 
-    // Advance to Settings, then Back — the Autonomous highlight must survive the
+    // Advance to Settings, then Back — the Don't ask highlight must survive the
     // re-render (the #320 regression: Back used to drop the selection).
     await advanceWizardTo(win, 'Your project settings')
     await expect(wizard.locator('.fl-settings-header')).toContainText('Your project settings')
@@ -298,11 +298,11 @@ test('mode step: switching selection moves the single highlight, and Back from S
     await wizard.locator('.fl-wizard-btn', { hasText: 'Back' }).click()
     await expect(wizard.locator('.fl-settings-header')).toContainText('Sign in to Flow')
     await wizard.locator('.fl-wizard-btn', { hasText: 'Back' }).click()
-    await expect(wizard.locator('.fl-settings-header')).toContainText('Choose a mode')
-    await expect(wizard.locator('.fl-wizard-btn', { hasText: 'Autonomous' })).toHaveClass(
+    await expect(wizard.locator('.fl-settings-header')).toContainText('Before the agent acts')
+    await expect(wizard.locator('.fl-wizard-btn', { hasText: "Don't ask" })).toHaveClass(
       /fl-wizard-btn--primary/,
     )
-    await expect(wizard.locator('.fl-wizard-btn', { hasText: 'Manual' })).not.toHaveClass(
+    await expect(wizard.locator('.fl-wizard-btn', { hasText: 'Ask me first' })).not.toHaveClass(
       /fl-wizard-btn--primary/,
     )
     // And Next stays ungated — the restored selection is a real, honored choice.

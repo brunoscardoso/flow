@@ -9,6 +9,7 @@
  * `flow:open-settings` event (dispatched by the titlebar button) and renders a
  * modal into document.body on demand.
  */
+import { ASK_CHOICES, BEFORE_AGENT_ACTS, SETTINGS_AGENT } from '../threads/conversation-switches-model'
 import { closeOtherSettingsOverlays } from './settings-overlay-stack'
 import { mountIntegrations } from './integrations-settings-view'
 import {
@@ -158,6 +159,7 @@ export const SETTINGS_TAB_ID = 'flow://settings'
  *
  * Five groups, and the split is by what a person came to change:
  *  · Models — which agent runs, and who it runs as
+ *  · Agent — how a new conversation starts (ask first, or not)
  *  · Conversation files — what a conversation keeps on disk, and where its
  *    work goes
  *  · Tasks — where this project's work comes from
@@ -166,6 +168,9 @@ export const SETTINGS_TAB_ID = 'flow://settings'
  */
 export const SETTINGS_GROUPS = [
   { key: 'models', label: 'Models' },
+  // How a new conversation starts: whether the agent asks before it acts.
+  // Each conversation can change it on its own, from its composer.
+  { key: 'agent', label: 'Agent' },
   // The KEY is the internal one and stays; the label is what a person reads,
   // and it stopped being the internal noun for a directory Flow makes
   // (worktree-ui-removal Phase 5, task 5.6).
@@ -475,6 +480,7 @@ class SettingsView {
     // used to render as though the runtime above them had not been chosen.
     const provider = providerResult.provider ?? 'claude'
     into('models', this.#renderProviderSection(providerResult.provider, accounts))
+    into('agent', this.#renderAgentSection())
     // TWO SECTIONS FOLLOW THE PROJECT'S RESOLVED RUNTIME, NOT THE APP-WIDE
     // DEFAULT. "This project" assigns a Claude ACCOUNT; "Model routing" maps
     // effort onto Haiku/Sonnet/Opus — both are Claude's, and both used to gate
@@ -2171,6 +2177,100 @@ class SettingsView {
   }
 
   /** A "Getting Started" entry to (re-)open the first-run onboarding wizard (#48). */
+  /**
+   * Agent — the default a NEW conversation starts from: does the agent ask
+   * before it edits or runs anything? It was reachable only from the first-run
+   * wizard, so a choice made once on the first day had no way back short of
+   * re-running the wizard. Open conversations keep what they have; each one
+   * changes its own from the composer. Saved on change, read on render.
+   */
+  #renderAgentSection(): HTMLElement {
+    const section = document.createElement('div')
+    section.className = 'fl-settings-section'
+    const heading = document.createElement('div')
+    heading.className = 'fl-settings-heading'
+    heading.textContent = SETTINGS_AGENT.heading
+    section.appendChild(heading)
+    const hint = document.createElement('div')
+    hint.className = 'fl-settings-hint'
+    hint.textContent = SETTINGS_AGENT.help
+    section.appendChild(hint)
+
+    const fieldset = document.createElement('fieldset')
+    fieldset.className = 'fl-settings-choices'
+    const legend = document.createElement('legend')
+    legend.textContent = BEFORE_AGENT_ACTS
+    fieldset.appendChild(legend)
+    const radios: HTMLInputElement[] = []
+    const paint = (bypass: boolean): void => {
+      for (const radio of radios) {
+        radio.checked = radio.value === String(bypass)
+        radio.closest('label')?.classList.toggle('is-on', radio.checked)
+      }
+    }
+    for (const choice of ASK_CHOICES) {
+      const label = document.createElement('label')
+      label.className = 'fl-settings-choice'
+      const radio = document.createElement('input')
+      radio.type = 'radio'
+      radio.name = 'fl-settings-ask-default'
+      radio.value = String(choice.bypass)
+      radio.disabled = true
+      radios.push(radio)
+      const text = document.createElement('span')
+      text.className = 'fl-settings-choice-text'
+      const title = document.createElement('span')
+      title.className = 'fl-settings-choice-title'
+      title.textContent = choice.label
+      const desc = document.createElement('span')
+      desc.className = 'fl-settings-choice-desc'
+      desc.textContent = choice.description
+      text.append(title, desc)
+      label.append(radio, text)
+      fieldset.appendChild(label)
+    }
+    section.appendChild(fieldset)
+    const status = document.createElement('div')
+    status.className = 'fl-settings-hint'
+    status.setAttribute('role', 'status')
+    section.appendChild(status)
+    const footnote = document.createElement('div')
+    footnote.className = 'fl-settings-hint'
+    footnote.textContent = SETTINGS_AGENT.footnote
+    section.appendChild(footnote)
+
+    let saved = false
+    void window.flow.settings
+      .getOnboarding()
+      .then((state) => {
+        saved = state.autonomyBypassDefault
+        paint(saved)
+        for (const radio of radios) radio.disabled = false
+      })
+      .catch(() => {
+        status.textContent = SETTINGS_AGENT.saveFailed
+      })
+    for (const radio of radios) {
+      radio.addEventListener('change', () => {
+        if (!radio.checked) return
+        const bypass = radio.value === 'true'
+        paint(bypass)
+        status.textContent = ''
+        void window.flow.settings
+          .setOnboarding({ autonomyBypassDefault: bypass })
+          .then(() => {
+            saved = bypass
+          })
+          .catch(() => {
+            // Put the radio back on what is actually stored, and say so.
+            paint(saved)
+            status.textContent = SETTINGS_AGENT.saveFailed
+          })
+      })
+    }
+    return section
+  }
+
   #renderGettingStarted(): HTMLElement {
     const wrap = document.createElement('div')
     wrap.style.marginTop = 'var(--fl-space-lg)'
@@ -2780,6 +2880,38 @@ export function injectSettingsStyles(): void {
       font-size: var(--fl-text-caption-size);
       margin-bottom: var(--fl-space-sm);
     }
+    .fl-settings-choices {
+      margin: 0 0 var(--fl-space-sm);
+      padding: 0;
+      border: 0;
+      display: flex;
+      flex-direction: column;
+      gap: var(--fl-space-xs);
+      max-width: 520px;
+    }
+    .fl-settings-choices legend {
+      font-size: var(--fl-text-caption-size);
+      color: var(--fl-color-text);
+      margin-bottom: var(--fl-space-xs);
+      padding: 0;
+    }
+    .fl-settings-choice {
+      display: flex;
+      gap: var(--fl-space-sm);
+      align-items: flex-start;
+      padding: var(--fl-space-sm);
+      border: var(--fl-border-width) solid var(--fl-color-border);
+      border-radius: var(--fl-radius-md);
+      cursor: pointer;
+    }
+    .fl-settings-choice.is-on {
+      border-color: var(--fl-color-accent);
+      background: var(--fl-color-accent-muted);
+    }
+    .fl-settings-choice input { margin-top: 2px; }
+    .fl-settings-choice-text { display: flex; flex-direction: column; gap: 2px; }
+    .fl-settings-choice-title { font-size: var(--fl-text-ui-size); font-weight: 600; color: var(--fl-color-text); }
+    .fl-settings-choice-desc { font-size: var(--fl-text-caption-size); color: var(--fl-color-text-secondary); line-height: 1.5; }
     .fl-settings-toggle {
       display: flex;
       align-items: center;

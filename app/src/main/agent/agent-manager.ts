@@ -559,6 +559,13 @@ interface ClaudeThreadSession {
   resumedFrom: string | null
   /** The thread's attached projects when this session was created (`projectsKey`). */
   projectsKey: string
+  /**
+   * Whether the session runs with permission prompts skipped right now — set
+   * at creation and moved by `setThreadPermissions` when the SDK took the
+   * switch live. When it disagrees with the thread, the switch did not take,
+   * and the next turn restarts the resting session with the thread's mode.
+   */
+  bypassPermissions: boolean
 }
 
 interface RuntimeThreadSession {
@@ -1408,6 +1415,28 @@ export class AgentManager extends EventEmitter {
     return ok
   }
 
+  /**
+   * A person switched whether THIS conversation asks before the agent acts.
+   * Stored first, so a session started later reads it; then applied to the
+   * live session through the SDK, so it takes effect without a restart. When
+   * the SDK refuses the switch, the session keeps its old mode until it rests,
+   * and the next turn starts it again with the new one
+   * (`standDownIfProjectsChanged`). Runtimes other than Claude spawn per turn
+   * and read the thread at their next turn.
+   */
+  async setThreadPermissions(threadId: string, bypassPermissions: boolean): Promise<void> {
+    this.threadStore.updateThread(threadId, { bypassPermissions })
+    const session = this.sessions.get(threadId)
+    if (session === undefined || session.provider !== 'claude') return
+    if (session.bypassPermissions === bypassPermissions) return
+    try {
+      await session.query.setPermissionMode(bypassPermissions ? 'bypassPermissions' : 'default')
+      session.bypassPermissions = bypassPermissions
+    } catch (error) {
+      console.warn('[AgentManager] the session did not take the permission switch; it applies from the next turn', error)
+    }
+  }
+
   /** True when the thread has a live SDK session. */
   hasActiveSession(threadId: string): boolean {
     return this.sessions.has(threadId)
@@ -1423,7 +1452,13 @@ export class AgentManager extends EventEmitter {
   private standDownIfProjectsChanged(threadId: string): boolean {
     const session = this.sessions.get(threadId)
     if (session === undefined) return false
-    if (session.projectsKey === projectsKey(this.#sessionRoots(threadId))) return false
+    const thread = this.threadStore.getThread(threadId)
+    // A permission switch the SDK could not take live is a session that must
+    // be started again with the thread's mode — the same stand-down as a
+    // changed folder set.
+    const permissionsDiffer =
+      session.provider === 'claude' && thread !== null && session.bypassPermissions !== thread.bypassPermissions
+    if (!permissionsDiffer && session.projectsKey === projectsKey(this.#sessionRoots(threadId))) return false
     const status = this.threadStore.getThread(threadId)?.status ?? null
     if (status !== null && !RESTING_STATUSES.has(status)) return false
     if (this.backgroundTasks.list(threadId).length > 0) return false
@@ -1640,6 +1675,7 @@ export class AgentManager extends EventEmitter {
       bridge,
       resumedFrom: thread.sdkSessionId ?? null,
       projectsKey: projectsKey(this.#sessionRoots(thread.id)),
+      bypassPermissions: thread.bypassPermissions,
     }
     this.sessions.set(thread.id, session)
 
@@ -1874,6 +1910,11 @@ export class AgentManager extends EventEmitter {
       forwardSubagentText: true,
       // A thread flagged bypassPermissions runs without prompts (dangerous, opt-in).
       permissionMode: thread.bypassPermissions ? 'bypassPermissions' : 'default',
+      // Lets a person switch THIS conversation to skipping prompts while it
+      // runs (setThreadPermissions). It permits the switch only: the session
+      // still starts in the mode above, and nothing but that person's press
+      // moves it.
+      allowDangerouslySkipPermissions: true,
       // No built-in plan mode (user, 2026-10-09). Flow plans through its own
       // workflow (discovery → plan → reviewed change notes); the agent's plan
       // mode added a second, private plan file and an "ExitPlanMode —

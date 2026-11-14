@@ -49,6 +49,13 @@ export interface ThreadRecord {
   /** When true, the SDK session runs in bypassPermissions mode (no prompts). */
   bypassPermissions: boolean
   /**
+   * Autopilot may chain this conversation's workflow (discovery → plan →
+   * build). THE CONSENT for a chain, per conversation (2026-11-14): it used to
+   * be the project-wide `autopilot` key, which switched every conversation of
+   * a project at once. Off unless a person turns it on here.
+   */
+  autopilot: boolean
+  /**
    * The loop this thread IS a run of, or null for an ordinary conversation.
    *
    * Set once, at creation, and never rewritten: a run does not stop having been
@@ -237,6 +244,8 @@ export interface CreateThreadInput {
   effort?: string
   /** Explicit permission mode. When omitted, the app-wide autonomy default applies. */
   bypassPermissions?: boolean
+  /** Start with autopilot on — the new-conversation page's chip. Off when omitted. */
+  autopilot?: boolean
   /** The loop this thread runs — set only by the press that starts a run. */
   originLoop?: string
   /** What that run was pointed at, verbatim. */
@@ -284,6 +293,8 @@ export interface UpdateThreadInput {
   pinned?: boolean
   /** Run the thread's session with permission prompts skipped (bypassPermissions). */
   bypassPermissions?: boolean
+  /** Let autopilot chain this conversation's workflow. */
+  autopilot?: boolean
 }
 
 export interface ThreadChangeEvent {
@@ -382,6 +393,7 @@ interface ThreadRow {
   imported_at: string | null
   pinned_at: string | null
   bypass_permissions: number
+  autopilot?: number
   origin_loop: string | null
   origin_aim: string | null
   origin_key: string | null
@@ -486,6 +498,7 @@ export class ThreadStore extends EventEmitter {
       importedAt: null,
       pinnedAt: null,
       bypassPermissions,
+      autopilot: input.autopilot === true,
       originLoop: input.originLoop ?? null,
       originAim: input.originAim ?? null,
       originKey: input.originKey ?? null,
@@ -515,8 +528,8 @@ export class ThreadStore extends EventEmitter {
     }
     this.db
       .prepare(
-        `INSERT INTO threads (id, ${THREAD_PROJECT_ROOT_COLUMN}, title, sdk_session_id, model, effort, status, created_at, updated_at, bypass_permissions, origin_loop, origin_aim, origin_key, parent_thread_id, origin_tool_call_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO threads (id, ${THREAD_PROJECT_ROOT_COLUMN}, title, sdk_session_id, model, effort, status, created_at, updated_at, bypass_permissions, autopilot, origin_loop, origin_aim, origin_key, parent_thread_id, origin_tool_call_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         thread.id,
@@ -529,6 +542,7 @@ export class ThreadStore extends EventEmitter {
         thread.createdAt,
         thread.updatedAt,
         bypassPermissions ? 1 : 0,
+        thread.autopilot ? 1 : 0,
         thread.originLoop,
         thread.originAim,
         thread.originKey,
@@ -763,6 +777,7 @@ export class ThreadStore extends EventEmitter {
       importedAt: input.importedAt,
       pinnedAt: null,
       bypassPermissions: false,
+      autopilot: false,
       // An imported Claude Code session was not started from a loop here, and
       // nothing in the transcript could tell us it was somewhere else.
       originLoop: null,
@@ -1042,10 +1057,11 @@ export class ThreadStore extends EventEmitter {
       archivedAt,
       pinnedAt,
       bypassPermissions: patch.bypassPermissions ?? existing.bypassPermissions,
+      autopilot: patch.autopilot ?? existing.autopilot,
     }
     this.db
       .prepare(
-        'UPDATE threads SET title = ?, model = ?, effort = ?, status = ?, updated_at = ?, archived_at = ?, pinned_at = ?, bypass_permissions = ? WHERE id = ?',
+        'UPDATE threads SET title = ?, model = ?, effort = ?, status = ?, updated_at = ?, archived_at = ?, pinned_at = ?, bypass_permissions = ?, autopilot = ? WHERE id = ?',
       )
       .run(
         updated.title,
@@ -1056,6 +1072,7 @@ export class ThreadStore extends EventEmitter {
         updated.archivedAt,
         updated.pinnedAt,
         updated.bypassPermissions ? 1 : 0,
+        updated.autopilot ? 1 : 0,
         id,
       )
     this.emitChange({ entity: 'thread', action: 'updated', threadId: id })
@@ -2293,6 +2310,7 @@ function toThreadRecord(row: ThreadRow): ThreadRecord {
     importedAt: row.imported_at ?? null,
     pinnedAt: row.pinned_at ?? null,
     bypassPermissions: (row.bypass_permissions ?? 0) !== 0,
+    autopilot: (row.autopilot ?? 0) !== 0,
     originLoop: row.origin_loop ?? null,
     originAim: row.origin_aim ?? null,
     originKey: row.origin_key ?? null,

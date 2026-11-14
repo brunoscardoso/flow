@@ -39,6 +39,7 @@ function harness(): Harness {
   const thread = {
     id: 'th1',
     projectRoot: '/repo',
+    autopilot: true,
     title: 'A conversation',
     get status() {
       return status
@@ -55,7 +56,6 @@ function harness(): Harness {
       sent.push(content)
     },
     readProjectSettings: async () => ({
-      autopilot: true,
       tail: { commit: true, push: true, pr: true },
     }),
     // Every edge is clean here — the point is what happens WITHIN the execute

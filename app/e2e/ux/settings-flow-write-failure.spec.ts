@@ -189,6 +189,9 @@ test('flow settings: a write preserves comments and keys the overlay never rende
 
   const after = readConfig(root)
   expect(after).toContain('# keep autopilot OFF here — prod repo')
+  // Autopilot is no longer a panel field (it is chosen per conversation), so
+  // it is exactly a key the overlay never renders — and must keep.
+  expect(after).toContain('autopilot: false')
   expect(after).toContain('# webhooks (Slack #eng-flow)')
   expect(after).toContain('webhook_url: https://hooks.slack.com/services/T000/B000/secret')
   expect(after).toContain('commands.lint: npm run lint -- --max-warnings 0')
@@ -202,7 +205,7 @@ test(
     lockConfig(root)
     await openFlowSettings(window, root)
 
-    await toggle(window, 'Autopilot').click()
+    await toggle(window, 'Wave execution').click()
     await window.waitForTimeout(1500)
 
     const feedback = await window.evaluate(() => {

@@ -82,6 +82,7 @@ interface FakeQuery {
   interrupt: jest.Mock
   close: jest.Mock
   setModel: jest.Mock
+  setPermissionMode: jest.Mock
   [Symbol.asyncIterator](): AsyncIterator<unknown>
 }
 
@@ -123,6 +124,7 @@ function makeFakeQuery(): FakeQuery {
     interrupt: jest.fn().mockResolvedValue(undefined),
     close: jest.fn(),
     setModel: jest.fn().mockResolvedValue(undefined),
+    setPermissionMode: jest.fn().mockResolvedValue(undefined),
     [Symbol.asyncIterator](): AsyncIterator<unknown> {
       return {
         next: (): Promise<IteratorResult<unknown>> => {
@@ -565,6 +567,70 @@ describe('AgentManager', () => {
     expect(events).toContainEqual({ kind: 'model', threadId: thread.id, model: 'opus' })
 
     fakes[0].release()
+  })
+
+  describe('asking, switched per conversation while it runs', () => {
+    function liveHarness(): { fakes: FakeQuery[]; queryFn: jest.Mock } {
+      const fakes: FakeQuery[] = []
+      const queryFn = jest.fn((): Query => {
+        const fake = makeFakeQuery()
+        fakes.push(fake)
+        return fake as unknown as Query
+      })
+      return { fakes, queryFn }
+    }
+
+    it('switches the RUNNING session — no restart, the store follows', async () => {
+      const { fakes, queryFn } = liveHarness()
+      const manager = makeManager(queryFn as unknown as QueryFunction)
+      const thread = store.createThread({ projectRoot: tempDir })
+      await manager.sendMessage(thread.id, 'go')
+      // The positive first (#28): a session is running, started asking.
+      expect(manager.hasActiveSession(thread.id)).toBe(true)
+      const options = (queryFn.mock.calls[0] as unknown as [{ options: Options }])[0].options
+      expect(options.permissionMode).not.toBe('bypassPermissions')
+      expect(options.allowDangerouslySkipPermissions).toBe(true)
+
+      await manager.setThreadPermissions(thread.id, true)
+      expect(fakes[0].setPermissionMode).toHaveBeenCalledWith('bypassPermissions')
+      expect(store.getThread(thread.id)?.bypassPermissions).toBe(true)
+      await manager.setThreadPermissions(thread.id, false)
+      expect(fakes[0].setPermissionMode).toHaveBeenLastCalledWith('default')
+      expect(store.getThread(thread.id)?.bypassPermissions).toBe(false)
+
+      // Same session throughout, and the next turn does not restart it.
+      await manager.sendMessage(thread.id, 'again')
+      expect(queryFn).toHaveBeenCalledTimes(1)
+      fakes[0].release()
+    })
+
+    it('a session that refuses the switch is restarted on the next send with the new mode', async () => {
+      const { fakes, queryFn } = liveHarness()
+      const manager = makeManager(queryFn as unknown as QueryFunction)
+      const thread = store.createThread({ projectRoot: tempDir })
+      await manager.sendMessage(thread.id, 'go')
+      fakes[0].setPermissionMode.mockRejectedValueOnce(new Error('not streaming'))
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined)
+      await manager.setThreadPermissions(thread.id, true)
+      warn.mockRestore()
+      expect(store.getThread(thread.id)?.bypassPermissions).toBe(true)
+      // The session is resting between turns, so the next send stands it down.
+      store.updateThread(thread.id, { status: 'idle' })
+      await manager.sendMessage(thread.id, 'again')
+      expect(queryFn).toHaveBeenCalledTimes(2)
+      const last = (queryFn.mock.calls[1] as unknown as [{ options: Options }])[0].options
+      expect(last.permissionMode).toBe('bypassPermissions')
+      for (const fake of fakes) fake.release()
+    })
+
+    it('with no session running, only the store changes', async () => {
+      const { queryFn } = liveHarness()
+      const manager = makeManager(queryFn as unknown as QueryFunction)
+      const thread = store.createThread({ projectRoot: tempDir })
+      await manager.setThreadPermissions(thread.id, true)
+      expect(store.getThread(thread.id)?.bypassPermissions).toBe(true)
+      expect(queryFn).not.toHaveBeenCalled()
+    })
   })
 
   it('concurrent sendMessage calls share ONE session creation (LOG-1)', async () => {

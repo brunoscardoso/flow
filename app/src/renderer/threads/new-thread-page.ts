@@ -22,6 +22,7 @@
  * Create is pressed, or null when the page is dismissed — matching the modal's
  * contract so `#createThread` did not have to change at all.
  */
+import { autopilotFace } from './conversation-switches-model'
 import '../components'
 import {
   CREATE_SOURCES,
@@ -318,43 +319,22 @@ export function createNewThreadPage(onClose: () => void): NewThreadPage {
   card.insertBefore(huntPanel, settings.nextSibling)
 
   /**
-   * Autopilot, the same toggle the composer carries — this page is where the
-   * first turn is set up, and "will this act without asking me?" is a question
-   * about that turn as much as any later one.
-   *
-   * It belongs to the PROJECT, not the draft, so it is not part of the answer
-   * this page resolves: it writes through the same one code path the composer
-   * uses and repaints from the broadcast that comes back.
+   * Autopilot, the same switch the composer carries — this page is where the
+   * first turn is set up. It belongs to the CONVERSATION, so it is part of the
+   * draft: off unless pressed, and written onto the thread once it exists.
    */
   const autopilotChip = document.createElement('button')
   autopilotChip.type = 'button'
   autopilotChip.className = 'fl-newthread-chip'
-  let autopilot = false
   const paintAutopilot = (): void => {
-    autopilotChip.textContent = autopilot ? 'autopilot on' : 'autopilot off'
-    autopilotChip.classList.toggle('is-on', autopilot)
-    autopilotChip.setAttribute('aria-pressed', String(autopilot))
-    autopilotChip.title = autopilot
-      ? 'Autopilot is on — turn it off to be asked before each step'
-      : 'Autopilot is off — turn it on to let the agent chain steps on its own'
+    const face = autopilotFace(draft.autopilot === true)
+    autopilotChip.textContent = face.label
+    autopilotChip.classList.toggle('is-on', face.on)
+    autopilotChip.setAttribute('aria-pressed', String(face.on))
+    autopilotChip.title = face.title
   }
   autopilotChip.addEventListener('click', () => {
-    const rootId = draft.roots[0]
-    if (!rootId) return
-    autopilotChip.disabled = true
-    void window.flow.flow
-      .setConfig({ rootId, updates: { autopilot: String(!autopilot) } })
-      .catch((error: unknown) => console.warn('[new-thread] could not change autopilot', error))
-      .finally(() => {
-        autopilotChip.disabled = false
-      })
-  })
-  document.addEventListener('flow:autopilot', (event) => {
-    const detail = (event as CustomEvent<{ rootId?: string; autopilot?: boolean }>).detail
-    // Only this page's primary project — the same per-root rule the composer
-    // follows, so the chip can never answer for a project nobody is looking at.
-    if (!detail || detail.rootId !== draft.roots[0]) return
-    autopilot = detail.autopilot === true
+    draft.autopilot = draft.autopilot !== true
     paintAutopilot()
   })
   paintAutopilot()
@@ -920,6 +900,7 @@ export function createNewThreadPage(onClose: () => void): NewThreadPage {
       }
       description.value = input.prompt ?? ''
       draft.description = description.value
+      paintAutopilot()
       // RESET, never carried over: the branch chosen for the last thread must
       // not be silently chosen for the next one. The project's branches are
       // dropped with it — `setBranches` refills them for whichever project this

@@ -140,7 +140,7 @@ describe('a chain ended mid-send', () => {
     const chain = new AutopilotChain({
       threadStore: {
         getThread: (id: string) =>
-          ({ id, projectRoot: '/repo', title: 'A conversation', status: 'working' }) as ThreadRecord,
+          ({ id, projectRoot: '/repo', title: 'A conversation', status: 'working', autopilot: true }) as ThreadRecord,
         setThreadChain: () => {},
       } as unknown as ThreadStore,
       claims,
@@ -149,7 +149,6 @@ describe('a chain ended mid-send', () => {
         await held
       },
       readProjectSettings: async () => ({
-        autopilot: true,
         tail: { commit: false, push: false, pr: false },
       }),
       // The ladder's gate, answering yes — every case here is about something

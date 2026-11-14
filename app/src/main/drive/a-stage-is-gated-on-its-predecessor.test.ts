@@ -34,7 +34,7 @@ function harness(
   const ended: Array<{ threadId: string; success: boolean }> = []
   const threadStore = {
     getThread: (id: string) =>
-      ({ id, projectRoot: '/repo', title: 'A conversation', status: 'idle' }) as ThreadRecord,
+      ({ id, projectRoot: '/repo', title: 'A conversation', status: 'idle', autopilot: true }) as ThreadRecord,
     setThreadChain: () => {},
   } as unknown as ThreadStore
   const chain = new AutopilotChain({
@@ -43,7 +43,6 @@ function harness(
       sent.push(content)
     },
     readProjectSettings: async () => ({
-      autopilot: true,
       tail: { commit: false, push: false, pr: false },
     }),
     checkStage: async (input) => {

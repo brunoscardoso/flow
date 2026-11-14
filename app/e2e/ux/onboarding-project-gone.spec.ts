@@ -302,7 +302,7 @@ test.fixme(
 )
 
 test.fixme(
-  'accepting the gone project must not RE-CREATE the deleted folder to write autopilot into it (#1407)',
+  'accepting the gone project must not RE-CREATE the deleted folder (#1407)',
   async () => {
     await withGoneProject(skipWithoutAccount(), async ({ win, projectDir }) => {
       await reopenWizard(win)
@@ -310,8 +310,8 @@ test.fixme(
       await openProjectStep(win)
       await nextButton(win).click()
       const wizard = win.locator(WIZARD)
-      await expect(wizard.locator('.fl-settings-header')).toContainText('Choose a mode')
-      await wizard.locator('.fl-wizard-btn', { hasText: /^Manual/ }).click()
+      await expect(wizard.locator('.fl-settings-header')).toContainText('Before the agent acts')
+      await wizard.locator('.fl-wizard-btn', { hasText: /^Ask me first/ }).click()
       await win.waitForTimeout(2000)
       await win.screenshot({ path: `${SCREENS}/onboarding-project-gone-mode.png` })
 

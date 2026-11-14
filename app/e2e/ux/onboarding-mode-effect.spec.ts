@@ -9,17 +9,15 @@ import { join, resolve } from 'node:path'
 /**
  * UX sweep — flow 0 (onboarding), round 11: MODE-CHOICE **EFFECT** guard.
  *
- * The existing onboarding specs verify the "Choose a mode" step at the UI layer —
- * the highlight moves (full-flow), a failed write surfaces "try again" and stays
- * gated (mode-persist-fail), Back preserves the highlight (#320). But NONE verify
- * that picking a mode has a REAL EFFECT: that choosing **Autonomous** actually
- * persists `autopilot: true` to the project's `.flowconfig` on disk AND flips the
- * app-level `autonomyBypassDefault` setting. That invariant is the entire point of
- * #229 — the autonomy mode gates permission-prompt bypass, so a mode the wizard
- * *shows* as chosen but never writes is a safety-relevant lie (the user believes
- * they're in autopilot; the agent still asks on every action, or vice-versa).
+ * The other onboarding specs verify the "Before the agent acts" step at the UI
+ * layer — the highlight moves (full-flow), Back preserves the highlight (#320).
+ * This one verifies the choice has a REAL EFFECT: choosing **Don't ask** flips
+ * the app-level `autonomyBypassDefault` on Finish — the default every new
+ * conversation starts from — and touches NOTHING in the project. Autopilot is
+ * chosen per conversation now, so the wizard must not write the project's
+ * `.flowconfig` at all.
  *
- * This drives the success path to completion (Autonomous → Finish) and then asserts
+ * This drives the success path to completion (Don't ask → Finish) and then asserts
  * the durable, user-observable outcome by INDEPENDENTLY reading the store and the
  * on-disk config — not trusting the wizard's own "confirmed" highlight. Preconditions
  * are the runbook-blessed pre-seeded ones (account row in flow.db, project via the
@@ -125,7 +123,7 @@ async function readOnboarding(
   )
 }
 
-test('onboarding Autonomous choice has a REAL effect: autopilot:true lands in .flowconfig + autonomyBypassDefault flips (#229)', async () => {
+test("onboarding Don't ask choice has a REAL effect: autonomyBypassDefault flips on Finish, the project is untouched", async () => {
   const userDataDir = mkdtempSync(join(tmpdir(), 'flow-e2e-onboard-effect-'))
   let projectDir: string | null = null
   let app: ElectronApplication | null = null
@@ -147,7 +145,7 @@ test('onboarding Autonomous choice has a REAL effect: autopilot:true lands in .f
     projectDir = await seedProject(win)
     await dismissFlowOverlay(win)
 
-    // Baseline: before onboarding completes, autopilot is off and onboarding
+    // Baseline: before onboarding completes, the bypass is off and onboarding
     // is not marked complete — so any post-Finish flip is attributable to it.
     const before = await readOnboarding(win)
     expect(before.completed, 'precondition: onboarding not yet complete').toBe(false)
@@ -156,11 +154,11 @@ test('onboarding Autonomous choice has a REAL effect: autopilot:true lands in .f
     // Walk Welcome → Connect → Project → Mode.
     await reopenWizard(win)
     const wizard = win.locator(WIZARD)
-    await advanceWizardTo(win, 'Choose a mode')
-    await expect(wizard.locator('.fl-settings-header')).toContainText('Choose a mode')
+    await advanceWizardTo(win, 'Before the agent acts')
+    await expect(wizard.locator('.fl-settings-header')).toContainText('Before the agent acts')
 
-    // Choose Autonomous — the safety-relevant branch (autopilot on + bypass on).
-    const autonomous = wizard.locator('.fl-wizard-btn', { hasText: 'Autonomous' })
+    // Choose Don't ask — the safety-relevant branch (new conversations skip the ask).
+    const autonomous = wizard.locator('.fl-wizard-btn', { hasText: "Don't ask" })
     await autonomous.click()
     await expect(autonomous).toHaveClass(/fl-wizard-btn--primary/, { timeout: 5000 })
     await expect.poll(() => nextDisabled(win)).toBe(false)
@@ -178,14 +176,15 @@ test('onboarding Autonomous choice has a REAL effect: autopilot:true lands in .f
     // ── EFFECT #1: app-level store flipped (independent read, not the UI) ────────
     await expect
       .poll(() => readOnboarding(win).then((o) => o.autonomyBypassDefault), {
-        message: 'Autonomous must flip autonomyBypassDefault true in app settings',
+        message: "Don't ask must flip autonomyBypassDefault true in app settings",
         timeout: 5000,
       })
       .toBe(true)
     const after = await readOnboarding(win)
     expect(after.completed, 'Finish must mark onboarding complete').toBe(true)
 
-    // ── EFFECT #2: the project's .flowconfig on disk carries autopilot: true ─────
+    // ── EFFECT #2: the project's .flowconfig is NOT written — autopilot is ────────
+    //    chosen in each conversation, never by the wizard.
     const cfgPath = join(projectDir, 'flow', '.flowconfig')
     // eslint-disable-next-line no-console
     console.log(
@@ -193,15 +192,9 @@ test('onboarding Autonomous choice has a REAL effect: autopilot:true lands in .f
         existsSync(cfgPath) ? JSON.stringify(readFileSync(cfgPath, 'utf8')) : '<none>'
       }`,
     )
-    await expect
-      .poll(
-        () => (existsSync(cfgPath) ? readFileSync(cfgPath, 'utf8') : ''),
-        {
-          message: 'Autonomous choice must persist autopilot: true to .flowconfig on disk',
-          timeout: 5000,
-        },
-      )
-      .toMatch(/autopilot:\s*true/)
+    // The positive came first (EFFECT #1 landed), so this absence is evidence.
+    const onDisk = existsSync(cfgPath) ? readFileSync(cfgPath, 'utf8') : ''
+    expect(onDisk, "Don't ask must not write autopilot into the project").not.toMatch(/autopilot:\s*true/)
 
     // The wizard never claimed success it didn't deliver, and nothing threw.
     expect(errors, errors.join(', ')).toHaveLength(0)

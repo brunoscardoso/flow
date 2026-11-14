@@ -31,26 +31,3 @@ export function savedModeFromOnboarding(state: {
 }): AutonomyMode {
   return state.autonomyBypassDefault ? 'autonomous' : 'manual'
 }
-
-/**
- * The mode to pre-select for the ACTIVE PROJECT (#1206).
- *
- * An autonomy mode is TWO writes: `autonomyBypassDefault` (app-wide, written on
- * Finish) and `config.autopilot` (per-project, written on click). #716's
- * reflection read only the first — so the step pre-selected, confirmed and
- * walked past a mode derived from a store it does not write. The moment the two
- * disagree (a second project; autopilot toggled in Flow settings or via
- * `/flow autopilot=…`), the wizard stated the wrong autonomy for the project
- * the user is in, and accepting it wrote nothing.
- *
- * So the PROJECT's own autopilot decides whenever we could read it. The
- * app-wide default is the fallback for "no project yet", which is the only
- * situation it actually describes.
- */
-export function savedModeForProject(
-  projectAutopilot: boolean | null,
-  onboarding: { autonomyBypassDefault: boolean },
-): AutonomyMode {
-  if (projectAutopilot !== null) return projectAutopilot ? 'autonomous' : 'manual'
-  return savedModeFromOnboarding(onboarding)
-}

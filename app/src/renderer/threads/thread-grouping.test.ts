@@ -33,6 +33,7 @@ function thread(id: string, daysAgo: number, pinned = false): ThreadSummary {
     imported: false,
     pinnedAt: pinned ? updatedAt : null,
     bypassPermissions: false,
+    autopilot: false,
     additionalRoots: [],
     // Not a loop run — an ordinary conversation, which is what this fixture is.
     originLoop: null,

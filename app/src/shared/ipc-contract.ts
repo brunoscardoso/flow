@@ -111,6 +111,8 @@ export interface ThreadSummary {
   pinnedAt: string | null
   /** When true, the thread's agent runs with permission prompts skipped. */
   bypassPermissions: boolean
+  /** Autopilot may chain this conversation's workflow — chosen per conversation. */
+  autopilot: boolean
   /** Additional project roots this thread spans (#45); [] for single-project. */
   additionalRoots: string[]
   /**
@@ -796,6 +798,8 @@ export interface ThreadUpdate {
   pinned?: boolean
   /** true runs the thread's agent with permission prompts skipped (dangerous). */
   bypassPermissions?: boolean
+  /** true lets autopilot chain this conversation's workflow. */
+  autopilot?: boolean
 }
 
 export type MessageRole = 'user' | 'assistant' | 'system'
@@ -5170,6 +5174,8 @@ export interface IpcInvokeMap {
       originLoop?: string
       originAim?: string
       originKey?: string
+      /** Start with autopilot on — the new-conversation page's chip. Off when omitted. */
+      autopilot?: boolean
     }
     response: ThreadSummary
   }

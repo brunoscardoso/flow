@@ -57,6 +57,7 @@ function harness(
   const thread = {
     id: 'th1',
     projectRoot: '/repo',
+    autopilot: true,
     title: 'A conversation',
     get status() {
       return status
@@ -73,7 +74,6 @@ function harness(
       sent.push(content)
     },
     readProjectSettings: async () => ({
-      autopilot: true,
       tail: options.tail ?? { commit: true, push: true, pr: true },
     }),
     // The ladder's gate, answering yes — every case here is about something

@@ -82,13 +82,14 @@ export interface AutopilotChainDeps {
   /** Start a turn on a thread. Rejects like the IPC verb does. */
   sendMessage: (threadId: string, content: string) => Promise<unknown>
   /**
-   * The project's autopilot switch and publish settings, read together.
+   * The project's publish settings. (Whether autopilot may run is no longer a
+   * project setting: it is the conversation's own `autopilot` flag.)
    *
    * ASYNC AND INJECTED, because this is main: a synchronous read of a project's
    * config on the process that answers every IPC call is a stall every window
    * waits behind (allowed-pattern #19).
    */
-  readProjectSettings: (projectRoot: string) => Promise<{ autopilot: boolean; tail: TailConfig }>
+  readProjectSettings: (projectRoot: string) => Promise<{ tail: TailConfig }>
   /** The publish verbs. Wired to the path the landing panel already uses. */
   tail: TailDeps
   /**
@@ -180,7 +181,7 @@ interface ChainRun {
 export const AUTOPILOT_CHAIN_DRIVER = 'autopilot-chain'
 
 /** The reasons the chain itself authors, in the words a person reads. */
-export const AUTOPILOT_OFF = 'Autopilot is off for this project, so nothing was started.'
+export const AUTOPILOT_OFF = 'Autopilot is off in this conversation, so nothing was started.'
 export const THREAD_GONE = 'This conversation is no longer here.'
 export const ALREADY_BUSY = 'Something else is already working this conversation.'
 
@@ -253,19 +254,18 @@ export class AutopilotChain {
   /**
    * Start a chain on a thread.
    *
-   * REFUSED WHEN AUTOPILOT IS OFF. The project's switch is the consent; a chain
-   * that could be started on a project which never asked for one would make the
-   * switch decorative. Refused too when something else is already driving the
-   * thread — one conversation, one driver, enforced in `ThreadClaims`.
+   * REFUSED WHEN AUTOPILOT IS OFF IN THIS CONVERSATION. The conversation's
+   * own switch is the consent (2026-11-14 — it used to be the project-wide
+   * `autopilot` key, which turned every conversation of a project on at once);
+   * a chain that could start in a conversation nobody switched on would make
+   * the switch decorative. Refused too when something else is already driving
+   * the thread — one conversation, one driver, enforced in `ThreadClaims`.
    *
    * `autonomous` IS THE ONE EXEMPTION, and it is not a bypass of the consent —
-   * it is a different consent. `autopilot` is a PROJECT-WIDE key, so a
-   * conversation that exists only because somebody pressed play on a list of
-   * cards they ticked cannot be gated on it: requiring the key would mean the
-   * board's loop silently stopped chaining, and setting the key so that it
-   * chains would change how the person's OWN conversations behave, which nobody
-   * asked for. Exactly one caller passes it — `BoardLoop`, which documents the
-   * asymmetry where it decides it — and nothing infers it from the thread.
+   * it is a different consent: a conversation that exists only because
+   * somebody pressed play on a list of cards they ticked. Exactly one caller
+   * passes it — `BoardLoop`, which documents the asymmetry where it decides
+   * it — and nothing infers it from the thread.
    */
   async begin(
     threadId: string,
@@ -279,23 +279,16 @@ export class AutopilotChain {
     this.#tails.delete(threadId)
     const thread = this.deps.threadStore.getThread(threadId)
     if (thread === null) return this.#refuse(threadId, THREAD_GONE)
-    const settings = await this.deps.readProjectSettings(thread.projectRoot)
-    if (!settings.autopilot && options.autonomous !== true) {
+    if (!thread.autopilot && options.autonomous !== true) {
       return this.#refuse(threadId, AUTOPILOT_OFF)
     }
-    // THE GUARD AT THE TOP OF THIS METHOD IS NOT ENOUGH, and the await above is
-    // why: reading the project's settings yields, so two calls that arrive
-    // together — a double press of the chain control, or the board's loop
-    // chaining a card's thread while somebody starts one by hand in it — both
-    // pass that guard before either has a run. Without this second look the
-    // later one overwrites the live run with a fresh `stage: null`, and the
-    // moment the FIRST stage's turn ends the model is asked what comes after
-    // "nothing yet" and issues that same first stage a second time, into a
-    // conversation that has already done it.
-    //
-    // Re-reading the driver is what makes the window safe rather than smaller:
-    // from here to `start()`, which records the run, nothing else yields, so
-    // the check and the claim on the run are one indivisible step.
+    // A SECOND LOOK AT THE DRIVER, kept although nothing above yields today.
+    // Two calls that arrive together — a double press of the chain control, or
+    // the board's loop chaining a card's thread while somebody starts one by
+    // hand in it — must never both reach `start()`: the later one would
+    // overwrite the live run with a fresh `stage: null`, and the first stage
+    // would be issued a second time. This check sits right before the run is
+    // recorded, so an await added above later cannot reopen that window.
     if (this.#driver.isRunning(threadId)) return this.status(threadId)
     const chainId = (this.deps.mintChainId ?? defaultChainId)()
     const aim = (options.aim ?? '').trim()

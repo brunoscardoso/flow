@@ -9,8 +9,8 @@ import { join, resolve } from 'node:path'
 /**
  * UX sweep — flow 0 (onboarding), REOPEN path with a PREVIOUSLY-SAVED mode.
  *
- * A returning user (account + project + a saved autonomy mode) re-opens the
- * wizard via "Getting Started" and walks to the "Choose a mode" step. The
+ * A returning user (account + project + a saved "Don't ask" default) re-opens the
+ * wizard via "Getting Started" and walks to the "Before the agent acts" step. The
  * Connect and Project steps both auto-detect existing state and reflect it
  * (Connect shows "Connected as …" + ungates; Project shows the root + ungates).
  * The Mode step is the odd one out: it never reads the saved
@@ -56,8 +56,8 @@ async function migrateDb(userDataDir: string): Promise<void> {
   await app.close()
 }
 
-/** Seed an account row + default-account + a saved AUTONOMOUS autonomy mode. */
-function seedAccountAndAutonomousMode(userDataDir: string): void {
+/** Seed an account row + default-account + a saved "Don't ask" default. */
+function seedAccountAndDontAskDefault(userDataDir: string): void {
   const db = join(userDataDir, 'flow.db')
   execFileSync('sqlite3', [
     db,
@@ -71,11 +71,11 @@ function seedAccountAndAutonomousMode(userDataDir: string): void {
 async function seedProject(win: Page): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), 'flow-ux-onboard-mode-'))
   execFileSync('git', ['init', '-q'], { cwd: dir })
-  // The SAVED mode the step reflects is the active PROJECT's autopilot (#1206 —
-  // it used to read only the app-level default, a store the step never writes),
-  // so the returning user's Autonomous choice lives in the project too.
+  // The step reflects the APP-WIDE default only — autopilot is chosen per
+  // conversation now, so a project's own autopilot key says nothing about how
+  // a new conversation asks. Seeded OFF here to prove the step ignores it.
   mkdirSync(join(dir, 'flow'), { recursive: true })
-  writeFileSync(join(dir, 'flow', '.flowconfig'), 'autopilot: true\n')
+  writeFileSync(join(dir, 'flow', '.flowconfig'), 'autopilot: false\n')
   await win.evaluate(async (p) => {
     await (
       window as unknown as {
@@ -123,7 +123,7 @@ async function walkToModeStep(userDataDir: string): Promise<{
   errors: string[]
 }> {
   await migrateDb(userDataDir)
-  seedAccountAndAutonomousMode(userDataDir)
+  seedAccountAndDontAskDefault(userDataDir)
 
   const app = await launch(userDataDir)
   const win = await app.firstWindow()
@@ -168,7 +168,7 @@ async function walkToModeStep(userDataDir: string): Promise<{
   await expect.poll(() => nextDisabled(win)).toBe(false)
   await wizard.locator('.fl-wizard-btn', { hasText: 'Next' }).click()
   // Mode step reached.
-  await expect(wizard.locator('.fl-settings-header')).toContainText('Choose a mode')
+  await expect(wizard.locator('.fl-settings-header')).toContainText('Before the agent acts')
 
   return { app, win, projectDir, errors }
 }
@@ -181,8 +181,8 @@ test('LIVE: reopen mode step neither reflects the saved mode nor errors — Conn
     ctx = await walkToModeStep(userDataDir)
     const { win, errors } = ctx
     const wizard = win.locator(WIZARD)
-    const manual = wizard.locator('.fl-wizard-btn', { hasText: 'Manual' })
-    const autonomous = wizard.locator('.fl-wizard-btn', { hasText: 'Autonomous' })
+    const manual = wizard.locator('.fl-wizard-btn', { hasText: 'Ask me first' })
+    const autonomous = wizard.locator('.fl-wizard-btn', { hasText: "Don't ask" })
 
     // Both mode buttons render, but (today) NEITHER carries the saved-choice
     // highlight — the wizard reaches the Mode step cleanly, so it is not a crash.
@@ -198,9 +198,9 @@ test('LIVE: reopen mode step neither reflects the saved mode nor errors — Conn
 })
 
 // ── guard for #716 (fixed): the Mode step reflects the saved autonomy setting
-// like Connect/Project do — saved Autonomous pre-selected, Next ungated. ─
+// like Connect/Project do — saved Don't ask pre-selected, Next ungated. ─
 test(
-  'TRIPWIRE: reopen mode step should pre-select the saved Autonomous mode and ungate Next',
+  "TRIPWIRE: reopen step should pre-select the saved Don't ask default and ungate Next",
   async () => {
     const userDataDir = mkdtempSync(join(tmpdir(), 'flow-e2e-onboard-mode2-'))
     let ctx: Awaited<ReturnType<typeof walkToModeStep>> | null = null
@@ -208,9 +208,9 @@ test(
       ctx = await walkToModeStep(userDataDir)
       const { win, errors } = ctx
       const wizard = win.locator(WIZARD)
-      const autonomous = wizard.locator('.fl-wizard-btn', { hasText: 'Autonomous' })
+      const autonomous = wizard.locator('.fl-wizard-btn', { hasText: "Don't ask" })
 
-      // The saved AUTONOMOUS mode should be reflected: highlighted + Next ungated,
+      // The saved Don't ask default should be reflected: highlighted + Next ungated,
       // so the user's real preference is shown and never silently overwritten.
       await expect(autonomous).toHaveClass(/fl-wizard-btn--primary/)
       await expect.poll(() => nextDisabled(win)).toBe(false)

@@ -48,7 +48,7 @@ export interface AutoChainInput {
  * would give the thread two opening turns saying the same thing.
  *
  * Every branch here is a reason NOT to chain. The remaining permission checks —
- * is autopilot on for this project, is something already driving this thread,
+ * is autopilot on in this conversation, is something already driving this thread,
  * does the thread still exist — belong to `begin()`, which refuses for each of
  * them with its own reason. This does not duplicate them (allowed-pattern #14):
  * it answers only the question `begin()` cannot, which is whether this message

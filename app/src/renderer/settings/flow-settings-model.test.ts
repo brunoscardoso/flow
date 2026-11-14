@@ -69,14 +69,14 @@ describe('resolveNumberInput (#369)', () => {
 describe('readValues', () => {
   it('coerces toggles, numbers, text and engine on/off with defaults', () => {
     const v = readValues({
-      autopilot: 'true',
+      autopilot: 'true', // per conversation now — no longer a field
       commit: 'false',
       worktree_setup: 'npm ci',
       max_verify_retries: '3',
       'engines.lavish': 'enabled', // retired engine — no longer a field (#1807)
       'engines.graphify': 'declined', // legacy value — no longer a field (#142)
     })
-    expect(v.autopilot).toBe(true)
+    expect(v.autopilot).toBeUndefined()
     expect(v.commit).toBe(false)
     expect(v.worktree_setup).toBe('npm ci')
     expect(v.max_verify_retries).toBe(3)
@@ -144,10 +144,10 @@ describe('disabledKeys', () => {
 
 describe('toConfigUpdates', () => {
   it('emits only changed keys, correctly coerced (bool/number)', () => {
-    const before = readValues({ autopilot: 'false', max_verify_retries: '2' })
-    const after = { ...before, autopilot: true, max_verify_retries: 4 }
+    const before = readValues({ commit: 'false', max_verify_retries: '2' })
+    const after = { ...before, commit: true, max_verify_retries: 4 }
     expect(toConfigUpdates(before, after)).toEqual({
-      autopilot: 'true',
+      commit: 'true',
       max_verify_retries: '4',
     })
   })
@@ -157,12 +157,19 @@ describe('toConfigUpdates', () => {
     // has read that key since lavish was retired. A value already on disk must
     // not come back out of the panel either.
     const before = readValues({ 'engines.lavish': 'declined' })
-    const after = { ...before, autopilot: true }
-    expect(Object.keys(toConfigUpdates(before, after))).toEqual(['autopilot'])
+    const after = { ...before, commit: true }
+    expect(Object.keys(toConfigUpdates(before, after))).toEqual(['commit'])
+  })
+
+  it('never writes autopilot: the project key is left as it is', () => {
+    const before = readValues({ autopilot: 'false', commit: 'false' })
+    // The positive first (#28): a real change IS emitted.
+    expect(toConfigUpdates(before, { ...before, commit: true })).toEqual({ commit: 'true' })
+    expect(toConfigUpdates(before, { ...before, autopilot: true })).toEqual({})
   })
 
   it('returns nothing when values are unchanged', () => {
-    const v = readValues({ autopilot: 'true' })
+    const v = readValues({ commit: 'true' })
     expect(toConfigUpdates(v, { ...v })).toEqual({})
   })
 })
@@ -434,7 +441,6 @@ describe('the Loops section is gone — loops are configured in the modal', () =
     // more than intended — asserted by name, in order.
     expect(FLOW_SETTINGS_SECTIONS.map((section) => section.title)).toEqual([
       'Runtime',
-      'Autopilot',
       'Git & PR',
       'Execution',
       WORKTREE_SECTION_TITLE,

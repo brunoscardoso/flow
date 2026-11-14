@@ -77,28 +77,6 @@ export function initFlowUi(surfaces: ShellSurfaces): void {
       blockedCount,
       blockedProjects: blockedElsewhere,
     })
-    announceAutopilot()
-  }
-
-  /**
-   * Tell whoever draws the autopilot control what each root's flag is.
-   *
-   * The flag used to be a readout on the status line, which could be showing a
-   * BACKGROUND project — hence #1204's `otherProject` prefix, so "autopilot on"
-   * could never be read as an answer about the project you were looking at.
-   * The control now lives in the composer, which belongs to a thread, which
-   * belongs to exactly one project: so this broadcasts PER ROOT and the
-   * listener takes the one matching its own thread. There is nothing left to
-   * disambiguate.
-   */
-  function announceAutopilot(): void {
-    for (const state of states.values()) {
-      document.dispatchEvent(
-        new CustomEvent('flow:autopilot', {
-          detail: { rootId: state.rootId, autopilot: state.autopilot },
-        }),
-      )
-    }
   }
 
   /** The task each root's live prompt asks about (#1165) — kept so a prompt

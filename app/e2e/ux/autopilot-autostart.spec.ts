@@ -8,8 +8,13 @@
  *
  * A unit test cannot show this: every piece was already correct on its own, and
  * what was missing was that nothing called them. So this drives the real path —
- * a real project with autopilot on, a real thread, a real message — and asks
- * main what the chain is doing afterwards.
+ * a real conversation with autopilot on, a real message — and asks main what
+ * the chain is doing afterwards.
+ *
+ * AUTOPILOT BELONGS TO THE CONVERSATION (2026-11). The project key no longer
+ * decides anything in the app; each case seeds the project's key to the
+ * OPPOSITE of the conversation's own switch, so a pass proves the conversation
+ * is what was read.
  */
 import { test, expect } from '../fixtures/electron'
 import { activateProject, cleanupSeeds, seedProject } from './fixtures/seed'
@@ -19,15 +24,15 @@ import { join } from 'node:path'
 
 test.afterAll(() => cleanupSeeds())
 
-/** A project whose flow config has autopilot on. */
-async function seedAutopilotProject(window: import('@playwright/test').Page, on: boolean) {
+/** A project whose flow config carries `projectKey` for autopilot — ignored by the app. */
+async function seedAutopilotProject(window: import('@playwright/test').Page, projectKey: boolean) {
   const root = await seedProject(window, 'flow-auto-', (dir) => {
     execFileSync('git', ['config', 'user.email', 'e2e@flow.test'], { cwd: dir })
     execFileSync('git', ['config', 'user.name', 'Flow E2E'], { cwd: dir })
     execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: dir })
     execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'base'], { cwd: dir })
     mkdirSync(join(dir, 'flow'), { recursive: true })
-    writeFileSync(join(dir, 'flow', '.flowconfig'), `autopilot: ${on}\ncommit: false\npush: false\n`)
+    writeFileSync(join(dir, 'flow', '.flowconfig'), `autopilot: ${projectKey}\ncommit: false\npush: false\n`)
   })
   await activateProject(window, root)
   return root
@@ -40,15 +45,16 @@ async function chainOf(window: import('@playwright/test').Page, threadId: string
   )) as { running: boolean; step: string | null }
 }
 
-test('the first message starts a chain when autopilot is on', async ({ window }) => {
+test('the first message starts a chain when the conversation has autopilot on', async ({ window }) => {
   test.setTimeout(240_000)
-  const root = await seedAutopilotProject(window, true)
+  const root = await seedAutopilotProject(window, false)
 
   const threadId = (await window.evaluate(
     async (projectRoot: string) =>
       (await (window as unknown as { flow: any }).flow.threads.create({
         projectRoot,
         title: 'autopilot autostart',
+        autopilot: true,
       })).id,
     root,
   )) as string
@@ -71,9 +77,9 @@ test('the first message starts a chain when autopilot is on', async ({ window })
     .toBe(true)
 })
 
-test('an autopilot-off project is untouched', async ({ window }) => {
+test('an autopilot-off conversation is untouched, whatever the project says', async ({ window }) => {
   test.setTimeout(240_000)
-  const root = await seedAutopilotProject(window, false)
+  const root = await seedAutopilotProject(window, true)
   const threadId = (await window.evaluate(
     async (projectRoot: string) =>
       (await (window as unknown as { flow: any }).flow.threads.create({
@@ -92,7 +98,7 @@ test('an autopilot-off project is untouched', async ({ window }) => {
     threadId,
   )
   await window.waitForTimeout(6000)
-  // The key is the consent. With it off, `begin()` refuses and the message is
+  // The conversation's switch is the consent. With it off, `begin()` refuses and the message is
   // sent as an ordinary turn — which is exactly what happened before autopilot
   // could start anything at all.
   expect((await chainOf(window, threadId)).running).toBe(false)
@@ -102,12 +108,13 @@ test('a first message with a file is sent normally, never silently stripped', as
   window,
 }) => {
   test.setTimeout(240_000)
-  const root = await seedAutopilotProject(window, true)
+  const root = await seedAutopilotProject(window, false)
   const threadId = (await window.evaluate(
     async (projectRoot: string) =>
       (await (window as unknown as { flow: any }).flow.threads.create({
         projectRoot,
         title: 'autopilot with an attachment',
+        autopilot: true,
       })).id,
     root,
   )) as string

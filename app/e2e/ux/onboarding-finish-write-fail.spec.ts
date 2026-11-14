@@ -6,7 +6,7 @@ import {
   type Page,
 } from '@playwright/test'
 import { trustSeededAccount, advanceWizardTo } from './fixtures/settings'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -18,22 +18,18 @@ import { join, resolve } from 'node:path'
  * Finish is not just "close the dialog". It is the COMMIT for the one
  * safety-relevant thing the wizard owns (`onboarding/index.ts` onComplete,
  * lines 13-30): the app-wide permission-prompt bypass `autonomyBypassDefault`
- * is deliberately withheld on every mode click (#1116/#1077) and written ONLY
- * here, in the same `settings:setOnboarding` call that marks onboarding
- * complete.
+ * is deliberately withheld on every click of the "Before the agent acts" step
+ * (#1116/#1077) and written ONLY here, in the same `settings:setOnboarding`
+ * call that marks onboarding complete. (The step writes nothing else — it no
+ * longer touches a project's autopilot, which is chosen per conversation.)
  *
- * 22 prior onboarding rounds (19 specs) drove every OTHER write in this wizard,
- * including the same failure branch one step earlier:
- *   - `onboarding-mode-persist-fail` / `-rollback` (#229/#1077/#1078) force the
- *     MODE step's `flow.setConfig` to reject and assert the user is told
- *     ("Couldn't save your choice — try again.") and that Next stays gated.
- *   - `onboarding-finish-persists` (#944) drives Finish only on the happy path.
- * Nobody has ever forced the FINAL write — the commit — to fail.
+ * `onboarding-finish-persists` (#944) drives Finish only on the happy path.
+ * This probe forces the FINAL write — the commit — to fail.
  *
  * It has no user-facing handling at all: `.catch((error) => console.error(...))`
  * and the wizard closes regardless (`#advance()` calls `onComplete` then
  * `close()`, never awaiting). So this probe asks the user's question: I opened
- * Getting Started specifically to turn Autonomous OFF, I picked Manual, I
+ * Getting Started specifically to turn "Don't ask" OFF, I picked Ask me first, I
  * clicked Finish and the wizard closed — is the permission bypass off?
  *
  * The failure is induced in SQLite itself, from a second connection, so it
@@ -84,8 +80,8 @@ function seedAccountAndAutonomy(userDataDir: string): void {
   ])
 }
 
-/** Throwaway repo added as a project root, pre-seeded autopilot: true so the
- *  mode step reflects the same Autonomous setup the app store carries. */
+/** Throwaway repo added as a project root. Its autopilot key is seeded ON to
+ *  show the step ignores it: only the app-wide default is reflected. */
 async function seedRepo(win: Page): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), 'flow-ux-onbfinish-'))
   execFileSync('git', ['init', '-q'], { cwd: dir })
@@ -133,15 +129,6 @@ async function bypassDefault(win: Page): Promise<{ completed: boolean; bypass: b
   })
 }
 
-function autopilotOnDisk(dir: string): string | null {
-  const path = join(dir, 'flow', '.flowconfig')
-  if (!existsSync(path)) return null
-  const line = readFileSync(path, 'utf-8')
-    .split('\n')
-    .find((l) => l.trim().startsWith('autopilot:'))
-  return line ? line.split(':')[1].trim() : null
-}
-
 async function nextDisabled(win: Page): Promise<boolean> {
   return win
     .locator(`${WIZARD} .fl-wizard-btn`, { hasText: /^(Next|Finish)$/ })
@@ -164,7 +151,7 @@ async function openWizardToMode(win: Page): Promise<void> {
     'Choose your agent',
     'Connect a Claude account',
     'Open a project',
-    'Choose a mode',
+    'Before the agent acts',
   ]) {
     await expect.poll(() => nextDisabled(win), { timeout: 20_000 }).toBe(false)
     await wizard.locator('.fl-wizard-btn', { hasText: /^Next$/ }).click()
@@ -204,7 +191,7 @@ function unblockSettingsWrites(userDataDir: string): void {
 
 /** What Finish left behind, and whether the user was told anything about it. */
 interface FinishOutcome {
-  /** The commit landed: bypass off (Manual) AND onboarding marked complete. */
+  /** The commit landed: bypass off (Ask me first) AND onboarding marked complete. */
   commitLanded: boolean
   /** The wizard stayed open to retry, or something on screen says it failed. */
   userWasTold: boolean
@@ -214,12 +201,12 @@ interface FinishOutcome {
 }
 
 /**
- * Boot with an account + an autopilot-on project + the app-wide bypass ON, then
- * do exactly what a user who wants to turn autonomy OFF does: Getting Started →
- * Mode → Manual → Finish. `blockWrites` decides whether the store accepts the
+ * Boot with an account + the app-wide bypass ON, then do exactly what a user who
+ * wants the agent to ask again does: Getting Started → Before the agent acts →
+ * Ask me first → Finish. `blockWrites` decides whether the store accepts the
  * commit. Returns what the app was left in.
  */
-async function driveDowngradeToManual(
+async function driveDowngradeToAskFirst(
   blockWrites: boolean,
   screenshot?: string,
 ): Promise<FinishOutcome & { errors: string[] }> {
@@ -244,10 +231,11 @@ async function driveDowngradeToManual(
 
     await openWizardToMode(win)
     const wizard = win.locator(WIZARD)
-    await wizard.locator('.fl-wizard-btn', { hasText: /^Manual/ }).click()
-    // The per-project half of the choice lands on disk (filesystem is writable
-    // in BOTH cases) — so the run reaches Finish identically either way.
-    await expect.poll(() => autopilotOnDisk(repo), { timeout: 10_000 }).toBe('false')
+    const askFirst = wizard.locator('.fl-wizard-btn', { hasText: /^Ask me first/ })
+    await askFirst.click()
+    // The click writes nothing — it only selects — so the run reaches Finish
+    // identically whether or not the store accepts writes.
+    await expect(askFirst).toHaveClass(/fl-wizard-btn--primary/, { timeout: 5000 })
 
     if (blockWrites) blockSettingsWrites(userDataDir)
 
@@ -261,8 +249,7 @@ async function driveDowngradeToManual(
     const after = await bypassDefault(win)
     if (screenshot) await win.screenshot({ path: `${SCREENS}/${screenshot}` })
     // Anything anywhere on screen that reads as "that didn't save" — the wizard
-    // staying open to retry, a toast, an inline line. The mode step one screen
-    // earlier renders exactly such a line for the same class of failure.
+    // staying open to retry, a toast, an inline line.
     const bodyText = await win.evaluate(() => document.body.innerText)
     const complaint = /couldn'?t save|could not save|failed to save|try again|didn'?t save/i.test(
       bodyText,
@@ -289,8 +276,8 @@ async function driveDowngradeToManual(
  * Control. Proves this probe measures the real commit — same clicks, writable
  * store — so the failing case below cannot be a harness artifact.
  */
-test('Finish commits the Manual downgrade when the store accepts writes', async () => {
-  const outcome = await driveDowngradeToManual(false)
+test('Finish commits the Ask me first choice when the store accepts writes', async () => {
+  const outcome = await driveDowngradeToAskFirst(false)
   expect(outcome.errors, 'no uncaught renderer errors').toEqual([])
   expect({
     commitLanded: outcome.commitLanded,
@@ -315,7 +302,7 @@ test('Finish commits the Manual downgrade when the store accepts writes', async 
 test.fixme(
   'Finish says so when the onboarding commit fails — it must not close as if it saved',
   async () => {
-    const outcome = await driveDowngradeToManual(true, 'onboarding-finish-write-fail.png')
+    const outcome = await driveDowngradeToAskFirst(true, 'onboarding-finish-write-fail.png')
     expect(
       outcome.commitLanded || outcome.userWasTold,
       `Finish must either save or say it didn't — measured ${JSON.stringify(outcome)}`,
