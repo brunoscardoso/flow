@@ -213,26 +213,38 @@ export class RunSetupPanel {
     if (root === null) return
     const scrollTop = root.scrollTop
     root.textContent = ''
+    // Full area, but the content sits in a readable column: the steps, and —
+    // when there is room — the suggestions beside them (mockup B).
+    const page = el('div', 'fl-run-page')
+    root.appendChild(page)
 
     const head = el('div', 'fl-run-setup-head')
     const projectName = draft?.projectName ?? ''
-    head.appendChild(el('span', 'fl-run-setup-title', projectName === '' ? SETUP_STRINGS.title : `${SETUP_STRINGS.title} · ${projectName}`))
+    const titles = el('div', 'fl-run-setup-titles')
+    titles.appendChild(el('span', 'fl-run-setup-title', projectName === '' ? SETUP_STRINGS.title : `${SETUP_STRINGS.title} · ${projectName}`))
+    head.appendChild(titles)
     head.appendChild(el('span', 'fl-run-grow'))
     head.appendChild(iconButton('close', SETUP_STRINGS.close, () => this.close()))
-    root.appendChild(head)
+    page.appendChild(head)
 
     if (draft === null) {
-      root.appendChild(el('p', 'fl-run-muted', RUN_STRINGS.failedToRead))
+      page.appendChild(el('p', 'fl-run-muted', RUN_STRINGS.failedToRead))
       return
     }
     const structural = isStructural(draft.layer)
-    root.appendChild(el('p', 'fl-run-note', structural ? SETUP_STRINGS.intro : SETUP_STRINGS.structureOnlyEveryone))
-    for (const problem of this.#view?.resolution.project.problems ?? []) root.appendChild(el('p', 'fl-run-note', problem))
+    titles.appendChild(el('p', 'fl-run-note', structural ? SETUP_STRINGS.intro : SETUP_STRINGS.structureOnlyEveryone))
+
+    const body = el('div', 'fl-run-body')
+    const main = el('div', 'fl-run-main')
+    const aside = el('div', 'fl-run-aside')
+    body.append(main, aside)
+    page.appendChild(body)
+    for (const problem of this.#view?.resolution.project.problems ?? []) main.appendChild(el('p', 'fl-run-note', problem))
 
     const list = el('div', 'fl-run-steps')
     if (draft.steps.length === 0) list.appendChild(el('p', 'fl-run-muted', SETUP_STRINGS.empty))
     draft.steps.forEach((step, index) => list.appendChild(this.#card(draft, step, index)))
-    root.appendChild(list)
+    main.appendChild(list)
 
     if (structural) {
       const add = button('fl-run-chip dashed', SETUP_STRINGS.addStep, () => {
@@ -241,8 +253,8 @@ export class RunSetupPanel {
         this.#update(next)
       })
       add.classList.add('fl-run-add')
-      root.appendChild(add)
-      root.appendChild(this.#suggested(draft))
+      main.appendChild(add)
+      aside.appendChild(this.#suggested(draft))
     }
 
     const ask = this.#deps.askAgent()
@@ -253,11 +265,11 @@ export class RunSetupPanel {
       ask === null ? SETUP_STRINGS.askAgentNoConversation : SETUP_STRINGS.askAgentTitle,
     )
     askButton.disabled = ask === null
-    root.appendChild(askButton)
+    aside.appendChild(askButton)
 
-    root.appendChild(el('span', 'fl-run-grow'))
+    page.appendChild(el('span', 'fl-run-grow'))
     this.#footer = el('div', 'fl-run-setup-foot')
-    root.appendChild(this.#footer)
+    page.appendChild(this.#footer)
     this.#renderFooter()
     root.scrollTop = scrollTop
 

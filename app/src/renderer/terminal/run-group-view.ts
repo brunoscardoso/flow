@@ -324,16 +324,9 @@ export class RunGroupView {
       run.append(glyph, document.createTextNode(RUN_STRINGS.run))
       run.addEventListener('click', () => this.#act((api, scope) => api.start({ scope })))
       pill.appendChild(run)
-    } else {
-      pill.appendChild(Object.assign(document.createElement('span'), { className: 'fl-run-pill-label', textContent: RUN_STRINGS.run }))
     }
-    if (face.summary !== null) {
-      const summary = document.createElement('span')
-      summary.className = 'fl-run-pill-summary'
-      summary.textContent = face.summary
-      if (face.summaryTitle !== '') summary.title = face.summaryTitle
-      pill.appendChild(summary)
-    }
+    // No label or count while it runs: the step tabs already show each
+    // step's state, so the pill keeps only its actions (user decision).
     if (face.canReload) {
       pill.appendChild(
         iconButton('refresh', RUN_STRINGS.reloadAll, RUN_STRINGS.reloadAllTitle, () =>
@@ -426,13 +419,24 @@ function injectRunStyles(): void {
     .fl-run-setup {
       position: absolute; inset: 0; z-index: 5;
       width: 100%; box-sizing: border-box; container-type: inline-size;
-      display: flex; flex-direction: column; gap: var(--fl-space-sm);
-      padding: var(--fl-space-md); overflow-y: auto;
+      display: block; padding: 0 var(--fl-space-lg); overflow-y: auto;
       background: var(--fl-color-bg);
       font-family: var(--fl-font-ui); font-size: var(--fl-text-ui-size); color: var(--fl-color-text);
     }
-    .fl-run-setup-head { display: flex; align-items: center; gap: var(--fl-space-sm); }
-    .fl-run-setup-title { font-weight: var(--fl-text-ui-weight-medium); }
+    .fl-run-page {
+      max-width: 1120px; margin: 0 auto; min-height: 100%; box-sizing: border-box;
+      display: flex; flex-direction: column; gap: var(--fl-space-md); padding-top: var(--fl-space-lg);
+    }
+    .fl-run-setup-head { display: flex; align-items: flex-start; gap: var(--fl-space-sm); }
+    .fl-run-setup-titles { display: flex; flex-direction: column; gap: 2px; }
+    .fl-run-setup-title { font-weight: var(--fl-text-ui-weight-medium); font-size: var(--fl-text-ui-size); }
+    .fl-run-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--fl-space-lg); align-items: start; }
+    .fl-run-main, .fl-run-aside { display: flex; flex-direction: column; gap: var(--fl-space-sm); min-width: 0; }
+    @container (min-width: 960px) {
+      .fl-run-body { grid-template-columns: minmax(0, 1fr) 340px; }
+      .fl-run-aside { position: sticky; top: var(--fl-space-md); }
+      .fl-run-aside .fl-run-section-title { margin-top: 0; }
+    }
     .fl-run-grow { flex: 1 1 auto; }
     .fl-run-muted { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); margin: 0; }
     .fl-run-note { margin: 0; color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); line-height: 1.5; }
@@ -460,7 +464,7 @@ function injectRunStyles(): void {
     .fl-run-card-move { flex: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
     .fl-run-card-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: var(--fl-space-xs); }
     .fl-run-card-line { display: flex; align-items: center; gap: var(--fl-space-sm); min-width: 0; }
-    .fl-run-card-line.small { flex-wrap: wrap; row-gap: var(--fl-space-xs); }
+    .fl-run-card-line.small { flex-wrap: wrap; row-gap: var(--fl-space-xs); column-gap: var(--fl-space-md); }
     .fl-run-card-tools { flex: none; display: flex; align-items: center; gap: var(--fl-space-xs); align-self: flex-start; }
     .fl-run-toggle {
       flex: none; width: 30px; height: 16px; border-radius: 8px; position: relative; padding: 0; cursor: pointer;
@@ -475,7 +479,7 @@ function injectRunStyles(): void {
     .fl-run-toggle.on .fl-run-toggle-knob { transform: translateX(14px); background: #fff; }
     .fl-run-toggle:hover { border-color: var(--fl-color-focus-ring); }
     .fl-run-inline { display: inline-flex; align-items: center; gap: var(--fl-space-xs); min-width: 0; }
-    .fl-run-name { flex: 0 1 140px; width: 140px; font-weight: var(--fl-text-ui-weight-medium); }
+    .fl-run-name { flex: 0 0 160px; width: 160px; font-weight: var(--fl-text-ui-weight-medium); }
     .fl-run-command { flex: 1 1 auto; width: 100%; }
     .fl-run-port { width: 72px; }
     .fl-run-skipped { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); font-style: italic; }
@@ -491,7 +495,7 @@ function injectRunStyles(): void {
       border: var(--fl-border-width) solid var(--fl-color-border); border-radius: var(--fl-radius-sm);
       font-family: var(--fl-font-ui); font-size: var(--fl-text-ui-size);
     }
-    .fl-run-input.small { height: 22px; font-size: var(--fl-text-caption-size); padding: 0 var(--fl-space-xs); max-width: 220px; }
+    .fl-run-input.small { height: 22px; font-size: var(--fl-text-caption-size); padding: 0 var(--fl-space-xs); width: auto; max-width: 180px; }
     .fl-run-input.mono { font-family: var(--fl-font-mono); font-size: var(--fl-text-mono-size); }
     .fl-run-input:focus { outline: none; border-color: var(--fl-color-focus-ring); }
     .fl-run-input:disabled { opacity: 0.6; }
@@ -525,9 +529,11 @@ function injectRunStyles(): void {
     .fl-run-link:hover { text-decoration: underline; }
     .fl-run-link:disabled { color: var(--fl-color-text-secondary); cursor: default; text-decoration: none; }
     .fl-run-setup-foot {
-      display: flex; flex-direction: column; gap: var(--fl-space-sm);
-      padding-top: var(--fl-space-sm); border-top: var(--fl-border-width) solid var(--fl-color-separator);
+      position: sticky; bottom: 0; background: var(--fl-color-bg);
+      display: flex; flex-direction: row; align-items: center; flex-wrap: wrap; gap: var(--fl-space-sm);
+      padding: var(--fl-space-sm) 0 var(--fl-space-md); border-top: var(--fl-border-width) solid var(--fl-color-separator);
     }
+    .fl-run-setup-foot .fl-run-foot-text { flex: 1 1 240px; }
     .fl-run-foot-text { display: flex; flex-direction: column; gap: 2px; color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); line-height: 1.45; }
     .fl-run-foot-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--fl-space-sm); }
     .fl-run-saves-for { display: inline-flex; align-items: center; gap: var(--fl-space-xs); }
