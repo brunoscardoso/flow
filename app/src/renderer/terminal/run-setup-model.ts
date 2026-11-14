@@ -42,7 +42,7 @@ export interface DraftStep {
   /** The port or the text, as typed. */
   readyValue: string
   readyTimeoutMs?: number
-  /** Tweak layers only: the step is skipped. */
+  /** The step is turned off: kept for later, not started by Run. */
   skipped: boolean
   /** The NAME of the project it runs in; null = the setup's own project. */
   runsIn: string | null
@@ -98,9 +98,9 @@ export const SETUP_STRINGS = {
   moveUp: 'Move up',
   moveDown: 'Move down',
   remove: 'Remove step',
-  skip: 'Skip this step',
-  unskip: 'Run this step again',
-  skipped: 'Skipped',
+  skip: 'Turn this step off — it stays here for later',
+  unskip: 'Turn this step on',
+  skipped: 'Off',
   cancel: 'Cancel',
   save: 'Save',
   saveAndRun: 'Save and run',
@@ -170,7 +170,7 @@ function baseSteps(project: RunProjectLayers, layer: RunLayer): DraftStep[] {
       start: step.start,
       ...readyFields(step.ready),
       ...(step.readyTimeoutMs !== undefined ? { readyTimeoutMs: step.readyTimeoutMs } : {}),
-      skipped: false,
+      skipped: step.disabled === true,
       runsIn: ownProject(step.runsIn, project.name),
       origin: null,
     }
@@ -294,7 +294,7 @@ export type StepPatch = Partial<
 export function changeStep(draft: RunSetupDraft, id: string, patch: StepPatch): RunSetupDraft {
   const allowed: StepPatch = {}
   for (const [key, value] of Object.entries(patch) as Array<[keyof StepPatch, never]>) {
-    if (isStructural(draft.layer) ? key !== 'skipped' : TWEAKABLE.has(key)) allowed[key] = value
+    if (isStructural(draft.layer) || TWEAKABLE.has(key)) allowed[key] = value
   }
   if (Object.keys(allowed).length === 0) return draft
   if ('runsIn' in allowed) allowed.runsIn = ownProject(allowed.runsIn, draft.projectName)
@@ -466,6 +466,7 @@ function toRunStep(step: DraftStep): RunStep {
   if (ready !== undefined && ready !== 'invalid') out.ready = ready
   if (step.readyTimeoutMs !== undefined) out.readyTimeoutMs = step.readyTimeoutMs
   if (step.runsIn !== null && step.runsIn.trim() !== '') out.runsIn = step.runsIn.trim()
+  if (step.skipped) out.disabled = true
   return out
 }
 

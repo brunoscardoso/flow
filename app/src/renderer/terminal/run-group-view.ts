@@ -239,9 +239,19 @@ export class RunGroupView {
     return this.#suggestions
   }
 
+  /** A terminal tab was chosen: tuck the setup away, keeping its unsaved edits. */
+  tuckSetup(): void {
+    this.#panel.tuck()
+  }
+
   #toggleSetup(): void {
     if (this.#panel.isOpen) {
       this.#panel.close()
+      return
+    }
+    if (this.#panel.isTucked) {
+      this.#panel.untuck()
+      this.#renderPill()
       return
     }
     const view = this.#view
@@ -414,13 +424,11 @@ function injectRunStyles(): void {
     .fl-run-pill-setup.active { background: var(--fl-color-accent); color: var(--fl-color-on-accent); }
 
     .fl-run-setup {
-      position: absolute; top: 0; right: 0; bottom: 0; z-index: 5;
-      width: min(680px, 100%); box-sizing: border-box; container-type: inline-size;
+      position: absolute; inset: 0; z-index: 5;
+      width: 100%; box-sizing: border-box; container-type: inline-size;
       display: flex; flex-direction: column; gap: var(--fl-space-sm);
       padding: var(--fl-space-md); overflow-y: auto;
       background: var(--fl-color-bg);
-      border-left: var(--fl-border-width) solid var(--fl-color-border);
-      box-shadow: -8px 0 24px rgba(0, 0, 0, 0.3);
       font-family: var(--fl-font-ui); font-size: var(--fl-text-ui-size); color: var(--fl-color-text);
     }
     .fl-run-setup-head { display: flex; align-items: center; gap: var(--fl-space-sm); }
@@ -453,7 +461,19 @@ function injectRunStyles(): void {
     .fl-run-card-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: var(--fl-space-xs); }
     .fl-run-card-line { display: flex; align-items: center; gap: var(--fl-space-sm); min-width: 0; }
     .fl-run-card-line.small { flex-wrap: wrap; row-gap: var(--fl-space-xs); }
-    .fl-run-card-tools { flex: none; display: flex; align-items: flex-start; }
+    .fl-run-card-tools { flex: none; display: flex; align-items: center; gap: var(--fl-space-xs); align-self: flex-start; }
+    .fl-run-toggle {
+      flex: none; width: 30px; height: 16px; border-radius: 8px; position: relative; padding: 0; cursor: pointer;
+      border: var(--fl-border-width) solid var(--fl-color-border); background: var(--fl-color-surface-raised);
+      transition: background var(--fl-transition-fast), border-color var(--fl-transition-fast);
+    }
+    .fl-run-toggle-knob {
+      position: absolute; top: 1px; left: 1px; width: 12px; height: 12px; border-radius: 50%;
+      background: var(--fl-color-text-secondary); transition: transform var(--fl-transition-fast), background var(--fl-transition-fast);
+    }
+    .fl-run-toggle.on { background: var(--fl-color-accent); border-color: var(--fl-color-accent); }
+    .fl-run-toggle.on .fl-run-toggle-knob { transform: translateX(14px); background: #fff; }
+    .fl-run-toggle:hover { border-color: var(--fl-color-focus-ring); }
     .fl-run-inline { display: inline-flex; align-items: center; gap: var(--fl-space-xs); min-width: 0; }
     .fl-run-name { flex: 0 1 140px; width: 140px; font-weight: var(--fl-text-ui-weight-medium); }
     .fl-run-command { flex: 1 1 auto; width: 100%; }
@@ -522,6 +542,7 @@ function injectRunStyles(): void {
     .fl-run-btn:hover { background: var(--fl-color-surface-raised); }
     .fl-run-btn.primary { background: var(--fl-color-accent); border-color: var(--fl-color-accent); color: var(--fl-color-on-accent); font-weight: var(--fl-text-ui-weight-medium); }
     .fl-run-btn:disabled { opacity: 0.45; cursor: default; }
+    .fl-run-setup[hidden] { display: none; }
     @container (max-width: 520px) {
       .fl-run-card-line:not(.small) { flex-wrap: wrap; }
       .fl-run-name { flex: 1 1 100%; width: auto; }

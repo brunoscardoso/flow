@@ -129,7 +129,26 @@ export class RunSetupPanel {
   }
 
   get isOpen(): boolean {
-    return this.#root !== null
+    return this.#root !== null && !this.#root.hidden
+  }
+
+  /** Open but tucked away (a terminal tab was chosen): the draft is kept. */
+  get isTucked(): boolean {
+    return this.#root !== null && this.#root.hidden
+  }
+
+  /** Tuck the panel away to show a terminal, keeping the unsaved draft. */
+  tuck(): void {
+    if (this.#root === null || this.#root.hidden) return
+    this.#root.hidden = true
+    this.#deps.onClosed()
+  }
+
+  /** Bring a tucked panel back exactly as it was left. */
+  untuck(): void {
+    if (this.#root === null) return
+    this.#root.hidden = false
+    this.#render()
   }
 
   /** Open on a view; with no setup yet, the draft starts with one empty step. */
@@ -367,16 +386,20 @@ export class RunSetupPanel {
     body.appendChild(line2)
     card.appendChild(body)
 
-    // Right: remove (Everyone) or skip (a tweak layer cannot delete a shared step).
+    // Right: the on/off switch (a step turned off stays for later), then remove.
     const tools = el('div', 'fl-run-card-tools')
+    const toggle = document.createElement('button')
+    toggle.type = 'button'
+    toggle.className = `fl-run-toggle${step.skipped ? '' : ' on'}`
+    toggle.setAttribute('role', 'switch')
+    toggle.setAttribute('aria-checked', step.skipped ? 'false' : 'true')
+    toggle.setAttribute('aria-label', step.skipped ? SETUP_STRINGS.unskip : SETUP_STRINGS.skip)
+    toggle.title = step.skipped ? SETUP_STRINGS.unskip : SETUP_STRINGS.skip
+    toggle.appendChild(el('span', 'fl-run-toggle-knob'))
+    toggle.addEventListener('click', () => this.#update(changeStep(current(), step.id, { skipped: !step.skipped })))
+    tools.appendChild(toggle)
     if (structural) {
       tools.appendChild(iconButton('trash', SETUP_STRINGS.remove, () => this.#update(removeStep(current(), step.id))))
-    } else {
-      tools.appendChild(
-        iconButton(step.skipped ? 'plus' : 'minus', step.skipped ? SETUP_STRINGS.unskip : SETUP_STRINGS.skip, () =>
-          this.#update(removeStep(current(), step.id)),
-        ),
-      )
     }
     card.appendChild(tools)
     return card

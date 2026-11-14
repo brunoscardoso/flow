@@ -1493,6 +1493,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
       runGroup?.activatePending(pendingStep)
       return
     }
+    runGroup?.tuckSetup() // the setup covers the terminals; a chosen tab is shown
     activateTab(id, { focus: true }) // the user clicked this tab
   })
 

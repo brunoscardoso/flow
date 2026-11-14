@@ -205,3 +205,18 @@ describe('runScopeKey', () => {
     expect(runScopeKey({ rootPath: '/p', threadId: 't1' })).toBe('/p::t1')
   })
 })
+
+describe('a step turned off', () => {
+  it('round-trips and is never resolved to run', () => {
+    const setup = parseRunSetup(
+      serializeRunSetup({ version: 1, steps: [
+        { id: 'a', name: 'a', command: 'npm run dev', start: 'now', disabled: true },
+        { id: 'b', name: 'b', command: 'npm start', start: 'now' },
+      ] }),
+    ).setup
+    expect(setup.steps[0]!.disabled).toBe(true)
+    expect(setup.steps[1]!.disabled).toBeUndefined()
+    const steps = resolveRunSteps({ root: '/p', name: 'p', cwd: '/p', setup, personal: {}, conversation: {} })
+    expect(steps.map((step) => step.id)).toEqual(['b'])
+  })
+})

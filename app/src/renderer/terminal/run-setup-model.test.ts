@@ -382,3 +382,17 @@ describe('UI text (forbidden-pattern #12)', () => {
     }
   })
 })
+
+describe('turning a step off', () => {
+  it('a step turned off is kept, saved as off, and read back off', () => {
+    const layers = project()
+    const draft = changeStep(startDraft(layers, 'shared'), 'worker', { skipped: true })
+    const change = saveChange(draft, layers)
+    const steps = change.layer === 'shared' ? change.setup.steps : []
+    expect(steps.map((step) => step.id)).toContain('worker')
+    expect(steps.find((step) => step.id === 'worker')?.disabled).toBe(true)
+    expect(steps.find((step) => step.id === 'api')?.disabled).toBeUndefined()
+    const reread = startDraft(project({ setup: change.layer === 'shared' ? change.setup : null }), 'shared')
+    expect(reread.steps.find((step) => step.id === 'worker')?.skipped).toBe(true)
+  })
+})

@@ -16,6 +16,8 @@ export interface RunStep {
   start: 'now' | 'after-previous'
   ready?: RunReady
   readyTimeoutMs?: number
+  /** Turned off: kept in the setup for later, never started by Run. */
+  disabled?: boolean
   /**
    * The NAME of the project this step runs in — the name the app shows, which
    * is the same on every computer (a folder path is not). Absent: the setup's
@@ -203,6 +205,7 @@ export function parseRunSetup(text: string): { setup: RunSetup; problems: string
       start: entry.start === 'after-previous' ? 'after-previous' : 'now',
     }
     if (parsedReady.ready !== undefined) step.ready = parsedReady.ready
+    if (entry.disabled === true) step.disabled = true
     if (entry.runsIn !== undefined && entry.runsIn !== null) {
       if (typeof entry.runsIn === 'string' && entry.runsIn.trim() !== '' && entry.runsIn.length <= MAX_PROJECT_NAME) {
         step.runsIn = entry.runsIn.trim()
@@ -231,6 +234,7 @@ export function serializeRunSetup(setup: RunSetup): string {
     }
     if (step.readyTimeoutMs !== undefined) out.readyTimeoutMs = step.readyTimeoutMs
     if (step.runsIn !== undefined && step.runsIn.trim() !== '') out.runsIn = step.runsIn.trim()
+    if (step.disabled === true) out.disabled = true
     return out
   })
   return `${JSON.stringify({ version: 1, steps }, null, 2)}\n`
@@ -299,7 +303,7 @@ export function resolveRunSteps(project: RunProjectInput, places: readonly RunPl
     const personal = project.personal[step.id]
     const conversation = project.conversation[step.id]
     // The nearest layer that SAYS something wins; a conversation's `skip: false` undoes a personal skip.
-    const skip = conversation?.skip ?? personal?.skip ?? false
+    const skip = conversation?.skip ?? personal?.skip ?? step.disabled ?? false
     if (skip) continue
 
     let command = step.command
