@@ -100,6 +100,7 @@ export const KNOWLEDGE_CLASS_TABLE: readonly KnowledgeClassRow[] = [
   // used to be `authored` by falling through to the default; now that the
   // root is a closed set, the one legitimate member has to be named.
   { pattern: '/ledger.md', class: 'authored', why: 'the project’s shared learning journal' },
+  { pattern: '/run/', class: 'authored', why: 'the project’s shared Run setup' },
 
   // ── Workspace-only: personal journals and local learning state ──
   { pattern: '/heartbeat.md', class: 'personal', why: 'this machine’s scheduled tasks', workspaceOnly: true },
