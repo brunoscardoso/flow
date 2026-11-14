@@ -163,17 +163,28 @@ export class TerminalManager extends EventEmitter {
     cols: number
     rows: number
     owner?: TerminalOwner
+    /** Run this one command (`shell -l -c`) instead of an idle login shell. */
+    command?: string
+    /** Absolute working folder, overriding the one derived from `rootId`. */
+    cwd?: string
+    /** Tab title, replacing the folder name. */
+    title?: string
+    /** Marks a terminal Flow's Run started for one step of a setup. */
+    run?: TerminalInfo['run']
+    /** Extra environment merged over the inherited process env. */
+    env?: Record<string, string>
   }): TerminalInfo {
-    const cwd = this.#resolveCwd(request.rootId)
+    const cwd = request.cwd ?? this.#resolveCwd(request.rootId)
     const terminalId = randomUUID()
     const info: TerminalInfo = {
       terminalId,
       kind: 'user',
-      title: basename(cwd) || cwd,
+      title: request.title ?? (basename(cwd) || cwd),
       cwd,
       // rootIds ARE absolute rootPaths in this app; the project root the
       // terminal is scoped to (undefined → homedir fallback, unscoped).
       projectRoot: request.rootId,
+      ...(request.run === undefined ? {} : { run: { ...request.run } }),
       ...(request.owner === undefined
         ? {}
         : { owner: { rootPath: request.owner.rootPath, threadId: request.owner.threadId } }),
@@ -185,6 +196,8 @@ export class TerminalManager extends EventEmitter {
       cwd,
       cols: request.cols,
       rows: request.rows,
+      ...(request.command === undefined ? {} : { command: request.command }),
+      ...(request.env === undefined ? {} : { env: request.env }),
     })
 
     const entry: TerminalEntry = {
@@ -446,6 +459,9 @@ export class TerminalManager extends EventEmitter {
       this.#agentTerminalsByThread.delete(entry.info.threadId)
     }
     entry.pty?.kill()
+    // A dev server leaves children behind; follow the hang-up with a hard kill
+    // of the process group so a Stop does not keep the port busy.
+    if (entry.info.run !== undefined && entry.pty) this.#hardKillLater(entry.pty)
     for (const commandPty of entry.commandPtys) {
       // Teardown is immediate — force-terminate any in-flight agent command and
       // its process group so nothing is orphaned past dispose (#272).
@@ -456,6 +472,27 @@ export class TerminalManager extends EventEmitter {
     // virtual AGENT terminals never exit — without this, their ⚙ tabs accumulate
     // permanently and can never be removed (#304).
     this.emit(TERMINAL_REMOVED_EVENT, { terminalId } satisfies TerminalRemovedEvent)
+  }
+
+  /**
+   * Stop the process of a user terminal WITHOUT removing its tab: hang-up now,
+   * hard kill of the process group after the grace period. The tab stays and
+   * shows exited when the PTY exits. False for an unknown, agent or virtual
+   * terminal (nothing to stop).
+   */
+  stopProcess(terminalId: string): boolean {
+    const entry = this.#entries.get(terminalId)
+    if (!entry || !entry.pty) return false
+    entry.pty.kill()
+    this.#hardKillLater(entry.pty)
+    return true
+  }
+
+  /** SIGKILL the PTY's process group after the grace — the group, not only
+   *  the shell, so children that outlived the hang-up go too. */
+  #hardKillLater(pty: PtySession): void {
+    const timer = setTimeout(() => pty.killGroup('SIGKILL'), KILL_GRACE_MS)
+    timer.unref?.()
   }
 
   /**

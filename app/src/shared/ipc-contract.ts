@@ -1464,6 +1464,13 @@ export interface TerminalInfo {
    */
   customTitle?: string
   /**
+   * Set on a terminal Flow's Run started for one step of a project's setup:
+   * which setup (`scopeKey`), which step, and the project it belongs to. Such a
+   * terminal runs its command directly (not an idle shell), is stopped with a
+   * hard kill of its process group, and is never saved for a restart.
+   */
+  run?: { scopeKey: string; stepId: string; projectRoot: string }
+  /**
    * Whether the shell process has exited (user terminals). Surfaced so a window
    * reopened from the dock restores the dead tab as `(exited)` instead of a
    * live-looking shell that silently swallows keystrokes (#446).

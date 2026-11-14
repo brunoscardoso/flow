@@ -210,6 +210,8 @@ export class PtySession {
   #cols: number
   #rows: number
   #exited = false
+  /** The shell's pid at spawn — its process group id, kept after exit. */
+  #groupPid = -1
   #dataCallbacks: Array<(data: string) => void> = []
   #exitCallbacks: Array<(exitCode: number) => void> = []
 
@@ -236,6 +238,7 @@ export class PtySession {
       env: buildEnv(options.env),
     })
 
+    this.#groupPid = this.#proc.pid
     this.#proc.onData((data: string) => {
       this.scrollback.append(data)
       for (const callback of this.#dataCallbacks) {
@@ -254,6 +257,25 @@ export class PtySession {
 
   get pid(): number {
     return this.#proc?.pid ?? -1
+  }
+
+  /**
+   * Signal the whole process group this session started, EVEN AFTER its shell
+   * has exited. `kill` is a no-op once the shell is gone, but a dev server's
+   * children (a reloader, a bundler) can outlive it in the same group and keep
+   * its port. The group id is the shell's pid, remembered at spawn.
+   */
+  killGroup(signal: string): void {
+    const groupPid = this.#groupPid
+    if (process.platform === 'win32' || groupPid <= 0) {
+      this.kill(signal)
+      return
+    }
+    try {
+      process.kill(-groupPid, signal as NodeJS.Signals)
+    } catch {
+      // The group is already empty.
+    }
   }
 
   get cols(): number {

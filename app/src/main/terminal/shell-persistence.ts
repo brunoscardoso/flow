@@ -51,6 +51,8 @@ export function ownedShellRefs(
       (info) =>
         info.kind === 'user' &&
         info.exited !== true &&
+        // A Run step restarts from the Run panel, never as a plain shell.
+        info.run === undefined &&
         info.owner !== undefined &&
         info.owner.rootPath === owner.rootPath &&
         info.owner.threadId === owner.threadId,
