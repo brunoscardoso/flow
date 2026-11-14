@@ -192,7 +192,7 @@ import {
 } from './terminal'
 import { registerRunChannels } from './run/ipc'
 import { createTcpConnect, waitForLine, waitForPort, waitForPortFree } from './run/ready-check'
-import { nodeRunStoreFs, RunSetupStore } from './run/run-setup-store'
+import { RunSetupStore } from './run/run-setup-store'
 import { CommandUsageStore, rankSuggestions, usageSuggestions } from './run/command-usage'
 import { nodeSuggestFs, suggestRunSteps } from './run/run-suggest'
 import { RunSupervisor } from './run/run-supervisor'
@@ -3526,7 +3526,6 @@ const understandFeature = async (request: {
     const manager = terminalManager
     const connect = createTcpConnect()
     const setups = new RunSetupStore({
-      fs: nodeRunStoreFs(),
       threads: threadStore,
       personal: appSettings,
       // A step may run in another project of the primary project's Workspace

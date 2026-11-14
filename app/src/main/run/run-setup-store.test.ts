@@ -1,17 +1,14 @@
-// Run setup store — real temp folders for the shared file (including a Flow
-// folder that is a link, as in a Workspace), in-memory fakes for the
-// conversation and personal layers.
+// Run setup store — the setup lives in (fake) local app settings, never in the
+// project; real temp folders only stand in for project roots.
 
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
 import type { RunSetup, RunTweaks, RunTweaksByProject } from '../../shared/run-setup'
 import {
-  nodeRunStoreFs,
   RunSetupError,
   RunSetupStore,
-  sharedSetupPath,
   type RunPersonalSource,
   type RunThreadSource,
 } from './run-setup-store'
@@ -38,10 +35,17 @@ function fakeThreads(threads: Record<string, FakeThread>): RunThreadSource {
   }
 }
 
-function fakePersonal(): RunPersonalSource & { rows: Map<string, RunTweaks> } {
+function fakePersonal(): RunPersonalSource & { rows: Map<string, RunTweaks>; setups: Map<string, string> } {
   const rows = new Map<string, RunTweaks>()
+  const setups = new Map<string, string>()
   return {
     rows,
+    setups,
+    getRunSetup: (root) => setups.get(root) ?? null,
+    setRunSetup: (root, text) => {
+      if (text === null) setups.delete(root)
+      else setups.set(root, text)
+    },
     getRunTweaks: (root) => rows.get(root) ?? {},
     setRunTweaks: (root, tweaks) => {
       rows.set(root, tweaks)
@@ -82,7 +86,6 @@ describe('RunSetupStore', () => {
     workspaceSiblings?: (root: string) => Promise<string[]>,
   ): RunSetupStore {
     return new RunSetupStore({
-      fs: nodeRunStoreFs(),
       threads: fakeThreads(threads),
       personal,
       ...(workspaceSiblings === undefined ? {} : { workspaceSiblings }),
@@ -97,29 +100,33 @@ describe('RunSetupStore', () => {
     expect(resolution.steps).toEqual([])
   })
 
-  it('writes the shared setup atomically through a linked Flow folder, leaving no temp file', async () => {
-    const s = store()
+  it('keeps the setup in local settings and never writes into the project or its Workspace', async () => {
+    const personal = fakePersonal()
+    const s = store({}, personal)
     await s.save({ rootPath: api, threadId: null }, { layer: 'shared', projectRoot: api, setup: SETUP })
-    const linkedTarget = join(dir, 'workspaces', 'acme', 'projects', 'api', 'run')
-    expect(readdirSync(linkedTarget)).toEqual(['setup.json'])
-    expect(JSON.parse(readFileSync(sharedSetupPath(api), 'utf8'))).toMatchObject({ version: 1, steps: [{ id: 'db' }, { id: 'web' }] })
+    expect(JSON.parse(personal.setups.get(api)!)).toMatchObject({ version: 1, steps: [{ id: 'db' }, { id: 'web' }] })
+    expect(readdirSync(join(dir, 'workspaces', 'acme', 'projects', 'api'))).toEqual([])
+    expect(readdirSync(join(shop, 'flow'))).toEqual([])
     const resolution = await s.resolve({ rootPath: api, threadId: null })
     expect(resolution.steps.map((step) => step.key)).toEqual([`${api}::db`, `${api}::web`])
   })
 
-  it('refuses to create a Flow folder for a project that has none', async () => {
+  it('saves for a project with no Flow folder too, and an empty list forgets the setup', async () => {
     const bare = join(dir, 'bare')
     mkdirSync(bare)
-    await expect(
-      store().save({ rootPath: bare, threadId: null }, { layer: 'shared', projectRoot: bare, setup: SETUP }),
-    ).rejects.toBeInstanceOf(RunSetupError)
+    const personal = fakePersonal()
+    const s = store({}, personal)
+    await s.save({ rootPath: bare, threadId: null }, { layer: 'shared', projectRoot: bare, setup: SETUP })
     expect(readdirSync(bare)).toEqual([])
+    expect(personal.setups.has(bare)).toBe(true)
+    await s.save({ rootPath: bare, threadId: null }, { layer: 'shared', projectRoot: bare, setup: { version: 1, steps: [] } })
+    expect(personal.setups.has(bare)).toBe(false)
   })
 
-  it('a malformed shared file reads with problems, never throws', async () => {
-    mkdirSync(join(shop, 'flow', 'run'))
-    writeFileSync(sharedSetupPath(shop), '{"steps":[{"name":"x"}]}')
-    const resolution = await store().resolve({ rootPath: shop, threadId: null })
+  it('a malformed stored setup reads with problems, never throws', async () => {
+    const personal = fakePersonal()
+    personal.setups.set(shop, '{"steps":[{"name":"x"}]}')
+    const resolution = await store({}, personal).resolve({ rootPath: shop, threadId: null })
     expect(resolution.steps).toEqual([])
     expect(resolution.project.problems).toHaveLength(1)
   })

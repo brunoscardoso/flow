@@ -118,6 +118,8 @@ export type KnowledgeSyncScope = 'project' | 'workspace'
 const RUN_TWEAKS_PREFIX = 'run_tweaks:'
 /** One project's recorded terminal commands (command-usage.ts is the one writer). */
 const RUN_USAGE_PREFIX = 'run_usage:'
+/** A project's Run setup — local to this computer, never shared (plan_project_run). */
+const RUN_SETUP_PREFIX = 'run_setup:'
 
 /**
  * The word this installation claims queue items under.
@@ -638,6 +640,17 @@ export class AppSettingsStore {
   }
 
   /** This person's tweaks to a project's Run setup. Corrupt rows read as none. */
+  /** A project's Run setup as stored text (JSON), or null when it has none. */
+  getRunSetup(projectRoot: string): string | null {
+    return this.#getString(`${RUN_SETUP_PREFIX}${projectRoot}`)
+  }
+
+  /** Store a project's Run setup text; null forgets it. */
+  setRunSetup(projectRoot: string, text: string | null): void {
+    if (text === null) this.#deleteKey(`${RUN_SETUP_PREFIX}${projectRoot}`)
+    else this.#setString(`${RUN_SETUP_PREFIX}${projectRoot}`, text)
+  }
+
   getRunTweaks(projectRoot: string): RunTweaks {
     const raw = this.#getString(`${RUN_TWEAKS_PREFIX}${projectRoot}`)
     if (raw === null) return {}

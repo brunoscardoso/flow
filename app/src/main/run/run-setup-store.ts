@@ -1,27 +1,22 @@
 /**
- * THE RUN SETUP STORE — where each layer of a Run setup lives, and the one
- * place a scope is turned into its projects, working folders and steps.
+ * THE RUN SETUP STORE — where a Run setup lives, and the one place a scope is
+ * turned into its projects, working folders and steps.
  *
- *   shared        `<project>/flow/run/setup.json` — the project's Flow folder,
- *                 which may be a link into a Workspace; written THROUGH it, so
- *                 the file syncs with the team (knowledge class `authored`).
- *   personal      app settings, per machine, per project.
- *   conversation  the conversation's own row (migration v42), per project.
+ * A Run setup is the PERSON'S OWN, on this computer: it is kept in app
+ * settings per project and is never written into the project or its Workspace,
+ * so it never syncs to anyone (user decision, 2026-11-14). The layer named
+ * `shared` is that base setup; the personal and conversation tweak layers
+ * remain for older data and are no longer offered by the panel.
  *
- * ONE LIST PER RUN. A Run's steps are the PRIMARY project's setup — one file,
+ * ONE LIST PER RUN. A Run's steps are the PRIMARY project's setup — one list,
  * one order. A step may run in another project, named by `runsIn`: one of the
  * scope's projects (in the conversation's checkout of it when it has one, else
  * its folder — FR-9), else a sibling of the same Workspace that is on this
- * computer, else nowhere: the step is reported as unable to start. The other
- * attached projects' own setup files are not merged in; each is the Run of a
- * conversation whose primary project it is.
+ * computer, else nowhere: the step is reported as unable to start.
  *
- * Every write of the shared file is atomic (temp file + rename) and async —
- * nothing here blocks main (allowed-pattern #19). Every dependency is injected
- * so the tests run against fakes and temp folders.
+ * Every dependency is injected so the tests run against fakes.
  */
-import { randomBytes } from 'crypto'
-import { basename, join } from 'path'
+import { basename } from 'path'
 
 import {
   parseRunSetup,
@@ -38,26 +33,6 @@ import {
   type RunTweaksByProject,
 } from '../../shared/run-setup'
 
-/** The project folder's Flow folder name, and the Run file inside it. */
-const FLOW_DIR = 'flow'
-const RUN_DIR = 'run'
-const SETUP_FILE = 'setup.json'
-
-export function sharedSetupPath(projectRoot: string): string {
-  return join(projectRoot, FLOW_DIR, RUN_DIR, SETUP_FILE)
-}
-
-export interface RunStoreFs {
-  /** The file's text, or null when it does not exist. */
-  readFile(path: string): Promise<string | null>
-  writeFile(path: string, text: string): Promise<void>
-  rename(from: string, to: string): Promise<void>
-  unlink(path: string): Promise<void>
-  mkdir(path: string): Promise<void>
-  /** True when the path is a directory (following links). */
-  isDirectory(path: string): Promise<boolean>
-}
-
 /** What the store needs to know about a conversation. */
 export interface RunThreadSource {
   /** Null for an unknown conversation. */
@@ -71,12 +46,14 @@ export interface RunThreadSource {
 }
 
 export interface RunPersonalSource {
+  /** The project's Run setup text, local to this computer — never a shared file. */
+  getRunSetup(projectRoot: string): string | null
+  setRunSetup(projectRoot: string, text: string | null): void
   getRunTweaks(projectRoot: string): RunTweaks
   setRunTweaks(projectRoot: string, tweaks: RunTweaks): RunTweaks
 }
 
 export interface RunSetupStoreDeps {
-  fs: RunStoreFs
   threads: RunThreadSource
   personal: RunPersonalSource
   /** A project's name as the app shows it. */
@@ -165,13 +142,14 @@ export class RunSetupStore {
   async readShared(projectRoot: string): Promise<{ setup: RunSetup | null; problems: string[] }> {
     let text: string | null
     try {
-      text = await this.#deps.fs.readFile(sharedSetupPath(projectRoot))
+      text = this.#deps.personal.getRunSetup(projectRoot)
     } catch {
-      return { setup: null, problems: ['The shared Run setup could not be opened, so it was treated as empty.'] }
+      return { setup: null, problems: ['The Run setup could not be read, so it was treated as empty.'] }
     }
     if (text === null) return { setup: null, problems: [] }
     return parseRunSetup(text)
   }
+
 
   /** The primary project's layers, where each step runs, and the merged steps with provenance. */
   async resolve(scope: RunScope): Promise<RunResolution> {
@@ -223,52 +201,10 @@ export class RunSetupStore {
   }
 
   async #writeShared(projectRoot: string, setup: RunSetup): Promise<void> {
-    const { fs } = this.#deps
-    // Validate by round-tripping: what is written is exactly what a reader keeps.
-    const text = serializeRunSetup(parseRunSetup(serializeRunSetup(setup)).setup)
-    const flowDir = join(projectRoot, FLOW_DIR)
-    if (!(await fs.isDirectory(flowDir))) {
-      throw new RunSetupError('This project is not set up for Flow yet, so the shared setup could not be saved.')
-    }
-    const runDir = join(flowDir, RUN_DIR)
-    await fs.mkdir(runDir)
-    const target = join(runDir, SETUP_FILE)
-    const temp = join(runDir, `.${SETUP_FILE}.${randomBytes(4).toString('hex')}.tmp`)
-    await fs.writeFile(temp, text)
-    try {
-      await fs.rename(temp, target)
-    } catch (error) {
-      await fs.unlink(temp).catch(() => undefined)
-      throw error
-    }
+    // Validate by round-tripping: what is stored is exactly what a reader keeps.
+    const clean = parseRunSetup(serializeRunSetup(setup)).setup
+    this.#deps.personal.setRunSetup(projectRoot, clean.steps.length === 0 ? null : serializeRunSetup(clean))
   }
+
 }
 
-/** The real async fs. */
-export function nodeRunStoreFs(): RunStoreFs {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const fsp = require('fs/promises') as typeof import('fs/promises')
-  return {
-    readFile: async (path) => {
-      try {
-        return await fsp.readFile(path, 'utf8')
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
-        throw error
-      }
-    },
-    writeFile: (path, text) => fsp.writeFile(path, text, 'utf8'),
-    rename: (from, to) => fsp.rename(from, to),
-    unlink: (path) => fsp.unlink(path),
-    mkdir: async (path) => {
-      await fsp.mkdir(path, { recursive: true })
-    },
-    isDirectory: async (path) => {
-      try {
-        return (await fsp.stat(path)).isDirectory()
-      } catch {
-        return false
-      }
-    },
-  }
-}

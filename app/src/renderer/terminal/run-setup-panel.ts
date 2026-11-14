@@ -8,14 +8,15 @@
  * ready; move up / drag / move down on the left, remove on the right. Below
  * the list: "+ Add a step", the short "Suggested" list (its full list behind
  * "Show all"), and "Ask the agent to set it up". The footer says what Save
- * will do, holds the small "Saves for" control, and Save (or Save and run).
+ * will do, and Save (or Save and run). The setup is the person's own, on this computer —
+ * there is no choice of who it is saved for.
  *
  * All editing logic lives in `run-setup-model.ts` (pure, tested); this file
  * only draws the draft and turns clicks into model calls. Nothing here runs a
  * command: Save sends one request and main decides what starts, restarts or
  * stops (allowed-pattern #14).
  */
-import type { RunGroupState, RunLayer, RunSaveAnswer, RunSaveChange, RunSuggestion, RunView } from '../../shared/run-setup'
+import type { RunGroupState, RunSaveAnswer, RunSaveChange, RunSuggestion, RunView } from '../../shared/run-setup'
 import { RUN_STRINGS } from './run-group-model'
 import {
   addedAsLabel,
@@ -25,8 +26,6 @@ import {
   draftToSetUp,
   isDirty,
   isStructural,
-  LAYER_LABELS,
-  LAYER_TITLES,
   moveStep,
   offeredSuggestions,
   removeStep,
@@ -59,7 +58,6 @@ export interface RunSetupPanelDeps {
   onClosed(): void
 }
 
-const LAYERS: RunLayer[] = ['shared', 'personal', 'conversation']
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag)
@@ -177,7 +175,7 @@ export class RunSetupPanel {
     this.#view = view
     if (this.#root === null) return
     const draft = this.#draft
-    if (draft === null || !isDirty(draft)) this.#draft = startDraft(view.resolution.project, draft?.layer ?? 'shared')
+    if (draft === null || !isDirty(draft)) this.#draft = startDraft(view.resolution.project, 'shared')
     this.#render()
   }
 
@@ -433,36 +431,6 @@ export class RunSetupPanel {
     return section
   }
 
-  #layerControl(draft: RunSetupDraft): HTMLElement {
-    const wrap = el('div', 'fl-run-saves-for')
-    wrap.appendChild(el('span', 'fl-run-label', SETUP_STRINGS.savesFor))
-    const group = el('div', 'fl-run-segment')
-    group.setAttribute('role', 'radiogroup')
-    group.setAttribute('aria-label', SETUP_STRINGS.savesFor)
-    for (const layer of LAYERS) {
-      const unavailable = layer === 'conversation' && !this.#deps.hasConversation()
-      const option = button(
-        'fl-run-segment-btn',
-        LAYER_LABELS[layer],
-        () => {
-          if (layer === draft.layer) return
-          const project = this.#view?.resolution.project
-          if (project === undefined) return
-          // A layer is its own draft: switching starts from what that layer says now.
-          this.#update(startDraft(project, layer))
-        },
-        unavailable ? SETUP_STRINGS.noConversation : LAYER_TITLES[layer],
-      )
-      option.setAttribute('role', 'radio')
-      option.setAttribute('aria-checked', String(layer === draft.layer))
-      option.classList.toggle('active', layer === draft.layer)
-      option.disabled = unavailable
-      group.appendChild(option)
-    }
-    wrap.appendChild(group)
-    return wrap
-  }
-
   #renderFooter(): void {
     const foot = this.#footer
     const draft = this.#draft
@@ -480,7 +448,6 @@ export class RunSetupPanel {
     foot.appendChild(text)
 
     const actions = el('div', 'fl-run-foot-actions')
-    actions.appendChild(this.#layerControl(draft))
     actions.appendChild(el('span', 'fl-run-grow'))
     actions.appendChild(button('fl-run-btn', SETUP_STRINGS.cancel, () => this.close()))
     const blocked = this.#saving || !isDirty(draft) || problems.length > 0

@@ -48,7 +48,6 @@ const PROJECT_PATHS: readonly [string, string][] = [
   ['archive/plan_old_v1.md', 'authored'],
   ['contracts/stripe_contract.md', 'authored'],
   ['ledger.md', 'authored'],
-  ['run/setup.json', 'authored'],
   ['rules/core/allowed-patterns.md', 'authored'],
   // append-only
   ['brain/.structure/annotations.jsonl', 'append-only'],
@@ -149,11 +148,6 @@ describe('classifyKnowledgePath', () => {
     // test above closes, so it now has a row of its own.
     expect(classifyKnowledgePath('ledger.md')).toBe('authored');
     expect(classifyKnowledgePath('projects/orders-api/ledger.md', { root: 'workspace' })).toBe('authored');
-  });
-
-  it('shares the Run setup folder, in a project root and in a Workspace', () => {
-    expect(classifyKnowledgePath('run/setup.json')).toBe('authored');
-    expect(classifyKnowledgePath('projects/orders-api/run/setup.json', { root: 'workspace' })).toBe('authored');
   });
 
   it("does not close the WORKSPACE repo's own root, whose members are a different set", () => {
@@ -430,7 +424,6 @@ describe('the closed root, as git actually reads the emitted ignore file', () =>
         'projects/orders-api/resources/design-guide.md',
         'projects/orders-api/brain/features/orders.md',
         'projects/orders-api/ledger.md',
-        'projects/orders-api/run/setup.json',
       ]) {
         expect({ path: kept, ignored: ignored(kept) }).toEqual({ path: kept, ignored: false });
       }
