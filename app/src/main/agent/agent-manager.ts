@@ -44,8 +44,14 @@ import type { AttachmentStore } from '../store/attachment-store'
 import { buildUserContent } from './user-content'
 import { BRAIN_FIRST_COMPACT } from './brain-first'
 import type { BoardToolsProvider } from './board-tools/board-tools-provider'
-import { createFlowBoardTools, type SubtaskToolDeps } from './board-tools/flow-tools'
-import { FLOW_MCP_SERVER_NAME, flowToolName, SUBTASK_TOOL_NAME } from './board-tools/board-tools-shared'
+import { createFlowBoardTools, type RunToolDeps, type SubtaskToolDeps } from './board-tools/flow-tools'
+import {
+  FLOW_MCP_SERVER_NAME,
+  flowToolName,
+  RUN_OUTPUT_TOOL_NAME,
+  RUN_RELOAD_TOOL_NAME,
+  SUBTASK_TOOL_NAME,
+} from './board-tools/board-tools-shared'
 import { isSubtaskTicket, subtaskSourceMessageId, type SubtaskRegistry } from './subtask-registry'
 import type { CredentialsManager } from '../credentials'
 import {
@@ -445,6 +451,13 @@ export interface AgentManagerOptions {
    * sub-agent exactly as before. Production always passes it.
    */
   subtasks?: SubtaskRegistry
+  /**
+   * PROJECT RUN (plan_project_run note 8). Binds the Run of ONE conversation to
+   * its agent: `run_output` and `run_reload`, nothing that starts, stops or
+   * edits. Called per session with the thread's project and id; null → no Run
+   * tools. Lazy because the supervisor is built after the manager.
+   */
+  runTools?: (scope: { rootPath: string; threadId: string }) => RunToolDeps | null
 }
 
 /** One message stored while its thread waits on a basic discovery. */
@@ -1638,8 +1651,9 @@ export class AgentManager extends EventEmitter {
           })
         : null
       const subtasks = this.#subtaskToolDeps(thread.id)
-      if (board !== null || subtasks !== null) {
-        const server = await createFlowBoardTools(board, subtasks)
+      const run = this.options.runTools?.({ rootPath: thread.projectRoot, threadId: thread.id }) ?? null
+      if (board !== null || subtasks !== null || run !== null) {
+        const server = await createFlowBoardTools(board, subtasks, run)
         options.mcpServers = { ...(options.mcpServers ?? {}), [FLOW_MCP_SERVER_NAME]: server }
       }
     } catch (error) {
@@ -1923,7 +1937,14 @@ export class AgentManager extends EventEmitter {
       // `start_subtask` writes nothing but a ticket in Flow's own store (the cap
       // is enforced there and again at the Agent hook), so it never asks. The
       // Agent call it leads to still goes through every gate as before.
-      ...(this.options.subtasks !== undefined ? { allowedTools: [flowToolName(SUBTASK_TOOL_NAME)] } : {}),
+      // The Run tools only read a Run's output and restart a step the person
+      // already set going in this conversation, so they never ask either.
+      allowedTools: [
+        ...(this.options.subtasks !== undefined ? [flowToolName(SUBTASK_TOOL_NAME)] : []),
+        ...(this.options.runTools !== undefined
+          ? [flowToolName(RUN_OUTPUT_TOOL_NAME), flowToolName(RUN_RELOAD_TOOL_NAME)]
+          : []),
+      ],
       // Saved allow/deny rules stay keyed to the PROJECT, not the worktree:
       // a rule remembered against a checkout that is pruned at merge time
       // would make the reader answer the same question in every new thread.

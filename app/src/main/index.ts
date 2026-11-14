@@ -1814,6 +1814,19 @@ function bootstrapMainProcess(): void {
       // Mid-run subtasks: `start_subtask`, the Agent ticket gate, the write
       // record, the task-event settle and Stop all go through this one writer.
       subtasks: subtaskRegistry,
+      // The agent reads a step's output and reloads it, in its own conversation
+      // only; a reload goes through the supervisor like the person's own.
+      runTools: ({ rootPath, threadId }) => {
+        const supervisor = runSupervisor
+        const manager = terminalManager
+        if (supervisor === null || manager === null) return null
+        const scope = { rootPath, threadId }
+        return {
+          steps: () => supervisor.state(scope).steps,
+          output: (terminalId) => manager.getScrollback(terminalId),
+          reload: (stepKey) => supervisor.reload(scope, stepKey),
+        }
+      },
       accountResolver,
       getModelRouting: () => appSettings.getModelRouting(),
       // The picker's evidence: what each runtime reported running (see
