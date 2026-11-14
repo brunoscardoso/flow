@@ -272,17 +272,35 @@ describe('tweak layers (Just me / This conversation)', () => {
 })
 
 describe('validateDraft', () => {
+  it('an untouched empty row is not a problem, and is not a change', () => {
+    const draft = addStep(startDraft(project({ setup: { version: 1, steps: [] } }), 'shared'))
+    expect(validateDraft(draft, { hasConversation: true })).toEqual([])
+    expect(isDirty(draft)).toBe(false)
+  })
+
+  it('a step with a command and no name is named from the command on Save', () => {
+    let draft = addStep(startDraft(project({ setup: { version: 1, steps: [] } }), 'shared'))
+    draft = changeStep(draft, draft.steps[0]!.id, { command: 'npm run dev' })
+    draft = addStep(draft)
+    expect(validateDraft(draft, { hasConversation: true })).toEqual([])
+    const change = saveChange(draft, project({ setup: { version: 1, steps: [] } }))
+    expect(change.layer === 'shared' ? change.setup.steps.map((step) => [step.name, step.command]) : null).toEqual([
+      ['dev', 'npm run dev'],
+    ])
+  })
+
   it('names each problem in plain words', () => {
     let draft = startDraft(project(), 'shared')
     draft = addStep(draft)
+    const blankId = draft.steps[draft.steps.length - 1]!.id
+    draft = changeStep(draft, blankId, { name: 'cache' })
     draft = changeStep(draft, 'app', { name: 'api' })
     draft = changeStep(draft, 'temporal', { readyValue: 'abc' })
     draft = changeStep(draft, 'worker', { readyKind: 'line', readyValue: ' ' })
     expect(validateDraft(draft, { hasConversation: true })).toEqual([
       '“temporal” waits for a port, but “abc” is not a port number.',
       '“worker” waits for a line, but the text to wait for is empty.',
-      'Step 5 needs a name.',
-      'Step 5 needs a command to run.',
+      '“cache” needs a command to run.',
       'Two steps are called “api”. Give each its own name.',
     ])
   })

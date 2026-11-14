@@ -5,11 +5,11 @@
 import type { RunSuggestion } from '../../shared/run-setup'
 import {
   isRecordableCommand,
+  rankSuggestions,
   addUsage,
   CommandUsageStore,
   feedLine,
   MAX_USAGE_ENTRIES,
-  mergeSuggestions,
   newLineBuffer,
   parseUsageEntries,
   usageScore,
@@ -200,23 +200,6 @@ describe('usageSuggestions and the merge', () => {
     expect(found[0]?.score).toBeCloseTo(2)
   })
 
-  it('puts usage first by score, then files in order, one per (project, command)', () => {
-    const file = (command: string, root = '/app'): RunSuggestion => ({
-      projectRoot: root, projectName: root === '/app' ? 'jupiter-app' : 'jupiter-core', name: command, command, source: 'package.json',
-    })
-    const usage: RunSuggestion[] = [
-      { ...file('npm run dev'), source: 'you ran it 2 times', kind: 'usage', score: 2 },
-      { ...file('make up', '/core'), source: 'you ran it 6 times', kind: 'usage', score: 6 },
-    ]
-    const merged = mergeSuggestions(usage, [file('npm run dev'), file('npm run storybook'), file('npm run dev', '/core')])
-    expect(merged.map((suggestion) => [suggestion.projectRoot, suggestion.command, suggestion.kind])).toEqual([
-      ['/core', 'make up', 'usage'],
-      ['/app', 'npm run dev', 'usage'],
-      ['/app', 'npm run storybook', 'file'],
-      ['/core', 'npm run dev', 'file'],
-    ])
-  })
-
   it('names no path or setting in a label (forbidden-pattern #12)', () => {
     const labels = usageSuggestions(project, [{ command: 'npm run dev', count: 6, lastUsedAt: iso(NOW) }], [{ command: 'make serve', startedAt: iso(NOW) }], NOW).map(
       (suggestion) => suggestion.source,
@@ -241,5 +224,52 @@ describe('isRecordableCommand — only runner lines, never secrets', () => {
     expect(isRecordableCommand('GITHUB_TOKEN=x node server.js')).toBe(false)
     expect(isRecordableCommand('docker login --password s3cret')).toBe(false)
     expect(isRecordableCommand('node seed.js postgres://me:pw@localhost/db')).toBe(false)
+  })
+})
+
+describe('rankSuggestions — the way to run each project first', () => {
+  const s = (projectRoot: string, name: string, command: string, source: string): RunSuggestion => ({
+    projectRoot, projectName: projectRoot.slice(1), name, command, source,
+  })
+  it('puts each project’s run command first, the main project first, extras last', () => {
+    const files = [
+      s('/app', 'storybook', 'npm run storybook', 'package.json'),
+      s('/app', 'codegen:watch', 'npm run codegen:watch', 'package.json'),
+      s('/app', 'dev', 'npm run dev', 'package.json'),
+      s('/core', 'postgres', 'docker compose up postgres', 'Docker Compose'),
+      s('/core', 'api', 'uv run python -m jupiter_core', 'README'),
+      s('/desk', 'preview', 'npm run preview', 'package.json'),
+      s('/desk', 'dev', 'npm run dev', 'package.json'),
+    ]
+    const ranked = rankSuggestions(files, [], ['/app', '/core', '/desk'])
+    expect(ranked.slice(0, 3).map((x) => `${x.projectRoot} ${x.command}`)).toEqual([
+      '/app npm run dev',
+      '/core uv run python -m jupiter_core',
+      '/desk npm run dev',
+    ])
+    expect(ranked[ranked.length - 1]!.name).toMatch(/storybook|preview/)
+  })
+  it('what the person ran lifts a declared command and says so', () => {
+    const files = [s('/app', 'dev', 'npm run dev', 'package.json'), s('/app', 'start', 'npm start', 'package.json')]
+    const usage = [{ ...s('/app', 'start', 'npm start', 'you ran it 6 times'), kind: 'usage' as const, score: 6 }]
+    const ranked = rankSuggestions(files, usage, ['/app'])
+    expect(ranked[0]!.command).toBe('npm start')
+    expect(ranked[0]!.source).toBe('package.json · you ran it 6 times')
+  })
+})
+
+describe('usageSuggestions — agent background noise is left out', () => {
+  it('drops waits and test runs the agent started', () => {
+    const out = usageSuggestions(
+      { root: '/app', name: 'app' },
+      [],
+      [
+        { command: 'sleep 240; echo done', startedAt: '2026-11-14T10:00:00Z' },
+        { command: '.venv/bin/pytest tests/services', startedAt: '2026-11-14T10:00:00Z' },
+        { command: 'npm run dev', startedAt: '2026-11-14T10:00:00Z' },
+      ],
+      Date.parse('2026-11-14T12:00:00Z'),
+    )
+    expect(out.map((x) => x.command)).toEqual(['npm run dev'])
   })
 })

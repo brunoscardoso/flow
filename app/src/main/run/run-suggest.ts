@@ -72,6 +72,8 @@ const ONE_SHOT_WORD =
   /^(build|test|tests|lint|format|fmt|typecheck|check|prepare|install|i|ci|add|remove|uninstall|clean|release|deploy|publish|e2e|coverage|gen|generate|migrate|seed|init|login|logout|version|help|--help|-h|--version|-v)$/i
 /** Programs that are never a step of a Run: they show, move or change something and end. */
 const ONE_SHOT_PROGRAMS = new Set([
+  'sleep', 'wait', 'true', 'false', 'pytest', 'jest', 'vitest', 'mocha', 'playwright', 'cypress', 'tsc', 'eslint',
+  'prettier', 'ruff', 'black', 'mypy', 'pyright', 'biome', 'curl', 'wget', 'grep', 'rg', 'find', 'sed', 'awk', 'jq',
   'cd', 'ls', 'll', 'la', 'l', 'pwd', 'git', 'gh', 'cat', 'bat', 'less', 'more', 'head', 'tail', 'clear', 'reset',
   'exit', 'logout', 'echo', 'printf', 'man', 'which', 'type', 'whoami', 'history', 'vim', 'vi', 'nvim', 'nano',
   'emacs', 'code', 'cursor', 'open', 'rm', 'mv', 'cp', 'mkdir', 'rmdir', 'touch', 'chmod', 'chown', 'ln', 'kill',

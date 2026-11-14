@@ -193,7 +193,7 @@ import {
 import { registerRunChannels } from './run/ipc'
 import { createTcpConnect, waitForLine, waitForPort, waitForPortFree } from './run/ready-check'
 import { nodeRunStoreFs, RunSetupStore } from './run/run-setup-store'
-import { CommandUsageStore, mergeSuggestions, usageSuggestions } from './run/command-usage'
+import { CommandUsageStore, rankSuggestions, usageSuggestions } from './run/command-usage'
 import { nodeSuggestFs, suggestRunSteps } from './run/run-suggest'
 import { RunSupervisor } from './run/run-supervisor'
 import { wireShellPersistence } from './terminal/shell-persistence'
@@ -3600,7 +3600,7 @@ const understandFeature = async (request: {
           places.map((place) => ({ root: place.root, dir: place.cwd ?? place.root, name: place.name })),
           suggestFs,
         )
-        return mergeSuggestions(used, files)
+        return rankSuggestions(files, used, places.map((place) => place.root))
       },
       resolveRoot: (rootPath) =>
         addressableRoots.isAddressable(rootPath) ? (addressableRoots.ownerCheckoutFor(rootPath) ?? rootPath) : null,

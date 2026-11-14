@@ -328,10 +328,12 @@ export function validateDraft(draft: RunSetupDraft, options: { hasConversation: 
   if (draft.layer === 'conversation' && !options.hasConversation) problems.push(SETUP_STRINGS.noConversation)
   const names = new Map<string, number>()
   draft.steps.forEach((step, index) => {
-    const name = step.name.trim()
+    // A row nobody has typed in is not a problem: Save leaves it out.
+    if (isBlankStep(step)) return
+    // An empty name is filled from the command on Save.
+    const name = step.name.trim() === '' ? nameFromCommand(step.command) : step.name.trim()
     const label = name === '' ? `Step ${index + 1}` : `“${name}”`
-    if (name === '') problems.push(`Step ${index + 1} needs a name.`)
-    else names.set(name.toLowerCase(), (names.get(name.toLowerCase()) ?? 0) + 1)
+    if (name !== '') names.set(name.toLowerCase(), (names.get(name.toLowerCase()) ?? 0) + 1)
     if (step.command.trim() === '') problems.push(`${label} needs a command to run.`)
     if (step.readyKind === 'port' && parsePort(step.readyValue) === null) {
       problems.push(
@@ -390,6 +392,7 @@ export function diffDraft(draft: RunSetupDraft): DraftDiff {
   const unskipped: DraftStep[] = []
   for (const step of draft.steps) {
     const before = original.get(step.id)
+    if (before === undefined && isBlankStep(step)) continue
     if (before === undefined) {
       added.push(step)
       continue
@@ -417,6 +420,46 @@ export function isDirty(draft: RunSetupDraft): boolean {
 
 // ─── the save request ────────────────────────────────────────────────────────
 
+/** A row with neither a name nor a command — the empty step the panel opens with. */
+export function isBlankStep(step: Pick<DraftStep, 'name' | 'command'>): boolean {
+  return step.name.trim() === '' && step.command.trim() === ''
+}
+
+/** A short name for a command: `npm run dev` → "dev", `docker compose up kafka` → "kafka". */
+export function nameFromCommand(command: string): string {
+  const words = command.trim().split(/\s+/).filter((word) => word !== '' && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word))
+  if (words.length === 0) return ''
+  const program = (words[0]!.split('/').pop() ?? words[0]!).toLowerCase()
+  if (['npm', 'pnpm', 'yarn', 'bun'].includes(program)) {
+    if (words[1] === 'run' && words[2] !== undefined) return words[2]
+    if (words[1] !== undefined) return words[1]
+  }
+  if ((program === 'docker' && words[1] === 'compose') || program === 'docker-compose') {
+    const rest = words.slice(program === 'docker' ? 3 : 2).filter((word) => !word.startsWith('-'))
+    return rest.length > 0 ? rest.join(' ') : 'compose'
+  }
+  if ((program === 'make' || program === 'just') && words[1] !== undefined) return words[1]
+  if (program === 'uv' && words[1] === 'run' && words[2] !== undefined) {
+    return words[2] === 'python' && words[3] === '-m' && words[4] !== undefined ? words[4] : words[2]
+  }
+  return words.slice(0, 2).join(' ')
+}
+
+/** The steps Save writes: blank rows left out, an empty name filled from the command (kept unique). */
+function savedSteps(steps: readonly DraftStep[]): DraftStep[] {
+  const taken = new Set(steps.map((step) => step.name.trim().toLowerCase()).filter((name) => name !== ''))
+  return steps
+    .filter((step) => !isBlankStep(step))
+    .map((step) => {
+      if (step.name.trim() !== '') return step
+      const base = nameFromCommand(step.command) || 'step'
+      let name = base
+      for (let n = 2; taken.has(name.toLowerCase()); n += 1) name = `${base} ${n}`
+      taken.add(name.toLowerCase())
+      return { ...step, name }
+    })
+}
+
 function toRunStep(step: DraftStep): RunStep {
   const out: RunStep = { id: step.id, name: step.name.trim(), command: step.command.trim(), start: step.start }
   const ready = readyOf(step)
@@ -443,7 +486,7 @@ export function saveChange(
   project: RunProjectLayers,
 ): RunSaveChange {
   if (draft.layer === 'shared') {
-    return { layer: 'shared', projectRoot: draft.projectRoot, setup: { version: 1, steps: draft.steps.map(toRunStep) } }
+    return { layer: 'shared', projectRoot: draft.projectRoot, setup: { version: 1, steps: savedSteps(draft.steps).map(toRunStep) } }
   }
   const below = new Map(baseSteps(project, draft.layer).map((step) => [step.id, step]))
   const existing: RunTweaks = project[draft.layer]

@@ -227,7 +227,7 @@ export function usageSuggestions(
   const byCommand = new Map<string, RunSuggestion>()
   for (const entry of typed) {
     const command = normalize(entry.command)
-    if (looksOneShotCommand(command)) continue
+    if (!isRecordableCommand(command)) continue
     if (!looksLongRunningCommand(command) && entry.count < OFTEN_RUN) continue
     byCommand.set(command, {
       projectRoot: project.root,
@@ -242,7 +242,10 @@ export function usageSuggestions(
   const started = new Map<string, { count: number; lastUsedAt: string }>()
   for (const call of agent) {
     const command = normalize(call.command)
-    if (command === '' || command.length > MAX_LINE_LENGTH || looksOneShotCommand(command)) continue
+    // The agent runs many things in the background (waits, test runs); only a
+    // runner line that keeps running is a way to run the project.
+    if (command === '' || command.length > MAX_LINE_LENGTH) continue
+    if (!isRecordableCommand(command) || !looksLongRunningCommand(command)) continue
     const seen = started.get(command)
     if (seen === undefined) started.set(command, { count: 1, lastUsedAt: call.startedAt })
     else {
@@ -271,19 +274,75 @@ export function usageSuggestions(
   return [...byCommand.values()].sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
 }
 
+/** How strongly a command reads as THE way to run a project: dev/start first, extras (storybook, preview) last. */
+export function runPriority(suggestion: Pick<RunSuggestion, 'name' | 'command' | 'source'>): number {
+  const name = suggestion.name.toLowerCase()
+  const words = suggestion.command.toLowerCase().split(/\s+/)
+  let score = 15
+  if (name === 'dev' || name === 'develop' || name === 'start-dev' || name === 'run-dev') score = 50
+  else if (name === 'start') score = 45
+  else if (name === 'serve' || name === 'server' || name === 'web' || name === 'api') score = 40
+  else if (words.includes('up') && (words.includes('compose') || words[0] === 'docker-compose')) score = 30
+  else if (/(^|[:_-])(dev|start|serve)([:_-]|$)/.test(name)) score = 25
+  else if (/watch/.test(name)) score = 12
+  else if (/storybook|preview|docs/.test(name)) score = 6
+  const source = suggestion.source.toLowerCase()
+  if (source === 'procfile') score += 30
+  else if (source === 'readme') score += 28
+  else if (source === 'package.json' || source === 'pyproject.toml') score += 20
+  else if (source === 'makefile') score += 18
+  else if (source === 'docker compose') score += 14
+  return score
+}
+
 /**
- * Usage first (best score first, across projects), then the file-based ones
- * in the order found; one suggestion per (project, command) — the first wins.
+ * The order the panel shows: the way to run each project first — the best
+ * candidate of every project, the main project first — then everything else
+ * by how likely it is to be a run command. What the person actually ran lifts
+ * a declared command (and says so) rather than competing with it; usage that
+ * matches nothing declared joins the pool on its own score.
  */
-export function mergeSuggestions(usage: readonly RunSuggestion[], files: readonly RunSuggestion[]): RunSuggestion[] {
-  const out: RunSuggestion[] = []
-  const seen = new Set<string>()
-  const ranked = [...usage].sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-  for (const suggestion of [...ranked, ...files]) {
-    const key = `${suggestion.projectRoot}::${normalize(suggestion.command)}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    out.push({ ...suggestion, kind: suggestion.kind ?? 'file' })
+export function rankSuggestions(
+  files: readonly RunSuggestion[],
+  usage: readonly RunSuggestion[],
+  projectOrder: readonly string[],
+): RunSuggestion[] {
+  const keyOf = (s: RunSuggestion): string => `${s.projectRoot}::${normalize(s.command)}`
+  const used = new Map(usage.map((s) => [keyOf(s), s]))
+  const pool = new Map<string, RunSuggestion & { rank: number }>()
+  for (const file of files) {
+    const key = keyOf(file)
+    if (pool.has(key)) continue
+    const hit = used.get(key)
+    pool.set(key, {
+      ...file,
+      kind: hit !== undefined ? 'usage' : 'file',
+      source: hit !== undefined ? `${file.source} · ${hit.source}` : file.source,
+      rank: runPriority(file) + (hit !== undefined ? 25 + Math.min(15, hit.score ?? 0) : 0),
+    })
   }
-  return out
+  for (const use of usage) {
+    const key = keyOf(use)
+    if (pool.has(key)) continue
+    pool.set(key, { ...use, kind: 'usage', rank: 10 + runPriority(use) / 2 + Math.min(15, use.score ?? 0) })
+  }
+  const order = (root: string): number => {
+    const at = projectOrder.indexOf(root)
+    return at === -1 ? projectOrder.length : at
+  }
+  const all = [...pool.values()].sort((a, b) => b.rank - a.rank || order(a.projectRoot) - order(b.projectRoot))
+  const leaders: typeof all = []
+  const seenProject = new Set<string>()
+  for (const s of [...all].sort((a, b) => order(a.projectRoot) - order(b.projectRoot) || b.rank - a.rank)) {
+    if (seenProject.has(s.projectRoot)) continue
+    seenProject.add(s.projectRoot)
+    leaders.push(s)
+  }
+  const leaderKeys = new Set(leaders.map(keyOf))
+  return [...leaders, ...all.filter((s) => !leaderKeys.has(keyOf(s)))].map(({ rank: _rank, ...rest }) => rest)
+}
+
+/** Kept for callers that only have usage and files: same as `rankSuggestions` with no project order. */
+export function mergeSuggestions(usage: readonly RunSuggestion[], files: readonly RunSuggestion[]): RunSuggestion[] {
+  return rankSuggestions(files, usage, [])
 }
