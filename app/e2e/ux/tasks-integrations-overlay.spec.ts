@@ -53,6 +53,13 @@ test('the Integrations group renders every provider, on the settings page', asyn
   // existed, the board's Remote column could only tell a person that Azure
   // "needs an organisation and project" with nowhere to say them.
   const azure = group.locator('.fl-settings-section', { hasText: 'Azure DevOps' })
+  // One card per tracker (2026-11-15): a connected tracker's card starts
+  // closed, and this machine may already be signed in — open it first.
+  const azureToggle = azure.locator('.fl-int-chevron')
+  if ((await azureToggle.getAttribute('aria-expanded')) !== 'true') await azureToggle.click()
+  // Connected, its token form sits behind Replace token / Use a token instead.
+  const reveal = azure.locator('.fl-int-secondary', { hasText: /Replace token|Use a token instead/ })
+  if ((await reveal.count()) > 0) await reveal.click()
   await expect(azure.locator('.fl-int-field', { hasText: 'Organisation' })).toBeVisible()
   await expect(azure.locator('.fl-int-field', { hasText: 'Project' })).toBeVisible()
 

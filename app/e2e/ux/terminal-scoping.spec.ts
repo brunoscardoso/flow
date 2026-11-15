@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/electron'
+import { clickNewTerminal } from '../terminal-actions'
 import { sel, statusButtonByText } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import type { Page } from '@playwright/test'
@@ -41,7 +42,7 @@ async function openTerminalWithShell(win: Page): Promise<void> {
   }
   await expect(win.locator(sel.terminalRoot)).toBeVisible()
   if ((await termTabs(win).count()) === 0) {
-    await win.locator('.fl-term-tool[aria-label="New terminal"]').click()
+    await clickNewTerminal(win)
   }
   await expect(win.locator('.fl-term-host .xterm').first()).toBeVisible({ timeout: 15000 })
   await expect

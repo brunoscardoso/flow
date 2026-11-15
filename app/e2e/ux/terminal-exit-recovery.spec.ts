@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/electron'
+import { clickNewTerminal } from '../terminal-actions'
 import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import type { Page } from '@playwright/test'
@@ -27,13 +28,12 @@ function activeRows(win: Page) {
   return win.locator('.fl-term-host:not([hidden]) .xterm-rows')
 }
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 
 /** Reveal is not needed (docked by default); ensure a scoped live shell via +. */
 async function ensureScopedShell(win: Page): Promise<void> {
   await expect(win.locator(sel.terminalRoot)).toBeVisible()
   if ((await termTabs(win).count()) === 0) {
-    await newBtn(win).click()
+    await clickNewTerminal(win)
   }
   await expect(win.locator('.fl-term-host:not([hidden]) .xterm').first()).toBeVisible({
     timeout: 15000,
@@ -106,7 +106,7 @@ test.describe('terminal — exit recovery & cwd title', () => {
     await window.screenshot({ path: `${SCREEN_DIR}/terminal-exit-recovery-01-exited.png` })
 
     // + opens a second, LIVE shell that becomes active — the dead tab is not active.
-    await newBtn(window).click()
+    await clickNewTerminal(window)
     await expect(termTabs(window)).toHaveCount(2)
     await expect(window.locator('.fl-term-tabs .tab.active')).toHaveCount(1)
     await expect(window.locator('.fl-term-tabs .tab.active')).not.toContainText(/\(exited\)/i)
@@ -132,7 +132,7 @@ test.describe('terminal — exit recovery & cwd title', () => {
     await runCommand(window, 'echo SHELL_A', 'SHELL_A')
 
     // Second live shell (B, now active).
-    await newBtn(window).click()
+    await clickNewTerminal(window)
     await expect(termTabs(window)).toHaveCount(2)
     await runCommand(window, 'echo SHELL_B', 'SHELL_B')
 

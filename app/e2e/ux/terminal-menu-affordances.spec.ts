@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/electron'
+import { clickNewTerminal } from '../terminal-actions'
 import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds, openThreadByTitle } from './fixtures/seed'
 import type { Page } from '@playwright/test'
@@ -41,7 +42,6 @@ import { join } from 'node:path'
 const activeHost = (win: Page) => win.locator('.fl-term-host:not([hidden])')
 const activeRows = (win: Page) => activeHost(win).locator('.xterm-rows')
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 const rootMenu = (win: Page) => win.locator('.fl-term-root-menu')
 
 async function revealTerminal(win: Page): Promise<void> {
@@ -217,7 +217,7 @@ test.describe('terminal popup affordances', () => {
     await revealTerminal(win)
     await waitPrompt(win)
 
-    await newBtn(win).click()
+    await clickNewTerminal(win)
     await expect(rootMenu(win)).toBeVisible({ timeout: 5000 })
 
     // Escape closes it — the dead key this issue was filed for.

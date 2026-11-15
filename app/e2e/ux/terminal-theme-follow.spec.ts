@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/electron'
+import { clickNewTerminal } from '../terminal-actions'
 import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import type { Page } from '@playwright/test'
@@ -33,7 +34,6 @@ function activeRows(win: Page) {
   return activeHost(win).locator('.xterm-rows')
 }
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 
 /** Every open terminal (visible OR hidden — the observer re-themes them all)
  *  must carry `target` as its rows `color`. Returns false until at least one row
@@ -50,7 +50,7 @@ async function everyRowColorIs(win: Page, target: string): Promise<boolean> {
 async function ensureScopedShell(win: Page): Promise<void> {
   await expect(win.locator(sel.terminalRoot)).toBeVisible()
   if ((await termTabs(win).count()) === 0) {
-    await newBtn(win).click()
+    await clickNewTerminal(win)
   }
   await expect(win.locator('.fl-term-host:not([hidden]) .xterm').first()).toBeVisible({
     timeout: 15000,
@@ -95,7 +95,7 @@ test.describe('terminal — follows the app theme (#399)', () => {
     await ensureScopedShell(window)
     // Open a SECOND terminal so "every open terminal" is a non-trivial guard
     // (the non-active sibling must re-theme too, not just the visible one).
-    await newBtn(window).click()
+    await clickNewTerminal(window)
     await expect(termTabs(window)).toHaveCount(2)
     await expect.poll(() => everyRowColorIs(window, DARK_FG), { timeout: 10000 }).toBe(true)
     await window.screenshot({ path: `${SCREEN_DIR}/terminal-theme-01-dark.png` })

@@ -1,4 +1,5 @@
 import { _electron as electron, type Page } from '@playwright/test'
+import { clickNewTerminal } from '../terminal-actions'
 import { resolve } from 'node:path'
 import { test, expect } from '../fixtures/electron'
 import { sel } from '../selectors'
@@ -156,7 +157,7 @@ test('a shell belongs to the conversation it was opened in; switching hides and 
   // ── B gets a second shell, then the app restarts with B selected.
   await selectThread(window, threadB)
   await expect(hostById(window, shellB)).toBeVisible({ timeout: 15_000 })
-  await window.locator('.fl-term-tool[aria-label="New terminal"]').click()
+  await clickNewTerminal(window)
   await expect(termTabs(window)).toHaveCount(2, { timeout: 15_000 })
   await app.close()
 

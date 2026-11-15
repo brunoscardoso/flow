@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/electron'
+import { clickNewTerminal } from '../terminal-actions'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { sel } from '../selectors'
 import { mkdirSync } from 'node:fs'
@@ -31,13 +32,12 @@ const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
 const renameInput = (win: Page) => win.locator('.fl-term-tabs .rename-input')
 const activeHost = (win: Page) => win.locator('.fl-term-host:not([hidden])')
 const activeRows = (win: Page) => activeHost(win).locator('.xterm-rows')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 
 /** Open (or reuse) a shell in the active project and wait for its first prompt. */
 async function ensureShell(win: Page): Promise<void> {
   await expect(win.locator(sel.terminalRoot)).toBeVisible()
   if ((await termTabs(win).count()) === 0) {
-    await newBtn(win).click()
+    await clickNewTerminal(win)
   }
   await expect(activeHost(win).locator('.xterm')).toBeVisible({ timeout: 15000 })
   await expect

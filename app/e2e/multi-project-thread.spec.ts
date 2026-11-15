@@ -29,6 +29,7 @@ import { basename, join } from 'node:path'
 import type { Page } from '@playwright/test'
 import { test, expect } from './fixtures/electron'
 import { sel } from './selectors'
+import { clickNewTerminal } from './terminal-actions'
 import { seedProject, activateProject, cleanupSeeds, gitRetry, pickFilesProject } from './ux/fixtures/seed'
 
 /** Accent chrome (tree header borders, terminal dots) is inline-styled
@@ -150,7 +151,6 @@ async function openGitChanges(win: Page): Promise<void> {
 }
 
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newTerminalBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 
 test.afterAll(() => cleanupSeeds())
 
@@ -337,7 +337,7 @@ test('multi-root thread: sectioned tree, per-repo git groups + independent commi
   // ── Terminal: + offers both roots; a beta shell carries beta's accent ────
   await expect(window.locator(sel.terminalRoot)).toBeVisible()
   const tabsBefore = await termTabs(window).count()
-  await newTerminalBtn(window).click()
+  await clickNewTerminal(window)
   const rootMenu = window.locator('.fl-term-root-menu')
   await expect(rootMenu).toBeVisible()
   await expect(rootMenu.locator('.fl-term-root-item')).toHaveCount(2)
@@ -389,7 +389,7 @@ test('single-root control shows NO scope chrome (NFR1); live attach flips all su
   // Terminal: + spawns directly — no root menu, and no accent dots on tabs.
   await expect(window.locator(sel.terminalRoot)).toBeVisible()
   const tabsBefore = await termTabs(window).count()
-  await newTerminalBtn(window).click()
+  await clickNewTerminal(window)
   await expect(window.locator('.fl-term-root-menu')).toHaveCount(0)
   await expect(termTabs(window)).toHaveCount(tabsBefore + 1, { timeout: 15_000 })
   await expect(window.locator('.fl-term-tabs .tab .project-dot')).toHaveCount(0)
@@ -424,7 +424,7 @@ test('single-root control shows NO scope chrome (NFR1); live attach flips all su
   await expect(
     window.locator('.fl-term-tabs .tab .project-dot').first(),
   ).toBeVisible({ timeout: 15_000 })
-  await newTerminalBtn(window).click()
+  await clickNewTerminal(window)
   const rootMenu = window.locator('.fl-term-root-menu')
   await expect(rootMenu).toBeVisible()
   await expect(rootMenu.locator('.fl-term-root-item')).toHaveCount(2)

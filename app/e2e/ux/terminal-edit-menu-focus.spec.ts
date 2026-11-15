@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/electron'
+import { clickNewTerminal } from '../terminal-actions'
 import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import type { ElectronApplication, Page } from '@playwright/test'
@@ -54,7 +55,6 @@ const activeScreen = (win: Page) => win.locator('.fl-term-host:not([hidden]) .xt
 const helperTextarea = (win: Page) =>
   win.locator('.fl-term-host:not([hidden]) .xterm-helper-textarea')
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 
 /** xterm paints its selection as absolutely-positioned rects; 0 = nothing selected. */
 const selectionRects = (win: Page) =>
@@ -99,7 +99,7 @@ async function editRole(app: ElectronApplication, method: 'copy' | 'paste'): Pro
 
 async function ensureScopedShell(win: Page): Promise<void> {
   await expect(win.locator(sel.terminalRoot)).toBeVisible()
-  if ((await termTabs(win).count()) === 0) await newBtn(win).click()
+  if ((await termTabs(win).count()) === 0) await clickNewTerminal(win)
   await expect(win.locator('.fl-term-host:not([hidden]) .xterm').first()).toBeVisible({
     timeout: 15000,
   })

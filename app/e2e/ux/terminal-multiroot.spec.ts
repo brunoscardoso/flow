@@ -23,11 +23,11 @@
 import { test, expect } from '../fixtures/electron'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import type { Page } from '@playwright/test'
+import { clickNewTerminal, clickSplitTerminal } from '../terminal-actions'
 
 const SCREENS = 'e2e/ux/__screens'
 
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 const rootMenu = (win: Page) => win.locator('.fl-term-root-menu')
 const activeRows = (win: Page) => win.locator('.fl-term-host:not([hidden]) .xterm-rows')
 
@@ -149,7 +149,7 @@ test('multi-root thread: + offers a root picker and each pick spawns a shell IN 
   console.log('TABS(initial):', JSON.stringify(await tabReport(window)))
 
   // + is a user gesture under a 2-root scope → the "New terminal in:" picker.
-  await newBtn(window).click()
+  await clickNewTerminal(window)
   await expect(rootMenu(window)).toBeVisible({ timeout: 8000 })
   const rows = rootMenu(window).locator('.fl-term-root-item')
   console.log('MENU ROWS:', JSON.stringify(await rows.allInnerTexts()))
@@ -179,7 +179,7 @@ test('multi-root thread: + offers a root picker and each pick spawns a shell IN 
   expect(await shellCwd(window)).toBe(beta)
 
   // GUARD — and the PRIMARY root, from the same menu, lands in alpha.
-  await newBtn(window).click()
+  await clickNewTerminal(window)
   await expect(rootMenu(window)).toBeVisible({ timeout: 8000 })
   await rootMenu(window).locator('.fl-term-root-item').nth(0).click()
   await expect(termTabs(window)).toHaveCount(before + 2, { timeout: 20_000 })
@@ -266,7 +266,7 @@ test('multi-root thread: split offers the same picker, and the pane lands in the
   await openThread(window, 'Split across projects')
 
   // One terminal to split FROM, in alpha.
-  await newBtn(window).click()
+  await clickNewTerminal(window)
   await expect(rootMenu(window)).toBeVisible({ timeout: 20_000 })
   await rootMenu(window).locator('.fl-term-root-item', { hasText: 'flow-tsplit-alpha' }).first().click()
   await waitForPrompt(window)
@@ -274,8 +274,7 @@ test('multi-root thread: split offers the same picker, and the pane lands in the
 
   // THE SPLIT ASKS. This is the whole change: it used to spawn immediately,
   // in the anchor's project.
-  const splitBtn = window.locator('.fl-term-tool[aria-label="Split terminal"]')
-  await splitBtn.click()
+  await clickSplitTerminal(window)
   await expect(rootMenu(window)).toBeVisible({ timeout: 20_000 })
   await expect(rootMenu(window)).toContainText('Split with:')
   // Both projects are offered — the anchor's included, because splitting into

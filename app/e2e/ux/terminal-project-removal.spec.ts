@@ -33,11 +33,11 @@ import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { openProjectActions } from './fixtures/project-actions'
 import { execFileSync } from 'node:child_process'
 import type { Page } from '@playwright/test'
+import { clickNewTerminal } from '../terminal-actions'
 
 const SCREENS = 'e2e/ux/__screens'
 
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 const activeRows = (win: Page) => win.locator('.fl-term-host:not([hidden]) .xterm-rows')
 
 /** A long-lived, uniquely identifiable foreground process per test. */
@@ -87,7 +87,7 @@ async function typeLine(win: Page, cmd: string): Promise<void> {
 /** A live scoped shell in the active project (the strip starts empty after
  *  activation — the boot auto-start was unscoped). */
 async function ensureScopedShell(win: Page): Promise<void> {
-  if ((await termTabs(win).count()) === 0) await newBtn(win).click()
+  if ((await termTabs(win).count()) === 0) await clickNewTerminal(win)
   await expect(win.locator('.fl-term-host:not([hidden]) .xterm').first()).toBeVisible({
     timeout: 20_000,
   })

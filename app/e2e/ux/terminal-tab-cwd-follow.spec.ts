@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/electron'
+import { clickNewTerminal } from '../terminal-actions'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { sel, statusButtonByText } from '../selectors'
 import { mkdirSync } from 'node:fs'
@@ -20,7 +21,6 @@ import type { Page } from '@playwright/test'
 const SCREEN_DIR = 'e2e/ux/__screens'
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
 const activeRows = (win: Page) => win.locator('.fl-term-host:not([hidden]) .xterm-rows')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 
 async function openProjectShell(win: Page): Promise<void> {
   // Terminal may be docked-visible by default; reveal via the toggle if not.
@@ -29,7 +29,7 @@ async function openProjectShell(win: Page): Promise<void> {
   }
   await expect(win.locator(sel.terminalRoot)).toBeVisible()
   if ((await termTabs(win).count()) === 0) {
-    await newBtn(win).click()
+    await clickNewTerminal(win)
   }
   await expect(termTabs(win).first()).toBeVisible({ timeout: 15000 })
   await expect(win.locator('.fl-term-host:not([hidden]) .xterm')).toBeVisible({ timeout: 15000 })

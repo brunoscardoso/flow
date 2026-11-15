@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/electron'
+import { clickNewTerminal } from '../terminal-actions'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { sel, statusButtonByText } from '../selectors'
 import type { Page } from '@playwright/test'
@@ -37,7 +38,6 @@ const SCREEN_DIR = 'e2e/ux/__screens'
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
 const activeHost = (win: Page) => win.locator('.fl-term-host:not([hidden])')
 const activeRows = (win: Page) => activeHost(win).locator('.xterm-rows')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 
 /** The terminal is docked-visible by default (#674) — reveal only if it isn't. */
 async function revealTerminal(win: Page): Promise<void> {
@@ -59,7 +59,7 @@ async function waitLiveShell(win: Page): Promise<void> {
 async function ensureShell(win: Page): Promise<void> {
   await revealTerminal(win)
   if ((await termTabs(win).count()) === 0) {
-    await newBtn(win).click()
+    await clickNewTerminal(win)
   }
   await waitLiveShell(win)
 }

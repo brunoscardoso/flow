@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/electron'
+import { clickNewTerminal } from '../terminal-actions'
 import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { rmSync } from 'node:fs'
@@ -35,7 +36,6 @@ import type { Page } from '@playwright/test'
 const SCREEN_DIR = 'e2e/ux/__screens'
 
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 const activeHost = (win: Page) => win.locator('.fl-term-host:not([hidden])')
 const activeRows = (win: Page) => activeHost(win).locator('.xterm-rows')
 
@@ -68,7 +68,7 @@ const mainTerminals = (win: Page) =>
 async function waitForLiveShell(win: Page): Promise<void> {
   await expect(win.locator(sel.terminalRoot)).toBeVisible({ timeout: 20000 })
   if ((await termTabs(win).count()) === 0) {
-    await newBtn(win).click()
+    await clickNewTerminal(win)
   }
   await expect(win.locator('.fl-term-host:not([hidden]) .xterm').first()).toBeVisible({
     timeout: 15000,
@@ -125,7 +125,7 @@ test.describe('terminal — the project folder is gone', () => {
     // The user deletes / moves / unmounts the project folder while Flow runs…
     rmSync(proj, { recursive: true, force: true })
     // …and then asks for another terminal, exactly as before.
-    await newBtn(window).click()
+    await clickNewTerminal(window)
 
     // 1. The shell that can't start is NOT disguised as a live one.
     await expect

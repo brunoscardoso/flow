@@ -104,6 +104,12 @@ function jiraSection(window: Page) {
   return window.locator(`${OVERLAY} .fl-settings-section`).filter({ hasText: 'Jira' })
 }
 
+/** One card per tracker (2026-11-15): a connected card starts closed. */
+async function openCard(section: ReturnType<typeof jiraSection>): Promise<void> {
+  const toggle = section.locator('.fl-int-chevron')
+  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click()
+}
+
 test.afterAll(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
 })
@@ -122,6 +128,7 @@ test.describe('Integrations — Disconnect (#1505)', () => {
 
       const jira = jiraSection(window)
       await expect(jira.locator('.fl-int-pill')).toContainText('Connected', { timeout: 30_000 })
+      await openCard(jira)
 
       // ONE click. Before the fix this was already the end of the token.
       await jira.locator('.fl-int-disconnect').click()
@@ -155,6 +162,7 @@ test.describe('Integrations — Disconnect (#1505)', () => {
 
       const jira = jiraSection(window)
       await expect(jira.locator('.fl-int-pill')).toContainText('Connected', { timeout: 30_000 })
+      await openCard(jira)
 
       await jira.locator('.fl-int-disconnect').click()
       await jira.locator('.fl-int-confirm button', { hasText: 'Disconnect' }).click()

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '../fixtures/electron'
+import { clickNewTerminal, clickSplitTerminal } from '../terminal-actions'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { sel } from '../selectors'
 
@@ -13,14 +14,12 @@ import { sel } from '../selectors'
  * closing one collapses the row back to the survivor (which stays live).
  */
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
-const splitBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="Split terminal"]')
 /** Panes currently on screen — the row. */
 const panes = (win: Page) => win.locator('.fl-term-split .fl-term-host:not([hidden])')
 
 async function ensureShell(win: Page): Promise<void> {
   await expect(win.locator(sel.terminalRoot)).toBeVisible()
-  if ((await termTabs(win).count()) === 0) await newBtn(win).click()
+  if ((await termTabs(win).count()) === 0) await clickNewTerminal(win)
   await expect(panes(win).first().locator('.xterm')).toBeVisible({ timeout: 15000 })
 }
 
@@ -42,9 +41,7 @@ test('splitting shows two live terminals side by side (#1133)', async ({ window 
 
   // One terminal → one pane. The pre-split experience, unchanged.
   await expect(panes(window)).toHaveCount(1)
-  await expect(splitBtn(window)).toBeEnabled()
-
-  await splitBtn(window).click()
+  await clickSplitTerminal(window)
 
   // Two panes, both alive: a split that leaves a blank host is the bug in a
   // new costume.
