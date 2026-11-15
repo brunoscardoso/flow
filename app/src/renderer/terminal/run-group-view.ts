@@ -603,10 +603,7 @@ export class RunGroupView {
       start.type = 'button'
       start.className = 'fl-run-setup-entry'
       start.title = RUN_STRINGS.setUpTitle
-      const glyph = document.createElement('fl-icon')
-      glyph.setAttribute('name', 'rocket')
-      glyph.setAttribute('size', '12')
-      start.append(glyph, document.createTextNode(RUN_STRINGS.setUp))
+      start.append(document.createTextNode(RUN_STRINGS.setUp))
       start.addEventListener('click', () => this.#toggleSetup())
       root.appendChild(start)
       root.appendChild(separator())
@@ -624,7 +621,7 @@ export class RunGroupView {
     open.title = RUN_STRINGS.launchpadTitle
     open.setAttribute('aria-haspopup', 'menu')
     open.setAttribute('aria-expanded', String(this.#menu !== null))
-    open.append(icon('rocket', '12'), document.createTextNode(RUN_STRINGS.launchpad), icon('chevron-down', '10'))
+    open.append(document.createTextNode(RUN_STRINGS.launchpad), icon('chevron-down', '10'))
     open.classList.toggle('active', this.#panel.isOpen)
     open.addEventListener('click', (event) => {
       event.stopPropagation()
