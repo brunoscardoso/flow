@@ -139,9 +139,11 @@ describe('the shipped ladder', () => {
   // the v35 floor — so a v35 build with the opening rule still opens the
   // profile. This pin is the loud, non-quiet bump that policy asks for.
   // v39 (turn-end mark) and v40 (the subtasks table, plan_mid-run-subtasks)
-  // follow the same rule: additive, floored at v35.
-  it('tops out at v40, floored at v35 for the installed pre-rename build', () => {
-    expect(LATEST_SCHEMA_VERSION).toBe(40)
+  // follow the same rule: additive, floored at v35. So does v41
+  // (threads.autopilot — autopilot chosen per conversation, default off), and
+  // v42 (threads.run_tweaks — a conversation's own Run setup tweaks, nullable).
+  it('tops out at v42, floored at v35 for the installed pre-rename build', () => {
+    expect(LATEST_SCHEMA_VERSION).toBe(42)
   })
 
   // Workspaces (plan_workspaces-knowledge-hub, Phase 4) deliberately added NO
@@ -153,7 +155,7 @@ describe('the shipped ladder', () => {
     try {
       const db = openDatabase(join(dir, 'fresh.db'))
       try {
-        expect(versionOf(db)).toBe(40)
+        expect(versionOf(db)).toBe(42)
         const tables = (
           db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>
         ).map((row) => row.name)
@@ -172,7 +174,7 @@ describe('the shipped ladder', () => {
     }
   })
 
-  it('the installed build (ladder ending at v35) opens a v40 database and writes into it', () => {
+  it('the installed build (ladder ending at v35) opens a v42 database and writes into it', () => {
     const dir = mkdtempSync(join(tmpdir(), 'flow-schema-compat-'))
     try {
       const path = join(dir, 'shared.db')
@@ -196,6 +198,10 @@ describe('the shipped ladder', () => {
         expect(
           (installed.prepare('SELECT ends_turn FROM messages WHERE id = ?').get('m-1') as { ends_turn: number }).ends_turn,
         ).toBe(0)
+        // A thread the old build writes has autopilot OFF — never on by omission.
+        expect(
+          (installed.prepare('SELECT autopilot FROM threads WHERE id = ?').get('th-1') as { autopilot: number }).autopilot,
+        ).toBe(0)
       } finally {
         installed.close()
       }
@@ -209,7 +215,7 @@ describe('the shipped ladder', () => {
     try {
       const db = openDatabase(join(dir, 'fresh.db'))
       try {
-        expect(versionOf(db)).toBe(40)
+        expect(versionOf(db)).toBe(42)
         expect(readCompatibleFloor(db)).toBe(35)
         const tables = (
           db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>

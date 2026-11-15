@@ -64,13 +64,13 @@ export interface BoardLoopDeps {
   /**
    * Put a card's thread under an autopilot chain, and say whether one took it.
    *
-   * THE ASYMMETRY LIVES HERE, and it is deliberate. `autopilot` is a
-   * PROJECT-WIDE key: a chain refuses to start on an ordinary conversation in a
-   * project whose switch is off, because the switch is the consent and a chain
-   * that ignored it would make it decorative. A board-loop thread is not an
+   * THE ASYMMETRY LIVES HERE, and it is deliberate. Autopilot is a switch on
+   * each conversation: a chain refuses to start on an ordinary conversation
+   * whose switch is off, because the switch is the consent and a chain that
+   * ignored it would make it decorative. A board-loop thread is not an
    * ordinary conversation — it exists because somebody pressed play on a list
    * of cards they ticked, which IS the consent, and it is autonomous by
-   * definition. So it chains whatever the project's key says, and the wiring
+   * definition. So it chains whatever its own switch says, and the wiring
    * passes the flag that says so.
    *
    * This replaces the sentence the loop used to open every thread with (see

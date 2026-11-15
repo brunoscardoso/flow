@@ -36,9 +36,15 @@ asked has not opted in). That is why the raw file must never be checked on its
 own — setting `autopilot` via `.flowconfig` (the IDE toggle and
 `/flow autopilot=true`) deletes the legacy file, so a raw-file check reads a
 project with autopilot ON as OFF. Reading `config.autopilot` is the one code
-path that cannot drift. The app resolves the same two sources in
-`app/src/main/flow/autopilot.ts`, which the chain driver and the config observer
-both call, for the same reason.
+path that cannot drift. The app's observer resolves the same two sources in
+`app/src/main/flow/autopilot.ts` for the status it reports.
+
+**In the Flow app, autopilot is chosen per conversation** (2026-11-14): the
+`threads.autopilot` column (off by default), switched from the composer's
+Autopilot chip or the new-conversation page. The chain driver reads that column,
+never the project key; the app no longer offers a project-wide switch and never
+writes the key. The key still governs terminal runs, and a value already in a
+project's file is left as it is.
 
 ---
 
@@ -180,13 +186,13 @@ reader who finds two push sites does not conclude one of them is a bug.
 
 | Thread | Chains? |
 | --- | --- |
-| An ordinary conversation | only when the project's autopilot switch is on — the switch is the consent, and a chain that could start on a project which never asked for one would make it decorative |
+| An ordinary conversation | only when that conversation's own Autopilot switch is on — the switch is the consent, and a chain that could start on a conversation which never asked for one would make it decorative |
 | A board-loop thread | always — a conversation the loop opened is autonomous by definition, and its own consent was pressing play |
 
 The asymmetry is deliberate and is implemented in
-`app/src/main/tasks/board-loop.ts`. `autopilot` is a **project-wide** key: turning
-it on so that loop cards chain would change how the person's own conversations
-behave, which nobody asked for.
+`app/src/main/tasks/board-loop.ts` (it begins the chain with `autonomous: true`).
+Because the switch belongs to each conversation, one conversation can chain
+while another in the same project only answers.
 
 ---
 

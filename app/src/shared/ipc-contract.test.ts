@@ -95,6 +95,13 @@ const INVOKE_MAP_KEYS: Record<IpcInvokeChannel, true> = {
   'terminal:dispose': true,
   'terminal:claim': true,
   'terminal:rename': true,
+  'run:get': true,
+  'run:save': true,
+  'run:suggest': true,
+  'run:start': true,
+  'run:reload': true,
+  'run:stop': true,
+  'run:states': true,
   'attachments:read': true,
   'attachments:revealPath': true,
   'attachments:captureScreen': true,
@@ -339,6 +346,7 @@ const EVENT_MAP_KEYS: Record<IpcEventChannel, true> = {
   'terminal:exit': true,
   'terminal:created': true,
   'terminal:removed': true,
+  'run:updated': true,
   'git:changed': true,
   'flow:notification': true,
   'flow:stateChanged': true,
@@ -433,6 +441,7 @@ describe('IPC contract channel allowlists', () => {
       'knowledge',
       'workspaces',
       'plan',
+      'run',
     ])
     for (const channel of [...IPC_INVOKE_CHANNELS, ...IPC_EVENT_CHANNELS]) {
       const domain = channel.split(':')[0]

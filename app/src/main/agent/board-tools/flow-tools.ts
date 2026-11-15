@@ -32,7 +32,14 @@ import type { TaskLane, TaskRecord, UpdateTaskInput } from '../../store/task-sto
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean }
 import type { BoardLoopStatus } from '../../tasks/board-loop'
 import type { SubtaskStartResult } from '../subtask-registry'
-import { BOARD_TOOL_NAMES, FLOW_MCP_SERVER_NAME, SUBTASK_TOOL_NAME } from './board-tools-shared'
+import type { RunStepState } from '../../../shared/run-setup'
+import {
+  BOARD_TOOL_NAMES,
+  FLOW_MCP_SERVER_NAME,
+  RUN_OUTPUT_TOOL_NAME,
+  RUN_RELOAD_TOOL_NAME,
+  SUBTASK_TOOL_NAME,
+} from './board-tools-shared'
 
 /** Every lane a card can be moved to — the runtime half of the TaskLane union. */
 const LANES: readonly TaskLane[] = ['todo', 'doing', 'blocked', 'review', 'done']
@@ -101,6 +108,114 @@ export function subtaskToolHandlers(deps: SubtaskToolDeps): SubtaskToolHandlers 
         )
       } catch (error) {
         return text(`Refused: ${error instanceof Error ? error.message : String(error)}`, true)
+      }
+    },
+  }
+}
+
+/**
+ * The Run of ONE conversation, bound to it by the AgentManager (scope = the
+ * thread's project + thread id), so no argument can reach another
+ * conversation's processes. There is deliberately no start, stop or edit here:
+ * those stay the person's (plan_project_run note 8).
+ */
+export interface RunToolDeps {
+  /** The steps of the Run going in this conversation; empty when none is. */
+  steps(): RunStepState[]
+  /** A step's retained terminal output, or null when it has none. */
+  output(terminalId: string): string | null
+  /** Reload one step through the supervisor, so it shows in the Run group. */
+  reload(stepKey: string): Promise<unknown>
+}
+
+/** What `run_output` returns at most: the last lines, and a byte ceiling. */
+export const RUN_OUTPUT_MAX_LINES = 200
+export const RUN_OUTPUT_MAX_BYTES = 16 * 1024
+
+export const RUN_OUTPUT_DESCRIPTION =
+  'Read the recent output of one step of the Run going in this conversation (its last lines). ' +
+  'Pass the step name. Without a name, it lists the steps and their states. ' +
+  'It never starts or stops a Run.'
+export const RUN_RELOAD_DESCRIPTION =
+  'Restart one step of the Run going in this conversation, by name. ' +
+  'Use it after you change code that step runs. It never starts or stops the whole Run.'
+
+const NO_RUN_SENTENCE = 'No Run is going in this conversation, so there is nothing to read or reload. The person starts a Run.'
+
+// eslint-disable-next-line no-control-regex
+const ANSI_PATTERN = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-Z\\-_])/g
+
+/** Output as plain text: escape sequences gone, CR-redrawn lines collapsed, bounded to the tail. */
+export function boundRunOutput(raw: string): string {
+  const plain = raw
+    .replace(ANSI_PATTERN, '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => {
+      const parts = line.split('\r')
+      return parts[parts.length - 1] ?? ''
+    })
+  let lines = plain.slice(-RUN_OUTPUT_MAX_LINES)
+  let out = lines.join('\n')
+  if (Buffer.byteLength(out) > RUN_OUTPUT_MAX_BYTES) {
+    out = Buffer.from(out).subarray(-RUN_OUTPUT_MAX_BYTES).toString('utf8').replace(/^\uFFFD+/, '')
+    lines = out.split('\n').slice(1)
+    out = lines.join('\n')
+  }
+  return out
+}
+
+export interface RunToolHandlers {
+  runOutput(args: { step?: string }): Promise<ToolResult>
+  runReload(args: { step: string }): Promise<ToolResult>
+}
+
+function describeStep(step: RunStepState): string {
+  const detail = step.detail !== null && step.detail !== '' ? ` (${step.detail})` : ''
+  return `${step.name}: ${step.status}${detail}`
+}
+
+type StepPick = { step: RunStepState } | { sentence: string }
+
+function pickStep(steps: RunStepState[], name: string): StepPick {
+  const wanted = name.trim().toLowerCase()
+  const hits = steps.filter((step) => step.name.trim().toLowerCase() === wanted)
+  if (hits.length === 1 && hits[0] !== undefined) return { step: hits[0] }
+  const names = steps.map((step) => step.name).join(', ')
+  if (hits.length === 0) return { sentence: `No step is named "${name}". The steps are: ${names}.` }
+  return { sentence: `More than one step is named "${name}". The steps are: ${names}.` }
+}
+
+export function runToolHandlers(deps: RunToolDeps): RunToolHandlers {
+  return {
+    runOutput: async (args) => {
+      try {
+        const steps = deps.steps()
+        if (steps.length === 0) return text(NO_RUN_SENTENCE)
+        if (args.step === undefined || args.step.trim() === '') {
+          return text(`Steps of the Run:\n${steps.map(describeStep).join('\n')}`)
+        }
+        const pick = pickStep(steps, args.step)
+        if ('sentence' in pick) return text(pick.sentence, true)
+        const { step } = pick
+        const raw = step.terminalId === null ? null : deps.output(step.terminalId)
+        if (raw === null) return text(`${describeStep(step)}\nThis step has no output yet.`)
+        const out = boundRunOutput(raw)
+        return text(`${describeStep(step)}\n--- last output ---\n${out === '' ? '(empty)' : out}`)
+      } catch (error) {
+        return text(`Could not read the output: ${error instanceof Error ? error.message : String(error)}`, true)
+      }
+    },
+    runReload: async (args) => {
+      try {
+        const steps = deps.steps()
+        if (steps.length === 0) return text(NO_RUN_SENTENCE)
+        const pick = pickStep(steps, args.step)
+        if ('sentence' in pick) return text(pick.sentence, true)
+        await deps.reload(pick.step.key)
+        return text(`Reloading "${pick.step.name}". Read its output in a moment to see how it started.`)
+      } catch (error) {
+        return text(`Could not reload: ${error instanceof Error ? error.message : String(error)}`, true)
       }
     },
   }
@@ -251,6 +366,7 @@ const LANE_ENUM = ['todo', 'doing', 'blocked', 'review', 'done'] as const
 export async function createFlowBoardTools(
   board: FlowBoardToolsDeps | null,
   subtasks: SubtaskToolDeps | null = null,
+  run: RunToolDeps | null = null,
 ): Promise<McpSdkServerConfigWithInstance> {
   const { createSdkMcpServer, tool } = await loadSdkMcpApi()
 
@@ -273,13 +389,35 @@ export async function createFlowBoardTools(
             (args) => subtaskToolHandlers(subtasks).startSubtask(args),
           ),
         ]
+  const runTools =
+    run === null
+      ? []
+      : [
+          tool(
+            RUN_OUTPUT_TOOL_NAME,
+            RUN_OUTPUT_DESCRIPTION,
+            { step: z.string().optional().describe('The step name. Leave out to list the steps.') },
+            (args) => runToolHandlers(run).runOutput(args),
+          ),
+          tool(
+            RUN_RELOAD_TOOL_NAME,
+            RUN_RELOAD_DESCRIPTION,
+            { step: z.string().min(1).describe('The name of the step to restart.') },
+            (args) => runToolHandlers(run).runReload(args),
+          ),
+        ]
   if (board === null) {
-    return createSdkMcpServer({ name: FLOW_MCP_SERVER_NAME, version: '1.0.0', tools: subtaskTools })
+    return createSdkMcpServer({
+      name: FLOW_MCP_SERVER_NAME,
+      version: '1.0.0',
+      tools: [...subtaskTools, ...runTools],
+    })
   }
   const h = boardToolHandlers(board)
 
   const tools = [
     ...subtaskTools,
+    ...runTools,
     tool(
       BOARD_TOOL_NAMES.createTask,
       'Create a task card on this project’s Flow board (with its own chat thread). Returns the new card.',

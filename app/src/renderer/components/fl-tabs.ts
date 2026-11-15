@@ -54,6 +54,9 @@ export interface TabDescriptor {
    *  while a dead one that reveals nothing breaks the #412/#709
    *  inert-not-silent invariant. Absent → the row is live. */
   revealBlockedReason?: string
+  /** Set up but not started (a Run step with no process yet): the accent dot
+   *  is drawn as a dashed ring and the label in italics. Structural. */
+  pending?: boolean
 }
 
 export interface TabSelectDetail {
@@ -150,6 +153,14 @@ export class FlTabs extends HTMLElement {
         height: 6px;
         border-radius: 50%;
         flex: none;
+      }
+      .tab.pending { font-style: italic; }
+      .tab.pending .project-dot {
+        box-sizing: border-box;
+        width: 7px;
+        height: 7px;
+        background: transparent !important;
+        border: var(--fl-border-width) dashed currentColor;
       }
       .close {
         display: inline-flex;
@@ -357,6 +368,7 @@ export class FlTabs extends HTMLElement {
       if (tab.tooltip) {
         button.title = tab.tooltip
       }
+      if (tab.pending) button.classList.add('pending')
 
       // Project accent dot (multi-project threads) — leftmost, so the project
       // marker never collides with the dirty dot on the right.

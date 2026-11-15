@@ -118,25 +118,26 @@ test.describe('flow-settings provisioning section', () => {
     await expect(window.locator('.fl-flow-toast')).toHaveCount(1)
   })
 
-  test('Autopilot toggle write round-trips across a close/reopen', async ({ window }) => {
+  test('a toggle write round-trips across a close/reopen', async ({ window }) => {
     const errors: string[] = []
     window.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`))
 
     const dir = await seedAndActivate(window)
     const overlay = window.locator(FLOW_OVERLAY)
-    const autopilot = () =>
-      overlay.locator('.fl-fs-row', { hasText: 'Autopilot' }).locator('.fl-fs-toggle')
+    // Wave execution defaults ON; the click writes it OFF.
+    const wave = () =>
+      overlay.locator('.fl-fs-row', { hasText: 'Wave execution' }).locator('.fl-fs-toggle')
 
-    await expect(autopilot()).toHaveAttribute('aria-checked', 'false')
-    await autopilot().click()
-    await expect(autopilot()).toHaveAttribute('aria-checked', 'true')
+    await expect(wave()).toHaveAttribute('aria-checked', 'true')
+    await wave().click()
+    await expect(wave()).toHaveAttribute('aria-checked', 'false')
 
     // Close, then reopen for the same root — the live .flowconfig write must have
     // persisted (state is re-read from flow:state on open).
     await window.keyboard.press('Escape')
     await expect(window.locator(FLOW_OVERLAY)).toHaveCount(0)
     await reopenFlowSettings(window, dir)
-    await expect(autopilot()).toHaveAttribute('aria-checked', 'true')
+    await expect(wave()).toHaveAttribute('aria-checked', 'false')
 
     expect(errors, `uncaught errors: ${errors.join(' | ')}`).toEqual([])
   })

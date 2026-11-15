@@ -13,6 +13,7 @@ import type { FlowDatabase } from './db'
 import { withTransaction } from './db'
 import { PROJECT_STATE_TABLE, THREAD_PROJECT_ROOT_COLUMN } from './storage-names'
 import type { SubtaskRecord, SubtaskState } from '../../shared/ipc-contract'
+import { parseRunTweaksByProject, type RunTweaksByProject } from '../../shared/run-setup'
 
 export type { SubtaskRecord, SubtaskState }
 
@@ -48,6 +49,13 @@ export interface ThreadRecord {
   pinnedAt: string | null
   /** When true, the SDK session runs in bypassPermissions mode (no prompts). */
   bypassPermissions: boolean
+  /**
+   * Autopilot may chain this conversation's workflow (discovery → plan →
+   * build). THE CONSENT for a chain, per conversation (2026-11-14): it used to
+   * be the project-wide `autopilot` key, which switched every conversation of
+   * a project at once. Off unless a person turns it on here.
+   */
+  autopilot: boolean
   /**
    * The loop this thread IS a run of, or null for an ordinary conversation.
    *
@@ -237,6 +245,8 @@ export interface CreateThreadInput {
   effort?: string
   /** Explicit permission mode. When omitted, the app-wide autonomy default applies. */
   bypassPermissions?: boolean
+  /** Start with autopilot on — the new-conversation page's chip. Off when omitted. */
+  autopilot?: boolean
   /** The loop this thread runs — set only by the press that starts a run. */
   originLoop?: string
   /** What that run was pointed at, verbatim. */
@@ -284,6 +294,8 @@ export interface UpdateThreadInput {
   pinned?: boolean
   /** Run the thread's session with permission prompts skipped (bypassPermissions). */
   bypassPermissions?: boolean
+  /** Let autopilot chain this conversation's workflow. */
+  autopilot?: boolean
 }
 
 export interface ThreadChangeEvent {
@@ -382,6 +394,7 @@ interface ThreadRow {
   imported_at: string | null
   pinned_at: string | null
   bypass_permissions: number
+  autopilot?: number
   origin_loop: string | null
   origin_aim: string | null
   origin_key: string | null
@@ -486,6 +499,7 @@ export class ThreadStore extends EventEmitter {
       importedAt: null,
       pinnedAt: null,
       bypassPermissions,
+      autopilot: input.autopilot === true,
       originLoop: input.originLoop ?? null,
       originAim: input.originAim ?? null,
       originKey: input.originKey ?? null,
@@ -515,8 +529,8 @@ export class ThreadStore extends EventEmitter {
     }
     this.db
       .prepare(
-        `INSERT INTO threads (id, ${THREAD_PROJECT_ROOT_COLUMN}, title, sdk_session_id, model, effort, status, created_at, updated_at, bypass_permissions, origin_loop, origin_aim, origin_key, parent_thread_id, origin_tool_call_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO threads (id, ${THREAD_PROJECT_ROOT_COLUMN}, title, sdk_session_id, model, effort, status, created_at, updated_at, bypass_permissions, autopilot, origin_loop, origin_aim, origin_key, parent_thread_id, origin_tool_call_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         thread.id,
@@ -529,6 +543,7 @@ export class ThreadStore extends EventEmitter {
         thread.createdAt,
         thread.updatedAt,
         bypassPermissions ? 1 : 0,
+        thread.autopilot ? 1 : 0,
         thread.originLoop,
         thread.originAim,
         thread.originKey,
@@ -763,6 +778,7 @@ export class ThreadStore extends EventEmitter {
       importedAt: input.importedAt,
       pinnedAt: null,
       bypassPermissions: false,
+      autopilot: false,
       // An imported Claude Code session was not started from a loop here, and
       // nothing in the transcript could tell us it was somewhere else.
       originLoop: null,
@@ -1042,10 +1058,11 @@ export class ThreadStore extends EventEmitter {
       archivedAt,
       pinnedAt,
       bypassPermissions: patch.bypassPermissions ?? existing.bypassPermissions,
+      autopilot: patch.autopilot ?? existing.autopilot,
     }
     this.db
       .prepare(
-        'UPDATE threads SET title = ?, model = ?, effort = ?, status = ?, updated_at = ?, archived_at = ?, pinned_at = ?, bypass_permissions = ? WHERE id = ?',
+        'UPDATE threads SET title = ?, model = ?, effort = ?, status = ?, updated_at = ?, archived_at = ?, pinned_at = ?, bypass_permissions = ?, autopilot = ? WHERE id = ?',
       )
       .run(
         updated.title,
@@ -1056,6 +1073,7 @@ export class ThreadStore extends EventEmitter {
         updated.archivedAt,
         updated.pinnedAt,
         updated.bypassPermissions ? 1 : 0,
+        updated.autopilot ? 1 : 0,
         id,
       )
     this.emitChange({ entity: 'thread', action: 'updated', threadId: id })
@@ -1419,6 +1437,37 @@ export class ThreadStore extends EventEmitter {
       throw new Error(`[ThreadStore] Cannot set the chain for unknown thread: ${threadId}`)
     }
     this.emitChange({ entity: 'thread', action: 'updated', threadId })
+  }
+
+  /**
+   * A conversation's own changes to the Run setup of each project in it,
+   * keyed by project root then step id (migration v42). An unknown thread,
+   * an empty column and a row an incompatible build wrote all read as none.
+   */
+  getRunTweaks(threadId: string): RunTweaksByProject {
+    const row = this.db.prepare('SELECT run_tweaks FROM threads WHERE id = ?').get(threadId) as
+      | { run_tweaks: string | null }
+      | undefined
+    if (row === undefined || row.run_tweaks === null || row.run_tweaks === '') return {}
+    try {
+      return parseRunTweaksByProject(JSON.parse(row.run_tweaks))
+    } catch {
+      return {}
+    }
+  }
+
+  /**
+   * THE ONLY WRITER of `threads.run_tweaks`. Stores the normalised tweaks (or
+   * NULL when none remain). Bookkeeping, not activity: `updated_at` is left
+   * alone and nothing is broadcast — the Run group reports its own changes.
+   */
+  setRunTweaks(threadId: string, tweaks: RunTweaksByProject): void {
+    const clean = parseRunTweaksByProject(tweaks)
+    const value = Object.keys(clean).length === 0 ? null : JSON.stringify(clean)
+    const result = this.db.prepare('UPDATE threads SET run_tweaks = ? WHERE id = ?').run(value, threadId)
+    if (result.changes === 0) {
+      throw new Error(`[ThreadStore] Cannot set Run tweaks for unknown thread: ${threadId}`)
+    }
   }
 
   /**
@@ -2039,6 +2088,40 @@ export class ThreadStore extends EventEmitter {
     })
   }
 
+  /**
+   * The commands the agent started IN THE BACKGROUND in a project's
+   * conversations (Bash calls with `run_in_background: true`), newest first,
+   * at most `limit` — the Run setup's "the agent started it" suggestions. A
+   * narrow read: two columns, a bounded row count, no output blobs
+   * (allowed-pattern #18). Rows whose input cannot be read are skipped.
+   */
+  listBackgroundCommands(projectRoot: string, limit = 200): Array<{ command: string; startedAt: string }> {
+    const bounded = Math.max(1, Math.min(1000, Math.floor(limit)))
+    const rows = this.db
+      .prepare(
+        `SELECT tc.input_json AS input, tc.started_at AS startedAt FROM tool_calls tc
+         JOIN threads t ON t.id = tc.thread_id
+         WHERE tc.tool_name = 'Bash'
+           AND t.${THREAD_PROJECT_ROOT_COLUMN} = ?
+           AND instr(tc.input_json, 'run_in_background') > 0
+         ORDER BY tc.started_at DESC LIMIT ?`,
+      )
+      .all(projectRoot, bounded) as Array<{ input: string | null; startedAt: string }>
+    const out: Array<{ command: string; startedAt: string }> = []
+    for (const row of rows) {
+      if (row.input === null) continue
+      try {
+        const input = JSON.parse(row.input) as { command?: unknown; run_in_background?: unknown }
+        if (input.run_in_background !== true || typeof input.command !== 'string') continue
+        const command = input.command.trim()
+        if (command !== '') out.push({ command, startedAt: row.startedAt })
+      } catch {
+        // A row an older build wrote in another shape: not a suggestion.
+      }
+    }
+    return out
+  }
+
   /** Point-read one tool call. PERF: the stream bridge finalizes every tool
    *  call — a list-and-find there materialized the whole thread's output
    *  blobs per completion. */
@@ -2293,6 +2376,7 @@ function toThreadRecord(row: ThreadRow): ThreadRecord {
     importedAt: row.imported_at ?? null,
     pinnedAt: row.pinned_at ?? null,
     bypassPermissions: (row.bypass_permissions ?? 0) !== 0,
+    autopilot: (row.autopilot ?? 0) !== 0,
     originLoop: row.origin_loop ?? null,
     originAim: row.origin_aim ?? null,
     originKey: row.origin_key ?? null,

@@ -180,10 +180,22 @@ import { tailConfigFrom } from './drive/chain-tail'
 import { makeRiskCheck, makeStageCheck } from './drive/chain-gates'
 import { watchDeletedThreads } from './drive/thread-gone'
 import { releaseCheckoutOnThreadDeleted } from './worktree/checkout-on-thread-deleted'
-import { LEGACY_AUTOPILOT_FILE, autopilotEnabledIn } from './flow/autopilot'
 import { makeTodoMirror } from './tasks/todo-mirror'
 import { onThreadStatus as syncCardLane } from './tasks/task-lane-sync'
-import { TerminalManager, registerTerminalChannels } from './terminal'
+import {
+  TERMINAL_EXIT_EVENT,
+  TERMINAL_REMOVED_EVENT,
+  TerminalManager,
+  registerTerminalChannels,
+  type TerminalExitEvent,
+  type TerminalRemovedEvent,
+} from './terminal'
+import { registerRunChannels } from './run/ipc'
+import { createTcpConnect, waitForLine, waitForPort, waitForPortFree } from './run/ready-check'
+import { RunSetupStore } from './run/run-setup-store'
+import { CommandUsageStore, rankSuggestions, usageSuggestions } from './run/command-usage'
+import { nodeSuggestFs, suggestRunSteps } from './run/run-suggest'
+import { RunSupervisor } from './run/run-supervisor'
 import { wireShellPersistence } from './terminal/shell-persistence'
 import { registerFileChannels } from './project/files'
 import {
@@ -551,6 +563,11 @@ let knowledgeRouter: KnowledgeRouter | null = null
 let disposeLoopsIpc: (() => void) | null = null
 let disposeSettingsIpc: (() => void) | null = null
 let disposeTerminalIpc: (() => void) | null = null
+/** The one owner of every project Run — disposed BEFORE the terminal manager on quit. */
+let runSupervisor: RunSupervisor | null = null
+/** The commands typed into Flow's terminals, per project — flushed on quit. */
+let commandUsage: CommandUsageStore | null = null
+let disposeRunIpc: (() => void) | null = null
 let disposeLspIpc: (() => Promise<void>) | null = null
 let disposeGitIpc: (() => void) | null = null
 let disposeReviewIpc: (() => void) | null = null
@@ -1523,16 +1540,12 @@ function bootstrapMainProcess(): void {
     // ASYNC, because this is main: a synchronous read of a project's config on
     // the process that answers every IPC call is a stall every window waits
     // behind (allowed-pattern #19). Fail-soft — a project with no config file
-    // has expressed no opinion, and no opinion means autopilot is off.
+    // publishes with the defaults. Only the publish settings are read: whether
+    // autopilot may run is the conversation's own flag now.
     readProjectSettings: async (rootPath) => {
-      const flowDir = join(rootPath, 'flow')
-      const text = await fsPromises.readFile(join(flowDir, '.flowconfig'), 'utf8').catch(() => null)
+      const text = await fsPromises.readFile(join(rootPath, 'flow', '.flowconfig'), 'utf8').catch(() => null)
       const config = text === null ? {} : parseFlowconfigText(text)
-      const legacy = await fsPromises
-        .access(join(flowDir, LEGACY_AUTOPILOT_FILE))
-        .then(() => true)
-        .catch(() => false)
-      return { autopilot: autopilotEnabledIn(config, legacy), tail: tailConfigFrom(config) }
+      return { tail: tailConfigFrom(config) }
     },
     // THE STAGE GATE, BEFORE THE NEXT RUNG IS ISSUED — the seam #1915 shipped
     // without (review C2). The ladder, the gate and its 122 tests existed and
@@ -1804,6 +1817,19 @@ function bootstrapMainProcess(): void {
       // Mid-run subtasks: `start_subtask`, the Agent ticket gate, the write
       // record, the task-event settle and Stop all go through this one writer.
       subtasks: subtaskRegistry,
+      // The agent reads a step's output and reloads it, in its own conversation
+      // only; a reload goes through the supervisor like the person's own.
+      runTools: ({ rootPath, threadId }) => {
+        const supervisor = runSupervisor
+        const manager = terminalManager
+        if (supervisor === null || manager === null) return null
+        const scope = { rootPath, threadId }
+        return {
+          steps: () => supervisor.state(scope).steps,
+          output: (terminalId) => manager.getScrollback(terminalId),
+          reload: (stepKey) => supervisor.reload(scope, stepKey),
+        }
+      },
       accountResolver,
       getModelRouting: () => appSettings.getModelRouting(),
       // The picker's evidence: what each runtime reported running (see
@@ -2900,6 +2926,13 @@ const understandFeature = async (request: {
       agentManager === null
         ? { ok: false, detail: 'Stopping a subtask is not available right now.' }
         : agentManager.stopSubtask(threadId, ticket),
+    // A conversation's own "asks first" switch reaches its LIVE session, not
+    // just the stored row (late-bound like stopSubtask). With no manager yet,
+    // the row is written and the next session reads it.
+    applyThreadPermissions: async (threadId, bypassPermissions) => {
+      if (agentManager === null) threadStore.updateThread(threadId, { bypassPermissions })
+      else await agentManager.setThreadPermissions(threadId, bypassPermissions)
+    },
     // #1484: removing a project closes its shells too — otherwise the PTYs
     // outlive the project with no tab, no menu entry and no route back.
     disposeTerminalsForRoot: (rootPath) => {
@@ -3483,6 +3516,87 @@ const understandFeature = async (request: {
       disposePersistence()
       disposeChannels()
     }
+  }
+
+  // PROJECT RUN: the supervisor owns every Run's steps; its channels sit
+  // beside the terminal channels. Nothing runs until a person presses Run.
+  {
+    const manager = terminalManager
+    const connect = createTcpConnect()
+    const setups = new RunSetupStore({
+      threads: threadStore,
+      personal: appSettings,
+      // A conversation's Run combines the steps of all its projects; a step
+      // for a project outside the conversation never runs there, so Workspace
+      // siblings are not offered.
+    })
+    // USAGE SUGGESTIONS (a): the commands a person enters in Flow's own
+    // interactive shells, keyed by the terminal's project; one writer, written
+    // to the app settings after a quiet moment, never per keystroke.
+    const usage = new CommandUsageStore({ settings: appSettings })
+    commandUsage = usage
+    manager.setCommandLineListener((projectRoot, line) => usage.record(projectRoot, line))
+    runSupervisor = new RunSupervisor({
+      terminals: {
+        createUserTerminal: (request) => manager.createUserTerminal(request),
+        dispose: (terminalId) => manager.dispose(terminalId),
+        stopProcess: (terminalId) => manager.stopProcess(terminalId),
+        onExit: (listener) => {
+          const handler = (event: TerminalExitEvent): void => listener(event)
+          manager.on(TERMINAL_EXIT_EVENT, handler)
+          return () => manager.off(TERMINAL_EXIT_EVENT, handler)
+        },
+        onRemoved: (listener) => {
+          const handler = (event: TerminalRemovedEvent): void => listener(event)
+          manager.on(TERMINAL_REMOVED_EVENT, handler)
+          return () => manager.off(TERMINAL_REMOVED_EVENT, handler)
+        },
+      },
+      setups,
+      ready: {
+        portInUse: (port) => connect(port),
+        waitForPort: (port, timeoutMs) => waitForPort(port, { timeoutMs, connect }),
+        waitForLine: (terminalId, text, timeoutMs) =>
+          waitForLine(terminalId, text, { timeoutMs, observe: (observer) => manager.observeOutput(observer) }),
+        waitPortFree: (port, timeoutMs) => waitForPortFree(port, { timeoutMs, connect }),
+      },
+    })
+    const suggestFs = nodeSuggestFs()
+    disposeRunIpc = registerRunChannels({
+      supervisor: runSupervisor,
+      setups,
+      // Every project a step may run in: what the person typed there (a), what
+      // the agent started in the background in its conversations (b — a
+      // bounded two-column read of tool_calls), then what its files declare.
+      suggest: async (scope) => {
+        const places = (await setups.placesOf(scope)).filter(
+          (place): place is typeof place & { root: string } => place.root !== null,
+        )
+        const now = Date.now()
+        const used = places.flatMap((place) =>
+          usageSuggestions(
+            { root: place.root, name: place.name },
+            usage.entries(place.root),
+            threadStore.listBackgroundCommands(place.root, 200),
+            now,
+          ),
+        )
+        const files = await suggestRunSteps(
+          places.map((place) => ({ root: place.root, dir: place.cwd ?? place.root, name: place.name })),
+          suggestFs,
+        )
+        return rankSuggestions(files, used, places.map((place) => place.root))
+      },
+      resolveRoot: (rootPath) =>
+        addressableRoots.isAddressable(rootPath) ? (addressableRoots.ownerCheckoutFor(rootPath) ?? rootPath) : null,
+      isTrustedSender: (event) =>
+        isAppMainFrame(
+          event,
+          (sender) => sender.getType() === 'window' && BrowserWindow.fromWebContents(sender) !== null,
+          (url) => isAppEntryUrl(url, rendererEntry()),
+        ),
+      broadcastUpdated: (state) => broadcast('run:updated', state),
+    })
   }
 
   // LSP (typescript server registry) over the editor:* contract channels.
@@ -4101,6 +4215,20 @@ async function disposeMainProcess(): Promise<void> {
     } catch (error) {
       console.error('[Main] Failed to dispose LSP:', error)
     }
+  }
+  // Every Run's processes end with the app (FR-10) — before the terminal
+  // manager, so the supervisor stops listening to terminals it is removing.
+  disposeRunIpc?.()
+  disposeRunIpc = null
+  commandUsage?.flush()
+  commandUsage = null
+  if (runSupervisor) {
+    try {
+      runSupervisor.disposeAll()
+    } catch (error) {
+      console.error('[Main] Failed to dispose the Run supervisor:', error)
+    }
+    runSupervisor = null
   }
   disposeTerminalIpc?.()
   disposeTerminalIpc = null

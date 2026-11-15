@@ -26,6 +26,15 @@ import type { ContextUsageSnapshot } from './context-usage'
 import type { SideIdentity } from './side-identity'
 import type { ConflictHunkChoice, ConflictHunkOrder } from './conflict-hunks'
 import type { UpdateStatus } from './updater'
+import type {
+  RunGroupState,
+  RunSaveAnswer,
+  RunSaveChange,
+  RunScope,
+  RunScopeSummary,
+  RunSuggestion,
+  RunView,
+} from './run-setup'
 import type { FeatureRole, FeatureRoleSource } from './feature-role'
 import type {
   BrowserBufferCounts,
@@ -111,6 +120,8 @@ export interface ThreadSummary {
   pinnedAt: string | null
   /** When true, the thread's agent runs with permission prompts skipped. */
   bypassPermissions: boolean
+  /** Autopilot may chain this conversation's workflow — chosen per conversation. */
+  autopilot: boolean
   /** Additional project roots this thread spans (#45); [] for single-project. */
   additionalRoots: string[]
   /**
@@ -796,6 +807,8 @@ export interface ThreadUpdate {
   pinned?: boolean
   /** true runs the thread's agent with permission prompts skipped (dangerous). */
   bypassPermissions?: boolean
+  /** true lets autopilot chain this conversation's workflow. */
+  autopilot?: boolean
 }
 
 export type MessageRole = 'user' | 'assistant' | 'system'
@@ -1459,6 +1472,13 @@ export interface TerminalInfo {
    * Kept in main so the name is saved with the shell and survives a restart.
    */
   customTitle?: string
+  /**
+   * Set on a terminal Flow's Run started for one step of a project's setup:
+   * which setup (`scopeKey`), which step, and the project it belongs to. Such a
+   * terminal runs its command directly (not an idle shell), is stopped with a
+   * hard kill of its process group, and is never saved for a restart.
+   */
+  run?: { scopeKey: string; stepId: string; projectRoot: string }
   /**
    * Whether the shell process has exited (user terminals). Surfaced so a window
    * reopened from the dock restores the dead tab as `(exited)` instead of a
@@ -5170,6 +5190,8 @@ export interface IpcInvokeMap {
       originLoop?: string
       originAim?: string
       originKey?: string
+      /** Start with autopilot on — the new-conversation page's chip. Off when omitted. */
+      autopilot?: boolean
     }
     response: ThreadSummary
   }
@@ -5858,6 +5880,24 @@ export interface IpcInvokeMap {
    * one. Saved with the shell, so the name comes back after a restart.
    */
   'terminal:rename': { request: { terminalId: string; title: string | null }; response: void }
+
+  // run (plan_project_run) — a project's Run: the supervisor in main owns
+  // every step; the renderer reads state and sends intents. Nothing in a setup
+  // runs until `run:start` (a person pressed Run).
+  /** The setup's layers, the merged steps with provenance, and the Run's state, for one scope. */
+  'run:get': { request: { scope: RunScope }; response: RunView }
+  /** Save one layer of one project in the scope, then apply it to a Run going (new start, changed restart, removed stop). */
+  'run:save': { request: { scope: RunScope; change: RunSaveChange }; response: RunSaveAnswer }
+  /** Commands the scope's projects already declare, each with where it was found. Reads only. */
+  'run:suggest': { request: { scope: RunScope }; response: RunSuggestion[] }
+  /** Run: start every step in order. */
+  'run:start': { request: { scope: RunScope }; response: RunGroupState }
+  /** Reload all (no `stepKey`) or one step; `force` starts a step even though its port is in use. */
+  'run:reload': { request: { scope: RunScope; stepKey?: string; force?: boolean }; response: RunGroupState }
+  /** Stop all: end every step's process. */
+  'run:stop': { request: { scope: RunScope }; response: RunGroupState }
+  /** Which scopes have a Run going. */
+  'run:states': { request: Record<string, never>; response: RunScopeSummary[] }
 
   // attachments (#456) — image attachments on user messages
   /** Read a persisted attachment's bytes for rendering (data URL). */
@@ -7465,6 +7505,8 @@ export interface IpcEventMap {
   'terminal:created': TerminalInfo
   /** A terminal was disposed (user close, thread teardown) — drop its tab (#304). */
   'terminal:removed': { terminalId: string }
+  /** A Run's state changed (sent on transitions only). */
+  'run:updated': RunGroupState
   'git:changed': { rootId: string }
   /** A thread's change review may have changed (#1906) — the card refetches
    *  `threads:changeReview` for this thread. Fired (debounced at the source) off
@@ -7728,6 +7770,13 @@ export const IPC_INVOKE_CHANNELS = [
   'terminal:dispose',
   'terminal:claim',
   'terminal:rename',
+  'run:get',
+  'run:save',
+  'run:suggest',
+  'run:start',
+  'run:reload',
+  'run:stop',
+  'run:states',
   'attachments:read',
   'attachments:revealPath',
   'attachments:captureScreen',
@@ -7969,6 +8018,7 @@ export const IPC_EVENT_CHANNELS = [
   'terminal:exit',
   'terminal:created',
   'terminal:removed',
+  'run:updated',
   'git:changed',
   'threads:changeReviewUpdated',
   'threads:contextChosen',
@@ -8185,6 +8235,17 @@ export interface FlowTerminalApi {
   onExit(listener: (event: IpcEventPayload<'terminal:exit'>) => void): Unsubscribe
   onRemoved(listener: (event: IpcEventPayload<'terminal:removed'>) => void): Unsubscribe
   onCreated(listener: (terminal: TerminalInfo) => void): Unsubscribe
+}
+
+export interface FlowRunApi {
+  get(request: IpcRequest<'run:get'>): Promise<IpcResponse<'run:get'>>
+  save(request: IpcRequest<'run:save'>): Promise<IpcResponse<'run:save'>>
+  suggest(request: IpcRequest<'run:suggest'>): Promise<IpcResponse<'run:suggest'>>
+  start(request: IpcRequest<'run:start'>): Promise<IpcResponse<'run:start'>>
+  reload(request: IpcRequest<'run:reload'>): Promise<IpcResponse<'run:reload'>>
+  stop(request: IpcRequest<'run:stop'>): Promise<IpcResponse<'run:stop'>>
+  states(): Promise<IpcResponse<'run:states'>>
+  onUpdated(listener: (state: IpcEventPayload<'run:updated'>) => void): Unsubscribe
 }
 
 export interface FlowGitApi {
@@ -8965,6 +9026,8 @@ export interface FlowApi {
   subtasks?: FlowSubtasksApi
   editor: FlowEditorApi
   terminal: FlowTerminalApi
+  /** A project's Run. Optional: an older preload predates the channels. */
+  run?: FlowRunApi
   attachments: FlowAttachmentsApi
   git: FlowGitApi
   flow: FlowFlowApi

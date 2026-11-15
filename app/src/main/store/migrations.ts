@@ -1038,6 +1038,25 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_subtasks_thread ON subtasks(thread_id, created_at);
     `,
   },
+  {
+    // ADDITIVE (one column with a default): an older build never reads it and
+    // its INSERTs name their columns, so the v35 floor carries forward.
+    version: 41,
+    description: 'threads.autopilot — autopilot is chosen per conversation, not per project',
+    compatibleDownTo: 35,
+    up: `ALTER TABLE threads ADD COLUMN autopilot INTEGER NOT NULL DEFAULT 0;`,
+  },
+  {
+    // PROJECT RUN (plan_project_run, Phase 3). A conversation's own tweaks to
+    // the project's Run setup (another port, a skipped step), as JSON keyed by
+    // project root then step id. ThreadStore.setRunTweaks is the only writer.
+    // ADDITIVE (one nullable column): an older build never reads it and its
+    // INSERTs name their columns, so the v35 floor carries forward.
+    version: 42,
+    description: 'threads.run_tweaks — a conversation\'s own changes to the Run setup',
+    compatibleDownTo: 35,
+    up: `ALTER TABLE threads ADD COLUMN run_tweaks TEXT;`,
+  },
 ]
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0

@@ -57,7 +57,7 @@ function world() {
     markAsLoopRun: () => {},
     setThreadChain: () => {},
     getThread: (id: string) =>
-      ({ id, projectRoot: '/repo', title: 'A conversation', status: 'idle' }) as ThreadRecord,
+      ({ id, projectRoot: '/repo', title: 'A conversation', status: 'idle', autopilot: true }) as ThreadRecord,
   } as unknown as ThreadStore
   const loop = new BoardLoop({
     claims,
@@ -76,7 +76,6 @@ function world() {
       sent.push({ threadId, content })
     },
     readProjectSettings: async () => ({
-      autopilot: true,
       tail: { commit: false, push: false, pr: false },
     }),
     // The ladder's gate, answering yes — every case here is about something

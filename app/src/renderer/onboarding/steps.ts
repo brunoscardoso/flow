@@ -30,8 +30,8 @@ import {
   validateRename,
 } from '../settings/workspace-settings-model'
 import type { WorkspaceListing } from '../../shared/workspaces-contract'
-import { modePersistPayload } from './mode-persist'
-import { isSelectedMode, savedModeForProject } from './mode-selection'
+import { isSelectedMode, savedModeFromOnboarding } from './mode-selection'
+import { ASK_CHOICES, ONBOARDING_ASK } from '../threads/conversation-switches-model'
 import type { AutonomyMode } from './wizard-controller'
 import type { StepView } from './wizard-view'
 import { summaryRows } from './settings-summary'
@@ -569,112 +569,57 @@ function projectStep(session: OnboardingSession): StepView {
   }
 }
 
-function modeStep(session: OnboardingSession): StepView {
+function modeStep(_session: OnboardingSession): StepView {
   return {
     id: 'mode',
-    title: 'Choose a mode',
+    title: ONBOARDING_ASK.title,
     render(container, ctx) {
-      container.appendChild(p('How autonomously should the agent work? You can change this later.'))
-      const choices: Array<{ mode: AutonomyMode; label: string; desc: string }> = [
-        { mode: 'manual', label: 'Manual', desc: 'Approve each action. Autopilot off.' },
-        {
-          mode: 'autonomous',
-          label: 'Autonomous',
-          desc: 'Autopilot on and permission prompts skipped for new threads.',
-        },
-      ]
+      container.appendChild(p(ONBOARDING_ASK.description))
+      // ONE QUESTION, ONE STORE. This step used to set two things — the
+      // app-wide "skip the ask" default AND the project's autopilot — and
+      // describe them as one "mode". Autopilot is now chosen in each
+      // conversation, so the step asks only how a new conversation starts.
+      //
+      // NOTHING IS WRITTEN ON CLICK. The pick is held in wizard state and
+      // committed on Finish (onboarding/index.ts onComplete), so abandoning the
+      // wizard via Skip/Escape cannot leave the ask silently off (#1116).
+      const choices = ASK_CHOICES.map((choice) => ({
+        mode: (choice.bypass ? 'autonomous' : 'manual') as AutonomyMode,
+        label: choice.label,
+        desc: choice.description,
+      }))
       const buttons: HTMLButtonElement[] = []
-      const statusSlot = document.createElement('div')
-      const failureMessage = (): HTMLDivElement =>
-        status("Couldn't save your choice — try again.", 'muted')
-      // A mode click persists ONLY the per-project autopilot flag — it is visible
-      // and revertable in the status line / flow settings. The app-wide
-      // permission-prompt bypass (autonomyBypassDefault) is CONFIRM-GATED: the
-      // wizard holds the pick in state and commits it on Finish (onboarding/
-      // index.ts onComplete), never on click. So abandoning the wizard via
-      // Skip/Escape cannot leave the bypass silently on (#1116), and a failed
-      // project write cannot leave the app store half-written behind a
-      // "couldn't save" message (#1077) — the writes are no longer a two-step
-      // transaction with no rollback. Awaited (not fire-and-forget) per #229.
-      const persist = async (mode: AutonomyMode): Promise<boolean> => {
-        if (!session.rootPath) return true
-        try {
-          await window.flow.flow.setConfig({
-            rootId: session.rootPath,
-            updates: modePersistPayload(mode).config,
-          })
-          return true
-        } catch (error) {
-          console.error('flow: onboarding mode persist failed', error)
-          return false
+      const paint = (mode: AutonomyMode | null): void => {
+        for (const [index, choice] of choices.entries()) {
+          buttons[index].classList.toggle('fl-wizard-btn--primary', isSelectedMode(choice.mode, mode))
+          buttons[index].setAttribute('aria-pressed', String(isSelectedMode(choice.mode, mode)))
         }
       }
       for (const choice of choices) {
         const btn = button(`${choice.label} — ${choice.desc}`, () => {
-          void (async () => {
-            statusSlot.replaceChildren()
-            const ok = await persist(choice.mode)
-            if (!ok) {
-              // Don't present the mode as confirmed — record the failure in
-              // wizard STATE so Next stays gated even though #716's reflection
-              // already set a mode, and so the message survives Back/Next
-              // re-renders until a retry succeeds (#229, #1078).
-              ctx.update({ modePersistFailed: true })
-              statusSlot.replaceChildren(failureMessage())
-              return
-            }
-            ctx.update({ mode: choice.mode, modePersistFailed: false })
-            for (const b of buttons) b.classList.remove('fl-wizard-btn--primary')
-            btn.classList.add('fl-wizard-btn--primary')
-          })()
+          ctx.update({ mode: choice.mode, modePersistFailed: false })
+          paint(choice.mode)
         })
         btn.style.display = 'block'
         btn.style.width = '100%'
         btn.style.textAlign = 'left'
         btn.style.marginBottom = 'var(--fl-space-sm)'
-        // Restore the highlight from wizard state so a previously-chosen mode still
-        // shows selected after Back-navigation re-renders the step (#320) — mirroring
-        // how the Connect/Project steps re-derive their confirmation on every render.
-        if (isSelectedMode(choice.mode, ctx.state.mode)) {
-          btn.classList.add('fl-wizard-btn--primary')
-        }
         buttons.push(btn)
         container.appendChild(btn)
       }
-      container.appendChild(statusSlot)
-      // An unresolved persist failure is rendered FROM STATE, like the highlight
-      // (#320) — Back → Next re-renders the step, and the error must not
-      // evaporate while it still gates Next (#1078).
-      if (ctx.state.modePersistFailed) statusSlot.replaceChildren(failureMessage())
-      // Reflect the SAVED autonomy mode on reopen (#716), mirroring how Connect/
-      // Project auto-detect existing state: read persisted onboarding, map it to
-      // a mode, highlight it and ungate Next. Reflection only — nothing persists
-      // until the user clicks. Skipped when the wizard already holds a choice
-      // (Back-navigation, #320) or on a true first run (savedMode → null).
+      // Restore the highlight from wizard state so a choice still shows after
+      // Back-navigation re-renders the step (#320).
+      paint(ctx.state.mode)
+      // Reflect the SAVED default on reopen (#716): highlight it and ungate
+      // Next. Reflection only — nothing is written until Finish.
       if (ctx.state.mode === null) {
-        // #1206: reflect the mode of the PROJECT this step writes to, not the
-        // app-wide default it doesn't. Reading only `autonomyBypassDefault`
-        // meant the step pre-selected, confirmed and walked past a mode derived
-        // from a store it never writes — so on a second project (or after
-        // autopilot was toggled in Flow settings) it stated the wrong autonomy
-        // for the active project and accepting it wrote nothing at all.
-        const root = session.rootPath
-        void Promise.all([
-          window.flow.settings.getOnboarding(),
-          root
-            ? window.flow.flow
-                .state({ rootId: root })
-                .then((state) => state.autopilot)
-                .catch(() => null)
-            : Promise.resolve(null),
-        ])
-          .then(([saved, projectAutopilot]) => {
+        void window.flow.settings
+          .getOnboarding()
+          .then((saved) => {
             if (ctx.state.mode !== null) return // user picked while we fetched
-            const mode = savedModeForProject(projectAutopilot, saved)
+            const mode = savedModeFromOnboarding(saved)
             ctx.update({ mode })
-            for (const [index, choice] of choices.entries()) {
-              buttons[index].classList.toggle('fl-wizard-btn--primary', choice.mode === mode)
-            }
+            paint(mode)
           })
           .catch(() => undefined) // fail-soft: step just requires a manual pick
       }

@@ -72,6 +72,8 @@ export const ICON_PATHS = {
   'panel-bottom': 'M2 3 H14 V13 H2 Z M2 9.5 H14',
   'more-horizontal': 'M4 8 H4.01 M8 8 H8.01 M12 8 H12.01',
   map: 'M1.5 4 L6 2 L10 4 L14.5 2 V12 L10 14 L6 12 L1.5 14 Z M6 2 V12 M10 4 V14',
+  // A triangle pointing right — start (the Run group's Run button).
+  play: 'M5 3.5 L12.5 8 L5 12.5 Z',
   refresh: 'M13.5 8 A5.5 5.5 0 1 1 11.6 3.9 M11.5 1.5 L11.8 4.2 L9 4.5',
   spinner: 'M8 2.5 A5.5 5.5 0 0 1 13.5 8',
   // A COG: a toothed ring around a hub.

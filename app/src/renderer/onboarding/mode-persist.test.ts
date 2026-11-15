@@ -1,22 +1,17 @@
 import { modePersistPayload } from './mode-persist'
 
-describe('modePersistPayload (#229)', () => {
-  it('maps autonomous → bypass true + autopilot string "true"', () => {
-    expect(modePersistPayload('autonomous')).toEqual({
-      onboarding: { autonomyBypassDefault: true },
-      config: { autopilot: 'true' },
-    })
+describe('modePersistPayload', () => {
+  it("maps Don't ask → bypass true", () => {
+    expect(modePersistPayload('autonomous')).toEqual({ onboarding: { autonomyBypassDefault: true } })
   })
 
-  it('maps manual → bypass false + autopilot string "false"', () => {
-    expect(modePersistPayload('manual')).toEqual({
-      onboarding: { autonomyBypassDefault: false },
-      config: { autopilot: 'false' },
-    })
+  it('maps Ask me first → bypass false', () => {
+    expect(modePersistPayload('manual')).toEqual({ onboarding: { autonomyBypassDefault: false } })
   })
 
-  it('always emits a STRING autopilot flag (flowconfig values are strings)', () => {
-    expect(typeof modePersistPayload('autonomous').config.autopilot).toBe('string')
-    expect(typeof modePersistPayload('manual').config.autopilot).toBe('string')
+  it("never writes a project's autopilot — it is chosen per conversation", () => {
+    // The positive first (#28): the payload carries the app setting.
+    expect(Object.keys(modePersistPayload('autonomous'))).toEqual(['onboarding'])
+    expect(modePersistPayload('autonomous')).not.toHaveProperty('config')
   })
 })

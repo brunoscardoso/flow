@@ -10,8 +10,7 @@ import { join, resolve } from 'node:path'
  * UX sweep — flow 0 (onboarding), the LAST step's PAYOFF CONTENT: the
  * **Settings** step ("Your project settings"). It's the final first-run screen —
  * it tells the user "Flow configured your project with these settings" and lists
- * the actual flow-settings sections (Autopilot, Git & PR, Execution, Engines,
- * Learning) so setup ends on a concrete summary rather than a blank confirmation.
+ * the actual flow-settings sections (Git & PR, Execution, Learning) so setup ends on a concrete summary rather than a blank confirmation.
  *
  * The deep full-flow spec (onboarding-full-flow.spec.ts) reaches this step but
  * asserts only the header title, the all-dots-active indicator, and the Finish
@@ -36,11 +35,12 @@ const SETTINGS_OVERLAY = '.fl-settings-page'
 const ANY_OVERLAY = '.fl-settings-overlay:not([hidden])'
 const SCREENS = 'e2e/ux/__screens'
 
-// The four flow-settings section titles the Settings step renders from
+// The flow-settings section titles the Settings step renders from
 // FLOW_SETTINGS_SECTIONS — asserted so the payoff panel is provably populated.
 // No "Engines": that section went when lavish was retired and graphify became
-// always-on (#1807/#1808) — nothing in it was a setting any more.
-const SECTION_TITLES = ['Autopilot', 'Git & PR', 'Execution', 'Learning']
+// always-on (#1807/#1808). No "Autopilot": it is chosen in each conversation
+// now, not per project.
+const SECTION_TITLES = ['Git & PR', 'Execution', 'Learning']
 
 /** Launch the app; a seeded account reads as signed in (see trustSeededAccount). */
 async function launch(userDataDir: string): Promise<ElectronApplication> {
@@ -154,11 +154,11 @@ test('onboarding Settings step renders the configured flow-settings summary (pop
 
     // Welcome → Connect → Project: each ungates once its precondition is met
     // (seeded account + root), so three Next clicks land us on the Mode step.
-    await advanceWizardTo(win, 'Choose a mode')
+    await advanceWizardTo(win, 'Before the agent acts')
 
     // Mode: pick one so Next ungates, then advance to the final Settings step.
-    await expect(wizard.locator('.fl-settings-header')).toContainText('Choose a mode')
-    await wizard.locator('.fl-wizard-btn', { hasText: 'Manual' }).click()
+    await expect(wizard.locator('.fl-settings-header')).toContainText('Before the agent acts')
+    await wizard.locator('.fl-wizard-btn', { hasText: 'Ask me first' }).click()
     await expect.poll(() => nextDisabled(win)).toBe(false)
     // Mode → (Sign in to Flow) → Settings.
     await advanceWizardTo(win, 'Your project settings')
@@ -176,6 +176,8 @@ test('onboarding Settings step renders the configured flow-settings summary (pop
     // (headings alone could render while fields silently dropped).
     await expect(body).toContainText('Auto-commit per task')
     await expect(body).toContainText('Model routing')
+    // The positive is above; the retired project-wide Autopilot row is gone.
+    await expect(body.locator('[data-setting-key="autopilot"]')).toHaveCount(0)
 
     await win.screenshot({ path: `${SCREENS}/onboarding-settings-summary.png` })
 

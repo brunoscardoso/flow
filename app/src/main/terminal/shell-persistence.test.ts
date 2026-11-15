@@ -63,6 +63,16 @@ describe('ownedShellRefs', () => {
     expect(ownedShellRefs(terminals, { rootPath: OTHER, threadId: 'thread-a' })).toEqual([])
   })
 
+  it('drops Run-step terminals but keeps a plain shell of the same scope', () => {
+    const terminals = [
+      shell('plain', THREAD_A),
+      shell('dev-server', THREAD_A, { run: { scopeKey: 'k', stepId: 's1', projectRoot: ROOT } }),
+    ]
+    // Positive first: the plain shell IS kept.
+    expect(ownedShellRefs(terminals, THREAD_A).map((ref) => ref.title)).toContain('plain')
+    expect(ownedShellRefs(terminals, THREAD_A).map((ref) => ref.title)).toEqual(['plain'])
+  })
+
   it('saves a person’s name for the tab over the folder name', () => {
     const terminals = [shell('a1', THREAD_A, { customTitle: 'server' }), shell('a2', THREAD_A)]
     expect(ownedShellRefs(terminals, THREAD_A)).toEqual([

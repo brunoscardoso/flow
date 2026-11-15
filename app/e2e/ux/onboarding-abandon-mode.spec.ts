@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path'
 
 /**
  * UX sweep — flow 0 (onboarding), round 19: ABANDONING the wizard after touching
- * the "Choose a mode" step.
+ * the "Before the agent acts" step.
  *
  * All 18 prior onboarding rounds (15 specs) drove the mode step either along the
  * happy path (click → Next → Finish) or along its persist-FAILURE branch (#229,
@@ -18,8 +18,9 @@ import { join, resolve } from 'node:path'
  * and finish later."
  *
  * Fixed contract (#1116): the app-wide permission bypass is CONFIRM-GATED. A
- * mode click writes only the visible per-project `flow.setConfig({autopilot})`;
- * `settings.setOnboarding({autonomyBypassDefault})` is committed on FINISH
+ * click writes NOTHING (the step no longer touches the project: autopilot is
+ * chosen per conversation); `settings.setOnboarding({autonomyBypassDefault})` is
+ * committed on FINISH
  * (onboarding/index.ts onComplete), never on click — so backing out via
  * Skip/Escape is a real cancel for the app-wide flag.
  *
@@ -29,14 +30,14 @@ import { join, resolve } from 'node:path'
  * the same behavior is labelled "New thread — skip permissions (dangerous)"
  * (thread-sidebar.ts:1219-1222) — but after an abandoned onboarding run the plain
  * "New thread" produces exactly that, silently. Nothing else in the renderer reads
- * or writes `autonomyBypassDefault` (grep: only onboarding/mode-persist.ts), so
- * there is no Settings toggle and no thread badge to notice or undo it with.
+ * (Settings › Agent can now change it, and each conversation's composer shows
+ * "Asks first" / "Doesn't ask" — but a silent flip is still the defect.)
  *
  * Everything below is read from the REAL stores — `flow.db` via the sqlite3 CLI and
  * the project's `.flowconfig` from disk — never from the wizard's own claims.
  *
- * Test 1 (LIVE) guards the split: a click commits the per-project flag only;
- * Finish is what flips the app-wide bypass. Test 2 (#1116) guards the cancel:
+ * Test 1 (LIVE) guards the split: a click writes nothing anywhere; Finish is
+ * what flips the app-wide bypass. Test 2 (#1116) guards the cancel:
  * an abandoned run leaves the bypass untouched and plain threads still ask.
  */
 
@@ -164,7 +165,7 @@ async function reopenWizard(win: Page): Promise<void> {
   await expect(win.locator(WIZARD)).toBeVisible()
 }
 
-/** Welcome → Connect (seeded account reflects) → Project → Choose a mode. */
+/** Welcome → Connect (seeded account reflects) → Project → Before the agent acts. */
 async function walkToModeStep(win: Page): Promise<void> {
   const wizard = win.locator(WIZARD)
   // The runtime step now sits between Welcome and Connect: which agent
@@ -178,7 +179,7 @@ async function walkToModeStep(win: Page): Promise<void> {
   await expect(wizard.locator('.fl-settings-header')).toContainText('Open a project')
   await expect.poll(() => nextDisabled(win)).toBe(false)
   await wizard.locator('.fl-wizard-btn', { hasText: 'Next' }).click()
-  await expect(wizard.locator('.fl-settings-header')).toContainText('Choose a mode')
+  await expect(wizard.locator('.fl-settings-header')).toContainText('Before the agent acts')
 }
 
 interface Ctx {
@@ -190,9 +191,9 @@ interface Ctx {
 
 /**
  * Seeded app (one account, one project), wizard reopened and walked to the mode
- * step, "Autonomous" clicked and CONFIRMED selected — but nothing finished yet.
+ * step, "Don't ask" clicked and CONFIRMED selected — but nothing finished yet.
  */
-async function abandonAfterChoosingAutonomous(userDataDir: string): Promise<Ctx> {
+async function abandonAfterChoosingDontAsk(userDataDir: string): Promise<Ctx> {
   await migrateDb(userDataDir)
   seedAccount(userDataDir)
 
@@ -221,7 +222,7 @@ async function abandonAfterChoosingAutonomous(userDataDir: string): Promise<Ctx>
   await walkToModeStep(win)
 
   const wizard = win.locator(WIZARD)
-  const autonomous = wizard.locator('.fl-wizard-btn', { hasText: 'Autonomous' })
+  const autonomous = wizard.locator('.fl-wizard-btn', { hasText: "Don't ask" })
   await autonomous.click()
   await expect(autonomous).toHaveClass(/fl-wizard-btn--primary/, { timeout: 5000 })
 
@@ -236,26 +237,22 @@ function cleanup(ctx: Ctx | null, userDataDir: string): Promise<void> {
   })
 }
 
-// ── LIVE: the confirm-gated split — click commits the project flag, Finish the bypass ──
-test('LIVE: a mode click commits only the per-project autopilot flag — the app-wide bypass waits for Finish', async () => {
+// ── LIVE: the confirm-gated split — a click writes nothing, Finish the bypass ──
+test('LIVE: a click writes nothing — the app-wide bypass waits for Finish, and no project is touched', async () => {
   const userDataDir = mkdtempSync(join(tmpdir(), 'flow-e2e-onb-abandon-'))
   let ctx: Ctx | null = null
   try {
-    ctx = await abandonAfterChoosingAutonomous(userDataDir)
+    ctx = await abandonAfterChoosingDontAsk(userDataDir)
     const { win, project, errors } = ctx
     const wizard = win.locator(WIZARD)
 
     await win.screenshot({ path: `${SCREENS}/onboarding-abandon-mode.png` })
 
-    // The click wrote the VISIBLE per-project half (status line / flow settings
-    // reflect it, and it is revertable there)...
-    await expect
-      .poll(() => flowConfig(project), {
-        message: 'project .flowconfig after clicking Autonomous',
-        timeout: 5000,
-      })
-      .toMatch(/autopilot:\s*true/)
-    // ...but NOT the app-wide permission bypass — that commit is Finish's.
+    // The click wrote nothing: not the project (autopilot is per conversation)...
+    expect(flowConfig(project), 'the project is not reconfigured by the wizard').not.toMatch(
+      /autopilot:\s*true/,
+    )
+    // ...and NOT the app-wide permission bypass — that commit is Finish's.
     expect(
       appSetting(userDataDir, 'autonomy_bypass_default'),
       'app-wide bypass must not flip on click',
@@ -271,11 +268,14 @@ test('LIVE: a mode click commits only the per-project autopilot flag — the app
     await expect(wizard).toHaveCount(0)
     await expect
       .poll(() => appSetting(userDataDir, 'autonomy_bypass_default'), {
-        message: 'Finish commits the confirmed Autonomous choice',
+        message: "Finish commits the confirmed Don't ask choice",
         timeout: 5000,
       })
       .toBe('true')
     expect(appSetting(userDataDir, 'onboarding_completed'), 'onboarding completion').toBe('true')
+    expect(flowConfig(project), 'Finish does not reconfigure the project either').not.toMatch(
+      /autopilot:\s*true/,
+    )
 
     // The deliberate, finished choice DOES reach new threads — the affordance
     // is confirm-gated, not disabled.
@@ -299,7 +299,7 @@ test(
     const userDataDir = mkdtempSync(join(tmpdir(), 'flow-e2e-onb-abandon2-'))
     let ctx: Ctx | null = null
     try {
-      ctx = await abandonAfterChoosingAutonomous(userDataDir)
+      ctx = await abandonAfterChoosingDontAsk(userDataDir)
       const { win, project, errors } = ctx
       const wizard = win.locator(WIZARD)
 

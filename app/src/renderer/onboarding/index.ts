@@ -11,12 +11,11 @@ async function openWizard(): Promise<void> {
   const wizard = new OnboardingWizard({
     steps: createOnboardingSteps(),
     onComplete: (state) => {
-      // Finish is the COMMIT for the app-wide permission-prompt bypass
-      // (#1116/#1077): the mode step holds the pick in wizard state and writes
-      // only the visible per-project autopilot flag on click; the app-level
-      // autonomyBypassDefault flips here, in the same write that marks
-      // onboarding complete — so an abandoned (Skip/Escape) or failed run
-      // never leaves new threads silently skipping permission prompts.
+      // Finish is the COMMIT for "Before the agent acts" (#1116/#1077): the
+      // step holds the pick in wizard state and writes nothing on click; the
+      // app-level autonomyBypassDefault flips here, in the same write that
+      // marks onboarding complete — so an abandoned (Skip/Escape) or failed
+      // run never leaves new conversations silently skipping the ask.
       const request: { completed: boolean; autonomyBypassDefault?: boolean } = { completed: true }
       if (state.mode !== null) {
         request.autonomyBypassDefault = modePersistPayload(state.mode).onboarding

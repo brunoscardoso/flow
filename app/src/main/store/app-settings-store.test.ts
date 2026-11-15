@@ -22,6 +22,22 @@ describe('AppSettingsStore', () => {
     rmSync(tempDir, { recursive: true, force: true })
   })
 
+  it('lists every project with a stored Run setup, and keeps one order of steps', () => {
+    expect(store.listRunSetupRoots()).toEqual([])
+    store.setRunSetup('/work/b', '{"version":1,"steps":[]}')
+    store.setRunSetup('/work/a_x%', '{"version":1,"steps":[]}')
+    store.setRunUsage('/work/c', [{ line: 'npm run dev' }])
+    expect(store.listRunSetupRoots()).toEqual(['/work/a_x%', '/work/b'])
+    store.setRunSetup('/work/b', null)
+    expect(store.listRunSetupRoots()).toEqual(['/work/a_x%'])
+
+    expect(store.getRunOrder()).toEqual([])
+    store.setRunOrder(['/work/b::api', '/work/a::web', '/work/b::api'])
+    expect(store.getRunOrder()).toEqual(['/work/b::api', '/work/a::web'])
+    store.setRunOrder([])
+    expect(db.prepare("SELECT key FROM app_settings WHERE key = 'run_order'").all()).toEqual([])
+  })
+
   it('defaults to false when unset', () => {
     expect(store.getOnboardingCompleted()).toBe(false)
     expect(store.getAutonomyBypassDefault()).toBe(false)
@@ -538,6 +554,18 @@ describe('the person’s app-wide worktree defaults', () => {
       expect(store.getGeneratedProjectDescription('acme', 'web')).toBe('The storefront web app.')
       expect(store.getGeneratedProjectDescription('acme', 'api')).toBeNull()
       expect(store.getGeneratedProjectDescription('other', 'web')).toBeNull()
+    })
+
+    it("keeps a person's Run tweaks per project; none left removes the row", () => {
+      expect(store.getRunTweaks('/a')).toEqual({})
+      store.setRunTweaks('/a', { web: { command: 'npm run dev -- --port 3100' }, db: { skip: true, ready: null } })
+      expect(store.getRunTweaks('/a')).toEqual({
+        web: { command: 'npm run dev -- --port 3100' },
+        db: { skip: true, ready: null },
+      })
+      expect(store.getRunTweaks('/b')).toEqual({})
+      expect(store.setRunTweaks('/a', {})).toEqual({})
+      expect(db.prepare("SELECT key FROM app_settings WHERE key LIKE 'run_tweaks:%'").all()).toEqual([])
     })
 
     it("keeps a card's extra projects per task, de-duplicated; empty removes the row", () => {

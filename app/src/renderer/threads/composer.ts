@@ -123,6 +123,15 @@ import {
 import { enterKeyIntent } from './composer-keys'
 import { createModelEffortMenu, type ModelEffortMenu } from './model-effort-menu'
 import { sendFailedToast } from './redo-feedback'
+import {
+  ASKING_SWITCH_FAILED,
+  AUTOPILOT_SWITCH_FAILED,
+  STOP_ASKING_CONFIRM,
+  askingFace,
+  autopilotFace,
+  needsAskingConfirm,
+  type SwitchFace,
+} from './conversation-switches-model'
 
 // The model list belongs to the RUNTIME (shared/runtime-models.ts). This file
 // used to hold Opus / Sonnet / Haiku unconditionally, and the thread handed the
@@ -180,9 +189,14 @@ export class Composer {
   #mentionPopup: HTMLDivElement
   #commandPopup: HTMLDivElement
   #thread: ThreadSummary | null = null
-  /** Autopilot for THIS thread's project, as last broadcast by flow/index.ts. */
+  /** Autopilot for THIS conversation (its own column, off by default). */
   #autopilot = false
   #autopilotButton!: HTMLButtonElement
+  /** Whether THIS conversation skips the ask before the agent acts. */
+  #bypass = false
+  #askingButton!: HTMLButtonElement
+  /** The "Stop asking in this conversation?" confirm, while it is open. */
+  #askConfirm: HTMLDivElement | null = null
   /** The model+effort popover — a view over the two selects above. */
   #modelEffort!: ModelEffortMenu
   #status: ThreadStatus = 'idle'
@@ -538,36 +552,33 @@ export class Composer {
     })
 
     /**
-     * Autopilot — a TOGGLE, beside the box you type the instruction into.
+     * The two per-conversation switches, beside the box you type into.
      *
-     * It used to be the words `autopilot on|off` at the far-left end of the
-     * status bar: the one always-visible answer to "will this act without
-     * asking me?", parked at the opposite corner of the window from the thing
-     * it qualifies, and not clickable. Here it is next to the message, and
-     * flipping it is the same gesture as reading it.
-     *
-     * IT IS NOT OPTIMISTIC. The click writes the key and the button waits for
-     * the config watcher's broadcast to come back — the file is the truth
-     * (flow/.flowconfig is hand-editable, and the CLI writes it too), so a
-     * button that painted itself on click would be claiming a state it had
-     * only requested. Disabled while the write is in flight, so a double-click
+     * Both belong to the CONVERSATION, not the project: one conversation can
+     * chain discovery → plan → build while another only answers, and one can
+     * skip the ask while another keeps it. Each writes the thread and repaints
+     * from the summary that comes back (`setThread`), never from the click —
+     * a chip that painted itself on click would claim a state it had only
+     * requested. Disabled while the write is in flight, so a double click
      * cannot race two writes.
+     *
+     * Asking applies to the RUNNING session at once (main switches the
+     * session's permission mode); turning it off is confirmed once.
      */
+    this.#askingButton = document.createElement('button')
+    this.#askingButton.type = 'button'
+    this.#askingButton.className = 'fl-composer-switch fl-composer-asking'
+    this.#askingButton.addEventListener('click', () => {
+      this.#requestAsking(!this.#bypass)
+    })
+    this.#paintSwitches()
     this.#autopilotButton = document.createElement('button')
     this.#autopilotButton.type = 'button'
-    this.#autopilotButton.className = 'fl-composer-autopilot'
+    this.#autopilotButton.className = 'fl-composer-switch fl-composer-autopilot'
     this.#autopilotButton.addEventListener('click', () => {
       void this.#toggleAutopilot()
     })
-    this.#paintAutopilot()
-    document.addEventListener('flow:autopilot', (event) => {
-      const detail = (event as CustomEvent<{ rootId?: string; autopilot?: boolean }>).detail
-      // Per-root, and this composer belongs to one thread in one project — so
-      // it takes only its own, and never has to say whose flag it is showing.
-      if (!detail || detail.rootId !== this.#thread?.projectRoot) return
-      this.#autopilot = detail.autopilot === true
-      this.#paintAutopilot()
-    })
+    this.#paintSwitches()
 
     // Live model indicator — sits next to the model picker and reads
     // "· using <model>" while the turn is working, from the SDK-resolved model
@@ -716,6 +727,7 @@ export class Composer {
       },
     })
     controls.appendChild(this.#modelEffort.element)
+    controls.appendChild(this.#askingButton)
     controls.appendChild(this.#autopilotButton)
     controls.appendChild(attachButton)
     controls.appendChild(captureButton)
@@ -896,6 +908,12 @@ export class Composer {
     const previous = this.#thread
     const switched = thread?.id !== previous?.id
     this.#thread = thread
+    // The switches read the conversation's own columns, on every refresh: the
+    // write's answer arrives as exactly such a refresh.
+    this.#autopilot = thread?.autopilot === true
+    this.#bypass = thread?.bypassPermissions === true
+    if (switched) this.#closeAskConfirm()
+    this.#paintSwitches()
     this.#dirCache.clear()
     this.#commands = null
     this.#closeMention()
@@ -1130,31 +1148,133 @@ export class Composer {
 
   // ── Sending ──────────────────────────────────────────────────────────────
 
-  /** Paint the toggle from `#autopilot`. Label says the STATE; title says what
-   *  pressing it will do, so the two never have to be read as one sentence. */
-  #paintAutopilot(): void {
-    const on = this.#autopilot
-    this.#autopilotButton.textContent = on ? 'autopilot on' : 'autopilot off'
-    this.#autopilotButton.classList.toggle('is-on', on)
-    this.#autopilotButton.setAttribute('aria-pressed', String(on))
-    this.#autopilotButton.title = on
-      ? 'Autopilot is on — turn it off to be asked before each step'
-      : 'Autopilot is off — turn it on to let the agent chain steps on its own'
+  /** Paint both chips from the conversation's columns. */
+  #paintSwitches(): void {
+    const paint = (button: HTMLButtonElement | undefined, face: SwitchFace): void => {
+      if (button === undefined) return
+      button.textContent = face.label
+      button.classList.toggle('is-on', face.on)
+      button.setAttribute('aria-pressed', String(face.on))
+      button.title = face.title
+      button.disabled = this.#thread === null
+    }
+    paint(this.#askingButton, askingFace(this.#bypass))
+    paint(this.#autopilotButton, autopilotFace(this.#autopilot))
   }
 
-  /** Write the flag for this thread's project. The watcher rebroadcasts and
-   *  `flow:autopilot` repaints the button; nothing is painted from here. */
+  /** Turning asking off is confirmed; turning it back on is not. */
+  #requestAsking(nextBypass: boolean): void {
+    if (this.#thread === null) return
+    if (this.#askConfirm !== null) {
+      this.#closeAskConfirm()
+      return
+    }
+    if (needsAskingConfirm(this.#bypass, nextBypass)) this.#openAskConfirm()
+    else void this.#writeAsking(nextBypass)
+  }
+
+  async #writeAsking(bypassPermissions: boolean): Promise<void> {
+    const thread = this.#thread
+    if (thread === null) return
+    this.#askingButton.disabled = true
+    try {
+      const updated = await window.flow.threads.update({ threadId: thread.id, patch: { bypassPermissions } })
+      if (this.#thread?.id === updated.id) this.setThread(updated)
+    } catch (error) {
+      console.warn('[composer] could not change asking', error)
+      this.#notifySwitchFailed(ASKING_SWITCH_FAILED)
+    } finally {
+      this.#paintSwitches()
+    }
+  }
+
+  #openAskConfirm(): void {
+    const box = document.createElement('div')
+    box.className = 'fl-composer-ask-confirm'
+    box.setAttribute('role', 'dialog')
+    const title = document.createElement('div')
+    title.className = 'fl-composer-ask-confirm-title'
+    title.id = `fl-ask-confirm-${Math.random().toString(36).slice(2)}`
+    title.textContent = STOP_ASKING_CONFIRM.title
+    box.setAttribute('aria-labelledby', title.id)
+    const body = document.createElement('div')
+    body.className = 'fl-composer-ask-confirm-body'
+    body.textContent = STOP_ASKING_CONFIRM.body
+    const row = document.createElement('div')
+    row.className = 'fl-composer-ask-confirm-actions'
+    const keep = document.createElement('button')
+    keep.type = 'button'
+    keep.className = 'fl-composer-ask-confirm-keep'
+    keep.textContent = STOP_ASKING_CONFIRM.keep
+    keep.addEventListener('click', () => this.#closeAskConfirm())
+    const confirm = document.createElement('button')
+    confirm.type = 'button'
+    confirm.className = 'fl-composer-ask-confirm-go'
+    confirm.textContent = STOP_ASKING_CONFIRM.confirm
+    confirm.addEventListener('click', () => {
+      this.#closeAskConfirm()
+      void this.#writeAsking(true)
+    })
+    row.append(keep, confirm)
+    box.append(title, body, row)
+    box.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        this.#closeAskConfirm()
+        this.#askingButton.focus()
+      }
+    })
+    // Fixed to the viewport, above the chip, kept inside the window.
+    const anchor = this.#askingButton.getBoundingClientRect()
+    const width = 340
+    const left = Math.max(8, Math.min(anchor.left, window.innerWidth - width - 8))
+    box.style.left = `${left}px`
+    box.style.bottom = `${Math.max(8, window.innerHeight - anchor.top + 8)}px`
+    box.style.width = `${width}px`
+    this.#askingButton.parentElement?.appendChild(box)
+    this.#askConfirm = box
+    this.#askingButton.setAttribute('aria-expanded', 'true')
+    // Safe choice focused first: Enter keeps asking.
+    keep.focus()
+    window.setTimeout(() => document.addEventListener('mousedown', this.#onAskConfirmOutside), 0)
+  }
+
+  #onAskConfirmOutside = (event: MouseEvent): void => {
+    const box = this.#askConfirm
+    if (box === null) return
+    const target = event.target as Node | null
+    if (target !== null && (box.contains(target) || this.#askingButton.contains(target))) return
+    this.#closeAskConfirm()
+  }
+
+  #closeAskConfirm(): void {
+    document.removeEventListener('mousedown', this.#onAskConfirmOutside)
+    this.#askConfirm?.remove()
+    this.#askConfirm = null
+    this.#askingButton?.setAttribute('aria-expanded', 'false')
+  }
+
+  #notifySwitchFailed(body: string): void {
+    document.dispatchEvent(
+      new CustomEvent('flow:notify', {
+        detail: { kind: 'state-change', rootId: '', title: 'Not changed', body, level: 'error', timestamp: new Date().toISOString() },
+      }),
+    )
+  }
+
+  /** Flip autopilot for THIS conversation. */
   async #toggleAutopilot(): Promise<void> {
-    const rootId = this.#thread?.projectRoot
-    if (!rootId) return
-    const next = !this.#autopilot
+    const thread = this.#thread
+    if (thread === null) return
     this.#autopilotButton.disabled = true
     try {
-      await window.flow.flow.setConfig({ rootId, updates: { autopilot: String(next) } })
+      const updated = await window.flow.threads.update({ threadId: thread.id, patch: { autopilot: !this.#autopilot } })
+      if (this.#thread?.id === updated.id) this.setThread(updated)
     } catch (error) {
       console.warn('[composer] could not change autopilot', error)
+      this.#notifySwitchFailed(AUTOPILOT_SWITCH_FAILED)
     } finally {
-      this.#autopilotButton.disabled = false
+      this.#paintSwitches()
     }
   }
 
@@ -2657,7 +2777,7 @@ function injectComposerStyles(): void {
     /* The autopilot toggle wears the same clothes as the pickers beside it —
        it is one of the settings for the message, not a separate kind of thing.
        Only its ON state is coloured, because that is the state worth noticing. */
-    .fl-composer-autopilot {
+    .fl-composer-switch {
       flex: 0 1 auto;
       min-width: 0;
       height: 22px;
@@ -2671,17 +2791,59 @@ function injectComposerStyles(): void {
       white-space: nowrap;
       cursor: pointer;
     }
-    .fl-composer-autopilot:hover:not(:disabled) {
+    .fl-composer-switch:hover:not(:disabled) {
       background: var(--fl-color-surface-raised);
       color: var(--fl-color-text);
     }
-    .fl-composer-autopilot.is-on {
+    .fl-composer-switch.is-on {
       color: var(--fl-color-accent);
       background: var(--fl-color-accent-muted);
     }
-    .fl-composer-autopilot:focus-visible { border-color: var(--fl-color-focus-ring); }
-    .fl-composer-autopilot:disabled { opacity: 0.5; cursor: default; }
+    .fl-composer-switch:focus-visible { border-color: var(--fl-color-focus-ring); }
+    .fl-composer-switch:disabled { opacity: 0.5; cursor: default; }
     .fl-composer-select:disabled { opacity: 0.5; cursor: default; }
+    .fl-composer-ask-confirm {
+      position: fixed;
+      z-index: 50;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      gap: var(--fl-space-sm);
+      padding: var(--fl-space-md);
+      background: var(--fl-color-surface-raised);
+      border: var(--fl-border-width) solid var(--fl-color-border);
+      border-radius: var(--fl-radius-md);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      color: var(--fl-color-text);
+      font-family: var(--fl-font-ui);
+    }
+    .fl-composer-ask-confirm-title { font-size: var(--fl-text-body-size); font-weight: 600; }
+    .fl-composer-ask-confirm-body {
+      font-size: var(--fl-text-caption-size);
+      color: var(--fl-color-text-secondary);
+      line-height: 1.5;
+    }
+    .fl-composer-ask-confirm-actions { display: flex; justify-content: flex-end; gap: var(--fl-space-xs); }
+    .fl-composer-ask-confirm-actions button {
+      height: 28px;
+      padding: 0 var(--fl-space-sm);
+      border-radius: var(--fl-radius-sm);
+      font-family: var(--fl-font-ui);
+      font-size: var(--fl-text-caption-size);
+      cursor: pointer;
+    }
+    .fl-composer-ask-confirm-keep {
+      background: transparent;
+      border: var(--fl-border-width) solid var(--fl-color-border);
+      color: var(--fl-color-text);
+    }
+    .fl-composer-ask-confirm-go {
+      background: var(--fl-color-warning, #b4541f);
+      border: 0;
+      color: #ffffff;
+      font-weight: 600;
+    }
+    .fl-composer-ask-confirm-actions button:focus-visible { outline: 2px solid var(--fl-color-focus-ring); outline-offset: 1px; }
     .fl-composer-model-indicator {
       display: inline-flex;
       align-items: center;

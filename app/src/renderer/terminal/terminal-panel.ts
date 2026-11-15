@@ -89,6 +89,16 @@ import { resolveXtermTheme } from './xterm-theme'
 // (#1002); it now comes from the shared registry.
 import { isModalOverlayOpen } from '../modal-overlay'
 import { detectTerminalLinks, isOpenableTerminalUrl } from './terminal-links'
+import {
+  orderRunTabs,
+  pendingTabTooltip,
+  pendingTabId,
+  RUN_STRINGS,
+  stepKeyOfPendingTab,
+  stepOfTerminal,
+  stepTabFace,
+} from './run-group-model'
+import { RUN_TONE_COLOR, RunGroupView } from './run-group-view'
 
 type XtermModule = typeof import('@xterm/xterm')
 type XtermTerminal = import('@xterm/xterm').Terminal
@@ -247,7 +257,20 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     document.dispatchEvent(new CustomEvent('flow:hide-terminal'))
   })
 
+  // The Run group's Reload for the step on screen (FR-6) — shown only while
+  // the active tab is one of this conversation's Run steps.
+  const reloadStepButton = document.createElement('button')
+  reloadStepButton.className = 'fl-term-tool'
+  reloadStepButton.hidden = true
+  reloadStepButton.title = RUN_STRINGS.reloadStepTitle
+  reloadStepButton.setAttribute('aria-label', RUN_STRINGS.reloadStep)
+  const reloadStepIcon = document.createElement('fl-icon')
+  reloadStepIcon.setAttribute('name', 'refresh')
+  reloadStepIcon.setAttribute('size', '14')
+  reloadStepButton.appendChild(reloadStepIcon)
+
   header.appendChild(tabsEl)
+  header.appendChild(reloadStepButton)
   header.appendChild(takeoverButton)
   header.appendChild(splitButton)
   header.appendChild(newButton)
@@ -387,6 +410,8 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
   /** A + pressed while the scope roots still belonged to the conversation
    *  being left — run, for that conversation only, once they arrive. */
   let deferredNewFor: string | null = null
+  /** The Run group — built once the panel's wiring is in place (below). */
+  let runGroup: RunGroupView | null = null
 
   /** The panel's current scoping inputs for the pure decision layer. */
   function scopeState(): TerminalScopeState {
@@ -405,6 +430,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
         .filter(
           (info) =>
             info.kind === 'user' &&
+            info.run === undefined &&
             info.exited !== true &&
             info.owner !== undefined &&
             info.owner.rootPath === owner.rootPath &&
@@ -535,7 +561,35 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
   function renderTabs(): void {
     persistArrangement() // #1445 — rows + names, so ⌘R hands back what was arranged
     const visible = [...tabs.values()].filter(isTabVisible)
-    const descriptors: TabDescriptor[] = visible.map((tab) => {
+    // Note 9: this conversation's Run steps come first, in step order, each
+    // labelled with its name and state; a step with no terminal yet stands in
+    // as a pending tab. Plain terminals keep today's labels and order.
+    const runState = runGroup?.state ?? null
+    const descriptors: TabDescriptor[] = orderRunTabs(visible, (tab) => tab.info.terminalId, runState).map((entry) => {
+      if (entry.kind === 'pending') {
+        const face = stepTabFace(entry.step)
+        return {
+          id: pendingTabId(entry.step.key),
+          label: face.label,
+          closable: false,
+          renamable: false,
+          pending: face.pending,
+          accent: RUN_TONE_COLOR[face.tone],
+          tooltip: runState === null ? face.tooltip : pendingTabTooltip(entry.step, runState),
+        }
+      }
+      if (entry.kind === 'step') {
+        const face = stepTabFace(entry.step)
+        return {
+          id: entry.item.info.terminalId,
+          label: face.label,
+          closable: true,
+          renamable: false,
+          accent: RUN_TONE_COLOR[face.tone],
+          tooltip: face.tooltip,
+        }
+      }
+      const tab = entry.item
       // Multi-root scope only: the tab carries its project's accent dot, with
       // the project name as the tooltip (stable per tab — the churning label
       // must NOT feed the tooltip, which is a structural field whose change
@@ -575,7 +629,8 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     })
     tabsEl.tabs = descriptors
     tabsEl.activeId = activeId
-    empty.hidden = visible.length > 0
+    empty.hidden = visible.length > 0 || descriptors.length > 0
+    reloadStepButton.hidden = stepOfTerminal(runState, activeId) === null
     // #1133: Split is only offered when there is something to split and room
     // to split it into — a disabled button with a reason beats a dead click.
     const splittable = canSplit(layout, activeId)
@@ -1393,6 +1448,19 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     closeOpenRootMenu?.()
   }
 
+  // ── The Run group (plan project_run, Phase 5) ───────────────────────────
+  // The pill sits before the tabs; its setup panel and first-time picker dock
+  // over the terminal area. Its scope is the conversation on screen.
+  const group = new RunGroupView({
+    api,
+    dock: hosts,
+    isOnScreen: () => panel.isConnected,
+    onChange: () => renderTabs(),
+  })
+  runGroup = group
+  header.insertBefore(group.element, tabsEl)
+  if (ownerScope !== undefined) group.setScope(ownerScope)
+
   // ── Wiring ─────────────────────────────────────────────────────────────
 
   newButton.addEventListener('click', () => {
@@ -1410,8 +1478,22 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     }
   })
 
+  reloadStepButton.addEventListener('click', () => {
+    const step = stepOfTerminal(runGroup?.state ?? null, activeId)
+    if (step !== null) runGroup?.reloadStep(step.key)
+  })
+
   tabsEl.addEventListener('fl-tab-select', (event) => {
     const { id } = (event as CustomEvent<TabSelectDetail>).detail
+    const pendingStep = stepKeyOfPendingTab(id)
+    if (pendingStep !== null) {
+      // A Run step with no terminal yet: the click starts it (or the Run);
+      // the strip keeps the tab that was active until a terminal arrives.
+      tabsEl.activeId = activeId
+      runGroup?.activatePending(pendingStep)
+      return
+    }
+    runGroup?.tuckSetup() // the setup covers the terminals; a chosen tab is shown
     activateTab(id, { focus: true }) // the user clicked this tab
   })
 
@@ -1869,6 +1951,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
   // An off-screen panel queues nothing; it re-checks its trees on the way in.
   document.addEventListener('flow:terminal-shown', () => {
     probeVisibleRoots()
+    runGroup?.shown()
   })
 
   // ── Conversation ownership (each thread is its own context) ────────────
@@ -1905,6 +1988,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     projectViewScopeThreadId = ownerScope !== null && ownerScope.threadId === null ? scopeThreadId : undefined
     claimFlaggedTabs()
     reconcileActiveTab()
+    runGroup?.setScope(ownerScope)
     if (panel.isConnected) ensureStarted()
   }
 

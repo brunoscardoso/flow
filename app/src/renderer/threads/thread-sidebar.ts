@@ -1105,6 +1105,14 @@ export class ThreadSidebar {
             .update({ threadId, patch: { bypassPermissions: true } })
             .catch((e: unknown) => console.error('flow: failed to set bypassPermissions', e))
         }
+        // Autopilot chosen on the new-thread page. One write for every channel
+        // (bare thread, card, imported issue), before the first turn ends —
+        // which is the first moment the chain reads it.
+        if (draft?.autopilot === true) {
+          await window.flow.threads
+            .update({ threadId, patch: { autopilot: true } })
+            .catch((e: unknown) => console.error('flow: failed to set autopilot', e))
+        }
         // THE BRANCH, BEFORE THE FIRST TURN. `prepareWorktree` cuts the checkout
         // and names it; asking for neither keeps the old path exactly — the
         // thread works in the project's own files.

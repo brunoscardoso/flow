@@ -178,10 +178,10 @@ test.describe('flow-settings overlay — forms & reconciliation', () => {
     const overlay = window.locator(FLOW_OVERLAY)
     await expect(overlay).toHaveCount(1)
 
-    const autopilot = toggleByLabel(overlay, 'Autopilot')
-    await expect(autopilot).toHaveAttribute('aria-checked', 'false')
+    const wave = toggleByLabel(overlay, 'Wave execution')
+    await expect(wave).toHaveAttribute('aria-checked', 'true')
 
-    // Mirror an external `/flow autopilot=true` edit (setConfig → flow:stateChanged
+    // Mirror an external `/flow wave_execution=false` edit (setConfig → flow:stateChanged
     // rebroadcast). The OPEN panel must reflect it with no user interaction.
     await window.evaluate(async (r) => {
       await (
@@ -192,10 +192,10 @@ test.describe('flow-settings overlay — forms & reconciliation', () => {
             }
           }
         }
-      ).flow.flow.setConfig({ rootId: r, updates: { autopilot: 'true' } })
+      ).flow.flow.setConfig({ rootId: r, updates: { wave_execution: 'false' } })
     }, root)
 
-    await expect(autopilot).toHaveAttribute('aria-checked', 'true', { timeout: 4000 })
+    await expect(wave).toHaveAttribute('aria-checked', 'false', { timeout: 4000 })
 
     expect(errors, `uncaught errors: ${errors.join(' | ')}`).toEqual([])
   })

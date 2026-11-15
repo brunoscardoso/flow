@@ -133,10 +133,11 @@ test.describe('flow settings — concurrent config writes', () => {
     window.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`))
 
     const dir = await openSettledPanel(window)
-    await row(window, 'Autopilot').locator('.fl-fs-toggle').click()
+    // Wave execution defaults ON, so the click writes it OFF explicitly.
+    await row(window, 'Wave execution').locator('.fl-fs-toggle').click()
     await expect
       .poll(() => flowconfig(dir), { timeout: 10_000 })
-      .toContain('autopilot: true')
+      .toContain('wave_execution: false')
     // Routing defaults ON (#1957) and a fresh project has no key, so the click
     // turns it OFF — written out explicitly, which is what proves it persisted.
     const routing = row(window, 'Model routing').locator('.fl-fs-toggle')
@@ -147,7 +148,7 @@ test.describe('flow settings — concurrent config writes', () => {
       .toContain('model_routing: false')
 
     // The first write must still be there — this is the non-racing baseline.
-    expect(flowconfig(dir)).toContain('autopilot: true')
+    expect(flowconfig(dir)).toContain('wave_execution: false')
     expect(errors, `uncaught: ${errors.join(' | ')}`).toEqual([])
   })
 
@@ -267,7 +268,7 @@ test.describe('flow settings — concurrent config writes', () => {
           ).flow.flow
           await Promise.all([
             api.setConfig({ rootId: root as string, updates: { branch: `feat/${n}` } }),
-            api.setConfig({ rootId: root as string, updates: { autopilot: 'true' } }),
+            api.setConfig({ rootId: root as string, updates: { max_verify_retries: '4' } }),
           ])
         },
         [dir, i] as const,
@@ -275,7 +276,7 @@ test.describe('flow settings — concurrent config writes', () => {
       await window.waitForTimeout(400)
       const text = flowconfig(dir)
       expect(text, `pair ${i}: branch lost to the concurrent write`).toContain(`branch: feat/${i}`)
-      expect(text, `pair ${i}: autopilot lost to the concurrent write`).toContain('autopilot: true')
+      expect(text, `pair ${i}: max_verify_retries lost to the concurrent write`).toContain('max_verify_retries: 4')
     }
   })
 
@@ -286,7 +287,7 @@ test.describe('flow settings — concurrent config writes', () => {
     window,
   }) => {
     const dir = await openSettledPanel(window)
-    expect(flowconfig(dir)).not.toContain('autopilot: true')
+    expect(flowconfig(dir)).not.toContain('wave_execution:')
 
     await window.evaluate(async (p) => {
       await (
@@ -316,12 +317,12 @@ test.describe('flow settings — concurrent config writes', () => {
       await expect(overlay).not.toContainText('Not provisioned')
     }
 
-    const stillEditable = await row(window, 'Autopilot').locator('.fl-fs-toggle').count()
+    const stillEditable = await row(window, 'Wave execution').locator('.fl-fs-toggle').count()
     expect(stillEditable, 'a removed project must not still be editable').toBe(0)
     await window.waitForTimeout(1000)
     expect(
       flowconfig(dir),
       'the panel wrote .flowconfig into a project the app no longer holds',
-    ).not.toContain('autopilot: true')
+    ).not.toContain('wave_execution:')
   })
 })

@@ -26,7 +26,7 @@ function harness() {
   const pending: Array<() => void> = []
   const threadStore = {
     getThread: (id: string) =>
-      ({ id, projectRoot: '/repo', title: 'A conversation', status: 'working' }) as ThreadRecord,
+      ({ id, projectRoot: '/repo', title: 'A conversation', status: 'working', autopilot: true }) as ThreadRecord,
     setThreadChain: () => {},
     markAsLoopRun: () => {},
   } as unknown as ThreadStore
@@ -38,7 +38,7 @@ function harness() {
     readProjectSettings: async () =>
       new Promise((resolve) => {
         pending.push(() =>
-          resolve({ autopilot: true, tail: { commit: false, push: false, pr: false } }),
+          resolve({ tail: { commit: false, push: false, pr: false } }),
         )
       }),
     // The ladder's gate, answering yes — every case here is about something

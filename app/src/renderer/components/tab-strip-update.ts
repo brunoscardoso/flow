@@ -53,7 +53,8 @@ function sameStructure(prev: TabDescriptor, next: TabDescriptor): boolean {
     (prev.closable ?? false) === (next.closable ?? false) &&
     (prev.renamable ?? false) === (next.renamable ?? false) &&
     prev.accent === next.accent &&
-    prev.tooltip === next.tooltip
+    prev.tooltip === next.tooltip &&
+    (prev.pending ?? false) === (next.pending ?? false)
   )
 }
 

@@ -256,14 +256,14 @@ async function walkPastProjectSettings(win: Page): Promise<ReturnType<Page['loca
   await win.locator('.fl-settings-page button', { hasText: 'Getting Started' }).click()
   const wizard = win.locator(WIZARD)
   await expect(wizard).toBeVisible()
-  for (const title of ['Choose your agent', 'Connect a Claude account', 'Open a project', 'Choose a mode']) {
+  for (const title of ['Choose your agent', 'Connect a Claude account', 'Open a project', 'Before the agent acts']) {
     const claude = wizard.locator('.fl-wizard-body button', { hasText: 'Claude (Anthropic)' })
     if ((await claude.count()) > 0) await claude.click()
     await expect.poll(() => nextDisabled(win), { timeout: 20_000 }).toBe(false)
     await wizard.locator('.fl-wizard-btn', { hasText: /^Next$/ }).click()
     await expect(wizard.locator('.fl-settings-header')).toContainText(title)
   }
-  await wizard.locator('.fl-wizard-body .fl-wizard-btn', { hasText: /^Manual/ }).click()
+  await wizard.locator('.fl-wizard-body .fl-wizard-btn', { hasText: /^Ask me first/ }).click()
   for (const title of ['Sign in to Flow', 'Your project settings']) {
     await expect.poll(() => nextDisabled(win), { timeout: 20_000 }).toBe(false)
     await wizard.locator('.fl-wizard-btn', { hasText: /^Next$/ }).click()

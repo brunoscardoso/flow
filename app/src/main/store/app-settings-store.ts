@@ -10,6 +10,7 @@ import { randomBytes } from 'node:crypto'
 
 import type { FlowDatabase } from './db'
 import { parseModelRouting, type ModelRouting } from '../../shared/model-routing'
+import { parseRunTweaks, type RunTweaks } from '../../shared/run-setup'
 import {
   WORKTREE_FLOWCONFIG_KEYS,
   WORKTREE_SETTING_KEYS,
@@ -109,6 +110,18 @@ const MAX_TASK_EXTRA_PROJECTS = 32
  */
 const KNOWLEDGE_LAST_SYNCED_PREFIX = 'knowledge_last_synced:'
 export type KnowledgeSyncScope = 'project' | 'workspace'
+
+/**
+ * A person's own tweaks to a project's Run setup (plan_project_run), per
+ * machine, as JSON keyed by step id. Key/value rows older builds ignore.
+ */
+const RUN_TWEAKS_PREFIX = 'run_tweaks:'
+/** One project's recorded terminal commands (command-usage.ts is the one writer). */
+const RUN_USAGE_PREFIX = 'run_usage:'
+/** A project's Run setup — local to this computer, never shared (plan_project_run). */
+const RUN_SETUP_PREFIX = 'run_setup:'
+/** The one order of Run steps across projects, as `<root>::<id>` references (plan_project_run). */
+const RUN_ORDER_KEY = 'run_order'
 
 /**
  * The word this installation claims queue items under.
@@ -626,6 +639,79 @@ export class AppSettingsStore {
   setCurrentWorkspace(slug: string | null): void {
     if (slug === null || slug.trim() === '') this.#deleteKey(CURRENT_WORKSPACE_KEY)
     else this.#setString(CURRENT_WORKSPACE_KEY, slug.trim())
+  }
+
+  /** A project's Run setup as stored text (JSON), or null when it has none. */
+  getRunSetup(projectRoot: string): string | null {
+    return this.#getString(`${RUN_SETUP_PREFIX}${projectRoot}`)
+  }
+
+  /** Store a project's Run setup text; null forgets it. */
+  setRunSetup(projectRoot: string, text: string | null): void {
+    if (text === null) this.#deleteKey(`${RUN_SETUP_PREFIX}${projectRoot}`)
+    else this.#setString(`${RUN_SETUP_PREFIX}${projectRoot}`, text)
+  }
+
+  /** Every project root that has a stored Run setup. */
+  listRunSetupRoots(): string[] {
+    const rows = this.db
+      .prepare('SELECT key FROM app_settings WHERE substr(key, 1, ?) = ? ORDER BY key')
+      .all(RUN_SETUP_PREFIX.length, RUN_SETUP_PREFIX) as Array<{ key: string }>
+    return rows.map((row) => row.key.slice(RUN_SETUP_PREFIX.length)).filter((root) => root !== '')
+  }
+
+  /** The one order of Run steps across projects. A corrupt row reads as none. */
+  getRunOrder(): string[] {
+    const raw = this.#getString(RUN_ORDER_KEY)
+    if (raw === null) return []
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      return Array.isArray(parsed) ? parsed.filter((ref): ref is string => typeof ref === 'string' && ref !== '') : []
+    } catch {
+      return []
+    }
+  }
+
+  /** Replace the one order; an empty one REMOVES the row. */
+  setRunOrder(refs: string[]): void {
+    const clean = [...new Set(refs.filter((ref) => typeof ref === 'string' && ref !== ''))]
+    if (clean.length === 0) this.#deleteKey(RUN_ORDER_KEY)
+    else this.#setString(RUN_ORDER_KEY, JSON.stringify(clean))
+  }
+
+  getRunTweaks(projectRoot: string): RunTweaks {
+    const raw = this.#getString(`${RUN_TWEAKS_PREFIX}${projectRoot}`)
+    if (raw === null) return {}
+    try {
+      return parseRunTweaks(JSON.parse(raw))
+    } catch {
+      return {}
+    }
+  }
+
+  /** Replace this person's tweaks to a project's Run setup; none left REMOVES the row. */
+  setRunTweaks(projectRoot: string, tweaks: RunTweaks): RunTweaks {
+    const clean = parseRunTweaks(tweaks)
+    if (Object.keys(clean).length === 0) this.#deleteKey(`${RUN_TWEAKS_PREFIX}${projectRoot}`)
+    else this.#setString(`${RUN_TWEAKS_PREFIX}${projectRoot}`, JSON.stringify(clean))
+    return clean
+  }
+
+  /** The raw recorded terminal commands of a project (parsed by command-usage.ts), or null. */
+  getRunUsage(projectRoot: string): unknown {
+    const raw = this.#getString(`${RUN_USAGE_PREFIX}${projectRoot}`)
+    if (raw === null) return null
+    try {
+      return JSON.parse(raw) as unknown
+    } catch {
+      return null
+    }
+  }
+
+  /** Replace a project's recorded terminal commands; an empty list REMOVES the row. */
+  setRunUsage(projectRoot: string, entries: readonly unknown[]): void {
+    if (entries.length === 0) this.#deleteKey(`${RUN_USAGE_PREFIX}${projectRoot}`)
+    else this.#setString(`${RUN_USAGE_PREFIX}${projectRoot}`, JSON.stringify(entries))
   }
 
   /**

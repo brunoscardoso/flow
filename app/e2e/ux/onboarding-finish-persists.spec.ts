@@ -165,10 +165,10 @@ test('a FINISHED wizard stays gone on relaunch even after the only account is re
     await reopenWizard(win)
     const wizard = win.locator(WIZARD)
     // Welcome → Connect (seeded account auto-reflects) → Project (seeded root).
-    await advanceWizardTo(win, 'Choose a mode')
-    // Mode: pick Manual (the conservative branch — no autopilot side effects).
-    await expect(wizard.locator('.fl-settings-header')).toContainText('Choose a mode')
-    const manual = wizard.locator('.fl-wizard-btn', { hasText: 'Manual' })
+    await advanceWizardTo(win, 'Before the agent acts')
+    // Before the agent acts: pick Ask me first (the conservative branch).
+    await expect(wizard.locator('.fl-settings-header')).toContainText('Before the agent acts')
+    const manual = wizard.locator('.fl-wizard-btn', { hasText: 'Ask me first' })
     await manual.click()
     await expect(manual).toHaveClass(/fl-wizard-btn--primary/, { timeout: 5000 })
     await expect.poll(() => nextDisabled(win)).toBe(false)

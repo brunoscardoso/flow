@@ -503,6 +503,28 @@ describe('ThreadStore', () => {
       expect(store.latestWriterThreadFor(ROOT_A, 'flow/plans/plan_never_v1.md')).toBeNull()
     })
 
+    it("listBackgroundCommands: the project's Bash calls started in the background, newest first, bounded", () => {
+      const a = store.createThread({ projectRoot: ROOT_A })
+      const b = store.createThread({ projectRoot: ROOT_B })
+      const bash = (threadId: string, input: Record<string, unknown>, startedAt: string): void => {
+        store.recordToolCall({ threadId, toolName: 'Bash', inputJson: JSON.stringify(input), startedAt })
+      }
+      bash(a.id, { command: 'npm run dev', run_in_background: true }, '2026-11-01T00:00:00.000Z')
+      bash(a.id, { command: 'temporal server start-dev', run_in_background: true }, '2026-11-02T00:00:00.000Z')
+      bash(a.id, { command: 'npm test' }, '2026-11-03T00:00:00.000Z')
+      bash(a.id, { command: 'echo run_in_background', run_in_background: false }, '2026-11-04T00:00:00.000Z')
+      bash(b.id, { command: 'make up', run_in_background: true }, '2026-11-05T00:00:00.000Z')
+      store.recordToolCall({ threadId: a.id, toolName: 'Read', inputJson: JSON.stringify({ run_in_background: true, command: 'x' }) })
+
+      expect(store.listBackgroundCommands(ROOT_A)).toEqual([
+        { command: 'temporal server start-dev', startedAt: '2026-11-02T00:00:00.000Z' },
+        { command: 'npm run dev', startedAt: '2026-11-01T00:00:00.000Z' },
+      ])
+      // The bound is on rows read, newest first: the two newest candidates hold one background call.
+      expect(store.listBackgroundCommands(ROOT_A, 2)).toEqual([{ command: 'temporal server start-dev', startedAt: '2026-11-02T00:00:00.000Z' }])
+      expect(store.listBackgroundCommands(ROOT_B).map((row) => row.command)).toEqual(['make up'])
+    })
+
     it('names a thread that wrote the doc into a project ATTACHED to it (live 2026-10-09)', () => {
       // The live report: a thread started in one project wrote its discovery
       // into a sibling it had attached; scoped to the primary root alone, the
@@ -1275,6 +1297,68 @@ describe('ThreadStore', () => {
       store.updateThread(thread.id, { bypassPermissions: true })
       const renamed = store.updateThread(thread.id, { title: 'renamed' })
       expect(renamed.bypassPermissions).toBe(true)
+    })
+  })
+
+  // ── Autopilot, per conversation ────────────────────────────────────────
+
+  describe('autopilot', () => {
+    it('is off on a new thread unless the create asks for it', () => {
+      const off = store.createThread({ projectRoot: ROOT_A })
+      expect(off.autopilot).toBe(false)
+      expect(store.getThread(off.id)?.autopilot).toBe(false)
+      const on = store.createThread({ projectRoot: ROOT_A, autopilot: true })
+      expect(on.autopilot).toBe(true)
+      expect(store.getThread(on.id)?.autopilot).toBe(true)
+    })
+
+    it('round-trips through update, and belongs to ONE thread', () => {
+      const a = store.createThread({ projectRoot: ROOT_A })
+      const b = store.createThread({ projectRoot: ROOT_A })
+      expect(store.updateThread(a.id, { autopilot: true }).autopilot).toBe(true)
+      expect(store.getThread(a.id)?.autopilot).toBe(true)
+      // Same project, other conversation: untouched.
+      expect(store.getThread(b.id)?.autopilot).toBe(false)
+      expect(store.updateThread(a.id, { autopilot: false }).autopilot).toBe(false)
+    })
+
+    it('an update that does not touch it leaves it intact', () => {
+      const thread = store.createThread({ projectRoot: ROOT_A, autopilot: true })
+      expect(store.updateThread(thread.id, { title: 'renamed' }).autopilot).toBe(true)
+    })
+  })
+
+  // ── Run tweaks, per conversation (v42) ─────────────────────────────────
+
+  describe('run tweaks', () => {
+    it('reads none on a new thread and on an unknown one', () => {
+      const thread = store.createThread({ projectRoot: ROOT_A })
+      expect(store.getRunTweaks(thread.id)).toEqual({})
+      expect(store.getRunTweaks('no-such-thread')).toEqual({})
+    })
+
+    it('round-trips per project and belongs to ONE thread', () => {
+      const a = store.createThread({ projectRoot: ROOT_A })
+      const b = store.createThread({ projectRoot: ROOT_A })
+      store.setRunTweaks(a.id, { [ROOT_A]: { web: { ready: { kind: 'port', port: 3100 } }, db: { skip: true } } })
+      expect(store.getRunTweaks(a.id)).toEqual({
+        [ROOT_A]: { web: { ready: { kind: 'port', port: 3100 } }, db: { skip: true } },
+      })
+      expect(store.getRunTweaks(b.id)).toEqual({})
+    })
+
+    it('drops malformed fields, stores NULL when nothing remains, and refuses an unknown thread', () => {
+      const thread = store.createThread({ projectRoot: ROOT_A })
+      store.setRunTweaks(thread.id, { [ROOT_A]: { web: { ready: { kind: 'port', port: 0 } as never } } })
+      const row = db.prepare('SELECT run_tweaks FROM threads WHERE id = ?').get(thread.id) as { run_tweaks: string | null }
+      expect(row.run_tweaks).toBeNull()
+      expect(() => store.setRunTweaks('no-such-thread', {})).toThrow('unknown thread')
+    })
+
+    it('a corrupt column reads as none', () => {
+      const thread = store.createThread({ projectRoot: ROOT_A })
+      db.prepare('UPDATE threads SET run_tweaks = ? WHERE id = ?').run('{nope', thread.id)
+      expect(store.getRunTweaks(thread.id)).toEqual({})
     })
   })
 

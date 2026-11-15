@@ -219,9 +219,9 @@ test.describe('flow 11 — Flow settings: the project account section', () => {
       expect(storedOverride(userDataDir, activeProject)).toBe('')
 
       // --- GUARD 1: a config toggle here writes to THAT project's file only. ---
-      await overlay.locator('.fl-fs-row', { hasText: 'Autopilot' }).locator('.fl-fs-toggle').click()
-      await expect.poll(() => readFlowConfig(otherProject), { timeout: 10_000 }).toContain('autopilot: true')
-      expect(readFlowConfig(activeProject)).not.toContain('autopilot')
+      await overlay.locator('.fl-fs-row', { hasText: 'Wave execution' }).locator('.fl-fs-toggle').click()
+      await expect.poll(() => readFlowConfig(otherProject), { timeout: 10_000 }).toContain('wave_execution: false')
+      expect(readFlowConfig(activeProject)).not.toContain('wave_execution')
       await closeOverlays(win)
 
       // --- GUARD 2: move the app default; the explicit pin must win. ---

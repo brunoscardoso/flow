@@ -32,6 +32,14 @@ export const BOARD_TOOL_NAMES = {
  */
 export const SUBTASK_TOOL_NAME = 'start_subtask'
 
+/**
+ * The Run tools (plan_project_run note 8): on the `flow` server of every Claude
+ * thread session when the Run is wired. They act only on a Run already going in
+ * the session's own conversation, so they never ask.
+ */
+export const RUN_OUTPUT_TOOL_NAME = 'run_output'
+export const RUN_RELOAD_TOOL_NAME = 'run_reload'
+
 /** The full, namespaced name the SDK reports for one of this server's tools. */
 export function flowToolName(base: string): string {
   return `mcp__${FLOW_MCP_SERVER_NAME}__${base}`

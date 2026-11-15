@@ -161,12 +161,9 @@ export const FLOW_SETTINGS_SECTIONS: SectionDef[] = [
       },
     ],
   },
-  {
-    title: 'Autopilot',
-    fields: [
-      { key: 'autopilot', label: 'Autopilot', type: 'toggle', help: 'Auto-chain commands through the flow' },
-    ],
-  },
+  // No Autopilot section: autopilot is chosen per CONVERSATION, on its
+  // composer, and the app no longer reads the project key. A value already in
+  // a project's file is left exactly as it is, for terminal runs.
   {
     title: 'Git & PR',
     fields: [
