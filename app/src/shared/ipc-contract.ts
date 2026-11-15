@@ -63,6 +63,16 @@ export type {
 } from './browser-capture-types'
 import type { ShareAccess, ShareRefusalReason, ShareSummary, ShareView } from './share-contract'
 import type {
+  AskListRequest,
+  AskListResponse,
+  AskRequest,
+  AskStaleRequest,
+  AskStaleResponse,
+  AskStartResponse,
+  AskStateEvent,
+  AskStopResponse,
+} from './ask-contract'
+import type {
   WorkspaceAnswer,
   WorkspaceResolveRequest,
   WorkspaceResolveResult,
@@ -6977,6 +6987,16 @@ export interface IpcInvokeMap {
     response: BrainQueryResult
   }
 
+  // Ask the Blueprint (plan `ask_the_blueprint`). rootId === absolute rootPath.
+  /** Start one question. Answers its id at once; the work streams on `ask:state`. */
+  'ask:start': { request: AskRequest; response: AskStartResponse }
+  /** Stop here — end the dig and keep the best answer so far, marked partial. */
+  'ask:stop': { request: { askId: string }; response: AskStopResponse }
+  /** Saved answers for one or more features or parts, through the CLI's `qa list`. */
+  'ask:list': { request: AskListRequest; response: AskListResponse }
+  /** Which saved answers have code that changed since, through the CLI's `qa stale`. */
+  'ask:stale': { request: AskStaleRequest; response: AskStaleResponse }
+
   // project (projects are addressed by absolute rootPath, matching main)
   'project:list': { request: Record<string, never>; response: RegisteredProject[] }
   /**
@@ -7628,6 +7648,9 @@ export interface IpcEventMap {
   /** Live learn-progress tick — the caged learner just read `file` for `module`
    *  under `rootId` (throttled per module in main). `rootId` === absolute rootPath. */
   'learn:progress': { rootId: string; module: string; file: string }
+  /** One question's phase and best answer changed (Ask the Blueprint). Sent
+   *  only when the step list or the answer changes — never per activity. */
+  'ask:state': AskStateEvent
   /** The global learn pause state flipped (learn:pause) — panels toggle their
    *  Pause/Resume label live (mirrors learn:progress's event pattern). */
   'learn:pausedChanged': { paused: boolean; pausedRoots?: string[] }
@@ -7959,6 +7982,10 @@ export const IPC_INVOKE_CHANNELS = [
   'loops:forget',
   'loops:owner',
   'brain:query',
+  'ask:start',
+  'ask:stop',
+  'ask:list',
+  'ask:stale',
   'project:list',
   'project:addressableRoots',
   'project:add',
@@ -8080,6 +8107,7 @@ export const IPC_EVENT_CHANNELS = [
   'learn:basicDiscoveryAsk',
   'learn:chatLearnAsk',
   'learn:progress',
+  'ask:state',
   'learn:pausedChanged',
   'learn:featureLearned',
   'learn:featureParts',
@@ -8460,6 +8488,15 @@ export interface FlowBrainApi {
   /** Search the trusted brain tiers. The feature map's title strip is the
    *  first caller. */
   query(request: IpcRequest<'brain:query'>): Promise<IpcResponse<'brain:query'>>
+}
+
+/** Ask the Blueprint: one question at a time, its state streamed back. */
+export interface FlowAskApi {
+  start(request: IpcRequest<'ask:start'>): Promise<IpcResponse<'ask:start'>>
+  stop(request: IpcRequest<'ask:stop'>): Promise<IpcResponse<'ask:stop'>>
+  list(request: IpcRequest<'ask:list'>): Promise<IpcResponse<'ask:list'>>
+  stale(request: IpcRequest<'ask:stale'>): Promise<IpcResponse<'ask:stale'>>
+  onState(listener: (event: IpcEventPayload<'ask:state'>) => void): Unsubscribe
 }
 
 /**
@@ -9074,6 +9111,8 @@ export interface FlowApi {
   /** Agent loops (Phase 7). Optional: an older preload predates the channels. */
   loops?: FlowLoopsApi
   brain: FlowBrainApi
+  /** Ask the Blueprint. Optional: an older preload predates the channels. */
+  ask?: FlowAskApi
   project: FlowProjectApi
   accounts: FlowAccountsApi
   review: FlowReviewApi

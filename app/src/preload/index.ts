@@ -464,6 +464,15 @@ const flowApi: FlowApi = {
   brain: {
     query: (request) => invoke('brain:query', request),
   },
+  // Ask the Blueprint: start, Stop here, the saved log and its staleness — the
+  // writes (facts, answers) happen in main through the CLI's one writer each.
+  ask: {
+    start: (request) => invoke('ask:start', request),
+    stop: (request) => invoke('ask:stop', request),
+    list: (request) => invoke('ask:list', request),
+    stale: (request) => invoke('ask:stale', request),
+    onState: (listener) => subscribe('ask:state', listener),
+  },
   // Feature view sharing: share STATE only. The session token that authorises
   // these calls is read in main and has no route through here.
   share: {

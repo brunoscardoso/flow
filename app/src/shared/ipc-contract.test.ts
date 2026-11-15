@@ -224,6 +224,10 @@ const INVOKE_MAP_KEYS: Record<IpcInvokeChannel, true> = {
   'settings:getModelRouting': true,
   'settings:setModelRouting': true,
   'brain:query': true,
+  'ask:start': true,
+  'ask:stop': true,
+  'ask:list': true,
+  'ask:stale': true,
   'project:list': true,
   'project:addressableRoots': true,
   'project:add': true,
@@ -369,6 +373,7 @@ const EVENT_MAP_KEYS: Record<IpcEventChannel, true> = {
   'learn:basicDiscoveryAsk': true,
   'learn:chatLearnAsk': true,
   'learn:progress': true,
+  'ask:state': true,
   'learn:pausedChanged': true,
   'learn:featureLearned': true,
   'learn:featureParts': true,
@@ -443,6 +448,7 @@ describe('IPC contract channel allowlists', () => {
       'workspaces',
       'plan',
       'run',
+      'ask',
     ])
     for (const channel of [...IPC_INVOKE_CHANNELS, ...IPC_EVENT_CHANNELS]) {
       const domain = channel.split(':')[0]

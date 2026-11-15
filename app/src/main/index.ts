@@ -68,6 +68,7 @@ import {
 } from './blueprint/blueprint-observer'
 import { deriveBasicGraph } from './blueprint/basic-derive'
 import { registerBrainChannels } from './brain/ipc'
+import { registerAskChannels } from './blueprint/ask-ipc'
 import { registerLoopsChannels } from './loops/loops-handler'
 import { makeBrainCaptureOnTurnComplete, threadWorkingSet } from './brain/capture'
 import { resolveChatLearnAsk } from './learn/chat-learn-trigger'
@@ -556,6 +557,7 @@ let disposeArtifactIpc: (() => void) | null = null
 let disposeWalkthroughPages: (() => void) | null = null
 let disposeBlueprintIpc: (() => void) | null = null
 let disposeBrainIpc: (() => void) | null = null
+let disposeAskIpc: (() => void) | null = null
 let disposeShareIpc: (() => void) | null = null
 let disposeWorkspacesIpc: (() => void) | null = null
 /** Which Workspace's sync carries a project's knowledge. Quit runs the engine's bounded last commit through it. */
@@ -3338,6 +3340,17 @@ const understandFeature = async (request: {
   disposeBrainIpc = registerBrainChannels({
     roots: rootsProviderFrom(projectRegistry),
   })
+  // Ask the Blueprint: the fast pass and the bounded dig run caged and
+  // read-only; facts and answers are written through the bundled CLI's one
+  // writer each. State streams on ask:state, sent only when it changes.
+  disposeAskIpc = registerAskChannels({
+    roots: rootsProviderFrom(projectRegistry),
+    bundledCli,
+    threadStore,
+    routing: () => appSettings.getModelRouting(),
+    authEnv: resolveLearnAuthEnv,
+    broadcast: (event) => broadcast('ask:state', event),
+  })
   // Feature view sharing (feature-view-sharing Phase 5). The client reads the
   // signed-in person's session token HERE, in main, at the moment of each
   // request — the renderer gets share state and never the token. Identity
@@ -4279,6 +4292,8 @@ async function disposeMainProcess(): Promise<void> {
   disposeBlueprintIpc = null
   disposeBrainIpc?.()
   disposeBrainIpc = null
+  disposeAskIpc?.()
+  disposeAskIpc = null
   disposeShareIpc?.()
   disposeShareIpc = null
   disposeLoopsIpc?.()
