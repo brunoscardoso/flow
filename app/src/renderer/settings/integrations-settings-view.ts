@@ -2,6 +2,13 @@
 // Azure DevOps, used by the task list to import issues. Tokens are stored in
 // main's CredentialsManager and NEVER read back (status returns connected +
 // an identity hint only), so token fields always start empty.
+//
+// THE LAYOUT (2026-11-14, from the approved mockup): one card per tracker. A
+// card's closed row says who it is connected as and whether a saved list
+// exists, so the page reads as a list; opening it shows the account box (how
+// it is connected, Replace token / Disconnect) and the saved-list box. A
+// tracker that is not connected opens by itself, on its connect form. The
+// close-on-done preference is a switch in its own section below the trackers.
 
 import '../components'
 import type {
@@ -18,7 +25,7 @@ import {
 } from './settings-feedback'
 import { injectSettingsStyles } from './settings-view'
 import { inspectListQuery } from './list-query-guard'
-import { isCliDerivedConnection } from './integration-connection'
+import { cardStartsOpen, cardSummary, isCliDerivedConnection } from './integration-connection'
 import { submitOnEnter } from './submit-on-enter-dom'
 import { isLatestRender } from './render-guard'
 
@@ -34,16 +41,18 @@ interface FieldDef {
 interface ProviderDef {
   provider: IntegrationProvider
   title: string
+  /** The letters on the card's badge. */
+  badge: string
+  /** One line saying what the tracker brings — the closed row of a card that is not connected. */
+  blurb: string
+  /** What connecting needs, above the connect form. Plain words: no command (forbidden #12). */
   help: string
   fields: FieldDef[]
   /** Build the token input from field values (null → invalid/incomplete). */
   toToken: (values: Record<string, string>) => IntegrationTokenInput | null
-  /** CLI logout command, for providers whose Connected state can come from a CLI
-   *  login the app can't revoke (#419). Absent for token-only providers. */
-  cliLogout?: string
-  /** What the custom-list query language is called, for the field's label. */
+  /** What the custom-list query language is called. */
   listSyntax: string
-  /** An example query, shown as the field's placeholder. */
+  /** An example query, shown as the field's placeholder and under it. */
   listPlaceholder: string
 }
 
@@ -51,21 +60,26 @@ const PROVIDERS: ProviderDef[] = [
   {
     provider: 'github',
     title: 'GitHub',
-    help: "Reuses your gh CLI login if you're signed in (gh auth login). Otherwise paste a Personal Access Token with read access to issues.",
-    fields: [{ key: 'pat', label: 'Personal Access Token', password: true, placeholder: 'ghp_…' }],
+    badge: 'GH',
+    blurb: 'Issues assigned to you, and any search you save.',
+    help:
+      'Flow uses the GitHub account you are signed in to on this computer when there is one. ' +
+      'Otherwise paste a personal access token with read access to issues.',
+    fields: [{ key: 'pat', label: 'Personal access token', password: true, placeholder: 'ghp_…' }],
     toToken: (v) => (v['pat'] ? { provider: 'github', pat: v['pat'] } : null),
-    cliLogout: 'gh auth logout',
     listSyntax: 'GitHub search',
     listPlaceholder: 'repo:acme/api is:issue is:open label:bug',
   },
   {
     provider: 'jira',
     title: 'Jira',
-    help: 'Your Atlassian site, account email, and an API token.',
+    badge: 'J',
+    blurb: 'Tickets assigned to you on your Atlassian site.',
+    help: 'Your Atlassian site, the email you sign in with, and an API token.',
     fields: [
       { key: 'site', label: 'Site', placeholder: 'your-team.atlassian.net' },
       { key: 'email', label: 'Account email', placeholder: 'you@company.com' },
-      { key: 'apiToken', label: 'API token', password: true, placeholder: '…' },
+      { key: 'apiToken', label: 'API token', password: true, placeholder: 'Paste an API token' },
     ],
     toToken: (v) =>
       v['site'] && v['email'] && v['apiToken']
@@ -77,13 +91,15 @@ const PROVIDERS: ProviderDef[] = [
   {
     provider: 'azure',
     title: 'Azure DevOps',
+    badge: 'AZ',
+    blurb: 'Work items assigned to you in one project.',
     help:
-      'Your organisation and project, plus a Personal Access Token with read access to work items. ' +
-      'Azure scopes a query to one project, so both are needed before Flow can list what is assigned to you.',
+      'Azure scopes a query to one project, so Flow needs the organisation and the project, ' +
+      'plus a personal access token with read access to work items.',
     fields: [
       { key: 'org', label: 'Organisation', placeholder: 'contoso' },
       { key: 'project', label: 'Project', placeholder: 'Orbit' },
-      { key: 'pat', label: 'Personal Access Token', password: true, placeholder: '…' },
+      { key: 'pat', label: 'Personal access token', password: true, placeholder: 'Paste a token with read access to work items' },
     ],
     // ORG AND PROJECT ARE REQUIRED NOW, and that is the fix for the sentence a
     // person hit trying to use the board's Remote column: "Azure DevOps needs
@@ -93,7 +109,6 @@ const PROVIDERS: ProviderDef[] = [
       v['pat'] && v['org'] && v['project']
         ? { provider: 'azure', pat: v['pat'], org: v['org'], project: v['project'] }
         : null,
-    cliLogout: 'az logout',
     listSyntax: 'WIQL',
     listPlaceholder:
       "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'Active' ORDER BY [System.ChangedDate] DESC",
@@ -142,17 +157,36 @@ export function mountIntegrations(host: HTMLElement): () => void {
 
 /** Pill text for a provider's probe state. `null` = the status promise has not
  *  settled yet, which must READ as work-in-progress rather than as an absence
- *  (#1069). Split out of #section so the state machine isn't a nested ternary. */
+ *  (#1069). The identity lives on the card's summary line now, so the pill is
+ *  the state alone. */
 function pillLabel(status: IntegrationStatus | null): string {
   if (status === null) return 'Checking…'
-  if (!status.connected) return 'Not connected'
-  return status.identityHint ? `Connected · ${status.identityHint}` : 'Connected'
+  return status.connected ? 'Connected' : 'Not connected'
 }
 
 /** Pill modifier class for the same three states (pending / on / off). */
 function pillClass(status: IntegrationStatus | null): string {
   if (status === null) return 'fl-int-pill pending'
   return status.connected ? 'fl-int-pill on' : 'fl-int-pill'
+}
+
+const CHEVRON_DOWN =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>'
+
+function button(label: string, className: string, onClick?: () => void): HTMLButtonElement {
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.className = className
+  btn.textContent = label
+  if (onClick !== undefined) btn.addEventListener('click', onClick)
+  return btn
+}
+
+function div(className: string, text?: string): HTMLDivElement {
+  const el = document.createElement('div')
+  el.className = className
+  if (text !== undefined) el.textContent = text
+  return el
 }
 
 class IntegrationsSettingsView {
@@ -167,6 +201,8 @@ class IntegrationsSettingsView {
    * (three cycles → nine), permanently, on the app's credential-entry surface.
    */
   #renderSeq = 0
+  /** Cards a person opened or closed — kept across repaints (a save re-renders). */
+  readonly #open = new Map<IntegrationProvider, boolean>()
 
   constructor(host: HTMLElement) {
     this.#body = host
@@ -193,10 +229,9 @@ class IntegrationsSettingsView {
     const generation = ++this.#renderSeq
 
     // Paint the provider sections IMMEDIATELY in a pending state (#1069). The
-    // gh/az probes take ~5s on a machine with the CLIs installed, and until now
-    // the panel spent that whole window as an empty box holding one sentence —
-    // no spinner, no skeleton, nothing. It read as broken, which is exactly what
-    // pushed users into closing and re-clicking (the #1068 duplication path).
+    // gh/az probes take ~5s on a machine with the CLIs installed; an empty box
+    // for that long read as broken and pushed people into closing and
+    // re-clicking (the #1068 duplication path).
     this.#paint(
       PROVIDERS.map(() => null),
       PROVIDERS.map(() => null),
@@ -204,11 +239,9 @@ class IntegrationsSettingsView {
     )
 
     // Resolve all providers CONCURRENTLY — status is non-blocking on main now
-    // (#174), so there's no reason to serialize; paint in PROVIDERS order so
-    // the layout stays deterministic regardless of which resolves first. The
-    // list config rides along: it is a fast local read, so there is no reason
-    // to make the query field wait on a second pass. The close-on-done toggle
-    // (#1885) is a fast local read too, so it rides the same pass.
+    // (#174); paint in PROVIDERS order so the layout stays deterministic. The
+    // list config and the close-on-done toggle (#1885) are fast local reads,
+    // so they ride the same pass.
     const [statuses, configs, closeOnDone] = await Promise.all([
       Promise.all(
         PROVIDERS.map((def) =>
@@ -246,51 +279,68 @@ class IntegrationsSettingsView {
     configs: readonly (IssueListConfig | null)[],
     closeOnDone: boolean | null,
   ): void {
-    const fragment = document.createDocumentFragment()
-    const intro = document.createElement('div')
-    intro.className = 'fl-settings-empty'
-    intro.textContent =
-      'Connect an issue tracker to import tasks. Tokens are stored locally and never leave your machine.'
-    fragment.appendChild(intro)
-    // The global behaviour toggle (#1885) — one preference for every tracker, so
-    // it sits above the per-provider cards rather than inside any one of them.
-    fragment.appendChild(this.#closeOnDoneToggle(closeOnDone))
+    const page = div('fl-int-page')
+
+    const intro = div('fl-int-intro')
+    const title = document.createElement('h2')
+    title.className = 'fl-int-title'
+    title.textContent = 'Integrations'
+    const sub = div(
+      'fl-int-sub',
+      'Connect your trackers so their tickets show on the Tasks board. Tokens stay on this computer.',
+    )
+    intro.append(title, sub)
+    page.appendChild(intro)
+
+    page.appendChild(div('fl-int-group-label', 'Trackers'))
+    const cards = div('fl-int-cards')
     PROVIDERS.forEach((def, i) => {
-      fragment.appendChild(this.#section(def, statuses[i] ?? null, configs[i] ?? null))
+      cards.appendChild(this.#card(def, statuses[i] ?? null, configs[i] ?? null))
     })
+    page.appendChild(cards)
+
+    // The global behaviour toggle (#1885) — one preference for every tracker, so
+    // it sits in its own section rather than inside any one card.
+    page.appendChild(div('fl-int-group-label', 'When a task is done'))
+    page.appendChild(this.#closeOnDoneToggle(closeOnDone))
+
+    const fragment = document.createDocumentFragment()
+    fragment.appendChild(page)
     this.#body.replaceChildren(fragment)
   }
 
   /**
-   * "Close the remote ticket when a task moves to Done" (#1885).
+   * "Close the ticket in its tracker" (#1885), drawn as a switch.
    *
    * A global, non-secret preference (default on), so it reads back and pre-checks.
-   * `null` is the pending state — the checkbox is inert until the real value lands,
+   * `null` is the pending state — the switch is inert until the real value lands,
    * so a click in the probe window is not written against a value that has not
    * loaded. GitHub only closes today; the help text says so rather than implying
    * every tracker does (forbidden-pattern #12 — plain language, no config key).
    */
   #closeOnDoneToggle(enabled: boolean | null): HTMLElement {
-    const section = document.createElement('div')
-    section.className = 'fl-settings-section'
-
+    // A <label>, so the whole row toggles; NOT a `.fl-settings-section` with a
+    // heading — tests find provider cards by that shape.
     const row = document.createElement('label')
-    row.className = 'fl-int-toggle'
+    row.className = 'fl-int-card fl-int-toggle'
+
+    const text = div('fl-int-toggle-text')
+    text.append(
+      div('fl-int-toggle-title', 'Close the ticket in its tracker'),
+      div(
+        'fl-int-help',
+        'Moving an imported task to Done closes the original ticket. ' +
+          'Works for GitHub today; Jira and Azure DevOps tickets stay open.',
+      ),
+    )
+
     const input = document.createElement('input')
     input.type = 'checkbox'
+    input.className = 'fl-int-switch'
+    input.setAttribute('role', 'switch')
     input.checked = enabled === true
     input.disabled = enabled === null
-    const text = document.createElement('span')
-    text.textContent = 'Close the remote ticket when a task moves to Done'
-    row.append(input, text)
-    section.appendChild(row)
-
-    const help = document.createElement('div')
-    help.className = 'fl-int-help'
-    help.textContent =
-      'When you move a task imported from a tracker into the Done column, Flow closes the ' +
-      'original ticket. Only GitHub issues are closed today; Jira and Azure DevOps are left open.'
-    section.appendChild(help)
+    row.append(text, input)
 
     input.addEventListener('change', () => {
       const next = input.checked
@@ -314,74 +364,157 @@ class IntegrationsSettingsView {
         })
     })
 
-    return section
+    return row
   }
 
-  /** One provider's card. `status === null` renders the pending (probing) state:
-   *  a "Checking…" pill and inert controls — inert because the repaint that
-   *  lands the real status replaces this DOM, so a token typed into a pending
-   *  field would be silently discarded. */
-  #section(
-    def: ProviderDef,
-    status: IntegrationStatus | null,
-    config: IssueListConfig | null,
-  ): HTMLElement {
+  /**
+   * One tracker's card. `status === null` renders the pending (probing) state:
+   * a "Checking…" pill and a closed card — closed because the repaint that
+   * lands the real status replaces this DOM, so a token typed into a pending
+   * field would be silently discarded.
+   */
+  #card(def: ProviderDef, status: IntegrationStatus | null, config: IssueListConfig | null): HTMLElement {
     const pending = status === null
     const connected = status?.connected === true
-    const hint = status?.identityHint
 
-    const section = document.createElement('div')
-    section.className = 'fl-settings-section'
+    // `.fl-settings-section` with a `.fl-settings-heading` — the shape the
+    // end-to-end specs find a provider card by.
+    const card = div(`fl-settings-section fl-int-card fl-int-${def.provider}`)
 
-    const heading = document.createElement('div')
-    heading.className = 'fl-settings-heading fl-int-heading'
-    const name = document.createElement('span')
-    name.textContent = def.title
+    const head = div('fl-settings-heading fl-int-heading')
+    const badge = div('fl-int-badge', def.badge)
+    badge.setAttribute('aria-hidden', 'true')
+    const names = div('fl-int-names')
+    names.append(
+      div('fl-int-name', def.title),
+      div(
+        'fl-int-summary',
+        cardSummary({
+          title: def.title,
+          blurb: def.blurb,
+          connected: pending ? null : connected,
+          identityHint: status?.identityHint ?? null,
+          listQuery: config?.query ?? null,
+        }),
+      ),
+    )
     const pill = document.createElement('span')
     pill.className = pillClass(status)
     pill.textContent = pillLabel(status)
-    heading.append(name, pill)
-    section.appendChild(heading)
+    const toggle = button('', 'fl-int-chevron')
+    toggle.innerHTML = CHEVRON_DOWN
+    head.append(badge, names, pill, toggle)
+    card.appendChild(head)
 
-    const help = document.createElement('div')
-    help.className = 'fl-int-help'
-    help.textContent = def.help
-    section.appendChild(help)
+    const body = div('fl-int-body')
+    if (!pending) {
+      if (connected) {
+        body.appendChild(this.#accountBox(def, status))
+        body.appendChild(this.#listBox(def, config))
+      } else {
+        body.appendChild(div('fl-int-help', def.help))
+        body.appendChild(this.#tokenForm(def, 'Connect'))
+      }
+    }
+    card.appendChild(body)
 
+    const setOpen = (open: boolean): void => {
+      body.hidden = !open || pending
+      card.classList.toggle('open', open && !pending)
+      toggle.setAttribute('aria-expanded', String(open && !pending))
+      toggle.setAttribute('aria-label', `${open ? 'Hide' : 'Show'} ${def.title}`)
+    }
+    let open = this.#open.get(def.provider) ?? cardStartsOpen(pending ? null : connected)
+    setOpen(open)
+    toggle.disabled = pending
+    const flip = (): void => {
+      if (pending) return
+      open = !open
+      this.#open.set(def.provider, open)
+      setOpen(open)
+    }
+    toggle.addEventListener('click', (event) => {
+      event.stopPropagation()
+      flip()
+    })
+    // The whole row opens the card, like the chevron does.
+    head.addEventListener('click', flip)
+
+    return card
+  }
+
+  /**
+   * How a connected tracker is connected, and what can be done about it.
+   *
+   * A CLI sign-in the app reuses can't be revoked from here, so it gets no
+   * Disconnect (it would be a dead no-op, #419) and no instruction to go type a
+   * command (forbidden #12) — it offers a token instead. A stored token offers
+   * Replace token and a confirmed Disconnect (#1505).
+   */
+  #accountBox(def: ProviderDef, status: IntegrationStatus | null): HTMLElement {
+    const wrap = div('fl-int-block')
+    const hint = status?.identityHint ?? undefined
+    const viaSignIn = isCliDerivedConnection(hint)
+
+    const box = div('fl-int-box')
+    const text = div(
+      'fl-int-box-text',
+      viaSignIn
+        ? `Flow uses the ${def.title} account you are already signed in to on this computer.`
+        : 'Connected with a token saved on this computer.',
+    )
+    box.appendChild(text)
+
+    const form = this.#tokenForm(def, 'Update token')
+    form.hidden = true
+    const reveal = button(viaSignIn ? 'Use a token instead' : 'Replace token', 'fl-int-secondary', () => {
+      form.hidden = !form.hidden
+      if (!form.hidden) form.querySelector('input')?.focus()
+    })
+    box.appendChild(reveal)
+
+    if (!viaSignIn) {
+      const disconnect = button('Disconnect', 'fl-int-disconnect')
+      disconnect.addEventListener('click', () => {
+        this.#confirmDisconnect(disconnect, def, hint)
+      })
+      box.appendChild(disconnect)
+    }
+    wrap.append(div('fl-int-block-label', 'Account'), box, form)
+    return wrap
+  }
+
+  /** The token fields and their submit — connecting, or replacing a token. */
+  #tokenForm(def: ProviderDef, saveLabel: string): HTMLElement {
+    const form = div('fl-int-form')
+    const grid = div('fl-int-fields')
     const inputs = new Map<string, HTMLInputElement>()
     for (const field of def.fields) {
       const row = document.createElement('label')
-      row.className = 'fl-int-field'
+      row.className = field.password ? 'fl-int-field wide' : 'fl-int-field'
       const label = document.createElement('span')
       label.textContent = field.label
       const input = document.createElement('input')
       input.type = field.password ? 'password' : 'text'
       input.className = 'fl-settings-input'
       input.placeholder = field.placeholder ?? ''
-      input.disabled = pending
+      input.spellcheck = false
       row.append(label, input)
-      section.appendChild(row)
+      grid.appendChild(row)
       inputs.set(field.key, input)
     }
+    form.appendChild(grid)
 
-    const actions = document.createElement('div')
-    actions.className = 'fl-int-actions'
-    const save = document.createElement('button')
-    save.type = 'button'
-    save.className = 'fl-int-save'
-    const saveLabel = connected ? 'Update token' : 'Connect'
-    save.textContent = saveLabel
-    save.disabled = pending
+    const actions = div('fl-int-actions')
+    actions.appendChild(div('fl-int-note', 'Saved on this computer only.'))
+    const save = button(saveLabel, 'fl-int-save')
     // Clear the transient 'Fill every field' hint as soon as the user edits a
     // field, instead of leaving it stuck on the button (#217).
     for (const [, input] of inputs) {
       input.addEventListener('input', () => {
         if (save.textContent === 'Fill every field') save.textContent = saveLabel
       })
-      // #1396: Enter in any Connect field does what the button does — the same
-      // wiring as the Account name box (#1554: the original fix claimed the
-      // whole settings family but only landed there), so validation, the
-      // disabled state and the feedback contract stay the button's.
+      // #1396: Enter in any field does what the button does.
       submitOnEnter(input, save)
     }
     save.addEventListener('click', () => {
@@ -402,6 +535,8 @@ class IntegrationsSettingsView {
           // The tasks board reads connection state; tell it a tracker just
           // connected so its Remote toggle appears without a project switch.
           document.dispatchEvent(new CustomEvent('flow:integrations-changed'))
+          // The card closes on its connected summary, which says it worked.
+          this.#open.delete(def.provider)
           return this.#render()
         })
         .catch((error: unknown) => {
@@ -412,100 +547,92 @@ class IntegrationsSettingsView {
         })
     })
     actions.appendChild(save)
-
-    if (connected && isCliDerivedConnection(hint)) {
-      // The Connected state comes from a CLI login the app can't revoke, so a
-      // Disconnect button would be a dead no-op (clearToken deletes a stored
-      // token that isn't there, and status re-resolves the CLI login). Explain
-      // it and point at the real logout instead (#419).
-      const note = document.createElement('div')
-      note.className = 'fl-int-cli-note'
-      const logout = def.cliLogout ?? 'the CLI'
-      note.textContent = `Connected through the CLI — run \`${logout}\` in a terminal to disconnect.`
-      actions.appendChild(note)
-    } else if (connected) {
-      const disconnect = document.createElement('button')
-      disconnect.type = 'button'
-      disconnect.className = 'fl-int-disconnect'
-      disconnect.textContent = 'Disconnect'
-      disconnect.addEventListener('click', () => {
-        this.#confirmDisconnect(disconnect, def, hint)
-      })
-      actions.appendChild(disconnect)
-    }
-    section.appendChild(actions)
-
-    // THE CUSTOM LIST QUERY — only once the tracker is connected, because a list
-    // needs a credential to read. Unlike the token, this is non-secret, so it is
-    // read back and pre-filled (the token fields never are). It is a GLOBAL
-    // preference; the board's Assigned / My list / Both selector is what turns it
-    // on, so this only saves the query the selector will draw from.
-    if (connected) section.appendChild(this.#listQueryField(def, config))
-
-    return section
+    form.appendChild(actions)
+    return form
   }
 
   /**
-   * The saved-query field for a provider's custom list.
+   * The saved list — only once the tracker is connected, because a list needs
+   * a credential to read. Non-secret, so it is read back (the token never is).
+   * It is a GLOBAL preference; the board's Assigned / My list / Both selector
+   * turns it on, so this only saves the query the selector draws from.
    *
-   * SAVED EXPLICITLY, not on every keystroke: a JQL/WIQL query is edited a
-   * character at a time into an invalid state, and persisting each of those
-   * would fire a board re-read against a half-written query. The button writes
-   * the query (trimmed by the store); clearing it and saving removes the list,
-   * which the board reads as "assigned only".
+   * Read mode shows the query and Edit; edit mode is the field. SAVED
+   * EXPLICITLY, not per keystroke: a JQL/WIQL query is edited a character at a
+   * time into an invalid state, and persisting each would fire a board re-read
+   * against a half-written query. Clearing it and saving removes the list.
    */
-  #listQueryField(def: ProviderDef, config: IssueListConfig | null): HTMLElement {
-    const wrap = document.createElement('div')
-    wrap.className = 'fl-int-list'
+  #listBox(def: ProviderDef, config: IssueListConfig | null): HTMLElement {
+    const wrap = div('fl-int-block fl-int-list')
+    let saved = config?.query ?? ''
 
-    const label = document.createElement('div')
-    label.className = 'fl-int-list-label'
-    label.textContent = `Custom list query (${def.listSyntax})`
+    const label = div('fl-int-block-label')
+    const name = document.createElement('span')
+    name.textContent = 'Saved list'
+    const caption = document.createElement('span')
+    caption.className = 'fl-int-caption'
+    caption.textContent = `A ${def.listSyntax} query, shown on the board as “My list”.`
+    label.append(name, caption)
     wrap.appendChild(label)
 
-    const help = document.createElement('div')
-    help.className = 'fl-int-help'
-    // THE EXAMPLE STAYS VISIBLE. It used to live only in the input's
-    // placeholder, which vanishes the instant the field has a value — so a
-    // person who typed a wrong query had nothing left to compare it against.
-    help.textContent =
-      "A saved query in the tracker's own language. Pick it on the board with the " +
-      `Assigned / My list / Both selector. For example: ${def.listPlaceholder}`
-    wrap.appendChild(help)
+    // ── read mode ──
+    const view = div('fl-int-box')
+    const shown = div('fl-int-query')
+    const edit = button('', 'fl-int-secondary')
+    view.append(shown, edit)
+    const showSaved = (): void => {
+      shown.textContent = saved !== '' ? saved : 'No saved list yet.'
+      shown.classList.toggle('empty', saved === '')
+      edit.textContent = saved !== '' ? 'Edit' : 'Add a list'
+    }
+    showSaved()
+    wrap.appendChild(view)
 
+    // ── edit mode ──
+    const editor = div('fl-int-editor')
+    editor.hidden = true
     const input = document.createElement('textarea')
     input.className = 'fl-settings-input fl-int-list-input'
-    input.rows = 2
+    input.rows = 3
     input.placeholder = def.listPlaceholder
-    input.value = config?.query ?? ''
-    wrap.appendChild(input)
+    input.spellcheck = false
+    editor.appendChild(input)
+    // THE EXAMPLE STAYS VISIBLE. A placeholder vanishes the instant the field
+    // has a value, so a person who typed a wrong query had nothing to compare.
+    editor.appendChild(div('fl-int-help', `For example: ${def.listPlaceholder}`))
 
     // THE GUARD NOTICE — a URL or repo-path pasted here is not a search, and
     // the board would silently draw free-text matches for it. We say so and
     // OFFER a scoped rewrite; we never apply it silently (allowed-pattern #22).
-    const notice = document.createElement('div')
-    notice.className = 'fl-int-list-notice'
+    const notice = div('fl-int-list-notice')
     notice.hidden = true
     notice.setAttribute('role', 'status')
-    wrap.appendChild(notice)
+    editor.appendChild(notice)
+
+    const editActions = div('fl-int-actions')
+    editActions.appendChild(div('fl-int-note'))
+    const cancel = button('Cancel', 'fl-int-secondary')
+    const save = button('Save list', 'fl-int-save')
+    editActions.append(cancel, save)
+    editor.appendChild(editActions)
+    wrap.appendChild(editor)
 
     // THE PREVIEW LINE — a count for the exact query, shown after a save, so a
     // divergence between what the query returns and what the user expected is
-    // visible here rather than discovered later on the board. Fail-soft: a
-    // failed preview shows its sentence, never a broken frame.
-    const preview = document.createElement('div')
-    preview.className = 'fl-int-list-preview'
+    // visible here rather than discovered later on the board. Fail-soft.
+    const preview = div('fl-int-list-preview')
     preview.hidden = true
     preview.setAttribute('role', 'status')
     wrap.appendChild(preview)
 
     const runPreview = (): void => {
-      const query = input.value.trim()
+      const query = saved.trim()
       if (query.length === 0 || window.flow.integrations.previewList === undefined) {
         preview.hidden = true
         return
       }
       preview.hidden = false
+      preview.classList.remove('ok')
       preview.textContent = 'Checking what this returns…'
       void window.flow.integrations
         .previewList({ provider: def.provider, query })
@@ -514,9 +641,9 @@ class IntegrationsSettingsView {
             preview.textContent = result.reason ?? 'Could not check this query.'
             return
           }
-          const head = `${String(result.count)} ${result.count === 1 ? 'result' : 'results'}`
-          preview.textContent =
-            result.sample.length > 0 ? `${head} — e.g. ${result.sample.join('; ')}` : head
+          const head = `This list finds ${String(result.count)} ${result.count === 1 ? 'ticket' : 'tickets'}`
+          preview.classList.add('ok')
+          preview.textContent = result.sample.length > 0 ? `${head} — e.g. ${result.sample.join('; ')}` : `${head}.`
         })
         .catch(() => {
           preview.textContent = 'Could not check this query.'
@@ -535,15 +662,9 @@ class IntegrationsSettingsView {
       said.textContent = verdict.reason
       notice.appendChild(said)
       if (verdict.suggestion !== null) {
-        const use = document.createElement('button')
-        use.type = 'button'
-        use.className = 'fl-int-list-fix'
-        use.textContent = `Use ${verdict.suggestion}`
-        use.addEventListener('click', () => {
-          // PROPOSE, THEN APPLY ON THE CLICK — the user chose this value, so
-          // now it is theirs; re-validate (it should clear) and let them Save.
+        const use = button(`Use ${verdict.suggestion}`, 'fl-int-list-fix', () => {
+          // PROPOSE, THEN APPLY ON THE CLICK — the user chose this value.
           input.value = verdict.suggestion ?? ''
-          if (save.textContent === 'Saved') save.textContent = 'Save list'
           revalidate()
           input.focus()
         })
@@ -551,10 +672,19 @@ class IntegrationsSettingsView {
       }
     }
 
-    const save = document.createElement('button')
-    save.type = 'button'
-    save.className = 'fl-int-save'
-    save.textContent = 'Save list'
+    const setEditing = (editing: boolean): void => {
+      view.hidden = editing
+      editor.hidden = !editing
+      if (editing) {
+        input.value = saved
+        preview.hidden = true
+        revalidate()
+        input.focus()
+      }
+    }
+    edit.addEventListener('click', () => setEditing(true))
+    cancel.addEventListener('click', () => setEditing(false))
+    input.addEventListener('input', revalidate)
     save.addEventListener('click', () => {
       save.disabled = true
       save.textContent = 'Saving…'
@@ -562,7 +692,10 @@ class IntegrationsSettingsView {
         .setListConfig?.({ provider: def.provider, query: input.value })
         .then(() => {
           save.disabled = false
-          save.textContent = 'Saved'
+          save.textContent = 'Save list'
+          saved = input.value.trim()
+          showSaved()
+          setEditing(false)
           // Show what the just-saved query actually returns.
           runPreview()
         })
@@ -573,20 +706,6 @@ class IntegrationsSettingsView {
           this.#notify(tokenSaveFailedToast(def.provider, error))
         })
     })
-    // A pending "Saved" reverts to the verb as soon as the query is edited again,
-    // the guard re-checks what is now in the field, and a now-stale preview (for
-    // the previously-saved query) is cleared.
-    input.addEventListener('input', () => {
-      if (save.textContent === 'Saved') save.textContent = 'Save list'
-      preview.hidden = true
-      revalidate()
-    })
-    // Check whatever was pre-filled from the stored config on first paint.
-    revalidate()
-    const listActions = document.createElement('div')
-    listActions.className = 'fl-int-actions'
-    listActions.appendChild(save)
-    wrap.appendChild(listActions)
 
     return wrap
   }
@@ -595,10 +714,9 @@ class IntegrationsSettingsView {
    * Swap Disconnect for an inline "Disconnect <provider>? [Cancel] [Disconnect]"
    * — the same gate #216 put on Remove account, for a stricter reason (#1505).
    *
-   * A Claude login can be re-run; the button for it is right there. GitHub and
-   * Atlassian show a PAT exactly ONCE at creation, so a user whose only copy
-   * lived in this write-only field has to go mint a new one. The panel can
-   * neither show what it is about to destroy nor give it back, which is
+   * GitHub and Atlassian show a PAT exactly ONCE at creation, so a user whose
+   * only copy lived in this write-only field has to go mint a new one. The panel
+   * can neither show what it is about to destroy nor give it back, which is
    * precisely when a single unconfirmed click is the wrong interface.
    */
   #confirmDisconnect(
@@ -606,13 +724,10 @@ class IntegrationsSettingsView {
     def: ProviderDef,
     hint: string | null | undefined,
   ): void {
-    const confirm = document.createElement('div')
-    confirm.className = 'fl-int-confirm'
+    const confirm = div('fl-int-confirm')
     const label = document.createElement('span')
     label.className = 'fl-int-confirm-label'
     // Name the identity when there is one: "Disconnect Jira (me@acme.example)?"
-    // is answerable in a way that "Disconnect Jira?" is not when several
-    // accounts have been through this field.
     label.textContent = hint ? `Disconnect ${def.title} (${hint})?` : `Disconnect ${def.title}?`
     const cancel = this.#miniButton('Cancel', () => confirm.replaceWith(disconnectBtn))
     const yes = this.#miniButton(
@@ -623,10 +738,10 @@ class IntegrationsSettingsView {
           .clearToken({ provider: def.provider })
           .then(() => {
             this.#notify(tokenClearedToast(def.provider))
-            // Same signal as connecting: the board drops the Remote toggle now,
-            // not on the next project switch.
+            // Same signal as connecting: the board drops the Remote toggle now.
             document.dispatchEvent(new CustomEvent('flow:integrations-changed'))
-            this.#render()
+            this.#open.delete(def.provider)
+            void this.#render()
           })
           .catch((error: unknown) => {
             console.error('flow: clearToken failed', error)
@@ -643,12 +758,7 @@ class IntegrationsSettingsView {
   /** A small inline button for the confirm row — mirrors the accounts panel's
    *  own helper so both confirms look and behave identically (#216, #1505). */
   #miniButton(label: string, onClick: () => void, danger = false): HTMLButtonElement {
-    const btn = document.createElement('button')
-    btn.type = 'button'
-    btn.className = 'fl-int-mini'
-    if (danger) btn.classList.add('danger')
-    btn.textContent = label
-    btn.addEventListener('click', onClick)
+    const btn = button(label, danger ? 'fl-int-mini danger' : 'fl-int-mini', onClick)
     return btn
   }
 
@@ -677,40 +787,112 @@ function injectIntegrationStyles(): void {
   stylesInjected = true
   const style = document.createElement('style')
   style.textContent = `
-    .fl-int-heading { display: flex; align-items: center; justify-content: space-between; }
+    .fl-int-page { max-width: 760px; display: flex; flex-direction: column; gap: var(--fl-space-sm); }
+    .fl-int-intro { display: flex; flex-direction: column; gap: 4px; margin-bottom: var(--fl-space-md, 12px); }
+    .fl-int-title { margin: 0; font-size: var(--fl-text-heading-size, 16px); font-weight: var(--fl-text-ui-weight-medium, 600); color: var(--fl-color-text); }
+    .fl-int-sub { color: var(--fl-color-text-secondary); font-size: var(--fl-text-ui-size); }
+    .fl-int-group-label {
+      margin-top: var(--fl-space-md, 12px);
+      font-size: var(--fl-text-caption-size); font-weight: var(--fl-text-ui-weight-medium, 600);
+      letter-spacing: 0.06em; text-transform: uppercase; color: var(--fl-color-text-secondary);
+    }
+    .fl-int-cards { display: flex; flex-direction: column; gap: var(--fl-space-sm); }
+
+    .fl-int-card {
+      margin: 0; background: var(--fl-color-surface-raised);
+      border: var(--fl-border-width) solid var(--fl-color-border); border-radius: 10px; overflow: hidden;
+    }
+    /* The card's head reuses .fl-settings-heading for the specs' sake; undo
+       that heading's caption look here. */
+    .fl-int-card .fl-int-heading {
+      display: flex; align-items: center; gap: 12px; margin: 0; padding: 12px 14px;
+      text-transform: none; letter-spacing: 0; font-size: var(--fl-text-ui-size);
+      font-weight: var(--fl-text-ui-weight); color: var(--fl-color-text); cursor: pointer;
+    }
+    .fl-int-badge {
+      flex: none; width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center;
+      font-weight: 600; font-size: 12px; background: var(--fl-color-bg); color: var(--fl-color-text);
+      border: var(--fl-border-width) solid var(--fl-color-border);
+    }
+    .fl-int-jira .fl-int-badge, .fl-int-azure .fl-int-badge { color: var(--fl-color-accent); }
+    .fl-int-names { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .fl-int-name { font-weight: var(--fl-text-ui-weight-medium, 600); }
+    .fl-int-summary {
+      color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
     .fl-int-pill {
-      padding: 1px 8px; border-radius: 9px; font-size: var(--fl-text-caption-size);
-      text-transform: none; letter-spacing: 0; font-weight: var(--fl-text-ui-weight);
-      color: var(--fl-color-text-secondary); background: var(--fl-color-surface-raised);
+      flex: none; padding: 2px 9px; border-radius: 10px; font-size: var(--fl-text-caption-size);
+      color: var(--fl-color-text-secondary); background: var(--fl-color-bg);
     }
     .fl-int-pill.on { color: var(--fl-color-success); background: var(--fl-color-accent-muted); }
-    /* Probing (#1069) — a quiet pulse so the ~5s CLI wait reads as work in
-       progress rather than as an empty panel. */
+    /* Probing (#1069) — a quiet pulse so the ~5s CLI wait reads as work in progress. */
     .fl-int-pill.pending { animation: fl-int-probing 1.3s ease-in-out infinite; }
     @keyframes fl-int-probing { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
-    /* Reduced motion: hold the pill at its mid opacity — the "Checking…" text
-       still says work is in progress without the pulse. */
     @media (prefers-reduced-motion: reduce) {
       .fl-int-pill.pending { animation: none; opacity: 0.7; }
+      .fl-int-chevron svg { transition: none; }
     }
+    .fl-int-chevron {
+      flex: none; width: 28px; height: 28px; display: grid; place-items: center; padding: 0;
+      background: transparent; border: 0; border-radius: var(--fl-radius-sm);
+      color: var(--fl-color-text-secondary); cursor: pointer;
+    }
+    .fl-int-chevron:hover:not(:disabled) { color: var(--fl-color-text); background: var(--fl-color-bg); }
+    .fl-int-chevron:disabled { opacity: 0.4; cursor: default; }
+    .fl-int-chevron svg { transition: transform 120ms ease; }
+    .fl-int-card.open .fl-int-chevron svg { transform: rotate(180deg); }
+
+    .fl-int-body {
+      display: flex; flex-direction: column; gap: 14px; padding: 14px;
+      border-top: var(--fl-border-width) solid var(--fl-color-border);
+    }
+    .fl-int-body[hidden] { display: none; }
+    .fl-int-block { display: flex; flex-direction: column; gap: 6px; }
+    .fl-int-block-label { display: flex; align-items: baseline; gap: 8px; font-weight: var(--fl-text-ui-weight-medium, 600); }
+    .fl-int-caption { font-weight: var(--fl-text-ui-weight); color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); }
+    .fl-int-box {
+      display: flex; align-items: center; gap: var(--fl-space-sm); padding: 10px 12px;
+      background: var(--fl-color-bg); border: var(--fl-border-width) solid var(--fl-color-border);
+      border-radius: 8px;
+    }
+    .fl-int-box[hidden] { display: none; }
+    .fl-int-box-text { flex: 1; min-width: 0; color: var(--fl-color-text); }
+    .fl-int-query {
+      flex: 1; min-width: 0; font-family: var(--fl-font-mono, monospace); font-size: var(--fl-text-mono-size, 12px);
+      color: var(--fl-color-text); overflow-wrap: anywhere;
+    }
+    .fl-int-query.empty { font-family: var(--fl-font-ui); color: var(--fl-color-text-secondary); }
+    .fl-int-help { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); line-height: 1.45; overflow-wrap: anywhere; }
+
+    .fl-int-form { display: flex; flex-direction: column; gap: var(--fl-space-sm); }
+    .fl-int-form[hidden], .fl-int-editor[hidden] { display: none; }
+    .fl-int-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--fl-space-sm) 12px; }
+    .fl-int-field { display: flex; flex-direction: column; gap: 4px; }
+    .fl-int-field.wide, .fl-int-fields > .fl-int-field:only-child { grid-column: 1 / -1; }
+    .fl-int-field > span { color: var(--fl-color-text); font-size: var(--fl-text-caption-size); font-weight: var(--fl-text-ui-weight-medium, 600); }
+    .fl-int-field input { height: 30px; box-sizing: border-box; }
     .fl-int-field input:disabled { opacity: 0.55; }
-    .fl-int-save:disabled { opacity: 0.5; cursor: default; filter: none; }
-    .fl-int-help { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); margin: 2px 0 8px; }
-    .fl-int-field { display: flex; flex-direction: column; gap: 3px; margin-bottom: var(--fl-space-sm); }
-    .fl-int-field > span { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); }
-    .fl-int-actions { display: flex; gap: var(--fl-space-sm); margin-top: 2px; }
-    .fl-int-save {
-      border: var(--fl-border-width) solid var(--fl-color-accent); background: var(--fl-color-accent);
-      color: #fff; border-radius: var(--fl-radius-sm); padding: 5px 12px; cursor: pointer;
+    .fl-int-editor { display: flex; flex-direction: column; gap: 6px; }
+    .fl-int-list-input { width: 100%; box-sizing: border-box; resize: vertical; font-family: var(--fl-font-mono, monospace); }
+    .fl-int-actions { display: flex; align-items: center; gap: var(--fl-space-sm); }
+    .fl-int-note { flex: 1; color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); }
+
+    .fl-int-save, .fl-int-secondary, .fl-int-disconnect {
+      flex: none; height: 28px; padding: 0 12px; border-radius: var(--fl-radius-sm); cursor: pointer;
       font-family: var(--fl-font-ui); font-size: var(--fl-text-ui-size);
     }
+    .fl-int-save { border: 0; background: var(--fl-color-accent); color: #fff; font-weight: var(--fl-text-ui-weight-medium, 600); }
     .fl-int-save:hover:not(:disabled) { filter: brightness(1.08); }
-    .fl-int-disconnect {
-      border: var(--fl-border-width) solid var(--fl-color-border); background: transparent;
-      color: var(--fl-color-text-secondary); border-radius: var(--fl-radius-sm); padding: 5px 12px; cursor: pointer;
-      font-family: var(--fl-font-ui); font-size: var(--fl-text-ui-size);
+    .fl-int-save:disabled { opacity: 0.5; cursor: default; filter: none; }
+    .fl-int-secondary {
+      border: var(--fl-border-width) solid var(--fl-color-border); background: transparent; color: var(--fl-color-text);
     }
-    .fl-int-disconnect:hover { color: var(--fl-color-error); border-color: var(--fl-color-error); }
+    .fl-int-secondary:hover { border-color: var(--fl-color-accent); }
+    .fl-int-disconnect {
+      border: var(--fl-border-width) solid var(--fl-color-border); background: transparent; color: var(--fl-color-error);
+    }
+    .fl-int-disconnect:hover { border-color: var(--fl-color-error); }
     /* Own classes on purpose (#1505): the accounts panel's .fl-settings-btn is
        defined in ITS sheet, and redefining it from this one would silently
        restyle that panel from whichever <style> happened to land last. */
@@ -724,18 +906,10 @@ function injectIntegrationStyles(): void {
     .fl-int-mini:hover:not(:disabled) { border-color: var(--fl-color-accent); }
     .fl-int-mini:disabled { opacity: 0.5; cursor: default; }
     .fl-int-mini.danger { color: var(--fl-color-error); border-color: var(--fl-color-error); }
-    .fl-int-cli-note { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); align-self: center; }
-    .fl-int-toggle { display: flex; align-items: center; gap: var(--fl-space-sm); cursor: pointer; }
-    .fl-int-toggle input { cursor: pointer; }
-    .fl-int-toggle input:disabled { cursor: default; opacity: 0.55; }
-    .fl-int-toggle > span { font-size: var(--fl-text-ui-size); color: var(--fl-color-text); }
-    .fl-int-list { margin-top: var(--fl-space-sm); padding-top: var(--fl-space-sm); border-top: var(--fl-border-width) solid var(--fl-color-border); }
-    .fl-int-list-label { font-size: var(--fl-text-caption-size); color: var(--fl-color-text-secondary); margin-bottom: 2px; }
-    .fl-int-list-input { width: 100%; box-sizing: border-box; resize: vertical; font-family: var(--fl-font-mono, monospace); margin-bottom: var(--fl-space-xs); }
+
     .fl-int-list-notice {
       display: flex; flex-wrap: wrap; align-items: center; gap: var(--fl-space-xs);
       font-size: var(--fl-text-caption-size); color: var(--fl-color-warning, var(--fl-color-text-secondary));
-      margin-bottom: var(--fl-space-xs);
     }
     .fl-int-list-notice[hidden], .fl-int-list-preview[hidden] { display: none; }
     .fl-int-list-fix {
@@ -743,7 +917,25 @@ function injectIntegrationStyles(): void {
       color: var(--fl-color-text); border-radius: var(--fl-radius-sm); padding: 2px 8px; cursor: pointer;
       font-family: var(--fl-font-mono, monospace); font-size: var(--fl-text-caption-size);
     }
-    .fl-int-list-preview { font-size: var(--fl-text-caption-size); color: var(--fl-color-text-secondary); margin-bottom: var(--fl-space-xs); }
+    .fl-int-list-preview { font-size: var(--fl-text-caption-size); color: var(--fl-color-text-secondary); }
+    .fl-int-list-preview.ok { color: var(--fl-color-success); }
+
+    .fl-int-toggle { display: flex; align-items: center; gap: 14px; padding: 12px 14px; cursor: pointer; }
+    .fl-int-toggle-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+    .fl-int-toggle-title { font-weight: var(--fl-text-ui-weight-medium, 600); color: var(--fl-color-text); }
+    .fl-int-switch {
+      flex: none; appearance: none; -webkit-appearance: none; margin: 0; cursor: pointer;
+      width: 34px; height: 20px; border-radius: 10px; position: relative;
+      background: var(--fl-color-border); transition: background 120ms ease;
+    }
+    .fl-int-switch::after {
+      content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px;
+      border-radius: 7px; background: #fff; transition: left 120ms ease;
+    }
+    .fl-int-switch:checked { background: var(--fl-color-accent); }
+    .fl-int-switch:checked::after { left: 17px; }
+    .fl-int-switch:focus-visible { outline: 2px solid var(--fl-color-focus-ring, var(--fl-color-accent)); outline-offset: 2px; }
+    .fl-int-switch:disabled { opacity: 0.5; cursor: default; }
   `
   document.head.appendChild(style)
 }
