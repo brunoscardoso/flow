@@ -110,7 +110,7 @@ program
   .description(
     // Every action runBlueprint's dispatch answers to, in dispatch order —
     // blueprint-help-drift.test.ts fails when this list and the switch diverge.
-    'Derive and query the blueprint system map (derive, context <node>, render, observe, notes, propose, link, unlink, sweep, narrate, features <sub-verb>, workspace <graph>, coverage, brief, feature-map, gate-check, reconcile, stale-check, drift-check, drift-ack, drift-reset, forget, tiers, promote-doc, adjudicate, index <warm>, storyline)'
+    'Derive and query the blueprint system map (derive, context <node>, render, observe, notes, propose, qa <sub-verb>, link, unlink, sweep, narrate, features <sub-verb>, workspace <graph>, coverage, brief, feature-map, gate-check, reconcile, stale-check, drift-check, drift-ack, drift-reset, forget, tiers, promote-doc, adjudicate, index <warm>, storyline)'
   )
   .option('--write <json>', 'View artifact JSON to validate and persist (features view only)')
   .option(
@@ -151,6 +151,10 @@ program
   .option(
     '--supersedes <fingerprint>',
     'Fingerprint of the active note this one replaces (observe only)'
+  )
+  .option(
+    '--input <file>',
+    'qa record/follow-up: the saved-answer JSON to write, from a file or - for stdin (qa list/stale take --feature and --json)'
   )
   .option(
     '--project <name>',

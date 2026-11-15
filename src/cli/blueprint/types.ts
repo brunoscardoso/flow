@@ -379,3 +379,94 @@ export interface TouchedSet {
   phase: number;
   touched: TouchedNode[];
 }
+
+// ── Ask the Blueprint: the saved-answer log (`qa.jsonl`) ────────────────────
+// One line per saved question (or follow-up) in
+// `flow/brain/.structure/qa.jsonl`, written ONLY by `appendQaEntry` in
+// `qa-store.ts`, reached ONLY through `planflow-ai blueprint qa record |
+// follow-up` (allowed-pattern #14). Code facts never live here — they go
+// through `blueprint observe`. Nothing from a personal conversation is stored:
+// only THAT one was used (a boolean) and how many (a count).
+
+/** A short judgement on a "can we build Y?" question. */
+export interface QaVerdict {
+  /** e.g. "Yes · medium effort". */
+  label: string;
+  /** The main risk, in one sentence. */
+  risk?: string;
+}
+
+/** One source an answer leans on. */
+export interface QaSource {
+  /** What the reader sees, e.g. "Thread store — markTurnEnd". */
+  label: string;
+  /** The feature or part the source belongs to (`feature:<slug>[/<part>]`). */
+  featureId?: string;
+  /** Repo-relative file the source quotes. */
+  file?: string;
+  /** Content stamp of `file` at write time — minted by the writer, never supplied. */
+  hashStamp?: AnchorHashStamp;
+}
+
+/** One saved answer (or follow-up) in `qa.jsonl`. */
+export interface QaEntry {
+  /** Minted by the writer: `qa-<yyyymmddThhmmss>-<hex>`. */
+  id: string;
+  /** ISO timestamp minted by the writer. */
+  ts: string;
+  /** Who asked. */
+  author: string;
+  question: string;
+  /** Feature/part ids the question is pinned to — never free labels. */
+  tags: string[];
+  /** How many personal conversations the answer drew on — a count, never text. */
+  conversationCount: number;
+  /** Whether any personal conversation was used. */
+  usedConversation: boolean;
+  /** The explanation. */
+  answer: string;
+  verdict?: QaVerdict;
+  /** A teammate's reply to the answer. */
+  reply?: string;
+  sources: QaSource[];
+  /** How many code facts this answer recorded through `blueprint observe`. */
+  factsLearned: number;
+  /** Set when this entry is a follow-up: the id of the entry it follows. */
+  parentId?: string;
+  /** True when the answer is incomplete (e.g. the code check did not finish). */
+  partial: boolean;
+  /** "in progress on branch X" — unmerged work is context, never a fact. */
+  branchInProgress?: string;
+}
+
+/** What a caller hands `appendQaEntry`: the record without writer-minted fields. */
+export interface QaRecordInput {
+  author: string;
+  question: string;
+  tags?: string[];
+  conversationCount?: number;
+  usedConversation?: boolean;
+  answer: string;
+  verdict?: QaVerdict;
+  reply?: string;
+  sources?: Array<Omit<QaSource, 'hashStamp'>>;
+  factsLearned?: number;
+  parentId?: string;
+  partial?: boolean;
+  branchInProgress?: string;
+}
+
+/** A root entry with its follow-ups attached (the folded read). */
+export interface QaThread extends QaEntry {
+  /** Follow-ups to this entry (and to its follow-ups), oldest first. */
+  followUps: QaEntry[];
+}
+
+/** One answer to "has the code under this saved entry changed?". */
+export interface QaStaleness {
+  stale: boolean;
+  /** Stamped files whose content no longer matches the stamp. */
+  changedFiles: string[];
+  /** Stamped files that are gone (or escape the repo root). */
+  missingFiles: string[];
+}

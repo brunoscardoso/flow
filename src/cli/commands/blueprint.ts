@@ -68,6 +68,7 @@ import {
   wouldCreateSupersedeCycle,
 } from '../blueprint/investigation-store.js';
 import { promoteRunRecords } from '../blueprint/promote.js';
+import { appendQaEntry, listQaForFeature, QaRefusal, qaStaleness, readQaThreads } from '../blueprint/qa-store.js';
 import { computeBriefDelta, computeFeatureBrief } from '../blueprint/brief-model.js';
 import { bootstrapFeatures, confirmCandidate, describeBootstrap } from '../blueprint/feature-bootstrap.js';
 import {
@@ -185,6 +186,7 @@ import type {
   HeatCounter,
   InvestigationEntry,
   InvestigationStatus,
+  QaRecordInput,
 } from '../blueprint/types.js';
 import { validateCanonicalGraph } from '../blueprint/validate.js';
 
@@ -1084,6 +1086,8 @@ export interface BlueprintCommandOptions {
   learned?: string;
   /** storyline --plan: the plan's starting commit, when the caller names it. */
   base?: string;
+  /** qa record/follow-up: the JSON input file, or `-` for stdin. */
+  input?: string;
 }
 
 /** How the new entry relates to any existing notes on its anchors. */
@@ -4391,6 +4395,112 @@ function runWorkspaceGraph(target: string | undefined, options: BlueprintCommand
   }
 }
 
+/** Print a qa refusal: the JSON payload, then the one refusal line (allowed-pattern #21). */
+function refuseQa(action: string, refusal: QaRefusal): number {
+  process.stdout.write(`${JSON.stringify({ action: `qa-${action}`, ...refusal.payload })}\n`);
+  process.stdout.write(`qa refused: ${refusal.reason} — ${refusal.sentence}\n`);
+  return 1;
+}
+
+/** Read the record input named by `--input` (a file, or `-` for stdin). */
+function readQaInput(inputFlag: string | undefined): unknown {
+  if (typeof inputFlag !== 'string' || inputFlag.trim() === '') {
+    throw new QaRefusal('missing-input', '--input', 'record and follow-up read their JSON from --input <file> or --input - (stdin)');
+  }
+  let raw: string;
+  try {
+    raw = inputFlag === '-' ? readFileSync(0, 'utf-8') : readFileSync(resolve(inputFlag), 'utf-8');
+  } catch (error) {
+    throw new QaRefusal('unreadable-input', '--input', `cannot read the input: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new QaRefusal('bad-input', '--input', 'the input is not parseable JSON');
+  }
+}
+
+/**
+ * `blueprint qa record | follow-up | list | stale` — the only way the app and
+ * skills reach the saved-answer log (`qa-store.ts` holds the one writer).
+ */
+function runQa(repoRoot: string, sub: string | undefined, options: BlueprintCommandOptions): number {
+  // Not named `action`: blueprint-help-drift.test.ts takes the first switch on `action` in this file as the top-level dispatch.
+  const subAction = sub ?? '';
+  const action = subAction;
+  const json = options.json === true;
+  try {
+    switch (subAction) {
+      case 'record':
+      case 'follow-up': {
+        const input = readQaInput(options.input);
+        const hasParent =
+          typeof input === 'object' && input !== null && !Array.isArray(input) && 'parentId' in input;
+        if (action === 'record' && hasParent) {
+          throw new QaRefusal('bad-field', 'parentId', 'a follow-up is recorded with `qa follow-up`, not `qa record`');
+        }
+        if (action === 'follow-up' && !hasParent) {
+          throw new QaRefusal('bad-field', 'parentId', 'a follow-up names the id of the entry it follows');
+        }
+        const entry = appendQaEntry(repoRoot, input as QaRecordInput);
+        const stamped = entry.sources.filter((source) => source.hashStamp !== undefined).length;
+        process.stdout.write(
+          json
+            ? `${JSON.stringify({ action: `qa-${action}`, entry })}\n`
+            : `qa: ${action === 'record' ? 'recorded' : 'follow-up recorded'} ${entry.id} · ${entry.tags.length} tag(s) · ${stamped} source file(s) stamped\n`,
+        );
+        return 0;
+      }
+      case 'list': {
+        if (typeof options.feature !== 'string' || options.feature.trim() === '') {
+          throw new QaRefusal('missing-feature', '--feature', 'list needs --feature <id> — the feature or part whose saved answers to read');
+        }
+        const threads = listQaForFeature(repoRoot, options.feature);
+        if (json) {
+          process.stdout.write(`${JSON.stringify({ action: 'qa-list', feature: options.feature, threads })}\n`);
+        } else if (threads.length === 0) {
+          process.stdout.write(`qa: no saved answers for ${options.feature}\n`);
+        } else {
+          const lines = threads.map(
+            (thread) =>
+              `${thread.id}  ${thread.ts}  ${thread.question}${thread.followUps.length > 0 ? `  (+${thread.followUps.length} follow-up(s))` : ''}`,
+          );
+          process.stdout.write(`${lines.join('\n')}\n`);
+        }
+        return 0;
+      }
+      case 'stale': {
+        const threads =
+          typeof options.feature === 'string' && options.feature.trim() !== ''
+            ? listQaForFeature(repoRoot, options.feature)
+            : readQaThreads(repoRoot);
+        const entries = threads.flatMap((thread) => {
+          const { followUps, ...root } = thread;
+          return [root, ...followUps];
+        });
+        const staleness = qaStaleness(repoRoot, entries);
+        const results = entries.map((entry) => ({ id: entry.id, ...(staleness.get(entry.id) ?? { stale: false, changedFiles: [], missingFiles: [] }) }));
+        const stale = results.filter((result) => result.stale);
+        if (json) {
+          process.stdout.write(`${JSON.stringify({ action: 'qa-stale', checked: results.length, staleCount: stale.length, results })}\n`);
+        } else {
+          const lines = [`qa: ${results.length} checked · ${stale.length} stale`];
+          for (const result of stale) {
+            lines.push(`  ${result.id}: ${[...result.changedFiles.map((file) => `changed ${file}`), ...result.missingFiles.map((file) => `missing ${file}`)].join(', ')}`);
+          }
+          process.stdout.write(`${lines.join('\n')}\n`);
+        }
+        return 0;
+      }
+      default:
+        throw new QaRefusal('unknown-action', null, `expected \`blueprint qa record | follow-up | list | stale\`, got '${action}'`);
+    }
+  } catch (error) {
+    if (error instanceof QaRefusal) return refuseQa(action || 'unknown', error);
+    return refuseQa(action || 'unknown', new QaRefusal('error', null, error instanceof Error ? error.message : String(error)));
+  }
+}
+
 export async function runBlueprint(
   action: string,
   target: string | undefined,
@@ -4466,6 +4576,14 @@ export async function runBlueprint(
         process.stderr.write(`propose refused: ${message}\n`);
         process.exitCode = 1;
       }
+      return;
+    }
+
+    case 'qa': {
+      // Ask the Blueprint's saved-answer log — the ONE door to `qa.jsonl`
+      // (record | follow-up | list | stale). Refusals: a JSON payload line,
+      // then `qa refused: <reason> — <sentence>`, exit 1, nothing written.
+      process.exitCode = runQa(repoRoot, target, options);
       return;
     }
 
@@ -4813,7 +4931,7 @@ export async function runBlueprint(
 
     default:
       process.stdout.write(
-        `Unknown blueprint action: "${action}". Valid actions: derive, context, render, observe, propose, sweep, narrate, gate-check, brief, feature-map, features, coverage, reconcile, stale-check, drift-check, drift-reset, drift-ack, tiers, adjudicate, index\n`,
+        `Unknown blueprint action: "${action}". Valid actions: derive, context, render, observe, propose, qa, sweep, narrate, gate-check, brief, feature-map, features, coverage, reconcile, stale-check, drift-check, drift-reset, drift-ack, tiers, adjudicate, index\n`,
       );
       process.exitCode = 1;
   }
