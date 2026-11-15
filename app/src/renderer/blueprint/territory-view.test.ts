@@ -388,7 +388,6 @@ describe('the title strip (Phase 2.1)', () => {
     expect(view.title.name).toBe('plan-flow')
     expect(view.title.prefix).toBe('')
     expect(view.title.kicker).toBe('4 features · 2 domains')
-    expect(view.title.showBrainField).toBe(true)
     expect(view.title.showControl).toBe(false)
     expect(view.title.showCorpusControl).toBe(false)
   })
@@ -406,7 +405,6 @@ describe('the title strip (Phase 2.1)', () => {
     expect(view.title.controlTitle).toBe("Open Chats's feature view")
     expect(view.title.showCorpusControl).toBe(true)
     expect(view.title.corpusControlTitle).toBe("Open Chats's changes & discoveries")
-    expect(view.title.showBrainField).toBe(false)
   })
 
   it('gives a DOMAIN neither control — it has no feature view and no changes', () => {

@@ -71,7 +71,6 @@ import {
   type FocusFit,
   type Rect,
 } from './territory-layout'
-import { queryAvailableAtDepth } from './brain-query-model'
 import { cellFolders, folderSlice, type CellFolders } from './folder-rows-model'
 import { relationsOf } from './feature-relations'
 import { understoodBySlug } from './learn-progress-model'
@@ -165,22 +164,18 @@ export function corpusControlTitle(name: string): string {
   return `Open ${name}'s changes & discoveries`
 }
 
-/* ── ASK THE BRAIN ──────────────────────────────────────────────────────────
+/* ── ASK THE BLUEPRINT ──────────────────────────────────────────────────────
  *
- * The affordance moved from inside the ring's centre to the right end of the
- * title strip; its WORDS did not change, and they are restated here rather
- * than carried over from the retired ring's view module, for the
- * same reason the control sentences are. The sentence still promises what
- * happens on the sheet, because that promise is the whole reason the field is
- * on the map at all rather than in a panel beside it.
+ * The strip's Ask button opens the Ask panel at EVERY depth (plan
+ * ask_the_blueprint): the keyword field it replaced was root-only because it
+ * could reach only the whole-project brain, and a tagged question has no such
+ * limit — so there is no depth gate left to carry on the title.
  */
 
-/** The field's own label. */
-export const BRAIN_FIELD_LABEL = 'Ask the brain'
-/** The mark that opens it. */
-export const BRAIN_FIELD_GLYPH = '⌕'
+/** The Ask button's own label (plan ask_the_blueprint). */
+export const ASK_FIELD_LABEL = 'Ask'
 /** Its tooltip AND its accessible name — one sentence, in one place. */
-export const BRAIN_FIELD_TITLE = 'Ask the brain — matches light up on the map'
+export const ASK_FIELD_TITLE = 'Ask the Blueprint how something works, or whether it can be built (/)'
 
 /* ── WHAT THE SHEET IS MADE OF ──────────────────────────────────────────────*/
 
@@ -332,9 +327,6 @@ export interface TerritoryTitleView {
    *  part's changes are its owner's, so a door on either could only mislead. */
   showCorpusControl: boolean
   corpusControlTitle: string
-  /** Ask the brain — ROOT ONLY, via `queryAvailableAtDepth`, which is the one
-   *  place that rule lives. */
-  showBrainField: boolean
   /** The drafting title block: one line, foot of the sheet. */
   block: string
 }
@@ -1024,7 +1016,6 @@ function titleFor(
     controlTitle: showControl ? controlTitle(name, anchorCount > 0) : '',
     showCorpusControl,
     corpusControlTitle: showCorpusControl ? corpusControlTitle(name) : '',
-    showBrainField: queryAvailableAtDepth(stack.length),
     block: [BLOCK_SHEET, blockMeasure(unit), project, source.length > 0 ? source : DEFAULT_SOURCE]
       .filter((part) => part.length > 0)
       .join(' · '),
@@ -1041,6 +1032,11 @@ function titleFor(
  *
  * One function, so no overlay invents its own (allowed-pattern #14).
  */
+
+/** Class the board puts on a lit cell (and on the country holding one). */
+export const LIT_CLASS = 'fb-terr-lit'
+/** Class the board puts on every cell an overlay did not name. */
+export const DIM_CLASS = 'fb-terr-dim'
 
 export interface DecorateOptions {
   /** The ids to light. Anything not drawn at this level is ignored — an

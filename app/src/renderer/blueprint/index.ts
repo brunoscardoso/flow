@@ -37,6 +37,7 @@ import { PeekViewer } from './peek-viewer'
 import { decodeBoardNav, encodeBoardNav, sameBoardNav } from './board-nav-state'
 import { runInWantedScope, tabScopeGate } from '../tab-scope-gate'
 import { sameScope, type TabScopeKey } from '../tab-scope-model'
+import { ASK_BLUEPRINT_EVENT, parseAskOpenDetail } from '../../shared/ask-contract'
 
 const BLUEPRINT_TAB_ID = 'flow://blueprint'
 /** The persisted identity of the board in a conversation's tab set. */
@@ -281,6 +282,18 @@ export function initBlueprint(editorApi: EditorApi, container?: HTMLElement): ()
   const onRevealInBlueprintGated = gated(onRevealInBlueprint)
   document.addEventListener('flow:reveal-in-blueprint', onRevealInBlueprintGated)
 
+  // ASK THE BLUEPRINT (plan ask_the_blueprint): the one door every opener
+  // uses — the palette, "Ask about this", a chat message's action. Open the
+  // tab, then the panel with whatever the opener passed (`AskBlueprintOpenDetail`).
+  const onAskBlueprint = (event: Event): void => {
+    const detail = parseAskOpenDetail((event as CustomEvent<unknown>).detail)
+    document.dispatchEvent(new CustomEvent('flow:show-editor'))
+    openBlueprintTab()
+    board.openAsk(detail)
+  }
+  const onAskBlueprintGated = gated(onAskBlueprint)
+  document.addEventListener(ASK_BLUEPRINT_EVENT, onAskBlueprintGated)
+
   // Peek entry points (#568, Phase 5): a story-anchor or popover-annotation
   // file reference asks to peek a file. Open the tab (idempotent) then peek —
   // openPeek needs neither the graph nor DOM attachment, so no queuing.
@@ -324,5 +337,6 @@ export function initBlueprint(editorApi: EditorApi, container?: HTMLElement): ()
     document.removeEventListener('flow:open-blueprint', onOpenBlueprintGated)
     document.removeEventListener('flow:reveal-in-blueprint', onRevealInBlueprintGated)
     document.removeEventListener('flow:peek-file', onPeekFileGated)
+    document.removeEventListener(ASK_BLUEPRINT_EVENT, onAskBlueprintGated)
   }
 }

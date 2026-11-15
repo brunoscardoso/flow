@@ -143,3 +143,63 @@ export interface AskStaleResult {
 }
 
 export type AskStaleResponse = { ok: true; results: AskStaleResult[] } | { ok: false; detail: string }
+
+// ── Opening the panel from anywhere in the app ──────────────────────────────
+
+/**
+ * THE ONE DOOR. Every opener of the Ask panel — the board's own Ask button and
+ * shortcut, and Phase 4's "Ask about this", palette command and chat message
+ * action — dispatches this event on `document`. The Blueprint wiring opens the
+ * board's tab and hands the detail to the panel; no opener reaches into the
+ * board directly, so there is one place that decides what opening means.
+ *
+ *   document.dispatchEvent(new CustomEvent(ASK_BLUEPRINT_EVENT, { detail }))
+ */
+export const ASK_BLUEPRINT_EVENT = 'flow:ask-blueprint'
+
+/** A tag an opener passes: a feature, a part, or one of the person's conversations. */
+export interface AskOpenTag {
+  /** `feature:<slug>`, `feature:<slug>/<part>`, or a thread id for a conversation. */
+  id: string
+  kind: 'feature' | 'part' | 'conversation'
+  /** What the chip says. Falls back to the id's own name when absent. */
+  label?: string
+}
+
+/**
+ * `flow:ask-blueprint`'s detail. Every field is optional: no detail opens the
+ * panel where it was left; any field starts a fresh question with it.
+ */
+export interface AskBlueprintOpenDetail {
+  /** Text to put in the question box (a pasted message, a palette query). */
+  text?: string
+  /** Tags to start with. */
+  tags?: AskOpenTag[]
+  /** A conversation to tag — the chat message action's own thread. */
+  threadId?: string
+  /** That conversation's title, for its chip. */
+  threadTitle?: string
+}
+
+/** Read an untrusted event detail into the shape above; anything malformed is dropped, never thrown. */
+export function parseAskOpenDetail(detail: unknown): AskBlueprintOpenDetail {
+  if (typeof detail !== 'object' || detail === null) return {}
+  const raw = detail as Record<string, unknown>
+  const out: AskBlueprintOpenDetail = {}
+  if (typeof raw['text'] === 'string' && raw['text'].trim() !== '') out.text = raw['text']
+  if (typeof raw['threadId'] === 'string' && raw['threadId'] !== '') out.threadId = raw['threadId']
+  if (typeof raw['threadTitle'] === 'string' && raw['threadTitle'] !== '') out.threadTitle = raw['threadTitle']
+  if (Array.isArray(raw['tags'])) {
+    const tags: AskOpenTag[] = []
+    for (const item of raw['tags']) {
+      if (typeof item !== 'object' || item === null) continue
+      const tag = item as Record<string, unknown>
+      const kind = tag['kind']
+      if (typeof tag['id'] !== 'string' || tag['id'] === '') continue
+      if (kind !== 'feature' && kind !== 'part' && kind !== 'conversation') continue
+      tags.push({ id: tag['id'], kind, ...(typeof tag['label'] === 'string' && tag['label'] !== '' ? { label: tag['label'] } : {}) })
+    }
+    if (tags.length > 0) out.tags = tags
+  }
+  return out
+}

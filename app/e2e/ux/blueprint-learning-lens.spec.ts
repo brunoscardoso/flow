@@ -169,7 +169,7 @@ async function decoration(window: Page): Promise<{ lit: string[]; dim: string[] 
       const name = cell.querySelector('.fb-terr-cell-name')?.textContent ?? ''
       if (name.length === 0) continue
       // The board's ONE lit/dim vocabulary (`LIT_CLASS` / `DIM_CLASS` in
-      // brain-query-model.ts) — the lens borrows it rather than inventing a
+      // territory-view.ts) — the lens borrows it rather than inventing a
       // fifth meaning for "dim", so this reads the same classes every other
       // overlay writes.
       if (cell.classList.contains('fb-terr-lit')) lit.push(name)

@@ -258,25 +258,16 @@ import {
   learnDotClass,
   type InFlightMark,
 } from './learn-inflight'
+import type { AskBlueprintOpenDetail } from '../../shared/ask-contract'
 import {
-  anchorQueryField,
-  BRAIN_QUERY_LIMIT,
-  buildBrainHighlight,
-  DIM_CLASS,
-  failQuery,
-  hitAction,
-  idleQuery,
-  LIT_CLASS,
-  QUERY_PANEL_MIN_HEIGHT,
-  QUERY_PANEL_WIDTH,
-  queryAvailableAtDepth,
-  resolveQuery,
-  statusLine,
-  submitQuery,
-  type BrainHighlight,
-  type BrainHitAction,
-  type BrainQueryState,
-} from './brain-query-model'
+  askDecoration,
+  decorationKey,
+  initialAskState,
+  kindOfId,
+  projectDecoration,
+  tagsFromOpen,
+} from './ask-panel-model'
+import { AskPanelView, paintCellMarks } from './ask-panel-view'
 // ── Territory (plan_blueprint_territory_v1) ────────────────────────────────
 // The three pure modules that replaced the retired ring's three. NOTHING
 // decidable without a document lives in this file: where a cell sits, what it
@@ -285,13 +276,15 @@ import {
 // and only WIRED here.
 import {
   activationOf as territoryActivationOf,
-  BRAIN_FIELD_LABEL,
-  BRAIN_FIELD_TITLE,
+  ASK_FIELD_LABEL,
+  ASK_FIELD_TITLE,
   buildTerritoryView,
   CONTROL_GLYPH,
   CORPUS_CONTROL_GLYPH,
   decorate as decorateTerritory,
   DEFAULT_STAGE,
+  DIM_CLASS,
+  LIT_CLASS,
   inFlightFor,
   levelNodes,
   progressFor,
@@ -361,7 +354,6 @@ import {
 import { buildFeatureViewRequest, matchFeatureViewNotice } from './feature-view-request'
 import { isDerivedView } from './derived-level'
 import {
-  brainQueryCap,
   buildLimitationsReport,
   limitationsLabel,
   type AppliedCap,
@@ -370,7 +362,6 @@ import {
   crumbs as focusCrumbs,
   depthDive,
   depthForward,
-  depthGoTo,
   depthNavLabels,
   depthPop,
   depthPopTo,
@@ -1992,36 +1983,13 @@ export class BlueprintBoard {
   /** Coalesces the resize re-render to one per frame (NFR-2). */
   #terrResizeFrame: number | null = null
   /**
-   * The open brain-query field (Phase 7), or null when it is closed.
-   *
-   * Lives beside `#territory` because it is the same lifetime: the panel is
-   * DOM inside the sheet's wrap, so whoever drops that wrap drops this
-   * too (`#takeStage`). Everything it DECIDES — the state machine, where it
-   * opens, what it says, which nodes light — is `brain-query-model`'s; this
-   * holds only the elements and the in-flight sequence number.
+   * The Ask the Blueprint panel (plan ask_the_blueprint), built on first open.
+   * It lives on the board root rather than the sheet's wrap, so a dive, a pop
+   * or a resize re-renders the map under it without dropping the question.
    */
-  #brainQuery: {
-    panel: HTMLElement
-    input: HTMLInputElement
-    status: HTMLElement
-    results: HTMLElement
-    /** Where the affordance was, in stage coordinates, when it opened. */
-    anchor: OverlayPoint
-    state: BrainQueryState
-    highlight: BrainHighlight | null
-  } | null = null
-  /** Guards a slow answer that outlived its question (or its project). */
-  #brainQuerySeq = 0
-  /**
-   * The cell a search result asked to be shown, or null.
-   *
-   * It OUTLIVES the query panel on purpose: activating a row closes the panel
-   * (the answer has been chosen), and the reader still has to be able to see
-   * which node they were sent to — including across the re-render a depth
-   * change causes. Cleared by the next navigation the reader makes themselves,
-   * and by a click on the sheet background.
-   */
-  #brainFocusNodeId: string | null = null
+  #ask: AskPanelView | null = null
+  /** What the map last drew for it — `#paintAsk` redraws only on a change. */
+  #askDecorationKey = ''
   /** Pending flight timer, so a fast second click cannot strand a half-transition. */
   #flightTimer: ReturnType<typeof setTimeout> | null = null
   /** The state change `#flightTimer` is holding, so a gesture that arrives
@@ -2379,6 +2347,12 @@ export class BlueprintBoard {
         if (this.#onEscape()) event.preventDefault()
         return
       }
+      // `/` OPENS ASK THE BLUEPRINT on the feature map (and closes it again).
+      if (event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey && !isTypingTarget(event.target) && this.#territory !== null) {
+        this.#toggleAsk()
+        event.preventDefault()
+        return
+      }
       // → / ← step the review tour while it is open; nothing while it is closed.
       if ((event.key === 'ArrowRight' || event.key === 'ArrowLeft') && this.#storyView?.tourOpen === true && !isTypingTarget(event.target)) {
         if (event.key === 'ArrowRight') this.#storyView.tourNext()
@@ -2692,6 +2666,11 @@ export class BlueprintBoard {
   setRoot(rootPath: string | null): void {
     if (rootPath === this.#activeRoot) return
     this.#activeRoot = rootPath
+    // A QUESTION BELONGS TO ITS PROJECT: its tags, answer and saved list mean
+    // nothing over another project's map.
+    this.#ask?.dispose()
+    this.#ask = null
+    this.#askDecorationKey = ''
     // WHERE THE BOARD LANDS. A project switch opens at the Workspace — except
     // the switch the reader asked for by pressing a sibling on the Workspace
     // sheet, which lands INSIDE that project, as a zoom does.
@@ -3189,6 +3168,9 @@ export class BlueprintBoard {
     // Same for a running discovery.
     this.#stopDiscoveryWatch()
     this.#popover.dispose()
+    // The Ask panel drops its `ask:state` subscription with it.
+    this.#ask?.dispose()
+    this.#ask = null
   }
 
   // ── Decoration (Phase-5 seam) ─────────────────────────────────────────────
@@ -6148,6 +6130,9 @@ export class BlueprintBoard {
     this.#drawTerritoryFlow(
       decoration === null ? null : territoryFlowHops(mounted.view, decoration.flow),
     )
+    // AN OPEN QUESTION IS THE STANDING ANSWER: an overlay restored under it
+    // (a popover closing, a hover ending) does not erase what it lit.
+    if (this.#ask?.isOpen === true) this.#paintAsk(true)
   }
 
   /**
@@ -6268,6 +6253,11 @@ export class BlueprintBoard {
     // closing the story underneath would leave its drawer behind.
     if (this.#peek.open) {
       this.closePeek()
+      return true
+    }
+    // AN OPEN ASK PANEL CLOSES before the map underneath it moves.
+    if (this.#ask?.isOpen === true) {
+      this.#ask.close()
       return true
     }
     if (this.#storyline !== null) {
@@ -10090,11 +10080,6 @@ export class BlueprintBoard {
       cancelAnimationFrame(this.#terrResizeFrame)
       this.#terrResizeFrame = null
     }
-    // The query panel is DOM inside that same wrap, so it goes with it. A
-    // stale handle here would leave the board applying a highlight to nodes
-    // that no longer exist.
-    this.#brainQuery = null
-    this.#brainQuerySeq += 1
     // THE TRAIL BELONGS TO THE LEVEL, and the level is what is being replaced.
     // Cleared HERE rather than in each renderer: this is the one gate every
     // surface passes through on its way onto the stage, so a trail cannot
@@ -11853,16 +11838,6 @@ export class BlueprintBoard {
     const sheet = document.createElement('div')
     sheet.className = 'fb-terr-sheet'
 
-    // A click on the sheet itself closes an open query and restores the map —
-    // including a mark left behind by a chosen result. Every cell, control and
-    // piece of chrome stops propagation, so only the BACKGROUND reaches this —
-    // no document-level listener to leak.
-    sheet.addEventListener('click', () => {
-      this.#brainFocusNodeId = null
-      this.#applyBrainHighlight(null)
-      this.#closeBrainQuery()
-    })
-
     // COUNTRIES FIRST, then what stands on them: a group is GROUND, and ground
     // that painted over its provinces would take their clicks with it.
     const groups = new Map<string, HTMLElement>()
@@ -11927,13 +11902,10 @@ export class BlueprintBoard {
     // A STANDING OVERLAY SURVIVES THE SWAP. `#decoration` is the board's, not
     // the sheet's — a neighbourhood lighting a cell must still light it after a
     // dive, a pop or a resize rebuilds every element it was hanging off.
-    // Before the brain mark below, so an explicit search result (the more
-    // recent gesture) wins the sheet.
     this.#applyTerritoryOverlay(this.#decoration)
-    // A search result's mark has to SURVIVE the re-render its own navigation
-    // caused — otherwise the reader is flown to a level and left to guess which
-    // cell they were sent to.
-    this.#applyBrainFocus()
+    // AN OPEN QUESTION SURVIVES IT TOO: the Ask panel lives on the board, and
+    // its outlines, numbers and live states are re-drawn on the new cells.
+    this.#paintAsk(true)
     // …AND SO HAS A RUNNING PASS. Every re-render lands here, so the mark is
     // re-derived from `#featureViewRunning` on the new sheet rather than being
     // carried across (it cannot be — the old sheet's DOM is gone). This is what
@@ -13685,6 +13657,8 @@ export class BlueprintBoard {
     // A PRESS OPENS THE CELL (`#openOnClick`); the lens keeps its own press,
     // which already says what it does.
     const open = (): void => {
+      // WHILE ASK IS OPEN A PRESS IS A TAG, NOT A DIVE (plan ask_the_blueprint).
+      if (this.#askTagFromCell(cell)) return
       if (this.#lensOn()) {
         activate()
         return
@@ -13698,6 +13672,7 @@ export class BlueprintBoard {
     // A DOUBLE-CLICK GOES IN — zoom, or the code story — from the map.
     el.addEventListener('dblclick', (event) => {
       event.stopPropagation()
+      if (this.#ask?.isOpen === true) return
       activate()
     })
     // Enter/Space is what a role=button owes its user — the SAME one code path
@@ -15186,7 +15161,7 @@ export class BlueprintBoard {
     // words while every cell said it in colour — so amber (drifted) had no
     // reference anywhere on the board at all, and a reader who had never seen a
     // stale cell had no way to learn what one looks like.
-    if (view.title.showBrainField) where.appendChild(this.#buildLearnKey())
+    if (view.depth === 0) where.appendChild(this.#buildLearnKey())
     strip.appendChild(where)
 
     const focus = this.#featureStack.at(-1)
@@ -15225,28 +15200,22 @@ export class BlueprintBoard {
     // CONNECTIONS — this project's links to the others, run off the edge. At
     // the project's own top level only: deeper levels are one feature's.
     if (this.#featureStack.length === 0 && this.#wsKnown()) strip.appendChild(this.#buildConnectionsToggle())
-    if (view.title.showBrainField) {
-      const ask = this.#headerButton({
-        icon: 'search',
-        label: BRAIN_FIELD_LABEL,
-        title: BRAIN_FIELD_TITLE,
-        ariaLabel: BRAIN_FIELD_TITLE,
-        press: () => {
-          // THE ANCHOR IS THE FIELD'S REAL SCREEN POSITION, measured at the
-          // moment it is pressed — in the header now, so the panel opens at
-          // the top of the stage, under it.
-          const box = ask.getBoundingClientRect()
-          const stage = this.#stage.getBoundingClientRect()
-          this.#toggleBrainQuery({
-            x: box.left - stage.left + box.width / 2,
-            y: Math.max(0, box.bottom - stage.top),
-          })
-        },
-      })
-      ask.classList.add('fb-terr-ask')
-      ask.dataset['brainQuery'] = 'open'
-      strip.appendChild(ask)
-    }
+    // ASK THE BLUEPRINT — at every depth (plan ask_the_blueprint, FR-1).
+    const ask = this.#headerButton({
+      icon: 'message',
+      label: ASK_FIELD_LABEL,
+      title: ASK_FIELD_TITLE,
+      ariaLabel: ASK_FIELD_TITLE,
+      pressed: this.#ask?.isOpen ?? false,
+      press: () => this.#toggleAsk(),
+    })
+    ask.classList.add('fb-terr-ask')
+    ask.dataset['ask'] = 'open'
+    const key = document.createElement('kbd')
+    key.className = 'fb-terr-ask-key'
+    key.textContent = '/'
+    ask.appendChild(key)
+    strip.appendChild(ask)
     return strip
   }
 
@@ -15563,142 +15532,117 @@ export class BlueprintBoard {
     return block
   }
 
-  /* ── The brain query (Phase 7.2 / 7.3 / 7.4) ──────────────────────────────
+  /* ── Ask the Blueprint (plan ask_the_blueprint, Phase 3) ─────────────────
    *
-   * ROOT-ONLY, and the affordance is only drawn at the root, so there is no
-   * second gate to keep in sync — `queryAvailableAtDepth` is asserted here as
-   * a guard rather than relied on as a condition.
+   * AT EVERY DEPTH. The keyword field it replaced was root-only because it
+   * could reach only the whole-project brain; the Ask panel takes tags, so a
+   * question asked inside a feature is asked about that feature's parts.
+   *
+   * Everything the panel DECIDES is `ask-panel-model`'s; the panel's DOM is
+   * `ask-panel-view`'s. The board owns three things: where the panel lives (on
+   * the board root, so a dive or a resize does not drop it), what a cell press
+   * means while it is open (a tag, not a dive), and painting the decoration —
+   * through `#applyTerritoryDecoration`, the one lit/dim path, and only when
+   * `askDecoration` says something different from what is already drawn.
    */
 
-  /**
-   * Open the field (or close it if it is already open).
-   *
-   * `anchor` is the field's own box in STAGE coordinates, measured by the
-   * caller at the moment of the press. There is no projection to undo: the
-   * territory has no camera, so where the strip's button is on screen is where
-   * it is, full stop.
-   */
-  #toggleBrainQuery(anchor: OverlayPoint): void {
-    if (this.#brainQuery !== null) {
-      this.#closeBrainQuery()
+  /** The panel, built on first open and kept for the board's lifetime. */
+  #askPanel(): AskPanelView {
+    if (this.#ask !== null) return this.#ask
+    const panel = new AskPanelView({
+      rootId: () => this.#activeRoot,
+      graphNodes: () => this.#featureGraph?.nodes ?? [],
+      historyScope: () => this.#askHistoryScope(),
+      onChange: () => this.#paintAsk(false),
+      peekFile: (relPath) => this.openPeek(relPath),
+    })
+    this.element.appendChild(panel.element)
+    this.#ask = panel
+    return panel
+  }
+
+  /** The strip's Ask button and the shortcut: open, or close when open. */
+  #toggleAsk(): void {
+    if (this.#ask?.isOpen === true) {
+      this.#ask.close()
       return
+    }
+    this.openAsk({})
+  }
+
+  /**
+   * Open the Ask panel — the one door every opener uses (`flow:ask-blueprint`,
+   * wired in `index.ts`, plus the strip button and the shortcut). Tags without
+   * a label take the name the board knows them by.
+   */
+  openAsk(detail: AskBlueprintOpenDetail): void {
+    const names = new Map((this.#featureGraph?.nodes ?? []).map((node) => [node.id, node.name]))
+    const tags = tagsFromOpen(detail.tags, detail.threadId, detail.threadTitle).map((tag) =>
+      detail.tags?.find((given) => given.id === tag.id)?.label === undefined && names.has(tag.id)
+        ? { ...tag, label: names.get(tag.id) as string }
+        : tag,
+    )
+    const fresh = detail.text !== undefined || tags.length > 0
+    this.#askPanel().open(fresh ? { text: detail.text ?? '', tags } : {})
+  }
+
+  /** Which features "Saved questions" reads when nothing is tagged: what this sheet draws. */
+  #askHistoryScope(): string[] {
+    const cells = this.#territory?.view.cells ?? []
+    return cells
+      .filter((cell) => cell.kind === 'feature' || cell.kind === 'part')
+      .map((cell) => cell.id)
+      .slice(0, 20)
+  }
+
+  /**
+   * A cell pressed while the panel is open becomes a tag. True when the press
+   * was the panel's — the cell then does not dive.
+   */
+  #askTagFromCell(cell: TerritoryCell): boolean {
+    const panel = this.#ask
+    if (panel === null || !panel.isOpen) return false
+    // A domain or a ghost is not something an answer can be about; the press
+    // is swallowed rather than diving out from under an open question.
+    if (cell.kind !== 'feature' && cell.kind !== 'part') return true
+    panel.addTagFromMap({ id: cell.id, kind: kindOfId(cell.id) === 'part' ? 'part' : 'feature', label: cell.name })
+    return true
+  }
+
+  /**
+   * Draw what the panel asks of the map. `force` repaints even when the
+   * decoration has not changed — a re-render rebuilt every cell, or another
+   * overlay just spoke over it.
+   */
+  #paintAsk(force: boolean): void {
+    const decoration = askDecoration(this.#ask?.state ?? initialAskState())
+    const key = decorationKey(decoration)
+    if (!force && key === this.#askDecorationKey) return
+    this.#askDecorationKey = key
+    const button = this.#headStrip?.querySelector('.fb-terr-ask') ?? null
+    if (button !== null) {
+      button.toggleAttribute('pressed', decoration.active)
+      button.setAttribute('aria-pressed', String(decoration.active))
     }
     const mounted = this.#territory
     if (mounted === null) return
-    if (!queryAvailableAtDepth(mounted.view.depth)) return
-
-    const panel = document.createElement('div')
-    panel.className = 'fb-terr-query'
-
-    const input = document.createElement('input')
-    input.type = 'text'
-    input.className = 'fb-terr-query-input'
-    input.placeholder = 'Ask the brain…'
-    input.setAttribute('aria-label', 'Ask the brain')
-
-    const status = document.createElement('p')
-    status.className = 'fb-terr-query-status'
-
-    const results = document.createElement('ul')
-    results.className = 'fb-terr-query-results'
-
-    panel.append(input, status, results)
-    // Escape closes and restores the map, from wherever the focus is.
-    panel.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') {
-        event.stopPropagation()
-        this.#closeBrainQuery()
-        return
-      }
-      if (event.key === 'Enter') {
-        // ENTER BELONGS TO WHATEVER HAS FOCUS. This handler is on the PANEL, so
-        // before the rows became buttons it could safely claim every Enter —
-        // the input was the only thing in here. Now a focused row's own Enter
-        // activates it, and this would ALSO re-run the search on top of it:
-        // measured live, pressing Enter on "Show Chats on the map" both lit
-        // Chats and re-opened the answer over it.
-        if (event.target !== input) return
-        event.stopPropagation()
-        void this.#runBrainQuery(input.value)
-      }
-    })
-    // Clicks inside the panel are the panel's, never the sheet's.
-    panel.addEventListener('click', (event) => event.stopPropagation())
-
-    mounted.wrap.appendChild(panel)
-    this.#brainQuery = {
-      panel,
-      input,
-      status,
-      results,
-      anchor,
-      state: idleQuery(),
-      highlight: null,
-    }
-    this.#placeBrainQuery()
-    this.#paintBrainQuery()
-    input.focus()
-  }
-
-  /** Position the panel under its anchor. Re-run on every re-fit. */
-  #placeBrainQuery(): void {
-    const query = this.#brainQuery
-    if (query === null) return
-    const stage = { width: this.#stage.clientWidth, height: this.#stage.clientHeight }
-    if (stage.width === 0 || stage.height === 0) return
-    // Measured, not assumed: the panel's height changes with the result list.
-    const field = {
-      width: query.panel.offsetWidth || QUERY_PANEL_WIDTH,
-      height: query.panel.offsetHeight || QUERY_PANEL_MIN_HEIGHT,
-    }
-    const placed = anchorQueryField(query.anchor, field, stage)
-    query.panel.style.left = `${placed.left.toFixed(1)}px`
-    query.panel.style.top = `${placed.top.toFixed(1)}px`
-    query.panel.classList.toggle('fb-terr-query-flipped', placed.flipped)
-  }
-
-  /** Ask the brain. The FIRST renderer caller of `brain:query`. */
-  async #runBrainQuery(raw: string): Promise<void> {
-    const query = this.#brainQuery
-    if (query === null) return
-    const state = submitQuery(raw)
-    query.state = state
-    if (state.phase === 'empty') {
-      // Never reaches IPC: asking the brain for nothing is not a search, and
-      // its empty answer would read as "this project knows nothing about it".
-      query.highlight = null
-      this.#paintBrainQuery()
+    mounted.wrap.classList.toggle('fb-terr-ask-open', decoration.active)
+    const drawn = new Set<string>([...mounted.cells.keys()])
+    const marks = projectDecoration(decoration, drawn)
+    for (const [id, el] of mounted.cells) paintCellMarks(el, marks.get(id) ?? null)
+    if (!decoration.active) {
+      // CLOSING PUTS THE MAP BACK — whatever overlay stood before it opened.
+      this.#applyTerritoryOverlay(this.#decoration)
       return
     }
-    this.#paintBrainQuery()
-
-    const rootId = this.#activeRoot
-    if (rootId === null) {
-      query.state = failQuery(state.query, new Error('no project is open'))
-      this.#paintBrainQuery()
+    // AN ANSWER THAT NAMES NOTHING ON THIS SHEET DIMS NOTHING: dimming every
+    // cell to say "the answer is elsewhere" reads as "the answer is nowhere".
+    if (marks.size === 0) {
+      this.#applyTerritoryDecoration(null)
       return
     }
-    const seq = ++this.#brainQuerySeq
-    let next: BrainQueryState
-    try {
-      const result = await window.flow.brain.query({
-        rootId,
-        query: state.query,
-        limit: BRAIN_QUERY_LIMIT,
-      })
-      next = resolveQuery(state.query, result.hits)
-    } catch (error) {
-      // FAIL-SOFT: an unavailable brain says so. It never throws into the
-      // board and never blanks the map.
-      next = failQuery(state.query, error)
-    }
-    // Drop an answer that outlived its question, its panel or its project.
-    if (seq !== this.#brainQuerySeq) return
-    if (this.#brainQuery !== query || rootId !== this.#activeRoot) return
-    query.state = next
-    this.#paintBrainQuery()
+    this.#applyTerritoryDecoration({ lit: [...marks.keys()], dimOthers: decoration.dimOthers })
   }
-
   /**
    * The caps LIVE on the surface currently drawn (Task 8.4).
    *
@@ -15717,11 +15661,6 @@ export class BlueprintBoard {
     // and said here, where the board already reports what it hid.
     const view = this.#territory?.view
     if (view !== undefined) caps.push(...territoryCaps(view))
-    const query = this.#brainQuery
-    if (query !== null && query.state.phase === 'results') {
-      const cap = brainQueryCap(query.state.hits.length, BRAIN_QUERY_LIMIT)
-      if (cap !== null) caps.push(cap)
-    }
     return caps
   }
 
@@ -15782,170 +15721,6 @@ export class BlueprintBoard {
       }
       box.appendChild(list)
     }
-  }
-
-  /** Render the panel's text + list, and light the map. */
-  #paintBrainQuery(): void {
-    const query = this.#brainQuery
-    const mounted = this.#territory
-    if (query === null || mounted === null) return
-    const graph = this.#featureGraph
-    query.highlight =
-      query.state.phase === 'results' && graph !== null
-        ? buildBrainHighlight(graph, mounted.view.cells, query.state.hits)
-        : null
-
-    query.status.textContent = statusLine(query.state, query.highlight)
-    query.status.classList.toggle('on', query.state.phase === 'error')
-
-    // EVERY ROW IS A CONTROL (not a <li> with text in it, which is what it was
-    // and why clicking one did nothing). The <button> carries the semantics —
-    // tab stop, Enter/Space, focus ring — so none of that has to be re-created
-    // by hand, and `hitAction` decides what pressing it means.
-    const drawnIds = new Set(mounted.view.cells.map((cell) => cell.id))
-    query.results.replaceChildren()
-    for (const hit of query.state.hits) {
-      const action = hitAction(hit, graph, drawnIds)
-      const item = document.createElement('li')
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.className = `fb-terr-query-hit fb-terr-query-hit-${action.kind}`
-      const title = document.createElement('span')
-      title.className = 'fb-terr-query-hit-title'
-      title.textContent = hit.title
-      const kind = document.createElement('span')
-      kind.className = 'fb-terr-query-hit-kind'
-      kind.textContent = hit.kind
-      button.append(kind, title)
-      // WHAT PRESSING IT DOES — the tooltip and the accessible name, not the
-      // snippet. The snippet is context; the label is the promise.
-      button.title = hit.snippet.length > 0 ? `${action.label}\n\n${hit.snippet}` : action.label
-      button.setAttribute('aria-label', action.label)
-      // A row that cannot open anything stays focusable and still SAYS why —
-      // `disabled` would remove it from the tab order and take its tooltip
-      // with it, which is the silent no-op wearing a different hat.
-      if (action.kind === 'none') button.setAttribute('aria-disabled', 'true')
-      button.addEventListener('click', () => this.#activateBrainHit(action))
-      item.appendChild(button)
-      query.results.appendChild(item)
-    }
-
-    this.#applyBrainHighlight(query.highlight)
-    this.#placeBrainQuery()
-    // An answer can bring a cap with it, so the disclosure is refilled with it.
-    this.#paintLimitations()
-  }
-
-  /**
-   * ACTIVATE ONE RESULT ROW. Wiring only — `hitAction` decided all of this.
-   *
-   * The three doing-something answers all end with the reader looking at the
-   * thing they picked, and the fourth says why it cannot. Note what is NOT
-   * here: no branch re-derives whether a hit is a feature, and no branch
-   * assembles a focus stack by hand — `depthGoTo` is the same algebra the
-   * arrows, the centre and the breadcrumbs use, so depth cannot disagree with
-   * itself afterwards.
-   */
-  #activateBrainHit(action: BrainHitAction): void {
-    switch (action.kind) {
-      case 'focus': {
-        // Already on this sheet: no depth change, so nothing to fly. Close the
-        // panel (the answer has been chosen) and leave the cell marked.
-        this.#closeBrainQuery()
-        this.#setBrainFocus(action.nodeId)
-        return
-      }
-      case 'navigate': {
-        const stack = action.stack ?? []
-        this.#closeBrainQuery()
-        // A SEARCH RESULT IS A JUMP, NOT A DIVE. Nobody pressed a cell, so
-        // there is no rectangle to fly from — `flightFor` cuts, and the level
-        // the answer named is simply there.
-        this.#flyTerritory('jump', null, () => {
-          this.#setDepthNav(depthGoTo(this.#depthNav(), stack))
-          // Set INSIDE the mutation, so the render that follows the flight
-          // already knows which node to mark — and so the ordinary "any
-          // navigation clears the mark" rule cannot wipe the one we just made.
-          this.#brainFocusNodeId = action.nodeId
-        })
-        return
-      }
-      case 'peek': {
-        // THE BOARD ALREADY HAS A DOCUMENT SURFACE. `openPeek` is the read-only
-        // drawer every other file reference in here uses (story anchors,
-        // annotations, evidence rows), and it carries its own "Open in editor"
-        // promotion — a second viewer would be a second set of bugs.
-        if (action.path !== null) this.openPeek(action.path)
-        this.#closeBrainQuery()
-        return
-      }
-      case 'none': {
-        // NOT A SILENT NO-OP. The row's own words go to the status line, where
-        // the reader is already looking for the answer's state.
-        const query = this.#brainQuery
-        if (query !== null) {
-          query.status.textContent = action.label
-          query.status.classList.add('on')
-        }
-        return
-      }
-    }
-  }
-
-  /**
-   * Mark the node a search result sent the reader to.
-   *
-   * REUSES THE HIT VOCABULARY (`LIT_CLASS` / `DIM_CLASS`) rather than inventing
-   * a second highlight: the reader has just seen those exact classes mean "this
-   * is what your question matched", and a different treatment for "this is the
-   * one you picked" would be two languages for one idea.
-   */
-  #setBrainFocus(nodeId: string | null): void {
-    this.#brainFocusNodeId = nodeId
-    this.#applyBrainFocus()
-  }
-
-  /** Paint the mark. Called after every feature-map render, so it survives
-   *  the re-render a depth change causes. */
-  #applyBrainFocus(): void {
-    const id = this.#brainFocusNodeId
-    if (id === null) return
-    const mounted = this.#territory
-    if (mounted === null) return
-    // The node may not be on THIS sheet (the reader navigated on past it) — in
-    // which case the mark has outlived its meaning and is dropped rather than
-    // left pointing at nothing.
-    if (!mounted.view.cells.some((cell) => cell.id === id)) {
-      this.#brainFocusNodeId = null
-      return
-    }
-    this.#applyBrainHighlight({ lit: [id], dimmed: [], hitCount: 1, onMap: 1, offMap: 0 })
-  }
-
-  /**
-   * Light the hits, dim the rest. NO SCRIM — the map lighting up IS the
-   * result, and a scrim over it would hide the answer the query produced.
-   *
-   * A lit cell also reveals its FULL name whatever its size, because a match
-   * you cannot read is not a match you found (the CSS overrides the label rule
-   * for `.fb-terr-lit` only, so the rule itself stays one rule).
-   *
-   * It is a THIN WRAPPER on purpose: `#applyTerritoryDecoration` is the one
-   * place a cell is lit or dimmed, and a brain answer is one overlay among
-   * five. Translating the highlight into that vocabulary here is what stops
-   * "dim" meaning something slightly different depending on which overlay
-   * spoke last (allowed-pattern #14).
-   */
-  #applyBrainHighlight(highlight: BrainHighlight | null): void {
-    if (highlight === null) {
-      // CLEARING A QUERY PUTS THE MAP BACK — including a
-      // click-neighbourhood that was lighting it before the field opened.
-      // Clearing outright would let a question the reader closed erase an
-      // answer they never dismissed.
-      this.#applyTerritoryOverlay(this.#decoration)
-      return
-    }
-    this.#applyTerritoryDecoration({ lit: highlight.lit, dimOthers: true })
   }
 
   /**
@@ -16150,19 +15925,6 @@ export class BlueprintBoard {
     this.#connSeq += 1
     this.#connPanel?.remove()
     this.#connPanel = null
-  }
-
-  /** Close the field and put the map back exactly as it was. */
-  #closeBrainQuery(): void {
-    const query = this.#brainQuery
-    if (query === null) return
-    query.panel.remove()
-    this.#brainQuery = null
-    this.#brainQuerySeq += 1
-    this.#applyBrainHighlight(null)
-    // The query's cap left with it — a row about a closed answer would be a
-    // limitation of nothing that is on screen.
-    this.#paintLimitations()
   }
 
   /**
@@ -16690,10 +16452,6 @@ export class BlueprintBoard {
     this.#featureForward = next.forward
     // At the project's own top level, the way in from the Workspace is spent.
     if (next.stack.length === 0) this.#wsEnteredFeature = false
-    // A MARK BELONGS TO THE LEVEL IT WAS MADE ON. Any move the reader makes
-    // themselves retires it; `#activateBrainHit`'s navigate re-sets it straight
-    // after this call, which is exactly the one move that should keep it.
-    this.#brainFocusNodeId = null
   }
 
   /**
@@ -17507,8 +17265,6 @@ export class BlueprintBoard {
     // would clear the rebuild fingerprint set above), minus the stage wipe.
     this.#territory = null
     this.#terrLens = null
-    this.#brainQuery = null
-    this.#brainQuerySeq += 1
     this.#refreshNav()
     this.#stage.replaceChildren(this.#surface, ...chrome, this.#mapControls)
     // A fresh graph re-fits: the camera baseline follows the new content.
@@ -18006,10 +17762,6 @@ export class BlueprintBoard {
       return
     }
     if (this.#territory !== null) {
-      if (this.#brainQuery !== null) {
-        this.#placeBrainQuery()
-        return
-      }
       if (this.#terrResizeFrame !== null) return
       this.#terrResizeFrame = requestAnimationFrame(() => {
         this.#terrResizeFrame = null
@@ -20233,7 +19985,7 @@ const BOARD_STYLES = `
     color: var(--fb-ink-dim);
     white-space: nowrap;
   }
-  /* ASK THE BRAIN, at the strip's right end and at the root only. A pill rather
+  /* ASK THE BLUEPRINT, at the strip's right end, at every depth. A pill rather
      than a bare mark: it is the board's one search entry point, and an
      unlabelled glyph in a corner is a feature nobody finds. */
   .flow-board-root .fb-terr-ask {
@@ -23735,8 +23487,20 @@ const BOARD_STYLES = `
   .flow-board-root .fb-header { gap: var(--fl-space-xs, 4px); }
   .flow-board-root .fb-header > .fb-nav { margin-right: var(--fl-space-xs, 4px); }
   .flow-board-root .fb-brief-headactions:empty { display: none; }
-  /* Ask the brain waits for its own design pass (user, 2026-10-06). */
-  .flow-board-root .fb-terr-ask { display: none !important; }
+  /* ASK THE BLUEPRINT (plan ask_the_blueprint): the accent pill from the
+     approved mockup, with its shortcut beside the label. */
+  .flow-board-root .fb-head-strip fl-button.fb-terr-ask {
+    border: 1px solid var(--fb-accent);
+    border-radius: var(--fl-radius-md, 8px);
+    background: color-mix(in srgb, var(--fb-accent) 14%, transparent);
+    padding: 0 var(--fl-space-sm, 8px);
+  }
+  .flow-board-root .fb-terr-ask-key {
+    margin-left: 6px;
+    font-family: var(--fl-font-mono, ui-monospace, monospace);
+    font-size: 11px;
+    color: var(--fb-ink-dim);
+  }
   /* A FEATURE'S OWN ACTIONS in the header (Understand, Changes & discoveries)
      — ghost buttons too, one face and one size for the whole label. */
   .flow-board-root .fb-brief-headactions .fb-brief-time {
