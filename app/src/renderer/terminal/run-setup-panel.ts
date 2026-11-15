@@ -218,8 +218,6 @@ export class RunSetupPanel {
     const titles = el('div', 'fl-run-setup-titles')
     titles.appendChild(el('span', 'fl-run-setup-title', projectName === '' ? SETUP_STRINGS.title : `${SETUP_STRINGS.title} · ${projectName}`))
     head.appendChild(titles)
-    head.appendChild(el('span', 'fl-run-grow'))
-    head.appendChild(iconButton('close', SETUP_STRINGS.close, () => this.close()))
     page.appendChild(head)
 
     if (draft === null) {
@@ -240,15 +238,9 @@ export class RunSetupPanel {
     draft.steps.forEach((step, index) => list.appendChild(this.#card(draft, step, index)))
     main.appendChild(list)
 
-    if (structural) {
-      const add = button('fl-run-chip dashed', SETUP_STRINGS.addStep, () => {
-        const next = addStep(draft)
-        this.#focusId = next.steps[next.steps.length - 1]?.id ?? null
-        this.#update(next)
-      })
-      add.classList.add('fl-run-add')
-      main.appendChild(add)
-    }
+    // Add a step, then Cancel and Save, right under the steps they act on.
+    this.#footer = el('div', 'fl-run-setup-foot')
+    main.appendChild(this.#footer)
 
     const ask = this.#deps.askAgent()
     const askButton = button(
@@ -260,9 +252,6 @@ export class RunSetupPanel {
     askButton.disabled = ask === null
     main.appendChild(askButton)
 
-    page.appendChild(el('span', 'fl-run-grow'))
-    this.#footer = el('div', 'fl-run-setup-foot')
-    page.appendChild(this.#footer)
     this.#renderFooter()
     root.scrollTop = scrollTop
 
@@ -459,6 +448,17 @@ export class RunSetupPanel {
     const draft = this.#draft
     if (foot === null || draft === null) return
     foot.textContent = ''
+    const row = el('div', 'fl-run-foot-actions')
+    if (isStructural(draft.layer)) {
+      const add = button('fl-run-chip dashed', SETUP_STRINGS.addStep, () => {
+        const current = this.#draft ?? draft
+        const next = addStep(current)
+        this.#focusId = next.steps[next.steps.length - 1]?.id ?? null
+        this.#update(next)
+      })
+      add.classList.add('fl-run-add')
+      row.appendChild(add)
+    }
     const problems = isDirty(draft) ? validateDraft(draft, { hasConversation: this.#deps.hasConversation() }) : []
     const text = el('div', 'fl-run-foot-text')
     if (this.#error !== null) {
@@ -468,9 +468,7 @@ export class RunSetupPanel {
     } else {
       text.appendChild(el('span', undefined, saveSentence(draft, this.#deps.state())))
     }
-    foot.appendChild(text)
-
-    const actions = el('div', 'fl-run-foot-actions')
+    const actions = row
     actions.appendChild(el('span', 'fl-run-grow'))
     actions.appendChild(button('fl-run-btn', SETUP_STRINGS.cancel, () => this.close()))
     const blocked = this.#saving || !isDirty(draft) || problems.length > 0
@@ -488,6 +486,7 @@ export class RunSetupPanel {
       actions.appendChild(saveAndRun)
     }
     foot.appendChild(actions)
+    foot.appendChild(text)
   }
 
   async #save(thenRun: boolean): Promise<void> {

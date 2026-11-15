@@ -424,7 +424,7 @@ function injectRunStyles(): void {
       font-family: var(--fl-font-ui); font-size: var(--fl-text-ui-size); color: var(--fl-color-text);
     }
     .fl-run-page {
-      max-width: 1120px; margin: 0 auto; min-height: 100%; box-sizing: border-box;
+      max-width: 960px; margin: 0 auto; min-height: 100%; box-sizing: border-box;
       display: flex; flex-direction: column; gap: var(--fl-space-md); padding-top: var(--fl-space-lg);
     }
     .fl-run-setup-head { display: flex; align-items: flex-start; gap: var(--fl-space-sm); }
@@ -432,11 +432,7 @@ function injectRunStyles(): void {
     .fl-run-setup-title { font-weight: var(--fl-text-ui-weight-medium); font-size: var(--fl-text-ui-size); }
     .fl-run-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--fl-space-lg); align-items: start; }
     .fl-run-main, .fl-run-aside { display: flex; flex-direction: column; gap: var(--fl-space-sm); min-width: 0; }
-    @container (min-width: 960px) {
-      .fl-run-body { grid-template-columns: minmax(0, 1fr) 340px; }
-      .fl-run-aside { position: sticky; top: var(--fl-space-md); }
-      .fl-run-aside .fl-run-section-title { margin-top: 0; }
-    }
+
     .fl-run-grow { flex: 1 1 auto; }
     .fl-run-muted { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); margin: 0; }
     .fl-run-note { margin: 0; color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); line-height: 1.5; }
@@ -528,12 +524,7 @@ function injectRunStyles(): void {
     }
     .fl-run-link:hover { text-decoration: underline; }
     .fl-run-link:disabled { color: var(--fl-color-text-secondary); cursor: default; text-decoration: none; }
-    .fl-run-setup-foot {
-      position: sticky; bottom: 0; background: var(--fl-color-bg);
-      display: flex; flex-direction: row; align-items: center; flex-wrap: wrap; gap: var(--fl-space-sm);
-      padding: var(--fl-space-sm) 0 var(--fl-space-md); border-top: var(--fl-border-width) solid var(--fl-color-separator);
-    }
-    .fl-run-setup-foot .fl-run-foot-text { flex: 1 1 240px; }
+    .fl-run-setup-foot { display: flex; flex-direction: column; gap: var(--fl-space-xs); }
     .fl-run-foot-text { display: flex; flex-direction: column; gap: 2px; color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); line-height: 1.45; }
     .fl-run-foot-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--fl-space-sm); }
     .fl-run-saves-for { display: inline-flex; align-items: center; gap: var(--fl-space-xs); }
