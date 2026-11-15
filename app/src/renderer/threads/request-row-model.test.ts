@@ -30,7 +30,7 @@ const summary = (over: Partial<RequestSummary> = {}): RequestSummary => ({
   elapsedMs: 6 * 60_000,
   tools: 25,
   failed: 1,
-  filesEdited: 2,
+  filesChanged: 2,
   model: 'claude-opus-4-8',
   ...over,
 })
@@ -102,9 +102,9 @@ describe('requestRowView — closed', () => {
     expect(view.facts).toEqual([
       { text: '25 tools', failed: false },
       { text: '1 failed', failed: true },
-      { text: '2 files edited', failed: false },
+      { text: '2 files changed', failed: false },
     ])
-    expect(view.label).toBe('Worked 6 min · 25 tools · 1 failed · 2 files edited')
+    expect(view.label).toBe('Worked 6 min · 25 tools · 1 failed · 2 files changed')
     expect(view.model).toBe('Opus 4.8')
     expect(view.modelId).toBe('claude-opus-4-8')
     expect(view.newestStep).toBeNull()
@@ -147,7 +147,7 @@ describe('requestRowView — closed', () => {
 describe('requestRowView — live', () => {
   it('puts the elapsed time in the lead and shows the newest step', () => {
     const view = requestRowView(
-      summary({ elapsedMs: 3 * 60_000, tools: 19, failed: 0, filesEdited: 0 }),
+      summary({ elapsedMs: 3 * 60_000, tools: 19, failed: 0, filesChanged: 0 }),
       [
         { text: 'Reading the backend.', records: [record('a')] },
         { text: '**Reading** the frontend hooks…\nand more', records: [] },
@@ -178,7 +178,7 @@ describe('liveRequestSummary', () => {
       elapsedMs: 180_000,
       tools: 4,
       failed: 1,
-      filesEdited: 1,
+      filesChanged: 1,
       model: 'claude-opus-4-8',
     })
   })

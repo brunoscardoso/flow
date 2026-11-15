@@ -96,6 +96,24 @@ describe('the input half — a write carries a whole file', () => {
     expect((trimmed?.inputJson ?? '').length).toBeLessThan(500)
   })
 
+  it('counts a write\'s lines from the whole input BEFORE summarizing it away', () => {
+    const big = Array.from({ length: 1_000 }, (_, i) => `line ${i}`).join('\n')
+    const [trimmed] = boundedToolCalls(
+      [{ ...write(big), id: 'w-count', outputJson: JSON.stringify('File created successfully at: /repo/src/big.ts') }, call('newest')],
+      1,
+    )
+    expect(trimmed?.inputWithheld).toBe(true)
+    expect(trimmed?.fileChanges).toEqual([
+      { path: '/repo/src/big.ts', added: 1_000, removed: 0, counted: true, created: true, whole: true },
+    ])
+  })
+
+  it('keeps counts the store already attached', () => {
+    const attached = [{ path: '/repo/src/big.ts', added: 7, removed: 0, counted: true, created: true }]
+    const [trimmed] = boundedToolCalls([{ ...write('x'.repeat(20_000)), fileChanges: attached }, call('newest')], 1)
+    expect(trimmed?.fileChanges).toBe(attached)
+  })
+
   it('leaves a small input completely alone', () => {
     const small = { ...call('s', null), inputJson: '{"file_path":"/a/b.ts"}' }
     const [trimmed] = boundedToolCalls([small, call('newest')], 1)

@@ -6,7 +6,7 @@
  * facts. This module decides what the ONE row standing for it says, in its
  * three states:
  *
- *   - closed — `Worked 6 min · 25 tools · 1 failed · 2 files edited`, the
+ *   - closed — `Worked 6 min · 25 tools · 1 failed · 3 files changed`, the
  *     model right-aligned;
  *   - opened — the same line over numbered steps: each step's first line, its
  *     tool count, a failed count in the error tint;
@@ -20,6 +20,7 @@ import type { ToolCallRecord } from '../../shared/ipc-contract'
 import { modelLabel } from './model-label'
 import { requestRowLabel, requestRowSegments, type RequestRowSegment, type RequestSummary } from './request-summary'
 import { turnSummary } from './turn-summary'
+import { requestFileChanges } from './request-file-changes'
 
 /** What the row knows about one step: its head text (null for a step whose
  *  tools ran before any message) and the tools after it. */
@@ -139,7 +140,7 @@ export function liveRequestSummary(
     elapsedMs: options.startedAt === null ? null : Math.max(0, options.now - options.startedAt),
     tools: counts.tools,
     failed: counts.failed,
-    filesEdited: counts.filesEdited,
+    filesChanged: requestFileChanges([records], { live: true }).files.length,
     model: options.model,
   }
 }

@@ -2,11 +2,15 @@
  * The work row — ONE line for everything between a person's message and the
  * request's final answer (plan_chat-cleanup, FR-1–FR-5).
  *
- *   closed  ▸ Worked 6 min · 25 tools · 1 failed · 2 files edited    Opus 4.8
+ *   closed  ▸ Worked 6 min · 25 tools · 1 failed · 3 files changed   Opus 4.8
  *   opened  the same line over numbered steps; each step opens to its message
  *           and its tools, built exactly as the feed builds them elsewhere
- *   live    ● Working · 3 min · 19 tools                              Opus 4.8
+ *   live    ● Working · 3 min · 19 tools          +180 −40 in 2 files  Opus 4.8
  *             Reading the frontend hooks…
+ *
+ * A step that changed files carries a chip per file under its line
+ * (`request-file-changes-view.ts`), visible whenever the row is open — a
+ * press opens that file's diff without opening the step.
  *
  * Every word comes from `request-row-model.ts`; this file only draws. Like a
  * turn row it carries no `dataset.entryId` (the reconcile reuse harvest keys
@@ -22,6 +26,8 @@
  */
 import type { RequestSummary } from './request-summary'
 import { requestRowView, type RequestRowStepInput, type RequestRowView } from './request-row-model'
+import { liveTotalsText, type RequestFileChanges } from './request-file-changes'
+import { fileChangeChips, fileChipsKey, type FileChangeActions } from './request-file-changes-view'
 
 export interface RequestRowOptions {
   /** The INITIAL state; not reported through `onToggle` (see TurnRow). */
@@ -33,6 +39,8 @@ export interface RequestRowOptions {
   /** Whether a step was open before a rebuild. */
   isStepExpanded?: (index: number) => boolean
   onStepToggle?: (index: number, expanded: boolean) => void
+  /** What pressing a step's file chip does. Without it no chips are drawn. */
+  fileActions?: FileChangeActions
 }
 
 interface StepNodes {
@@ -42,6 +50,9 @@ interface StepNodes {
   text: HTMLSpanElement
   count: HTMLSpanElement
   detail: HTMLDivElement
+  /** The step's file chips, between its line and its contents. */
+  chips: HTMLElement | null
+  chipsKey: string
   built: boolean
   expanded: boolean
   /** What was last drawn, so an unchanged step costs no DOM write. */
@@ -55,6 +66,7 @@ export class RequestRow {
   #lead: HTMLSpanElement
   #facts: HTMLSpanElement
   #model: HTMLSpanElement
+  #changes: HTMLSpanElement
   #now: HTMLDivElement
   #list: HTMLOListElement
   #steps: StepNodes[] = []
@@ -67,6 +79,7 @@ export class RequestRow {
     steps: readonly RequestRowStepInput[],
     live: boolean,
     options: RequestRowOptions = {},
+    files: RequestFileChanges | null = null,
   ) {
     injectRequestRowStyles()
     this.#options = options
@@ -90,7 +103,10 @@ export class RequestRow {
     this.#facts.className = 'fl-request-row-facts'
     this.#model = document.createElement('span')
     this.#model.className = 'fl-request-row-model'
-    header.append(this.#marker, this.#lead, this.#facts, this.#model)
+    this.#changes = document.createElement('span')
+    this.#changes.className = 'fl-request-row-changes'
+    this.#changes.hidden = true
+    header.append(this.#marker, this.#lead, this.#facts, this.#changes, this.#model)
 
     const toggle = (): void => this.setExpanded(!this.#expanded)
     header.addEventListener('click', toggle)
@@ -108,7 +124,7 @@ export class RequestRow {
     this.#list.className = 'fl-request-row-steps'
 
     this.element.append(header, this.#now, this.#list)
-    this.update(summary, steps, live)
+    this.update(summary, steps, live, files)
     this.#applyExpanded()
   }
 
@@ -117,8 +133,32 @@ export class RequestRow {
   }
 
   /** Redraw the counts, the step list and the live line in place (note 18). */
-  update(summary: RequestSummary, steps: readonly RequestRowStepInput[], live: boolean): void {
+  update(
+    summary: RequestSummary,
+    steps: readonly RequestRowStepInput[],
+    live: boolean,
+    files: RequestFileChanges | null = null,
+  ): void {
     this.#draw(requestRowView(summary, steps, live))
+    this.#drawFiles(live, files)
+  }
+
+  /** The live total on the line, and each step's chips. */
+  #drawFiles(live: boolean, files: RequestFileChanges | null): void {
+    const totals = live && files !== null ? liveTotalsText(files) : ''
+    if (this.#changes.textContent !== totals) this.#changes.textContent = totals
+    this.#changes.hidden = totals === ''
+    const actions = this.#options.fileActions
+    if (actions === undefined) return
+    this.#steps.forEach((nodes, index) => {
+      const stepFiles = files?.steps[index] ?? []
+      const key = fileChipsKey(stepFiles)
+      if (key === nodes.chipsKey) return
+      nodes.chipsKey = key
+      nodes.chips?.remove()
+      nodes.chips = fileChangeChips(stepFiles, actions)
+      if (nodes.chips !== null) nodes.item.insertBefore(nodes.chips, nodes.detail)
+    })
   }
 
   /**
@@ -237,7 +277,19 @@ export class RequestRow {
     item.append(header, detail)
     this.#list.appendChild(item)
 
-    const nodes: StepNodes = { item, header, number, text, count, detail, built: false, expanded: false, drawn: '' }
+    const nodes: StepNodes = {
+      item,
+      header,
+      number,
+      text,
+      count,
+      detail,
+      chips: null,
+      chipsKey: '',
+      built: false,
+      expanded: false,
+      drawn: '',
+    }
     this.#steps[index] = nodes
     const toggle = (): void => this.#setStepExpanded(index, !nodes.expanded, true)
     header.addEventListener('click', toggle)
@@ -373,6 +425,17 @@ function injectRequestRowStyles(): void {
       margin-left: auto;
       font-size: var(--fl-text-caption-size);
     }
+    /* The live running total sits right, before the model; with it shown the
+       model no longer needs to push itself right. */
+    .fl-request-row-changes {
+      flex: none;
+      margin-left: auto;
+      font-size: var(--fl-text-caption-size);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .fl-request-row-changes[hidden] { display: none; }
+    .fl-request-row-changes:not([hidden]) + .fl-request-row-model { margin-left: 0; }
     .fl-request-row-now {
       padding-left: 18px;
       overflow: hidden;

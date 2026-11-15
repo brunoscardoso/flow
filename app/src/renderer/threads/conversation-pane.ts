@@ -99,15 +99,20 @@ import { ToolGroupCard } from './tool-group-card'
 import { groupPresentation, planToolGroups, toolCallGroupKey } from './tool-group-model'
 import { TurnRow } from './turn-row'
 import { turnSummary, type TurnRole } from './turn-summary'
-import { requestSummary, type Request, type RequestRole } from './request-summary'
+import { planRequests, requestSummary, type Request, type RequestRole } from './request-summary'
 import { RequestRow, sentWhileWorkingNote } from './request-row'
 import { liveRequestSummary, type RequestRowStepInput } from './request-row-model'
+import { fileDisplay, requestFileChanges } from './request-file-changes'
+import { fileChangeChips, fileChangeList, LiveFileCards, type FileChangeActions } from './request-file-changes-view'
+import { changeReviewStore } from './change-review-store'
 import {
   DEFAULT_FEED_DENSITY,
+  feedEntries,
   feedUnits,
   projectFeed,
   type FeedClassifiers,
   type FeedDensity,
+  type FeedUnit,
 } from './feed-density'
 import { getFeedDensity, onFeedDensityChanged } from './feed-density-controller'
 import { reconcileScrollTop } from './conversation-scroll'
@@ -340,6 +345,8 @@ interface LiveRequest {
   model: string | null
   /** False once the turn rests (done, a parked ask, an interrupt). */
   active: boolean
+  /** The changed-file cards under the row, one per file as edits land. */
+  files: LiveFileCards
 }
 
 /** How often a live row's minutes are redrawn when no event does it. */
@@ -793,6 +800,23 @@ export class ConversationPane {
   /** The active project root (ADR-002) — the rootId for blueprint:read on the
    *  decoupled flow:open-blueprint signal (blueprint:changed carries its own). */
   #activeRoot: string | null = null
+
+  /**
+   * What the changed-files cards, rows and chips do when pressed. One object
+   * for every request the pane draws, so nothing is closed over per build.
+   *
+   * A file opens in the SAME diff view the Changes tab and Source Control use
+   * (`flow:open-change-review-diff`): git's diff of that file in the
+   * conversation's checkout. Review changes opens the Changes tab — every
+   * changed file of the checkout, each expandable to its diff in place.
+   */
+  readonly #fileActions: FileChangeActions = {
+    roots: () => this.#conversationRoots(),
+    openFile: (path) => this.#openFileDiff(path),
+    review: () => {
+      document.dispatchEvent(new CustomEvent('flow:open-change-review'))
+    },
+  }
   #openBlueprintHandler?: () => void
   /** Live conflict-review cards for the CURRENT thread's feed (dropped on thread
    *  switch, like the other live cards — the feed wipe detaches their elements). */
@@ -2003,44 +2027,103 @@ export class ConversationPane {
     units.forEach((unit, index) => {
       if (unit.level === 'turn') lastTurnIndex = index
     })
+    // Below Compact there is no request unit to hang the changed-files list
+    // on, so the same request fold places it: before the request's answer, or
+    // after its last entry while it has none.
+    const fileLists = this.#density === 'compact' ? null : this.#requestFileLists(entries, liveTail)
     units.forEach((unit, index) => {
-      if (unit.level === 'turn') {
-        // `Thought Ns` heads the turn, above the prose it preceded — the order
-        // the work happened in, and the order the reference shows it. Only a
-        // turn this pane WATCHED think has an entry, so a rebuilt history and a
-        // turn that answered straight away both correctly render no row at all
-        // (FR-5, Q-3: the elapsed time belongs here and nowhere else — a
-        // duration on the turn row would compete with the counts, which are the
-        // facts a reader decides on).
-        const thought = this.#buildThoughtRow(unit.messageId, unit.head)
-        if (thought !== null) out.push(thought)
-        out.push(this.#buildHistoryEntry(unit.head))
-        // A turn that only spoke gets no row. `turnSummaryLabel` would be empty,
-        // and an empty row is the noise this plan exists to remove.
-        if (unit.tools.length === 0) return
-        out.push(this.#buildTurnRow(unit.messageId, unit.tools, liveTail && index === lastTurnIndex))
+      if (fileLists === null) {
+        this.#buildUnit(unit, index, lastTurnIndex, liveTail, out)
         return
       }
-      if (unit.level === 'group') {
-        out.push(this.#buildToolGroup(unit.key, unit.entries))
-        return
+      const covered = feedEntries([unit])
+      for (const entry of covered) {
+        const list = fileLists.before.get(entry)
+        if (list !== undefined) out.push(list)
       }
-      // Below Compact there is no turn unit to head, so the thinking row hangs
-      // off the assistant message itself. FR-5 is a fact about the turn, not a
-      // property of the fold: a reader who chose to see more must not see LESS
-      // of what the pane observed.
-      if (unit.level === 'request') {
-        out.push(...this.#buildRequest(unit.request, liveTail))
-        return
+      this.#buildUnit(unit, index, lastTurnIndex, liveTail, out)
+      for (const entry of covered) {
+        const list = fileLists.after.get(entry)
+        if (list !== undefined) out.push(list)
       }
-      const { entry } = unit
-      if (entry.kind === 'message' && entry.message.role === 'assistant') {
-        const thought = this.#buildThoughtRow(entry.message.id, entry)
-        if (thought !== null) out.push(thought)
-      }
-      out.push(this.#buildHistoryEntry(entry))
     })
     return out
+  }
+
+  /**
+   * The changed-files lists of a Balanced or Detailed feed, keyed by the entry
+   * each goes before (the request's answer) or after (its last entry, while it
+   * has no answer). A request still running gets none — it is not finished.
+   */
+  #requestFileLists(
+    entries: HistoryEntry[],
+    liveTail: boolean,
+  ): { before: Map<HistoryEntry, HTMLElement>; after: Map<HistoryEntry, HTMLElement> } {
+    const before = new Map<HistoryEntry, HTMLElement>()
+    const after = new Map<HistoryEntry, HTMLElement>()
+    for (const unit of planRequests(entries, requestRoleFor, { running: liveTail })) {
+      if (!unit.request || (unit.live && liveTail)) continue
+      const records = unit.entries.flatMap((entry) => (entry.kind === 'tool' ? [entry.toolCall] : []))
+      if (records.length === 0) continue
+      const list = fileChangeList(requestFileChanges([records]), this.#fileActions)
+      if (list === null) continue
+      const wrapper = entryWrapper('file-changes', list)
+      if (unit.answer !== null) {
+        wrapper.dataset.at = unit.answer.at
+        before.set(unit.answer, wrapper)
+        continue
+      }
+      const last = unit.entries[unit.entries.length - 1]
+      if (last === undefined) continue
+      wrapper.dataset.at = last.at
+      after.set(last, wrapper)
+    }
+    return { before, after }
+  }
+
+  /** One unit of `#buildGroupedEntries`, appended to `out`. */
+  #buildUnit(
+    unit: FeedUnit<HistoryEntry>,
+    index: number,
+    lastTurnIndex: number,
+    liveTail: boolean,
+    out: HTMLElement[],
+  ): void {
+    if (unit.level === 'turn') {
+      // `Thought Ns` heads the turn, above the prose it preceded — the order
+      // the work happened in, and the order the reference shows it. Only a
+      // turn this pane WATCHED think has an entry, so a rebuilt history and a
+      // turn that answered straight away both correctly render no row at all
+      // (FR-5, Q-3: the elapsed time belongs here and nowhere else — a
+      // duration on the turn row would compete with the counts, which are the
+      // facts a reader decides on).
+      const thought = this.#buildThoughtRow(unit.messageId, unit.head)
+      if (thought !== null) out.push(thought)
+      out.push(this.#buildHistoryEntry(unit.head))
+      // A turn that only spoke gets no row. `turnSummaryLabel` would be empty,
+      // and an empty row is the noise this plan exists to remove.
+      if (unit.tools.length === 0) return
+      out.push(this.#buildTurnRow(unit.messageId, unit.tools, liveTail && index === lastTurnIndex))
+      return
+    }
+    if (unit.level === 'group') {
+      out.push(this.#buildToolGroup(unit.key, unit.entries))
+      return
+    }
+    // Below Compact there is no turn unit to head, so the thinking row hangs
+    // off the assistant message itself. FR-5 is a fact about the turn, not a
+    // property of the fold: a reader who chose to see more must not see LESS
+    // of what the pane observed.
+    if (unit.level === 'request') {
+      out.push(...this.#buildRequest(unit.request, liveTail))
+      return
+    }
+    const { entry } = unit
+    if (entry.kind === 'message' && entry.message.role === 'assistant') {
+      const thought = this.#buildThoughtRow(entry.message.id, entry)
+      if (thought !== null) out.push(thought)
+    }
+    out.push(this.#buildHistoryEntry(entry))
   }
 
   /**
@@ -2095,7 +2178,12 @@ export class ConversationPane {
       records: recordsOf(step.tools),
     }))
     const summary = requestSummary(request, { classify: requestRoleFor })
+    const files = requestFileChanges(
+      inputs.map((input) => input.records),
+      { live },
+    )
     const row = new RequestRow(summary, inputs, live, {
+      fileActions: this.#fileActions,
       expanded: this.#expandedRequests.has(key),
       onToggle: (expanded) => {
         if (expanded) this.#expandedRequests.add(key)
@@ -2117,14 +2205,24 @@ export class ConversationPane {
         if (expanded) this.#expandedSteps.add(stepKeyOf(step))
         else this.#expandedSteps.delete(stepKeyOf(step))
       },
-    })
+    }, files)
     steps.forEach((step, index) => {
       for (const record of recordsOf(step.tools)) this.#requestByCardId.set(record.id, { row, step: index })
     })
     const wrapper = entryWrapper('request', row.element)
     const last = request.entries[request.entries.length - 1]
     if (last !== undefined) wrapper.dataset.at = last.at
-    if (live) {
+    // The files the request changed, between its work and its answer: the
+    // live cards while it runs, the list once it has finished.
+    const liveFiles = live ? new LiveFileCards(this.#fileActions) : null
+    if (liveFiles !== null) {
+      liveFiles.update(files.files)
+      wrapper.appendChild(liveFiles.element)
+    } else {
+      const list = fileChangeList(files, this.#fileActions)
+      if (list !== null) wrapper.appendChild(list)
+    }
+    if (live && liveFiles !== null) {
       steps.forEach((_, index) => row.stepDetail(index))
       const records = new Map<string, ToolCallRecord>()
       for (const input of inputs) for (const record of input.records) records.set(record.id, record)
@@ -2141,10 +2239,54 @@ export class ConversationPane {
         })),
         model: summary.model,
         active: true,
+        files: liveFiles,
       }
       this.#startLiveRequestTimer()
     }
     return wrapper
+  }
+
+  /**
+   * The roots a changed file is named relative to, and its diff opened in:
+   * the conversation's own checkout first (the review store's answer when it
+   * has one for this thread, else the thread's worktree), then the project,
+   * then every attached project and its checkout.
+   */
+  #conversationRoots(): string[] {
+    const roots: string[] = []
+    const add = (root: string | null | undefined): void => {
+      if (typeof root === 'string' && root !== '' && !roots.includes(root)) roots.push(root)
+    }
+    const snapshot = changeReviewStore.snapshot
+    if (snapshot.threadId !== null && snapshot.threadId === this.#threadId) add(snapshot.review?.rootId)
+    const thread = this.#bannerThread
+    if (thread !== null && thread.id === this.#threadId) {
+      add(thread.worktreePath)
+      add(thread.projectRoot)
+      for (const attached of thread.attachedWorktrees ?? []) {
+        add(attached.path)
+        add(attached.rootPath)
+      }
+      for (const root of thread.additionalRoots) add(root)
+    }
+    add(this.#activeRoot)
+    return roots
+  }
+
+  /** Open one changed file's diff, in the checkout it lives in. */
+  #openFileDiff(path: string): void {
+    const display = fileDisplay(path, this.#conversationRoots())
+    if (display.root === null) {
+      // Outside every checkout this conversation knows: there is no git tree
+      // to diff it in, so the file itself opens rather than nothing at all.
+      document.dispatchEvent(new CustomEvent('flow:open-file-path', { detail: { path } }))
+      return
+    }
+    document.dispatchEvent(
+      new CustomEvent('flow:open-change-review-diff', {
+        detail: { rootPath: display.root, filePath: display.relative, threadId: this.#threadId },
+      }),
+    )
   }
 
   /**
@@ -2230,6 +2372,13 @@ export class ConversationPane {
     })
     for (const record of records) this.#turnByCardId.set(record.id, row)
     const wrapper = entryWrapper('turn', row.element)
+    // Balanced: a turn row IS a step's line, so the files that step changed
+    // hang under it as chips, as they do under a step of the opened work row.
+    // Not while the turn runs — its tools are still landing.
+    if (!live) {
+      const chips = fileChangeChips(requestFileChanges([records]).files, this.#fileActions)
+      if (chips !== null) wrapper.appendChild(chips)
+    }
     // Stamped like a group's slot so the story card's timestamp-ordered
     // placement (#placeStoryEntry) still sees it.
     wrapper.dataset.at = tools[tools.length - 1].at
@@ -2380,6 +2529,7 @@ export class ConversationPane {
     const key = entryId !== undefined && entryId.startsWith('msg:') ? entryId.slice('msg:'.length) : null
     const summary = liveRequestSummary([], { startedAt, now: Date.now(), model: this.#currentModel })
     const row = new RequestRow(summary, [], true, {
+      fileActions: this.#fileActions,
       expanded: key !== null && this.#expandedRequests.has(key),
       onToggle: (expanded) => {
         if (key === null) return
@@ -2387,11 +2537,14 @@ export class ConversationPane {
         else this.#expandedRequests.delete(key)
       },
     })
-    this.#feed.appendChild(entryWrapper('request', row.element))
+    const files = new LiveFileCards(this.#fileActions)
+    const wrapper = entryWrapper('request', row.element)
+    wrapper.appendChild(files.element)
+    this.#feed.appendChild(wrapper)
     // A row appended mid-load belongs to a new turn — keep the reconcile from
     // wiping it (#101), exactly as for a stream node.
     if (this.#historyLoading) this.#liveDuringLoad = true
-    this.#liveRequest = { row, startedAt, records: new Map(), steps: [], model: null, active: true }
+    this.#liveRequest = { row, startedAt, records: new Map(), steps: [], model: null, active: true, files }
     this.#startLiveRequestTimer()
     return this.#liveRequest
   }
@@ -2456,8 +2609,15 @@ export class ConversationPane {
    *  on the row the moment it lands). No-op for a record it does not hold. */
   #noteLiveRecord(record: ToolCallRecord): void {
     const live = this.#liveRequest
-    if (live === null || !live.records.has(record.id)) return
-    live.records.set(record.id, record)
+    const previous = live?.records.get(record.id)
+    if (live === null || previous === undefined) return
+    // An end event may carry only the outcome (no name, no input): the input
+    // the start carried is still what the changed-files cards count from.
+    const merged =
+      record.inputJson === null && previous.inputJson !== null
+        ? { ...record, toolName: record.toolName === '' ? previous.toolName : record.toolName, inputJson: previous.inputJson }
+        : record
+    live.records.set(record.id, merged)
     this.#updateLiveRequest()
   }
 
@@ -2478,7 +2638,14 @@ export class ConversationPane {
       now: Date.now(),
       model: this.#currentModel ?? live.model,
     })
-    live.row.update(summary, steps, live.active)
+    // Records are memoized by identity inside the fold, so a text batch or a
+    // tick that changed no tool re-counts nothing; the cards diff what they draw.
+    const files = requestFileChanges(
+      steps.map((step) => step.records),
+      { live: live.active },
+    )
+    live.row.update(summary, steps, live.active, files)
+    live.files.update(files.files)
   }
 
   #startLiveRequestTimer(): void {

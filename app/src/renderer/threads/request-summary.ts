@@ -41,6 +41,7 @@
  */
 import type { ToolCallRecord } from '../../shared/ipc-contract'
 import { turnSummary } from './turn-summary'
+import { filesChangedText, requestFileChanges } from './request-file-changes'
 
 /**
  * What an entry is, as far as the request fold cares. Injected by the caller.
@@ -346,8 +347,9 @@ export interface RequestSummary {
   tools: number
   /** Error or denied — never interrupted (`FAILED_STATUSES`). */
   failed: number
-  /** Distinct files written to. */
-  filesEdited: number
+  /** Distinct files the request's own edit calls changed — the same count
+   *  as the changed-files list under the row (`request-file-changes.ts`). */
+  filesChanged: number
   /** The answer's model, else the newest step's model with one. */
   model: string | null
   /** The request was ended by a later message while its turn ran — its row
@@ -364,7 +366,8 @@ export interface RequestSummaryDeps<T> {
 /**
  * Reduce a request to the facts its work row states. The tool counts are
  * `turnSummary` over the request's tool records — the same rule a turn row
- * uses for failures and files edited, in one code path.
+ * uses for failures, in one code path; the changed files are
+ * `requestFileChanges`, the same fold the list under the row draws.
  */
 export function requestSummary<T>(request: Request<T>, deps: RequestSummaryDeps<T>): RequestSummary {
   const records: ToolCallRecord[] = []
@@ -398,6 +401,7 @@ export function requestSummary<T>(request: Request<T>, deps: RequestSummaryDeps<
   }
 
   const counts = turnSummary(records)
+  const filesChanged = requestFileChanges([records]).files.length
   const first = start ?? (times.length > 0 ? Math.min(...times) : null)
   let elapsedMs: number | null = null
   if (first !== null) {
@@ -413,7 +417,7 @@ export function requestSummary<T>(request: Request<T>, deps: RequestSummaryDeps<
     elapsedMs,
     tools: counts.tools,
     failed: counts.failed,
-    filesEdited: counts.filesEdited,
+    filesChanged,
     model: answerModel ?? model,
     ...(request.continued ? { continued: true } : {}),
   }
@@ -446,7 +450,7 @@ export interface RequestRowSegment {
 
 /**
  * The row's line as segments: `Worked 6 min`, `25 tools`, `1 failed`,
- * `2 files edited` — or `Working`, `3 min`, `19 tools` while live. A zero
+ * `3 files changed` — or `Working`, `3 min`, `19 tools` while live. A zero
  * count is omitted. The failure segment is flagged by VALUE, as
  * `turnRowSegments` does, so no other segment can inherit the error tint.
  */
@@ -462,12 +466,14 @@ export function requestRowSegments(summary: RequestSummary, live: boolean): Requ
   if (summary.tools > 0) texts.push(plural(summary.tools, 'tool'))
   const failedText = summary.failed > 0 ? summary.failed + ' failed' : null
   if (failedText !== null) texts.push(failedText)
-  if (summary.filesEdited > 0) texts.push(plural(summary.filesEdited, 'file') + ' edited')
+  // While live, the row's right side carries the running `+180 −40 in 2 files`
+  // instead, so the count is not said twice on one line.
+  if (!live && summary.filesChanged > 0) texts.push(filesChangedText(summary.filesChanged))
   if (!live && summary.continued === true) texts.push(CONTINUED_TEXT)
   return texts.map((text) => ({ text, failed: text === failedText }))
 }
 
-/** The row's whole line, e.g. `Worked 6 min · 25 tools · 1 failed · 2 files edited`. */
+/** The row's whole line, e.g. `Worked 6 min · 25 tools · 1 failed · 3 files changed`. */
 export function requestRowLabel(summary: RequestSummary, live: boolean): string {
   return requestRowSegments(summary, live)
     .map((segment) => segment.text)

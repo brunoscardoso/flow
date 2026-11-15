@@ -119,7 +119,10 @@ test('a finished request folds to one row, Balanced to one turn row, and Detaile
     // edited twice + mocks written) — distinct files, not edit calls.
     expect(requestLabel).toContain('12 tools')
     expect(requestLabel).toContain('2 failed')
-    expect(requestLabel).toContain('2 files edited')
+    expect(requestLabel).toContain('2 files changed')
+    // …and the same two files listed between the work and the answer.
+    await expect(window.locator('.fl-file-change-list-title')).toHaveText('2 files changed')
+    await expect(window.locator('.fl-file-change-row')).toHaveCount(2)
     const compactTint = await failedTint('.fl-request-row-header')
     expect(compactTint).not.toBeNull()
     expect(compactTint?.actual).toBe(compactTint?.expected)

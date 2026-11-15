@@ -375,16 +375,37 @@ describe('requestSummary', () => {
     say('m2', 'Done.', { ends: true, model: 'claude-opus-4-8', minute: 6 }),
   ]
 
-  it('counts tools, failures and distinct files with the turn-row rule', () => {
+  it('counts tools and failures with the turn-row rule, and the files the request changed', () => {
     const [request] = requests(planRequests(feed, classify))
     const summary = requestSummary(request, { classify })
     expect(summary.tools).toBe(5)
     // error counts; interrupted (stopped by the person) does not.
     expect(summary.failed).toBe(1)
-    expect(summary.filesEdited).toBe(2)
+    expect(summary.filesChanged).toBe(2)
     expect(summary.model).toBe('claude-opus-4-8')
     expect(summary.elapsedMs).toBe(6 * 60_000)
-    expect(requestRowLabel(summary, false)).toBe('Worked 6 min · 5 tools · 1 failed · 2 files edited')
+    expect(requestRowLabel(summary, false)).toBe('Worked 6 min · 5 tools · 1 failed · 2 files changed')
+  })
+
+  it('does not count a file whose only edit failed — it was not changed', () => {
+    const failedEdit: Entry[] = [
+      user('u1', 0),
+      say('m1', 'Writing.', { minute: 1 }),
+      tool('t1', 'm1', { name: 'Edit', file: '/a.ts', minute: 2 }),
+      tool('t2', 'm1', { name: 'Edit', file: '/c.ts', status: 'error', minute: 3 }),
+      say('m2', 'Done.', { ends: true, minute: 4 }),
+    ]
+    const [request] = requests(planRequests(failedEdit, classify))
+    const summary = requestSummary(request, { classify })
+    expect(summary.failed).toBe(1)
+    expect(summary.filesChanged).toBe(1)
+    expect(requestRowLabel(summary, false)).toBe('Worked 4 min · 2 tools · 1 failed · 1 file changed')
+  })
+
+  it('while live, the line leaves the file count to the running total beside it', () => {
+    const facts = { elapsedMs: 60_000, tools: 3, failed: 0, filesChanged: 2, model: null }
+    expect(requestRowLabel(facts, true)).toBe('Working · 1 min · 3 tools')
+    expect(requestRowLabel(facts, false)).toBe('Worked 1 min · 3 tools · 2 files changed')
   })
 
   it('times a live request to now', () => {
@@ -400,7 +421,7 @@ describe('requestSummary', () => {
 describe('requestRowSegments', () => {
   it('omits zero segments and flags only the failure segment, by value', () => {
     const segments = requestRowSegments(
-      { elapsedMs: 60_000, tools: 2, failed: 2, filesEdited: 0, model: null },
+      { elapsedMs: 60_000, tools: 2, failed: 2, filesChanged: 0, model: null },
       false,
     )
     expect(segments).toEqual([
@@ -411,7 +432,7 @@ describe('requestRowSegments', () => {
   })
 
   it('says nothing about time when no time is known', () => {
-    expect(requestRowLabel({ elapsedMs: null, tools: 0, failed: 0, filesEdited: 0, model: null }, false)).toBe(
+    expect(requestRowLabel({ elapsedMs: null, tools: 0, failed: 0, filesChanged: 0, model: null }, false)).toBe(
       'Worked',
     )
   })

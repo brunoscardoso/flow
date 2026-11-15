@@ -2005,6 +2005,51 @@ describe('listToolCalls with an output limit', () => {
     expect(store.listToolCalls(thread.id, { outputLimit: 0 })).toEqual(all)
   })
 
+  it('still says what a withheld write did to its file — counted from the whole input', () => {
+    // The chat's changed-files list needs "+3, new" about an old write whose
+    // result this read withholds; the result's first characters answer it.
+    const thread = store.createThread({ projectRoot: '/repo' })
+    const write = store.recordToolCall({
+      threadId: thread.id,
+      toolName: 'Write',
+      inputJson: JSON.stringify({ file_path: '/repo/src/new.py', content: 'a\nb\nc\n' }),
+      startedAt: '2026-11-14T10:00:00.000Z',
+    })
+    store.updateToolCall(write.id, {
+      status: 'success',
+      outputJson: JSON.stringify('File created successfully at: /repo/src/new.py'),
+    })
+    const edit = store.recordToolCall({
+      threadId: thread.id,
+      toolName: 'Edit',
+      inputJson: JSON.stringify({ file_path: '/repo/src/a.ts', old_string: 'x', new_string: 'y\nz' }),
+      startedAt: '2026-11-14T10:00:01.000Z',
+    })
+    store.updateToolCall(edit.id, { status: 'success', outputJson: JSON.stringify('updated') })
+    const read = store.recordToolCall({
+      threadId: thread.id,
+      toolName: 'Read',
+      inputJson: '{"file_path":"/repo/src/a.ts"}',
+      startedAt: '2026-11-14T10:00:02.000Z',
+    })
+    store.updateToolCall(read.id, { status: 'success', outputJson: 'contents' })
+
+    const calls = store.listToolCalls(thread.id, { outputLimit: 1 })
+    const byId = new Map(calls.map((c) => [c.id, c]))
+    // The positive first (allowed-pattern #28): these two really were withheld.
+    expect(byId.get(write.id)?.outputWithheld).toBe(true)
+    expect(byId.get(edit.id)?.outputWithheld).toBe(true)
+    expect(byId.get(write.id)?.fileChanges).toEqual([
+      { path: '/repo/src/new.py', added: 3, removed: 0, counted: true, created: true, whole: true },
+    ])
+    expect(byId.get(edit.id)?.fileChanges).toEqual([
+      { path: '/repo/src/a.ts', added: 2, removed: 1, counted: true, created: false },
+    ])
+    // A call that touches no file carries nothing, and a whole one needs nothing.
+    expect(byId.get(read.id)?.fileChanges).toBeUndefined()
+    expect(store.listToolCalls(thread.id).every((c) => c.fileChanges === undefined)).toBe(true)
+  })
+
   it('reads only the window a caller says it will show', () => {
     // The pane mounts a couple of hundred entries; the rows for turns nobody is
     // looking at were shipped anyway — 1.19 MB of metadata on an 1,800-call

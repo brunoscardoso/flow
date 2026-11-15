@@ -20,6 +20,7 @@ import { checkAttachRoots } from '../project/attach-roots'
 import { createAddressableRoots } from '../project/addressable-roots'
 import { app as electronApp, ipcMain, BrowserWindow, dialog, shell } from 'electron'
 import { readFileSync } from 'node:fs'
+import { cachedFileChanges } from '../store/tool-file-change-cache'
 import { join } from 'node:path'
 
 import type {
@@ -503,6 +504,12 @@ export function boundedToolCalls(
       trimmed.outputWithheld = true
     }
     if (call.inputJson !== null && call.inputJson.length > INPUT_KEEP_BYTES) {
+      // Count the call's file changes from the WHOLE input before it goes:
+      // the stub keeps the path but not the strings the lines are counted from.
+      if (trimmed.fileChanges === undefined) {
+        const fileChanges = cachedFileChanges(call)
+        if (fileChanges !== undefined) trimmed.fileChanges = fileChanges
+      }
       trimmed.inputJson = stubInput(call.inputJson)
       trimmed.inputWithheld = true
     }

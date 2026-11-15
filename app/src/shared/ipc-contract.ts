@@ -905,6 +905,32 @@ export interface ToolCallRecord {
    * the real one if the reader opens it.
    */
   inputWithheld?: boolean
+  /**
+   * What this call did to files, in lines — precomputed by main, from the
+   * WHOLE stored input and result, for a list read that withholds either
+   * (`tool-file-changes.ts` is the one counter). Absent when the call's input
+   * and output are sent whole: the renderer counts those itself, with the same
+   * function, so the field never duplicates bulk that is already here.
+   */
+  fileChanges?: ToolFileChange[]
+}
+
+/** One file one tool call changed (see `shared/tool-file-changes.ts`). */
+export interface ToolFileChange {
+  /** As the call named it — usually absolute. */
+  path: string
+  added: number
+  removed: number
+  /** False when the runtime reported the file but not its lines (Codex), or
+   *  the input was summarized with nothing precomputed: no numbers are shown. */
+  counted: boolean
+  /** True when the call created the file, false when it was already there,
+   *  null when the call cannot say (a write whose result is not here). */
+  created: boolean | null
+  /** A whole-file write (its `added` is the file's line count). */
+  whole?: boolean
+  /** The call deleted the file. */
+  deleted?: boolean
 }
 
 /**

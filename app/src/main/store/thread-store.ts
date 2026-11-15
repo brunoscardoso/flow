@@ -12,7 +12,12 @@ import { join } from 'path'
 import type { FlowDatabase } from './db'
 import { withTransaction } from './db'
 import { PROJECT_STATE_TABLE, THREAD_PROJECT_ROOT_COLUMN } from './storage-names'
-import type { SubtaskRecord, SubtaskState } from '../../shared/ipc-contract'
+import type { SubtaskRecord, SubtaskState, ToolFileChange } from '../../shared/ipc-contract'
+import { cachedFileChanges } from './tool-file-change-cache'
+
+/** Enough of a write's stored result to read "File created successfully" or
+ *  "has been updated" from it, without loading the result itself. */
+const WRITE_OUTPUT_HEAD_CHARS = 200
 import { parseRunTweaksByProject, type RunTweaksByProject } from '../../shared/run-setup'
 
 export type { SubtaskRecord, SubtaskState }
@@ -224,6 +229,9 @@ export interface ToolCallRecord {
    *  at all. Never stored; see the contract's field for what a card owes the
    *  reader when it is true (withheld is not empty). */
   outputWithheld?: boolean
+  /** What the call did to files, counted from its whole input when a bounded
+   *  read withholds its result (see the contract's field). Never stored. */
+  fileChanges?: ToolFileChange[]
 }
 
 /** The analyzer projection of a tool call (brain usage/savings): everything
@@ -2065,11 +2073,12 @@ export class ThreadStore extends EventEmitter {
     const rows = this.db
       .prepare(
         `SELECT id, thread_id, message_id, tool_name, input_json, status, started_at, completed_at, parent_tool_call_id, agent_id,
-                output_json IS NOT NULL AS has_output
+                output_json IS NOT NULL AS has_output,
+                CASE WHEN lower(tool_name) IN ('write', 'create') THEN substr(output_json, 1, ${WRITE_OUTPUT_HEAD_CHARS}) END AS output_head
          FROM tool_calls WHERE thread_id = @threadId AND parent_tool_call_id IS NULL${windowClause}
          ORDER BY started_at ASC, id ASC`,
       )
-      .all(bindings) as Array<Omit<ToolCallRow, 'output_json'> & { has_output: number }>
+      .all(bindings) as Array<Omit<ToolCallRow, 'output_json'> & { has_output: number; output_head: string | null }>
     const newest = this.db
       .prepare(
         `SELECT id, output_json FROM tool_calls WHERE thread_id = @threadId AND parent_tool_call_id IS NULL${windowClause}
@@ -2082,9 +2091,14 @@ export class ThreadStore extends EventEmitter {
       const record = toToolCallRecord({ ...row, output_json: output ?? null })
       // Withheld only where something was actually taken away: a call that
       // never produced an output must read exactly as it always did.
-      return output === undefined && row.has_output === 1
+      if (output !== undefined || row.has_output !== 1) return record
+      // A withheld result still has to answer "did this write create its
+      // file?" for the chat's changed-files list. Its first characters do,
+      // without loading the blob — and the input is already here, whole.
+      const fileChanges = cachedFileChanges({ ...record, outputJson: row.output_head })
+      return fileChanges === undefined
         ? { ...record, outputWithheld: true }
-        : record
+        : { ...record, outputWithheld: true, fileChanges }
     })
   }
 
