@@ -120,6 +120,8 @@ const RUN_TWEAKS_PREFIX = 'run_tweaks:'
 const RUN_USAGE_PREFIX = 'run_usage:'
 /** A project's Run setup — local to this computer, never shared (plan_project_run). */
 const RUN_SETUP_PREFIX = 'run_setup:'
+/** The one order of Run steps across projects, as `<root>::<id>` references (plan_project_run). */
+const RUN_ORDER_KEY = 'run_order'
 
 /**
  * The word this installation claims queue items under.
@@ -639,7 +641,6 @@ export class AppSettingsStore {
     else this.#setString(CURRENT_WORKSPACE_KEY, slug.trim())
   }
 
-  /** This person's tweaks to a project's Run setup. Corrupt rows read as none. */
   /** A project's Run setup as stored text (JSON), or null when it has none. */
   getRunSetup(projectRoot: string): string | null {
     return this.#getString(`${RUN_SETUP_PREFIX}${projectRoot}`)
@@ -649,6 +650,33 @@ export class AppSettingsStore {
   setRunSetup(projectRoot: string, text: string | null): void {
     if (text === null) this.#deleteKey(`${RUN_SETUP_PREFIX}${projectRoot}`)
     else this.#setString(`${RUN_SETUP_PREFIX}${projectRoot}`, text)
+  }
+
+  /** Every project root that has a stored Run setup. */
+  listRunSetupRoots(): string[] {
+    const rows = this.db
+      .prepare('SELECT key FROM app_settings WHERE substr(key, 1, ?) = ? ORDER BY key')
+      .all(RUN_SETUP_PREFIX.length, RUN_SETUP_PREFIX) as Array<{ key: string }>
+    return rows.map((row) => row.key.slice(RUN_SETUP_PREFIX.length)).filter((root) => root !== '')
+  }
+
+  /** The one order of Run steps across projects. A corrupt row reads as none. */
+  getRunOrder(): string[] {
+    const raw = this.#getString(RUN_ORDER_KEY)
+    if (raw === null) return []
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      return Array.isArray(parsed) ? parsed.filter((ref): ref is string => typeof ref === 'string' && ref !== '') : []
+    } catch {
+      return []
+    }
+  }
+
+  /** Replace the one order; an empty one REMOVES the row. */
+  setRunOrder(refs: string[]): void {
+    const clean = [...new Set(refs.filter((ref) => typeof ref === 'string' && ref !== ''))]
+    if (clean.length === 0) this.#deleteKey(RUN_ORDER_KEY)
+    else this.#setString(RUN_ORDER_KEY, JSON.stringify(clean))
   }
 
   getRunTweaks(projectRoot: string): RunTweaks {

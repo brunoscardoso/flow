@@ -96,7 +96,7 @@ export function pillFace(view: RunView | null): RunPillFace {
   if (view === null) return hidden
   const steps = view.state.steps.length > 0 ? view.state.steps : null
   const setupCount = view.resolution.steps.length
-  // Every step skipped in a tweak layer is still a setup — the pill offers Setup, not "Set up Run".
+  // Every step turned off is still a setup — the pill offers Setup, not "Set up Run".
   const hasShared = (view.resolution.project.setup?.steps.length ?? 0) > 0
   if (steps === null && setupCount === 0 && !hasShared) {
     return { ...hidden, mode: 'set-up' }

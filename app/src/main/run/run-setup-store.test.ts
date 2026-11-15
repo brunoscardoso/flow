@@ -1,24 +1,19 @@
-// Run setup store — the setup lives in (fake) local app settings, never in the
-// project; real temp folders only stand in for project roots.
+// Run setup store — each step is stored with the project it runs in, in
+// (fake) local app settings; a conversation's Run combines every project it
+// has, in the one order kept on this computer.
 
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
-import type { RunSetup, RunTweaks, RunTweaksByProject } from '../../shared/run-setup'
-import {
-  RunSetupError,
-  RunSetupStore,
-  type RunPersonalSource,
-  type RunThreadSource,
-} from './run-setup-store'
+import { parseRunSetup, runStepRef, type RunSetup, type RunStep } from '../../shared/run-setup'
+import { RunSetupError, RunSetupStore, type RunPersonalSource, type RunThreadSource } from './run-setup-store'
 
 interface FakeThread {
   projectRoot: string
   worktreePath: string | null
   roots: string[]
   rootWorktrees: Array<{ rootPath: string; worktreePath: string }>
-  tweaks: RunTweaksByProject
 }
 
 function fakeThreads(threads: Record<string, FakeThread>): RunThreadSource {
@@ -26,53 +21,275 @@ function fakeThreads(threads: Record<string, FakeThread>): RunThreadSource {
     getThread: (id) => threads[id] ?? null,
     getThreadRoots: (id) => threads[id]?.roots ?? [],
     getThreadRootWorktrees: (id) => threads[id]?.rootWorktrees ?? [],
-    getRunTweaks: (id) => threads[id]?.tweaks ?? {},
-    setRunTweaks: (id, tweaks) => {
-      const thread = threads[id]
-      if (thread === undefined) throw new Error('unknown thread')
-      thread.tweaks = tweaks
-    },
   }
 }
 
-function fakePersonal(): RunPersonalSource & { rows: Map<string, RunTweaks>; setups: Map<string, string> } {
-  const rows = new Map<string, RunTweaks>()
+type FakePersonal = RunPersonalSource & { setups: Map<string, string>; order: string[] }
+
+function fakePersonal(): FakePersonal {
   const setups = new Map<string, string>()
-  return {
-    rows,
+  const fake: FakePersonal = {
     setups,
+    order: [],
     getRunSetup: (root) => setups.get(root) ?? null,
     setRunSetup: (root, text) => {
       if (text === null) setups.delete(root)
       else setups.set(root, text)
     },
-    getRunTweaks: (root) => rows.get(root) ?? {},
-    setRunTweaks: (root, tweaks) => {
-      rows.set(root, tweaks)
-      return tweaks
+    listRunSetupRoots: () => [...setups.keys()],
+    getRunOrder: () => [...fake.order],
+    setRunOrder: (refs) => {
+      fake.order = [...refs]
     },
   }
+  return fake
 }
 
-const SETUP: RunSetup = {
-  version: 1,
-  steps: [
-    { id: 'db', name: 'Database', command: 'docker compose up db', start: 'now', ready: { kind: 'port', port: 5432 } },
-    { id: 'web', name: 'Web', command: 'npm run dev', start: 'after-previous' },
-  ],
+function storedSteps(personal: FakePersonal, root: string): RunStep[] {
+  const text = personal.setups.get(root)
+  return text === undefined ? [] : parseRunSetup(text).setup.steps
 }
 
-describe('RunSetupStore', () => {
+const step = (id: string, extra: Partial<RunStep> = {}): RunStep => ({
+  id,
+  name: id,
+  command: `run ${id}`,
+  start: 'now',
+  ...extra,
+})
+
+const A = '/work/a'
+const B = '/work/b'
+const C = '/work/c'
+const D = '/work/d'
+
+describe('RunSetupStore — one combined list across projects', () => {
+  const threads: Record<string, FakeThread> = {
+    t1: { projectRoot: A, worktreePath: null, roots: [B, C], rootWorktrees: [] },
+    t2: {
+      projectRoot: B,
+      worktreePath: '/work/.b-threads/blue',
+      roots: [C, D],
+      rootWorktrees: [{ rootPath: C, worktreePath: '/work/.c-threads/blue' }],
+    },
+    t3: { projectRoot: D, worktreePath: null, roots: [], rootWorktrees: [] },
+  }
+  const T1 = { rootPath: A, threadId: 't1' }
+  const T2 = { rootPath: B, threadId: 't2' }
+
+  function seeded(): { s: RunSetupStore; personal: FakePersonal } {
+    const personal = fakePersonal()
+    return { s: new RunSetupStore({ threads: fakeThreads(threads), personal }), personal }
+  }
+
+  async function saveConversationOne(s: RunSetupStore): Promise<void> {
+    await s.save(T1, {
+      layer: 'shared',
+      steps: [
+        step('cache', { runsIn: 'c' }),
+        step('api', { runsIn: 'b', start: 'after-previous' }),
+        step('web'),
+        step('worker', { runsIn: 'b' }),
+      ],
+    })
+  }
+
+  it('stores each step with the project it runs in, with no runsIn, and keeps one order', async () => {
+    const { s, personal } = seeded()
+    await saveConversationOne(s)
+    expect(storedSteps(personal, A).map((x) => [x.id, x.runsIn])).toEqual([['web', undefined]])
+    expect(storedSteps(personal, B).map((x) => [x.id, x.runsIn])).toEqual([
+      ['api', undefined],
+      ['worker', undefined],
+    ])
+    expect(storedSteps(personal, C).map((x) => x.id)).toEqual(['cache'])
+    expect(personal.order).toEqual([runStepRef(C, 'cache'), runStepRef(B, 'api'), runStepRef(A, 'web'), runStepRef(B, 'worker')])
+
+    const one = await s.resolve(T1)
+    expect(one.steps.map((x) => [x.key, x.projectRoot])).toEqual([
+      [`${C}::cache`, C],
+      [`${B}::api`, B],
+      [`${A}::web`, A],
+      [`${B}::worker`, B],
+    ])
+    expect(one.places.map((place) => place.name)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('another conversation shows its projects’ steps in the same order, plus its own project’s', async () => {
+    const { s } = seeded()
+    await saveConversationOne(s)
+    await s.save({ rootPath: D, threadId: 't3' }, { layer: 'shared', steps: [step('docs')] })
+
+    const two = await s.resolve(T2)
+    expect(two.steps.map((x) => [x.key, x.cwd])).toEqual([
+      [`${C}::cache`, '/work/.c-threads/blue'],
+      [`${B}::api`, '/work/.b-threads/blue'],
+      [`${B}::worker`, '/work/.b-threads/blue'],
+      [`${D}::docs`, D],
+    ])
+    // The combined list names each step's project; the main one is the draft's own.
+    expect(two.project.setup?.steps.map((x) => [x.id, x.runsIn])).toEqual([
+      [`${C}::cache`, 'c'],
+      [`${B}::api`, 'b'],
+      [`${B}::worker`, 'b'],
+      [`${D}::docs`, 'd'],
+    ])
+    expect(two.places.map((place) => place.name)).toEqual(['b', 'c', 'd'])
+  })
+
+  it('a save from another conversation leaves the steps it cannot see, and their order, alone', async () => {
+    const { s, personal } = seeded()
+    await saveConversationOne(s)
+    const before = personal.setups.get(A)
+    await s.save(T2, {
+      layer: 'shared',
+      steps: [
+        step(`${B}::worker`, { name: 'worker', runsIn: 'b' }),
+        step(`${C}::cache`, { name: 'cache', runsIn: 'c' }),
+        step(`${B}::api`, { name: 'api', runsIn: 'b', command: 'run api --reload' }),
+        step('docs', { runsIn: 'd' }),
+      ],
+    })
+    expect(personal.setups.get(A)).toBe(before)
+    expect(personal.order).toEqual([
+      runStepRef(B, 'worker'),
+      runStepRef(C, 'cache'),
+      runStepRef(B, 'api'),
+      runStepRef(D, 'docs'),
+      runStepRef(A, 'web'),
+    ])
+    expect(storedSteps(personal, B).find((x) => x.id === 'api')?.command).toBe('run api --reload')
+    expect(storedSteps(personal, D).map((x) => x.id)).toEqual(['docs'])
+    // Conversation one keeps a's step where it was relative to the others.
+    expect((await s.resolve(T1)).steps.map((x) => x.key)).toEqual([
+      `${B}::worker`,
+      `${C}::cache`,
+      `${B}::api`,
+      `${A}::web`,
+    ])
+  })
+
+  it('moving a step to another project stores it there with a fresh id', async () => {
+    const { s, personal } = seeded()
+    await saveConversationOne(s)
+    await s.save(T1, {
+      layer: 'shared',
+      steps: [
+        step(`${C}::cache`, { name: 'cache', runsIn: 'c' }),
+        step(`${B}::api`, { name: 'api', runsIn: 'c', start: 'after-previous' }),
+        step(`${A}::web`, { name: 'web' }),
+        step(`${B}::worker`, { name: 'worker', runsIn: 'b' }),
+      ],
+    })
+    expect(storedSteps(personal, B).map((x) => x.id)).toEqual(['worker'])
+    expect(storedSteps(personal, C).map((x) => x.id)).toEqual(['cache', 'api'])
+    expect(personal.order).toEqual([runStepRef(C, 'cache'), runStepRef(C, 'api'), runStepRef(A, 'web'), runStepRef(B, 'worker')])
+  })
+
+  it('a fresh id never takes one the project already uses', async () => {
+    const { s, personal } = seeded()
+    await saveConversationOne(s)
+    await s.save(T1, {
+      layer: 'shared',
+      steps: [
+        step(`${C}::cache`, { name: 'cache', runsIn: 'c' }),
+        step(`${B}::api`, { name: 'api', runsIn: 'b' }),
+        step(`${A}::web`, { name: 'web' }),
+        step(`${B}::worker`, { name: 'worker', runsIn: 'b' }),
+        step('api', { runsIn: 'b' }),
+      ],
+    })
+    expect(storedSteps(personal, B).map((x) => x.id)).toEqual(['api', 'worker', 'api-2'])
+  })
+
+  it('deleting a step removes it and its place in the order; an emptied project is forgotten', async () => {
+    const { s, personal } = seeded()
+    await saveConversationOne(s)
+    await s.save(T1, {
+      layer: 'shared',
+      steps: [step(`${B}::api`, { name: 'api', runsIn: 'b' }), step(`${B}::worker`, { name: 'worker', runsIn: 'b' })],
+    })
+    expect(personal.setups.has(A)).toBe(false)
+    expect(personal.setups.has(C)).toBe(false)
+    expect(personal.order).toEqual([runStepRef(B, 'api'), runStepRef(B, 'worker')])
+  })
+
+  it('refuses a step for a project that is not part of the conversation, and writes nothing', async () => {
+    const { s, personal } = seeded()
+    await saveConversationOne(s)
+    const before = new Map(personal.setups)
+    await expect(s.save(T1, { layer: 'shared', steps: [step('docs', { runsIn: 'd' })] })).rejects.toBeInstanceOf(RunSetupError)
+    await expect(s.save(T1, { layer: 'shared', steps: [step('docs', { runsIn: 'd' })] })).rejects.toThrow(
+      'not part of this conversation',
+    )
+    expect(personal.setups).toEqual(before)
+  })
+
+  it('steps the order does not name yet go last, by project: the main one first', async () => {
+    const { s, personal } = seeded()
+    personal.setups.set(C, JSON.stringify({ version: 1, steps: [step('cache')] }))
+    personal.setups.set(B, JSON.stringify({ version: 1, steps: [step('api'), step('worker')] }))
+    personal.setups.set(A, JSON.stringify({ version: 1, steps: [step('web')] }))
+    personal.order = [runStepRef(B, 'worker')]
+    expect((await s.resolve(T1)).steps.map((x) => x.key)).toEqual([
+      `${B}::worker`,
+      `${A}::web`,
+      `${B}::api`,
+      `${C}::cache`,
+    ])
+  })
+})
+
+describe('RunSetupStore — older setups that name another project', () => {
+  const threads: Record<string, FakeThread> = {
+    t1: { projectRoot: A, worktreePath: null, roots: [B, C], rootWorktrees: [] },
+    t2: { projectRoot: B, worktreePath: null, roots: [C, D], rootWorktrees: [] },
+  }
+  const LEGACY: RunSetup = {
+    version: 1,
+    steps: [step('cache', { runsIn: 'c' }), step('api', { runsIn: 'b', start: 'after-previous' }), step('web', { runsIn: 'a' })],
+  }
+
+  function seeded(): { s: RunSetupStore; personal: FakePersonal } {
+    const personal = fakePersonal()
+    personal.setups.set(A, JSON.stringify(LEGACY))
+    return { s: new RunSetupStore({ threads: fakeThreads(threads), personal }), personal }
+  }
+
+  it('reads a step as belonging to the project it names', async () => {
+    const { s } = seeded()
+    const two = await s.resolve({ rootPath: B, threadId: 't2' })
+    expect(two.steps.map((x) => [x.key, x.projectRoot])).toEqual([
+      [`${A}::cache`, C],
+      [`${A}::api`, B],
+    ])
+    // Alone, a sees only its own step.
+    expect((await s.resolve({ rootPath: A, threadId: null })).steps.map((x) => x.key)).toEqual([`${A}::web`])
+  })
+
+  it('moves the steps a save touches to their own project, losing nothing', async () => {
+    const { s, personal } = seeded()
+    const scope = { rootPath: B, threadId: 't2' }
+    const view = await s.resolve(scope)
+    await s.save(scope, { layer: 'shared', steps: view.project.setup!.steps })
+    expect(storedSteps(personal, A).map((x) => [x.id, x.runsIn])).toEqual([['web', 'a']])
+    expect(storedSteps(personal, B).map((x) => [x.id, x.runsIn])).toEqual([['api', undefined]])
+    expect(storedSteps(personal, C).map((x) => [x.id, x.runsIn])).toEqual([['cache', undefined]])
+    expect((await s.resolve({ rootPath: A, threadId: 't1' })).steps.map((x) => x.key)).toEqual([
+      `${C}::cache`,
+      `${B}::api`,
+      `${A}::web`,
+    ])
+  })
+})
+
+describe('RunSetupStore — where it is kept', () => {
   let dir: string
-  let shop: string
   let api: string
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'flow-run-store-'))
-    shop = join(dir, 'shop')
     api = join(dir, 'api')
-    mkdirSync(join(shop, 'flow'), { recursive: true })
-    // api's Flow folder is a LINK into a Workspace folder, as after the migration.
     const workspaceProject = join(dir, 'workspaces', 'acme', 'projects', 'api')
     mkdirSync(workspaceProject, { recursive: true })
     mkdirSync(api)
@@ -80,193 +297,42 @@ describe('RunSetupStore', () => {
   })
   afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
-  function store(
-    threads: Record<string, FakeThread> = {},
-    personal = fakePersonal(),
-    workspaceSiblings?: (root: string) => Promise<string[]>,
-  ): RunSetupStore {
-    return new RunSetupStore({
-      threads: fakeThreads(threads),
-      personal,
-      ...(workspaceSiblings === undefined ? {} : { workspaceSiblings }),
-    })
-  }
-
-  it('a project with no shared setup resolves to no steps, and says so', async () => {
-    const resolution = await store().resolve({ rootPath: shop, threadId: null })
-    expect(resolution.scopeKey).toBe(`${shop}::`)
-    expect(resolution.project).toMatchObject({ root: shop, name: 'shop', cwd: shop, hasSharedSetup: false, setup: null })
-    expect(resolution.places).toEqual([{ name: 'shop', root: shop, cwd: shop, from: 'scope' }])
+  it('a project with no setup resolves to no steps, and says so', async () => {
+    const s = new RunSetupStore({ threads: fakeThreads({}), personal: fakePersonal() })
+    const resolution = await s.resolve({ rootPath: api, threadId: null })
+    expect(resolution.scopeKey).toBe(`${api}::`)
+    expect(resolution.project).toMatchObject({ root: api, name: 'api', cwd: api, hasSharedSetup: false, setup: null })
+    expect(resolution.places).toEqual([{ name: 'api', root: api, cwd: api, from: 'scope' }])
     expect(resolution.steps).toEqual([])
   })
 
   it('keeps the setup in local settings and never writes into the project or its Workspace', async () => {
     const personal = fakePersonal()
-    const s = store({}, personal)
-    await s.save({ rootPath: api, threadId: null }, { layer: 'shared', projectRoot: api, setup: SETUP })
-    expect(JSON.parse(personal.setups.get(api)!)).toMatchObject({ version: 1, steps: [{ id: 'db' }, { id: 'web' }] })
+    const s = new RunSetupStore({ threads: fakeThreads({}), personal })
+    await s.save({ rootPath: api, threadId: null }, { layer: 'shared', steps: [step('db'), step('web', { start: 'after-previous' })] })
+    expect(storedSteps(personal, api).map((x) => x.id)).toEqual(['db', 'web'])
     expect(readdirSync(join(dir, 'workspaces', 'acme', 'projects', 'api'))).toEqual([])
-    expect(readdirSync(join(shop, 'flow'))).toEqual([])
-    const resolution = await s.resolve({ rootPath: api, threadId: null })
-    expect(resolution.steps.map((step) => step.key)).toEqual([`${api}::db`, `${api}::web`])
-  })
-
-  it('saves for a project with no Flow folder too, and an empty list forgets the setup', async () => {
-    const bare = join(dir, 'bare')
-    mkdirSync(bare)
-    const personal = fakePersonal()
-    const s = store({}, personal)
-    await s.save({ rootPath: bare, threadId: null }, { layer: 'shared', projectRoot: bare, setup: SETUP })
-    expect(readdirSync(bare)).toEqual([])
-    expect(personal.setups.has(bare)).toBe(true)
-    await s.save({ rootPath: bare, threadId: null }, { layer: 'shared', projectRoot: bare, setup: { version: 1, steps: [] } })
-    expect(personal.setups.has(bare)).toBe(false)
+    expect(readdirSync(api)).toEqual(['flow'])
+    expect((await s.resolve({ rootPath: api, threadId: null })).steps.map((x) => x.key)).toEqual([`${api}::db`, `${api}::web`])
   })
 
   it('a malformed stored setup reads with problems, never throws', async () => {
     const personal = fakePersonal()
-    personal.setups.set(shop, '{"steps":[{"name":"x"}]}')
-    const resolution = await store({}, personal).resolve({ rootPath: shop, threadId: null })
+    personal.setups.set(api, '{"steps":[{"name":"x"}]}')
+    const resolution = await new RunSetupStore({ threads: fakeThreads({}), personal }).resolve({ rootPath: api, threadId: null })
     expect(resolution.steps).toEqual([])
     expect(resolution.project.problems).toHaveLength(1)
   })
 
-  it('layers resolve in order: shared, then personal, then the conversation', async () => {
+  it('a step turned off stays in the list but is not resolved to run', async () => {
     const personal = fakePersonal()
-    const threads: Record<string, FakeThread> = {
-      t1: { projectRoot: shop, worktreePath: null, roots: [], rootWorktrees: [], tweaks: {} },
-    }
-    const s = store(threads, personal)
-    await s.save({ rootPath: shop, threadId: null }, { layer: 'shared', projectRoot: shop, setup: SETUP })
-    await s.save({ rootPath: shop, threadId: null }, { layer: 'personal', projectRoot: shop, tweaks: { web: { command: 'npm run dev -- -p 3100' }, db: { skip: true } } })
-    await s.save({ rootPath: shop, threadId: 't1' }, { layer: 'conversation', projectRoot: shop, tweaks: { db: { skip: false, ready: null } } })
-
-    const mine = await s.resolve({ rootPath: shop, threadId: null })
-    expect(mine.steps.map((step) => step.id)).toEqual(['web'])
-    expect(mine.steps[0]).toMatchObject({ command: 'npm run dev -- -p 3100', from: { command: 'personal' } })
-
-    const conversation = await s.resolve({ rootPath: shop, threadId: 't1' })
-    expect(conversation.steps.map((step) => step.id)).toEqual(['db', 'web'])
-    expect(conversation.steps[0]?.ready).toBeUndefined()
-    expect(conversation.steps[0]?.from.ready).toBe('conversation')
-  })
-
-  it('tweaks survive a reorder of the shared steps (keyed by step id, not position)', async () => {
-    const personal = fakePersonal()
-    const s = store({}, personal)
-    await s.save({ rootPath: shop, threadId: null }, { layer: 'shared', projectRoot: shop, setup: SETUP })
-    await s.save({ rootPath: shop, threadId: null }, { layer: 'personal', projectRoot: shop, tweaks: { web: { command: 'pnpm dev' } } })
-    await s.save({ rootPath: shop, threadId: null }, { layer: 'shared', projectRoot: shop, setup: { version: 1, steps: [SETUP.steps[1]!, SETUP.steps[0]!] } })
-    const resolution = await s.resolve({ rootPath: shop, threadId: null })
-    expect(resolution.steps.map((step) => [step.id, step.command])).toEqual([
-      ['web', 'pnpm dev'],
-      ['db', 'docker compose up db'],
+    const s = new RunSetupStore({ threads: fakeThreads({}), personal })
+    await s.save({ rootPath: api, threadId: null }, { layer: 'shared', steps: [step('db', { disabled: true }), step('web')] })
+    const resolution = await s.resolve({ rootPath: api, threadId: null })
+    expect(resolution.project.setup?.steps.map((x) => [x.id, x.disabled])).toEqual([
+      [`${api}::db`, true],
+      [`${api}::web`, undefined],
     ])
-  })
-
-  it("ONE list: only the primary project's setup is read; another project's own file is not merged", async () => {
-    const threads: Record<string, FakeThread> = {
-      t1: { projectRoot: shop, worktreePath: null, roots: [api], rootWorktrees: [], tweaks: {} },
-    }
-    const s = store(threads)
-    await s.save({ rootPath: shop, threadId: null }, { layer: 'shared', projectRoot: shop, setup: SETUP })
-    await s.save({ rootPath: api, threadId: null }, { layer: 'shared', projectRoot: api, setup: { version: 1, steps: [SETUP.steps[1]!] } })
-    const resolution = await s.resolve({ rootPath: shop, threadId: 't1' })
-    expect(resolution.steps.map((step) => step.key)).toEqual([`${shop}::db`, `${shop}::web`])
-    expect(resolution.places.map((place) => place.name)).toEqual(['shop', 'api'])
-  })
-
-  it("a step runs in the named project's conversation checkout, else its folder; keys stay the primary's", async () => {
-    const threads: Record<string, FakeThread> = {
-      t1: {
-        projectRoot: shop,
-        worktreePath: join(dir, '.shop-threads', 'blue'),
-        roots: [api],
-        rootWorktrees: [{ rootPath: api, worktreePath: join(dir, '.api-threads', 'blue') }],
-        tweaks: {},
-      },
-      t2: { projectRoot: shop, worktreePath: null, roots: [api], rootWorktrees: [], tweaks: {} },
-    }
-    const s = store(threads)
-    const cross: RunSetup = {
-      version: 1,
-      steps: [
-        { id: 'temporal', name: 'temporal', command: 'temporal server start-dev', start: 'now', runsIn: 'api' },
-        { id: 'web', name: 'Web', command: 'npm run dev', start: 'after-previous' },
-      ],
-    }
-    await s.save({ rootPath: shop, threadId: null }, { layer: 'shared', projectRoot: shop, setup: cross })
-
-    const isolated = await s.resolve({ rootPath: shop, threadId: 't1' })
-    expect(isolated.steps.map((step) => [step.key, step.projectRoot, step.cwd])).toEqual([
-      [`${shop}::temporal`, api, join(dir, '.api-threads', 'blue')],
-      [`${shop}::web`, shop, join(dir, '.shop-threads', 'blue')],
-    ])
-    const plain = await s.resolve({ rootPath: shop, threadId: 't2' })
-    expect(plain.steps.map((step) => step.cwd)).toEqual([api, shop])
-  })
-
-  it('a step naming a Workspace sibling on this computer runs in its folder; an unknown one is blocked', async () => {
-    const core = join(dir, 'jupiter-core')
-    mkdirSync(core)
-    const s = store({}, fakePersonal(), async (root) => (root === shop ? [core, shop] : []))
-    await s.save(
-      { rootPath: shop, threadId: null },
-      {
-        layer: 'shared',
-        projectRoot: shop,
-        setup: {
-          version: 1,
-          steps: [
-            { id: 'temporal', name: 'temporal', command: 'temporal server start-dev', start: 'now', runsIn: 'jupiter-core' },
-            { id: 'ghost', name: 'ghost', command: 'x', start: 'after-previous', runsIn: 'billing' },
-          ],
-        },
-      },
-    )
-    const resolution = await s.resolve({ rootPath: shop, threadId: null })
-    expect(resolution.places).toEqual([
-      { name: 'shop', root: shop, cwd: shop, from: 'scope' },
-      { name: 'jupiter-core', root: core, cwd: core, from: 'workspace' },
-    ])
-    expect(resolution.steps[0]).toMatchObject({ projectRoot: core, cwd: core, projectName: 'jupiter-core' })
-    expect(resolution.steps[0]?.unavailable).toBeUndefined()
-    expect(resolution.steps[1]?.unavailable).toBe("billing is not on this computer, so this step can't start.")
-  })
-
-  it('a Workspace read that fails leaves the scope projects only', async () => {
-    const s = store({}, fakePersonal(), async () => {
-      throw new Error('cli down')
-    })
-    expect((await s.placesOf({ rootPath: shop, threadId: null })).map((place) => place.name)).toEqual(['shop'])
-  })
-
-  it('refuses any project but the primary, and a conversation layer without a conversation', async () => {
-    const threads: Record<string, FakeThread> = {
-      t1: { projectRoot: shop, worktreePath: null, roots: [api], rootWorktrees: [], tweaks: {} },
-    }
-    const s = store(threads)
-    await expect(
-      s.save({ rootPath: shop, threadId: null }, { layer: 'shared', projectRoot: api, setup: SETUP }),
-    ).rejects.toThrow('not the one this Run belongs to')
-    // An attached project of the conversation is not the Run's setup either.
-    await expect(
-      s.save({ rootPath: shop, threadId: 't1' }, { layer: 'conversation', projectRoot: api, tweaks: {} }),
-    ).rejects.toBeInstanceOf(RunSetupError)
-    await expect(
-      s.save({ rootPath: shop, threadId: null }, { layer: 'conversation', projectRoot: shop, tweaks: {} }),
-    ).rejects.toThrow('inside a conversation')
-  })
-
-  it('keeps conversation tweaks under the primary project, and an empty save removes them', async () => {
-    const threads: Record<string, FakeThread> = {
-      t1: { projectRoot: shop, worktreePath: null, roots: [api], rootWorktrees: [], tweaks: { [api]: { web: { command: 'x' } } } },
-    }
-    const s = store(threads)
-    const scope = { rootPath: shop, threadId: 't1' }
-    await s.save(scope, { layer: 'conversation', projectRoot: shop, tweaks: { web: { skip: true } } })
-    expect(threads.t1!.tweaks).toEqual({ [shop]: { web: { skip: true } }, [api]: { web: { command: 'x' } } })
-    await s.save(scope, { layer: 'conversation', projectRoot: shop, tweaks: {} })
-    expect(threads.t1!.tweaks).toEqual({ [api]: { web: { command: 'x' } } })
+    expect(resolution.steps.map((x) => x.key)).toEqual([`${api}::web`])
   })
 })

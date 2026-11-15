@@ -89,7 +89,6 @@ export class RunGroupView {
         return run.save({ scope: this.#scope, change })
       },
       state: () => this.#view?.state ?? null,
-      hasConversation: () => this.#scope !== null && this.#scope.threadId !== null,
       startRun: () => this.#act((run, scope) => run.start({ scope })),
       askAgent: () => this.#askAgent(),
       onSaved: (view) => this.#setView(view),

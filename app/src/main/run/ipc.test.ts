@@ -125,14 +125,17 @@ describe('registerRunChannels', () => {
     ])
   })
 
-  it('run:save rebuilds the change, saves, then applies it to the Run', async () => {
+  it('run:save rebuilds the combined list, keeps each id as sent, saves, then applies it to the Run', async () => {
     const h = harness()
     const answer = await h.call('run:save', {
       scope: { rootPath: ROOT, threadId: null },
       change: {
         layer: 'shared',
-        projectRoot: ROOT,
-        setup: { version: 1, steps: [{ name: 'Web', command: 'npm run dev', start: 'now', evil: true }, { name: '' }] },
+        steps: [
+          { id: `${ROOT}::web`, name: 'Web', command: 'npm run dev', start: 'now', evil: true },
+          { name: 'Worker', command: 'npm run worker', start: 'after-previous', runsIn: 'api' },
+          { name: '' },
+        ],
       },
     })
     expect(answer).toMatchObject({ ok: true })
@@ -140,32 +143,35 @@ describe('registerRunChannels', () => {
       {
         save: [
           { rootPath: ROOT, threadId: null },
-          { layer: 'shared', projectRoot: ROOT, setup: { version: 1, steps: [{ id: 'web', name: 'Web', command: 'npm run dev', start: 'now' }] } },
+          {
+            layer: 'shared',
+            steps: [
+              { id: `${ROOT}::web`, name: 'Web', command: 'npm run dev', start: 'now' },
+              { id: 'worker', name: 'Worker', command: 'npm run worker', start: 'after-previous', runsIn: 'api' },
+            ],
+          },
         ],
       },
       { apply: { rootPath: ROOT, threadId: null } },
     ])
   })
 
-  it('run:save keeps only valid tweak fields, and refuses an unknown layer', async () => {
+  it('run:save refuses a retired layer and a change with no list', async () => {
     const h = harness()
-    await h.call('run:save', {
-      scope: { rootPath: ROOT, threadId: 't1' },
-      change: { layer: 'conversation', projectRoot: ROOT, tweaks: { web: { skip: 'yes', command: 'pnpm dev', rm: '-rf' } } },
-    })
-    expect(h.calls[0]).toEqual({
-      save: [{ rootPath: ROOT, threadId: 't1' }, { layer: 'conversation', projectRoot: ROOT, tweaks: { web: { command: 'pnpm dev' } } }],
-    })
     await expect(
-      h.call('run:save', { scope: { rootPath: ROOT, threadId: null }, change: { layer: 'disk', projectRoot: ROOT } }),
+      h.call('run:save', { scope: { rootPath: ROOT, threadId: 't1' }, change: { layer: 'conversation', tweaks: {} } }),
     ).rejects.toThrow('change.layer')
+    await expect(
+      h.call('run:save', { scope: { rootPath: ROOT, threadId: null }, change: { layer: 'shared', steps: 'all' } }),
+    ).rejects.toThrow('change.steps')
+    expect(h.calls).toEqual([])
   })
 
   it('a refused save answers its sentence and applies nothing', async () => {
     const h = harness({ saveError: new RunSetupError('That project is not part of this Run, so nothing was saved.') })
     const answer = await h.call('run:save', {
       scope: { rootPath: ROOT, threadId: null },
-      change: { layer: 'personal', projectRoot: '/elsewhere', tweaks: {} },
+      change: { layer: 'shared', steps: [] },
     })
     expect(answer).toEqual({ ok: false, reason: 'That project is not part of this Run, so nothing was saved.' })
     expect(h.calls.some((c) => typeof c === 'object' && c !== null && 'apply' in c)).toBe(false)

@@ -1,12 +1,16 @@
 import {
   DEFAULT_READY_TIMEOUT_MS,
   clampReadyTimeout,
+  mergeRunOrder,
   newStepId,
   notHereSentence,
+  parseRunSaveSteps,
   parseRunSetup,
+  parseRunStepRef,
   placeOfStep,
   resolveRunSteps,
   runScopeKey,
+  runStepRef,
   serializeRunSetup,
   type RunPlace,
   type RunSetup,
@@ -218,5 +222,48 @@ describe('a step turned off', () => {
     expect(setup.steps[1]!.disabled).toBeUndefined()
     const steps = resolveRunSteps({ root: '/p', name: 'p', cwd: '/p', setup, personal: {}, conversation: {} })
     expect(steps.map((step) => step.id)).toEqual(['b'])
+  })
+})
+
+describe('step references and the one order', () => {
+  it('a reference names the project a step is stored with and its id', () => {
+    expect(runStepRef('/work/a::b', 'web')).toBe('/work/a::b::web')
+    expect(parseRunStepRef('/work/a::b::web')).toEqual({ root: '/work/a::b', id: 'web' })
+    expect(parseRunStepRef('web')).toBeNull()
+    expect(parseRunStepRef('/work/a::')).toBeNull()
+  })
+
+  it('a save takes out what its conversation could see and puts its list back where the first of them was', () => {
+    const order = ['a1', 'b1', 'a2', 'b2', 'c1']
+    expect(mergeRunOrder(order, new Set(['b1', 'b2', 'c1']), ['c1', 'b2', 'd1'])).toEqual(['a1', 'c1', 'b2', 'd1', 'a2'])
+  })
+
+  it('a list the order has never seen goes at the end; other references keep their places', () => {
+    expect(mergeRunOrder(['a1', 'a2'], new Set(['b1']), ['b1', 'd1'])).toEqual(['a1', 'a2', 'b1', 'd1'])
+    expect(mergeRunOrder([], new Set(), ['x'])).toEqual(['x'])
+    expect(mergeRunOrder(['a1', 'b1'], new Set(['b1']), [])).toEqual(['a1'])
+  })
+
+  it('a moved step leaves no stale reference behind', () => {
+    expect(mergeRunOrder(['b1', 'c1'], new Set(['b1', 'c1']), ['c1', 'c2'])).toEqual(['c1', 'c2'])
+  })
+})
+
+describe('parseRunSaveSteps', () => {
+  it('keeps each id as sent, re-checks every field and drops what cannot be read', () => {
+    expect(
+      parseRunSaveSteps([
+        { id: '/work/a::web', name: 'Web', command: 'npm run dev', start: 'now', evil: true },
+        { id: '/work/a::web', name: 'Again', command: 'x', start: 'now' },
+        { name: 'Worker', command: 'uv run worker', start: 'after-previous', runsIn: 'core', disabled: true },
+        { name: '' },
+        'nope',
+      ]),
+    ).toEqual([
+      { id: '/work/a::web', name: 'Web', command: 'npm run dev', start: 'now' },
+      { id: 'work-a-web', name: 'Again', command: 'x', start: 'now' },
+      { id: 'worker', name: 'Worker', command: 'uv run worker', start: 'after-previous', runsIn: 'core', disabled: true },
+    ])
+    expect(parseRunSaveSteps({ steps: [] })).toEqual([])
   })
 })

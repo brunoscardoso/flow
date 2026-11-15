@@ -16,7 +16,7 @@ import {
   stepTabFace,
   threadIdOfScopeKey,
 } from './run-group-model'
-import { LAYER_LABELS, LAYER_TITLES, SETUP_STRINGS } from './run-setup-model'
+import { SETUP_STRINGS, setupTitle } from './run-setup-model'
 
 const ROOT = '/work/jupiter'
 
@@ -227,8 +227,7 @@ function uiStrings(): string[] {
   const all: string[] = [
     ...Object.values(RUN_STRINGS),
     ...Object.values(SETUP_STRINGS),
-    ...Object.values(LAYER_LABELS),
-    ...Object.values(LAYER_TITLES),
+    setupTitle([{ name: 'jupiter-app' }, { name: 'jupiter-core' }]),
     RUN_MARK_TITLE,
   ]
   const statuses: RunStepStatus[] = ['idle', 'waiting', 'starting', 'running', 'ready', 'exited', 'stopped', 'blocked', 'timed-out']

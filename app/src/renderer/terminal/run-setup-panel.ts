@@ -3,7 +3,8 @@
  * running terminals, so changing a step never hides what is running. "Set up
  * Run" opens it straight away with one empty step to fill in.
  *
- * ONE ORDERED LIST. Every step of the Run is a card: line 1 its name and
+ * ONE ORDERED LIST — every step of every project of the conversation,
+ * combined in the one order kept on this computer. Every step of the Run is a card: line 1 its name and
  * command, line 2 the project it runs in, when it starts and when it counts as
  * ready; move up / drag / move down on the left, remove on the right. Below
  * the list: "+ Add a step", the short "Suggested" list (its full list behind
@@ -23,12 +24,12 @@ import {
   changeStep,
   draftToSetUp,
   isDirty,
-  isStructural,
   moveStep,
   removeStep,
   runsInChoices,
   saveChange,
   saveSentence,
+  setupTitle,
   SETUP_STRINGS,
   startDraft,
   startsOptions,
@@ -46,7 +47,6 @@ export interface RunSetupPanelDeps {
   save(change: RunSaveChange): Promise<RunSaveAnswer>
   /** The group's live state — for the sentence saying what Save will do. */
   state(): RunGroupState | null
-  hasConversation(): boolean
   /** Start the Run (Save and run). */
   startRun(): void
   /** Ask the agent in this conversation, or null when there is none. */
@@ -189,7 +189,7 @@ export class RunSetupPanel {
     this.#view = view
     if (this.#root === null) return
     const draft = this.#draft
-    if (draft === null || !isDirty(draft)) this.#draft = startDraft(view.resolution.project, 'shared')
+    if (draft === null || !isDirty(draft)) this.#draft = startDraft(view.resolution.project)
     this.#render()
   }
 
@@ -214,9 +214,8 @@ export class RunSetupPanel {
     root.appendChild(page)
 
     const head = el('div', 'fl-run-setup-head')
-    const projectName = draft?.projectName ?? ''
     const titles = el('div', 'fl-run-setup-titles')
-    titles.appendChild(el('span', 'fl-run-setup-title', projectName === '' ? SETUP_STRINGS.title : `${SETUP_STRINGS.title} · ${projectName}`))
+    titles.appendChild(el('span', 'fl-run-setup-title', setupTitle(this.#view?.resolution.places ?? [], draft?.projectName ?? '')))
     head.appendChild(titles)
     page.appendChild(head)
 
@@ -224,8 +223,7 @@ export class RunSetupPanel {
       page.appendChild(el('p', 'fl-run-muted', RUN_STRINGS.failedToRead))
       return
     }
-    const structural = isStructural(draft.layer)
-    titles.appendChild(el('p', 'fl-run-note', structural ? SETUP_STRINGS.intro : SETUP_STRINGS.structureOnlyEveryone))
+    titles.appendChild(el('p', 'fl-run-note', SETUP_STRINGS.intro))
 
     const body = el('div', 'fl-run-body')
     const main = el('div', 'fl-run-main')
@@ -263,7 +261,6 @@ export class RunSetupPanel {
   }
 
   #card(draft: RunSetupDraft, step: DraftStep, index: number): HTMLElement {
-    const structural = isStructural(draft.layer)
     const current = (): RunSetupDraft => this.#draft ?? draft
     const card = el('div', 'fl-run-card')
     card.classList.toggle('skipped', step.skipped)
@@ -272,40 +269,36 @@ export class RunSetupPanel {
     // Left: move up, drag, move down.
     const move = el('div', 'fl-run-card-move')
     const up = iconButton('chevron-up', SETUP_STRINGS.moveUp, () => this.#update(moveStep(current(), step.id, index - 1)))
-    up.disabled = !structural || index === 0
+    up.disabled = index === 0
     const handle = el('span', 'fl-run-handle')
     handle.setAttribute('aria-hidden', 'true')
     const down = iconButton('chevron-down', SETUP_STRINGS.moveDown, () => this.#update(moveStep(current(), step.id, index + 1)))
-    down.disabled = !structural || index === draft.steps.length - 1
+    down.disabled = index === draft.steps.length - 1
     move.append(up, handle, down)
-    if (structural) {
-      handle.title = SETUP_STRINGS.dragHandle
-      // Only the handle starts a drag, so text in the fields stays selectable.
-      handle.addEventListener('mousedown', () => {
-        card.draggable = true
-      })
-      card.addEventListener('dragstart', (event) => {
-        this.#dragId = step.id
-        event.dataTransfer?.setData('text/plain', step.id)
-        card.classList.add('dragging')
-      })
-      card.addEventListener('dragend', () => {
-        this.#dragId = null
-        card.draggable = false
-        card.classList.remove('dragging')
-      })
-      card.addEventListener('dragover', (event) => {
-        if (this.#dragId !== null && this.#dragId !== step.id) event.preventDefault()
-      })
-      card.addEventListener('drop', (event) => {
-        event.preventDefault()
-        const dragged = this.#dragId
-        this.#dragId = null
-        if (dragged !== null && dragged !== step.id) this.#update(moveStep(current(), dragged, index))
-      })
-    } else {
-      handle.classList.add('inert')
-    }
+    handle.title = SETUP_STRINGS.dragHandle
+    // Only the handle starts a drag, so text in the fields stays selectable.
+    handle.addEventListener('mousedown', () => {
+      card.draggable = true
+    })
+    card.addEventListener('dragstart', (event) => {
+      this.#dragId = step.id
+      event.dataTransfer?.setData('text/plain', step.id)
+      card.classList.add('dragging')
+    })
+    card.addEventListener('dragend', () => {
+      this.#dragId = null
+      card.draggable = false
+      card.classList.remove('dragging')
+    })
+    card.addEventListener('dragover', (event) => {
+      if (this.#dragId !== null && this.#dragId !== step.id) event.preventDefault()
+    })
+    card.addEventListener('drop', (event) => {
+      event.preventDefault()
+      const dragged = this.#dragId
+      this.#dragId = null
+      if (dragged !== null && dragged !== step.id) this.#update(moveStep(current(), dragged, index))
+    })
     card.appendChild(move)
 
     const body = el('div', 'fl-run-card-body')
@@ -316,7 +309,6 @@ export class RunSetupPanel {
     name.value = step.name
     name.placeholder = SETUP_STRINGS.namePlaceholder
     name.setAttribute('aria-label', SETUP_STRINGS.name)
-    name.disabled = !structural
     name.addEventListener('input', () => this.#update(changeStep(current(), step.id, { name: name.value }), false))
     // The next step's "Starts" names this one: redraw once the name is settled.
     name.addEventListener('change', () => this.#render())
@@ -383,12 +375,10 @@ export class RunSetupPanel {
     }
     const places = this.#view?.resolution.places ?? []
     const runsIn = select(runsInChoices(draft, places, step), step.runsIn ?? '', SETUP_STRINGS.runsIn)
-    runsIn.disabled = !structural
     runsIn.addEventListener('change', () =>
       this.#update(changeStep(current(), step.id, { runsIn: runsIn.value === '' ? null : runsIn.value })),
     )
     const starts = select(startsOptions(draft.steps, index), step.start, SETUP_STRINGS.starts)
-    starts.disabled = !structural
     starts.addEventListener('change', () =>
       this.#update(changeStep(current(), step.id, { start: starts.value === 'after-previous' ? 'after-previous' : 'now' })),
     )
@@ -436,9 +426,7 @@ export class RunSetupPanel {
     toggle.appendChild(el('span', 'fl-run-toggle-knob'))
     toggle.addEventListener('click', () => this.#update(changeStep(current(), step.id, { skipped: !step.skipped })))
     tools.appendChild(toggle)
-    if (structural) {
-      tools.appendChild(iconButton('trash', SETUP_STRINGS.remove, () => this.#update(removeStep(current(), step.id))))
-    }
+    tools.appendChild(iconButton('trash', SETUP_STRINGS.remove, () => this.#update(removeStep(current(), step.id))))
     card.appendChild(tools)
     return card
   }
@@ -449,17 +437,15 @@ export class RunSetupPanel {
     if (foot === null || draft === null) return
     foot.textContent = ''
     const row = el('div', 'fl-run-foot-actions')
-    if (isStructural(draft.layer)) {
-      const add = button('fl-run-chip dashed', SETUP_STRINGS.addStep, () => {
-        const current = this.#draft ?? draft
-        const next = addStep(current)
-        this.#focusId = next.steps[next.steps.length - 1]?.id ?? null
-        this.#update(next)
-      })
-      add.classList.add('fl-run-add')
-      row.appendChild(add)
-    }
-    const problems = isDirty(draft) ? validateDraft(draft, { hasConversation: this.#deps.hasConversation() }) : []
+    const add = button('fl-run-chip dashed', SETUP_STRINGS.addStep, () => {
+      const current = this.#draft ?? draft
+      const next = addStep(current)
+      this.#focusId = next.steps[next.steps.length - 1]?.id ?? null
+      this.#update(next)
+    })
+    add.classList.add('fl-run-add')
+    row.appendChild(add)
+    const problems = isDirty(draft) ? validateDraft(draft) : []
     const text = el('div', 'fl-run-foot-text')
     if (this.#error !== null) {
       text.appendChild(el('span', 'fl-run-error', this.#error))
@@ -491,13 +477,12 @@ export class RunSetupPanel {
 
   async #save(thenRun: boolean): Promise<void> {
     const draft = this.#draft
-    const project = this.#view?.resolution.project
-    if (this.#saving || draft === null || project === undefined || !isDirty(draft)) return
+    if (this.#saving || draft === null || !isDirty(draft)) return
     this.#saving = true
     this.#renderFooter()
     let view: RunView | null = null
     try {
-      const answer = await this.#deps.save(saveChange(draft, project))
+      const answer = await this.#deps.save(saveChange(draft))
       if (!answer.ok) {
         this.#error = answer.reason
         return

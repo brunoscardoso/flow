@@ -3,25 +3,36 @@
  * turned into its projects, working folders and steps.
  *
  * A Run setup is the PERSON'S OWN, on this computer: it is kept in app
- * settings per project and is never written into the project or its Workspace,
- * so it never syncs to anyone (user decision, 2026-11-14). The layer named
- * `shared` is that base setup; the personal and conversation tweak layers
- * remain for older data and are no longer offered by the panel.
+ * settings and is never written into a project or its Workspace, so it never
+ * syncs to anyone (user decision, 2026-11-14).
  *
- * ONE LIST PER RUN. A Run's steps are the PRIMARY project's setup — one list,
- * one order. A step may run in another project, named by `runsIn`: one of the
- * scope's projects (in the conversation's checkout of it when it has one, else
- * its folder — FR-9), else a sibling of the same Workspace that is on this
- * computer, else nowhere: the step is reported as unable to start.
+ * EACH STEP BELONGS TO ONE PROJECT — the one it runs in — and is stored with
+ * that project. A conversation's Run is every step of every project it has
+ * (its main project and the attached ones), combined into ONE list. The order
+ * of that list is kept once, on this computer, across projects, so the same
+ * steps keep the same relative order in every conversation that combines them.
+ * A step runs in the conversation's checkout of its project when it has one,
+ * else in the project folder (FR-9).
+ *
+ * OLDER DATA. A setup stored under one project may hold steps that name
+ * another project to run in. Such a step belongs to the project it names: it
+ * is read that way, and the next Save that touches it moves it there. Nothing
+ * is dropped on the way.
+ *
+ * The personal and conversation tweak layers are retired from the panel; a
+ * Run resolves with none (their stored data is left as it is).
  *
  * Every dependency is injected so the tests run against fakes.
  */
 import { basename } from 'path'
 
 import {
+  mergeRunOrder,
+  newStepId,
   parseRunSetup,
   resolveRunSteps,
   runScopeKey,
+  runStepRef,
   serializeRunSetup,
   type RunPlace,
   type RunProjectLayers,
@@ -29,8 +40,7 @@ import {
   type RunSaveChange,
   type RunScope,
   type RunSetup,
-  type RunTweaks,
-  type RunTweaksByProject,
+  type RunStep,
 } from '../../shared/run-setup'
 
 /** What the store needs to know about a conversation. */
@@ -41,16 +51,17 @@ export interface RunThreadSource {
   getThreadRoots(threadId: string): string[]
   /** The checkouts those other projects have. */
   getThreadRootWorktrees(threadId: string): Array<{ rootPath: string; worktreePath: string }>
-  getRunTweaks(threadId: string): RunTweaksByProject
-  setRunTweaks(threadId: string, tweaks: RunTweaksByProject): void
 }
 
 export interface RunPersonalSource {
-  /** The project's Run setup text, local to this computer — never a shared file. */
+  /** A project's own Run steps as stored text, local to this computer — never a shared file. */
   getRunSetup(projectRoot: string): string | null
   setRunSetup(projectRoot: string, text: string | null): void
-  getRunTweaks(projectRoot: string): RunTweaks
-  setRunTweaks(projectRoot: string, tweaks: RunTweaks): RunTweaks
+  /** Every project that has stored steps. */
+  listRunSetupRoots(): string[]
+  /** The one order of steps across projects, as step references. */
+  getRunOrder(): string[]
+  setRunOrder(refs: string[]): void
 }
 
 export interface RunSetupStoreDeps {
@@ -58,12 +69,6 @@ export interface RunSetupStoreDeps {
   personal: RunPersonalSource
   /** A project's name as the app shows it. */
   projectName?: (root: string) => string
-  /**
-   * The folders, on this computer, of the other projects in the primary
-   * project's Workspace — async and cached by the caller; never a sync spawn
-   * (allowed-pattern #19). Absent or failing: no siblings.
-   */
-  workspaceSiblings?: (primaryRoot: string) => Promise<string[]>
 }
 
 /** A refusal a person reads — plain words, no path or setting (forbidden-pattern #12). */
@@ -72,6 +77,33 @@ export class RunSetupError extends Error {}
 interface ScopeProject {
   root: string
   cwd: string
+}
+
+interface NamedProject extends ScopeProject {
+  name: string
+}
+
+/** One stored step, where it is stored and which project of the scope it runs in. */
+interface StoredStep {
+  /** The project it is stored with. */
+  owner: string
+  /** Its position in that project's stored list. */
+  index: number
+  step: RunStep
+  ref: string
+  /** The scope project it runs in, or null when it is not one of the scope's. */
+  project: NamedProject | null
+}
+
+interface Gathered {
+  projects: NamedProject[]
+  stored: Map<string, { setup: RunSetup | null; problems: string[] }>
+  /** The steps this scope sees, in the one order. */
+  visible: StoredStep[]
+}
+
+function sameName(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase()
 }
 
 export class RunSetupStore {
@@ -93,13 +125,14 @@ export class RunSetupStore {
       root: thread.projectRoot,
       cwd: thread.worktreePath !== null && thread.worktreePath !== '' ? thread.worktreePath : thread.projectRoot,
     }
-    const others = this.#deps.threads
-      .getThreadRoots(scope.threadId)
-      .filter((root) => root !== thread.projectRoot)
-      .map((root) => {
-        const checkout = checkouts.get(root)
-        return { root, cwd: checkout !== undefined && checkout !== '' ? checkout : root }
-      })
+    const seen = new Set([thread.projectRoot])
+    const others: ScopeProject[] = []
+    for (const root of this.#deps.threads.getThreadRoots(scope.threadId)) {
+      if (seen.has(root)) continue
+      seen.add(root)
+      const checkout = checkouts.get(root)
+      others.push({ root, cwd: checkout !== undefined && checkout !== '' ? checkout : root })
+    }
     return [primary, ...others]
   }
 
@@ -109,40 +142,126 @@ export class RunSetupStore {
   }
 
   /**
-   * Every project a step of this scope may run in: the scope's projects (the
-   * primary first, each in its working folder), then Workspace siblings on
-   * this computer that are not already listed (by folder or by name).
+   * Every project a step of this scope may run in: the scope's projects only,
+   * the primary first, each in its working folder. A project outside the
+   * conversation is not offered — its steps would never run here.
    */
   async placesOf(scope: RunScope): Promise<RunPlace[]> {
-    const places: RunPlace[] = this.projectsOf(scope).map((project) => ({
-      name: this.nameOf(project.root),
-      root: project.root,
-      cwd: project.cwd,
-      from: 'scope',
-    }))
-    const primary = places[0]?.root ?? scope.rootPath
-    let siblings: string[] = []
-    try {
-      siblings = (await this.#deps.workspaceSiblings?.(primary)) ?? []
-    } catch {
-      siblings = []
-    }
-    for (const root of siblings) {
-      if (typeof root !== 'string' || root === '') continue
-      const name = this.nameOf(root)
-      const taken = places.some(
-        (place) => place.root === root || place.name.toLowerCase() === name.toLowerCase(),
-      )
-      if (!taken) places.push({ name, root, cwd: root, from: 'workspace' })
-    }
-    return places
+    return this.#named(scope).map((project) => ({ name: project.name, root: project.root, cwd: project.cwd, from: 'scope' }))
   }
 
-  /** The shared setup of one project, or null when it has none. */
+  /** One project's stored steps, or null when it has none. */
   async readShared(projectRoot: string): Promise<{ setup: RunSetup | null; problems: string[] }> {
+    return this.#read(projectRoot)
+  }
+
+  /**
+   * The scope's combined Run: every stored step whose project is one of the
+   * scope's, in the one order (steps it does not name yet go last, grouped by
+   * the project they are stored with — the main project first, then the
+   * scope's order), each running in its project's working folder.
+   */
+  async resolve(scope: RunScope): Promise<RunResolution> {
+    const gathered = this.#gather(scope)
+    const primary = gathered.projects[0]!
+    const combined: RunStep[] = gathered.visible.map((entry) => {
+      const step: RunStep = { ...entry.step, id: entry.ref }
+      step.runsIn = entry.project!.name
+      return step
+    })
+    const owners = new Set([...gathered.projects.map((project) => project.root), ...gathered.visible.map((entry) => entry.owner)])
+    const problems = [...owners].flatMap((root) => gathered.stored.get(root)?.problems ?? [])
+    const project: RunProjectLayers = {
+      root: primary.root,
+      name: primary.name,
+      cwd: primary.cwd,
+      setup: combined.length === 0 ? null : { version: 1, steps: combined },
+      hasSharedSetup: combined.length > 0,
+      problems,
+      personal: {},
+      conversation: {},
+    }
+    const places = await this.placesOf(scope)
+    return {
+      scope,
+      scopeKey: runScopeKey(scope),
+      project,
+      places,
+      steps: resolveRunSteps(project, places, { keyOf: (step) => step.id }),
+    }
+  }
+
+  /**
+   * Write the scope's whole combined list. Each step is stored with the
+   * project it runs in (the main project when it names none); a step that
+   * changed project, or is new, gets a fresh id there. Steps this scope cannot
+   * see are left exactly as they are, and so is their place in the one order.
+   */
+  async save(scope: RunScope, change: RunSaveChange): Promise<void> {
+    const gathered = this.#gather(scope)
+    const primary = gathered.projects[0]!
+    const visibleByRef = new Map(gathered.visible.map((entry) => [entry.ref, entry]))
+
+    // Where each step of the draft goes, and whether it keeps its stored id.
+    const placed = change.steps.map((step) => {
+      const wanted = step.runsIn?.trim() ?? ''
+      const target = wanted === '' ? primary : gathered.projects.find((project) => sameName(project.name, wanted))
+      if (target === undefined) {
+        throw new RunSetupError(
+          `“${step.name}” runs in ${wanted}, which is not part of this conversation, so nothing was saved.`,
+        )
+      }
+      const existing = visibleByRef.get(step.id)
+      const keepId = existing !== undefined && existing.owner === target.root ? existing.step.id : null
+      return { step, target: target.root, keepId, id: keepId ?? '' }
+    })
+
+    const touched = new Set<string>([...gathered.visible.map((entry) => entry.owner), ...placed.map((entry) => entry.target)])
+    const visibleRefs = new Set(visibleByRef.keys())
+    const lists = new Map<string, RunStep[]>()
+    for (const root of touched) {
+      const kept = (gathered.stored.get(root)?.setup?.steps ?? []).filter(
+        (step) => !visibleRefs.has(runStepRef(root, step.id)),
+      )
+      lists.set(root, kept)
+    }
+    // Ids: the kept ones first, so a fresh id never takes one already in use.
+    for (const root of touched) {
+      const taken = new Set(lists.get(root)!.map((step) => step.id))
+      for (const entry of placed) if (entry.target === root && entry.keepId !== null) taken.add(entry.keepId)
+      for (const entry of placed) {
+        if (entry.target !== root || entry.keepId !== null) continue
+        entry.id = newStepId(entry.step.name, taken)
+        taken.add(entry.id)
+      }
+    }
+    for (const entry of placed) {
+      const { runsIn: _runsIn, ...own } = entry.step
+      lists.get(entry.target)!.push({ ...own, id: entry.id })
+    }
+
+    for (const [root, steps] of lists) this.#write(root, { version: 1, steps })
+    let order: string[] = []
+    try {
+      order = this.#deps.personal.getRunOrder()
+    } catch {
+      order = []
+    }
+    this.#deps.personal.setRunOrder(
+      mergeRunOrder(order, visibleRefs, placed.map((entry) => runStepRef(entry.target, entry.id))),
+    )
+  }
+
+  // ─── reading ─────────────────────────────────────────────────────────────────
+
+  #named(scope: RunScope): NamedProject[] {
+    return this.projectsOf(scope).map((project) => ({ ...project, name: this.nameOf(project.root) }))
+  }
+
+  #read(root: string): { setup: RunSetup | null; problems: string[] } {
     let text: string | null
     try {
-      text = this.#deps.personal.getRunSetup(projectRoot)
+      text = this.#deps.personal.getRunSetup(root)
     } catch {
       return { setup: null, problems: ['The Run setup could not be read, so it was treated as empty.'] }
     }
@@ -150,61 +269,62 @@ export class RunSetupStore {
     return parseRunSetup(text)
   }
 
-
-  /** The primary project's layers, where each step runs, and the merged steps with provenance. */
-  async resolve(scope: RunScope): Promise<RunResolution> {
-    const conversation = scope.threadId === null ? {} : this.#deps.threads.getRunTweaks(scope.threadId)
-    const places = await this.placesOf(scope)
-    const primary = this.projectsOf(scope)[0] ?? { root: scope.rootPath, cwd: scope.rootPath }
-    const shared = await this.readShared(primary.root)
-    const project: RunProjectLayers = {
-      root: primary.root,
-      name: this.nameOf(primary.root),
-      cwd: primary.cwd,
-      setup: shared.setup,
-      hasSharedSetup: shared.setup !== null,
-      problems: shared.problems,
-      personal: this.#deps.personal.getRunTweaks(primary.root),
-      conversation: conversation[primary.root] ?? {},
+  /** Every stored setup, and the steps of it this scope sees, in the one order. */
+  #gather(scope: RunScope): Gathered {
+    const projects = this.#named(scope)
+    let roots: string[] = []
+    try {
+      roots = this.#deps.personal.listRunSetupRoots()
+    } catch {
+      roots = []
     }
-    return { scope, scopeKey: runScopeKey(scope), project, places, steps: resolveRunSteps(project, places) }
+    const allRoots = [...new Set([...projects.map((project) => project.root), ...roots])]
+    const stored = new Map(allRoots.map((root) => [root, this.#read(root)]))
+    const byRoot = new Map(projects.map((project) => [project.root, project]))
+
+    const visible: StoredStep[] = []
+    for (const [owner, read] of stored) {
+      const ownerName = this.nameOf(owner)
+      read.setup?.steps.forEach((step, index) => {
+        const named = step.runsIn?.trim() ?? ''
+        // Older data: a step naming another project belongs to that project.
+        const project =
+          named === '' || sameName(named, ownerName)
+            ? (byRoot.get(owner) ?? null)
+            : (projects.find((candidate) => sameName(candidate.name, named)) ?? null)
+        if (project === null) return
+        visible.push({ owner, index, step, ref: runStepRef(owner, step.id), project })
+      })
+    }
+
+    let order: string[] = []
+    try {
+      order = this.#deps.personal.getRunOrder()
+    } catch {
+      order = []
+    }
+    const position = new Map(order.map((ref, index) => [ref, index]))
+    const ownerRank = (owner: string): number => {
+      const index = projects.findIndex((project) => project.root === owner)
+      return index < 0 ? projects.length : index
+    }
+    visible.sort((a, b) => {
+      const pa = position.get(a.ref)
+      const pb = position.get(b.ref)
+      if (pa !== undefined && pb !== undefined) return pa - pb
+      if (pa !== undefined) return -1
+      if (pb !== undefined) return 1
+      const rank = ownerRank(a.owner) - ownerRank(b.owner)
+      if (rank !== 0) return rank
+      if (a.owner !== b.owner) return a.owner < b.owner ? -1 : 1
+      return a.index - b.index
+    })
+    return { projects, stored, visible }
   }
 
-  /**
-   * Write one layer of the scope's primary project — the only setup a Run
-   * reads. Any other project is refused (the renderer never names a file to
-   * write), and so is a conversation layer without a conversation.
-   */
-  async save(scope: RunScope, change: RunSaveChange): Promise<void> {
-    const primary = this.projectsOf(scope)[0]?.root ?? scope.rootPath
-    if (change.projectRoot !== primary) {
-      throw new RunSetupError('That project is not the one this Run belongs to, so nothing was saved.')
-    }
-    switch (change.layer) {
-      case 'shared':
-        await this.#writeShared(change.projectRoot, change.setup)
-        return
-      case 'personal':
-        this.#deps.personal.setRunTweaks(change.projectRoot, change.tweaks)
-        return
-      case 'conversation': {
-        if (scope.threadId === null) {
-          throw new RunSetupError('Changes for one conversation can only be saved from inside a conversation.')
-        }
-        const all = { ...this.#deps.threads.getRunTweaks(scope.threadId) }
-        if (Object.keys(change.tweaks).length === 0) delete all[change.projectRoot]
-        else all[change.projectRoot] = change.tweaks
-        this.#deps.threads.setRunTweaks(scope.threadId, all)
-        return
-      }
-    }
-  }
-
-  async #writeShared(projectRoot: string, setup: RunSetup): Promise<void> {
+  #write(projectRoot: string, setup: RunSetup): void {
     // Validate by round-tripping: what is stored is exactly what a reader keeps.
     const clean = parseRunSetup(serializeRunSetup(setup)).setup
     this.#deps.personal.setRunSetup(projectRoot, clean.steps.length === 0 ? null : serializeRunSetup(clean))
   }
-
 }
-

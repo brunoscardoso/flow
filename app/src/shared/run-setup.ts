@@ -161,6 +161,69 @@ function parseReady(raw: unknown): { ready?: RunReady; problem?: string } {
 /** A project name far longer than any real one. */
 const MAX_PROJECT_NAME = 256
 
+/**
+ * One stored step, or the sentence why it was left out. `keepId` keeps the id
+ * as written (a Save's combined ids carry the project they are stored with);
+ * otherwise it is made a slug, unique among `taken`.
+ */
+function parseStepEntry(
+  entry: unknown,
+  position: number,
+  taken: Set<string>,
+  problems: string[],
+  keepId: boolean,
+): RunStep | null {
+  if (!isRecord(entry)) {
+    problems.push(`Step ${position} could not be read and was left out.`)
+    return null
+  }
+  const name = typeof entry.name === 'string' ? entry.name.trim() : ''
+  if (name === '') {
+    problems.push(`Step ${position} has no name and was left out.`)
+    return null
+  }
+  const command = typeof entry.command === 'string' ? entry.command.trim() : ''
+  if (command === '') {
+    problems.push(`The step "${name}" has nothing to run and was left out.`)
+    return null
+  }
+  const parsedReady = parseReady(entry.ready)
+  if (parsedReady.problem !== undefined) {
+    problems.push(`The step "${name}" has ${parsedReady.problem}, so it was left out.`)
+    return null
+  }
+  let id: string
+  if (keepId && typeof entry.id === 'string' && entry.id.trim() !== '' && entry.id.length <= MAX_STEP_REF && !taken.has(entry.id)) {
+    id = entry.id
+  } else {
+    const wanted = typeof entry.id === 'string' && slug(entry.id) !== '' ? slug(entry.id) : slug(name) || 'step'
+    id = uniqueId(wanted, taken)
+  }
+  taken.add(id)
+  const step: RunStep = {
+    id,
+    name,
+    command,
+    start: entry.start === 'after-previous' ? 'after-previous' : 'now',
+  }
+  if (parsedReady.ready !== undefined) step.ready = parsedReady.ready
+  if (entry.disabled === true) step.disabled = true
+  if (entry.runsIn !== undefined && entry.runsIn !== null) {
+    if (typeof entry.runsIn === 'string' && entry.runsIn.trim() !== '' && entry.runsIn.length <= MAX_PROJECT_NAME) {
+      step.runsIn = entry.runsIn.trim()
+    } else {
+      problems.push(`The step "${name}" names a project it runs in that could not be read, so it runs in this project.`)
+    }
+  }
+  if (typeof entry.readyTimeoutMs === 'number' && Number.isFinite(entry.readyTimeoutMs)) {
+    step.readyTimeoutMs = clampReadyTimeout(entry.readyTimeoutMs)
+  }
+  return step
+}
+
+/** A combined step id far longer than any real one (a folder path plus a step id). */
+const MAX_STEP_REF = 4096
+
 export function parseRunSetup(text: string): { setup: RunSetup; problems: string[] } {
   const problems: string[] = []
   let raw: unknown
@@ -175,50 +238,65 @@ export function parseRunSetup(text: string): { setup: RunSetup; problems: string
   const steps: RunStep[] = []
   const taken = new Set<string>()
   raw.steps.forEach((entry, index) => {
-    const position = index + 1
-    if (!isRecord(entry)) {
-      problems.push(`Step ${position} could not be read and was left out.`)
-      return
-    }
-    const name = typeof entry.name === 'string' ? entry.name.trim() : ''
-    if (name === '') {
-      problems.push(`Step ${position} has no name and was left out.`)
-      return
-    }
-    const command = typeof entry.command === 'string' ? entry.command.trim() : ''
-    if (command === '') {
-      problems.push(`The step "${name}" has nothing to run and was left out.`)
-      return
-    }
-    const parsedReady = parseReady(entry.ready)
-    if (parsedReady.problem !== undefined) {
-      problems.push(`The step "${name}" has ${parsedReady.problem}, so it was left out.`)
-      return
-    }
-    const wanted = typeof entry.id === 'string' && slug(entry.id) !== '' ? slug(entry.id) : slug(name) || 'step'
-    const id = uniqueId(wanted, taken)
-    taken.add(id)
-    const step: RunStep = {
-      id,
-      name,
-      command,
-      start: entry.start === 'after-previous' ? 'after-previous' : 'now',
-    }
-    if (parsedReady.ready !== undefined) step.ready = parsedReady.ready
-    if (entry.disabled === true) step.disabled = true
-    if (entry.runsIn !== undefined && entry.runsIn !== null) {
-      if (typeof entry.runsIn === 'string' && entry.runsIn.trim() !== '' && entry.runsIn.length <= MAX_PROJECT_NAME) {
-        step.runsIn = entry.runsIn.trim()
-      } else {
-        problems.push(`The step "${name}" names a project it runs in that could not be read, so it runs in this project.`)
-      }
-    }
-    if (typeof entry.readyTimeoutMs === 'number' && Number.isFinite(entry.readyTimeoutMs)) {
-      step.readyTimeoutMs = clampReadyTimeout(entry.readyTimeoutMs)
-    }
-    steps.push(step)
+    const step = parseStepEntry(entry, index + 1, taken, problems, false)
+    if (step !== null) steps.push(step)
   })
   return { setup: { version: 1, steps }, problems }
+}
+
+/**
+ * A Save's combined step list, read defensively: every step re-checked like a
+ * stored one, but its id kept as sent (it names where the step is stored).
+ * Anything unreadable is left out; this never throws.
+ */
+export function parseRunSaveSteps(raw: unknown): RunStep[] {
+  if (!Array.isArray(raw)) return []
+  const steps: RunStep[] = []
+  const taken = new Set<string>()
+  raw.forEach((entry, index) => {
+    const step = parseStepEntry(entry, index + 1, taken, [], true)
+    if (step !== null) steps.push(step)
+  })
+  return steps
+}
+
+// ─── combined ids and the one order ──────────────────────────────────────────
+
+/**
+ * A step's reference across projects: the project it is stored with and its
+ * id there. It is the step's id in a combined list, its key in a Run and its
+ * entry in the one order kept on this computer.
+ */
+export function runStepRef(root: string, id: string): string {
+  return `${root}::${id}`
+}
+
+/** The project and id a reference names, or null when it is not one. Ids never hold `::`. */
+export function parseRunStepRef(ref: string): { root: string; id: string } | null {
+  const at = ref.lastIndexOf('::')
+  if (at <= 0 || at + 2 >= ref.length) return null
+  return { root: ref.slice(0, at), id: ref.slice(at + 2) }
+}
+
+/**
+ * The one order after a Save from one conversation: the references that
+ * conversation could see are taken out, and its list goes back in, in its
+ * order, where the first of them was (else at the end). Every other reference
+ * keeps its place.
+ */
+export function mergeRunOrder(order: readonly string[], visible: ReadonlySet<string>, saved: readonly string[]): string[] {
+  const savedSet = new Set(saved)
+  let insertAt = -1
+  const kept: string[] = []
+  for (const ref of order) {
+    if (visible.has(ref) || savedSet.has(ref)) {
+      if (insertAt < 0) insertAt = kept.length
+      continue
+    }
+    kept.push(ref)
+  }
+  if (insertAt < 0) insertAt = kept.length
+  return [...kept.slice(0, insertAt), ...saved, ...kept.slice(insertAt)]
 }
 
 export function serializeRunSetup(setup: RunSetup): string {
@@ -243,10 +321,10 @@ export function serializeRunSetup(setup: RunSetup): string {
 // ─── resolve ─────────────────────────────────────────────────────────────────
 
 /**
- * A project a step can run in: one of the scope's projects (the conversation's
- * own, in its checkout when it has one) or a sibling of the same Workspace
- * that is on this computer. `root` is null for a project that is named but not
- * here — kept so a step naming it still shows.
+ * A project a step can run in: one of the scope's projects — the
+ * conversation's own, in its checkout when it has one. `root` is null for a
+ * project that is named but not here (older data). `workspace` is no longer
+ * produced: a step for a project outside the conversation never runs there.
  */
 export interface RunPlace {
   name: string
@@ -297,7 +375,11 @@ export function placeOfStep(
  * merged and the project it runs in resolved. A step's key stays the setup's
  * own project and the step id, whichever project it runs in — tweaks follow it.
  */
-export function resolveRunSteps(project: RunProjectInput, places: readonly RunPlace[] = []): ResolvedRunStep[] {
+export function resolveRunSteps(
+  project: RunProjectInput,
+  places: readonly RunPlace[] = [],
+  options: { keyOf?: (step: RunStep) => string } = {},
+): ResolvedRunStep[] {
   const resolved: ResolvedRunStep[] = []
   for (const step of project.setup?.steps ?? []) {
     const personal = project.personal[step.id]
@@ -330,7 +412,7 @@ export function resolveRunSteps(project: RunProjectInput, places: readonly RunPl
 
     const place = placeOfStep(step, project, places)
     const out: ResolvedRunStep = {
-      key: `${project.root}::${step.id}`,
+      key: options.keyOf?.(step) ?? `${project.root}::${step.id}`,
       projectRoot: place.root,
       projectName: place.name,
       cwd: place.cwd,
@@ -422,22 +504,31 @@ export interface RunProjectLayers extends RunProjectInput {
 export interface RunResolution {
   scope: RunScope
   scopeKey: string
-  /** The scope's primary project: its setup is the Run's one ordered list. */
+  /**
+   * The scope's main project, whose `setup` is the COMBINED list: every step
+   * of every project of the scope, in the one order kept on this computer.
+   * Each step's id is its reference (`runStepRef`) and its `runsIn` names the
+   * project it runs in.
+   */
   project: RunProjectLayers
   /**
    * Every project a step may run in, for the panel's "Runs in" choice: the
-   * scope's projects first (the primary at the top), then Workspace siblings
-   * on this computer.
+   * scope's projects only, the main project first.
    */
   places: RunPlace[]
   steps: ResolvedRunStep[]
 }
 
-/** What a Save writes — one layer of the scope's primary project. */
-export type RunSaveChange =
-  | { layer: 'shared'; projectRoot: string; setup: RunSetup }
-  | { layer: 'personal'; projectRoot: string; tweaks: RunTweaks }
-  | { layer: 'conversation'; projectRoot: string; tweaks: RunTweaks }
+/**
+ * What a Save writes: the scope's whole combined list, in order. A step's id
+ * is its reference (`runStepRef`) when it is already stored, else a new id;
+ * its `runsIn` names the project it runs in (absent: the main project). Main
+ * splits it back into each project's own steps and the one order.
+ */
+export interface RunSaveChange {
+  layer: 'shared'
+  steps: RunStep[]
+}
 
 /** A scope that has a Run going — the sidebar's running mark. */
 export interface RunScopeSummary {

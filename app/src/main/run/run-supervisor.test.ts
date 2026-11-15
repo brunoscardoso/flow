@@ -12,6 +12,7 @@ import {
   type RunSetup,
 } from '../../shared/run-setup'
 import type { ReadyOutcome, ReadyWait } from './ready-check'
+import { RunSetupStore } from './run-setup-store'
 import { RunSupervisor, type RunReadyChecks, type RunTerminalPort } from './run-supervisor'
 
 const ROOT = '/repos/shop'
@@ -442,6 +443,70 @@ describe('RunSupervisor — apply a saved setup', () => {
     expect(h.terminals.created).toHaveLength(0)
     expect(state).toMatchObject({ active: false })
     expect(state.steps.map((s) => s.status)).toEqual(['idle', 'idle', 'idle'])
+  })
+})
+
+describe('RunSupervisor — apply with steps combined across projects', () => {
+  it('keys steps by the project they are stored with, so a save keeps, restarts, starts and stops by those keys', async () => {
+    const A = '/repos/a'
+    const B = '/repos/b'
+    const setups = new Map<string, string>()
+    let order: string[] = []
+    const store = new RunSetupStore({
+      threads: {
+        getThread: () => ({ projectRoot: A, worktreePath: null }),
+        getThreadRoots: () => [B],
+        getThreadRootWorktrees: () => [],
+      },
+      personal: {
+        getRunSetup: (root) => setups.get(root) ?? null,
+        setRunSetup: (root, text) => {
+          if (text === null) setups.delete(root)
+          else setups.set(root, text)
+        },
+        listRunSetupRoots: () => [...setups.keys()],
+        getRunOrder: () => [...order],
+        setRunOrder: (refs) => {
+          order = [...refs]
+        },
+      },
+    })
+    const scope: RunScope = { rootPath: A, threadId: 't1' }
+    await store.save(scope, {
+      layer: 'shared',
+      steps: [
+        { id: 'db', name: 'db', command: 'db', start: 'now', runsIn: 'b' },
+        { id: 'web', name: 'web', command: 'web', start: 'now' },
+        { id: 'old', name: 'old', command: 'old', start: 'now', runsIn: 'b' },
+      ],
+    })
+    const terminals = new FakeTerminals()
+    const supervisor = new RunSupervisor({ terminals, setups: store, ready: new FakeReady() })
+    await supervisor.start(scope)
+    await flush()
+    expect(supervisor.state(scope).steps.map((s) => s.key)).toEqual([`${B}::db`, `${A}::web`, `${B}::old`])
+    expect(terminals.created.map((c) => [c.command, c.cwd])).toEqual([
+      ['db', B],
+      ['web', A],
+      ['old', B],
+    ])
+
+    // The panel sends the combined list back: db kept, web changed, old removed, a new step.
+    const combined = (await store.resolve(scope)).project.setup!.steps
+    await store.save(scope, {
+      layer: 'shared',
+      steps: [
+        combined[0]!,
+        { ...combined[1]!, command: 'web --port 4000' },
+        { id: 'jobs', name: 'jobs', command: 'jobs', start: 'now', runsIn: 'b' },
+      ],
+    })
+    const state = await supervisor.apply(scope)
+    await flush()
+    expect(state.steps.map((s) => s.key)).toEqual([`${B}::db`, `${A}::web`, `${B}::jobs`])
+    expect(terminals.disposed.sort()).toEqual(['term-2', 'term-3'])
+    expect(terminals.commands().slice(3)).toEqual(['web --port 4000', 'jobs'])
+    expect(supervisor.state(scope).steps.map((s) => s.terminalId)).toEqual(['term-1', 'term-4', 'term-5'])
   })
 })
 

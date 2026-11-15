@@ -567,8 +567,6 @@ let disposeTerminalIpc: (() => void) | null = null
 let runSupervisor: RunSupervisor | null = null
 /** The commands typed into Flow's terminals, per project — flushed on quit. */
 let commandUsage: CommandUsageStore | null = null
-/** How long opening a Run waits for the Workspace read before treating siblings as unknown. */
-const WORKSPACE_SIBLINGS_WAIT_MS = 4_000
 let disposeRunIpc: (() => void) | null = null
 let disposeLspIpc: (() => Promise<void>) | null = null
 let disposeGitIpc: (() => void) | null = null
@@ -3528,21 +3526,9 @@ const understandFeature = async (request: {
     const setups = new RunSetupStore({
       threads: threadStore,
       personal: appSettings,
-      // A step may run in another project of the primary project's Workspace
-      // that is on this computer. The registry's `workspace status --target`
-      // read is an async spawn, cached a few seconds and shared in flight
-      // (never sync — allowed-pattern #19); a slow first read is bounded so
-      // opening the Run never waits on it for long.
-      workspaceSiblings: async (primaryRoot) => {
-        const answer = await Promise.race([
-          workspaces.statusFor(primaryRoot),
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), WORKSPACE_SIBLINGS_WAIT_MS)),
-        ])
-        if (answer === null || !answer.ok || answer.membership.workspace === null) return []
-        return answer.membership.siblings
-          .map((sibling) => sibling.localPath)
-          .filter((path): path is string => typeof path === 'string' && path !== '' && path !== primaryRoot)
-      },
+      // A conversation's Run combines the steps of all its projects; a step
+      // for a project outside the conversation never runs there, so Workspace
+      // siblings are not offered.
     })
     // USAGE SUGGESTIONS (a): the commands a person enters in Flow's own
     // interactive shells, keyed by the terminal's project; one writer, written

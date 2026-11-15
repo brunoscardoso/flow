@@ -1,38 +1,34 @@
 /**
- * THE SETUP PANEL'S DRAFT — editing the Run's ONE ordered list of steps before
- * Save: add, remove, move, change, and which project each step runs in; the
- * sentences that say what is wrong; which layer a Save writes (Everyone / Just
- * me / This conversation); the one sentence that says what Save will do to a
- * Run that is going; and the short "Suggested" list.
+ * THE SETUP PANEL'S DRAFT — editing the Run's ONE combined list of steps
+ * before Save: add, remove, move, change, and which of the conversation's
+ * projects each step runs in; the sentences that say what is wrong; the one
+ * sentence that says what Save will do to a Run that is going; and the short
+ * "Suggested" list.
+ *
+ * The list is every step of every project of the conversation, in the one
+ * order kept on this computer. Each step belongs to the project it runs in;
+ * Save sends the whole list and main stores each step with its project.
  *
  * DOM-free. Every sentence is shown to a person (forbidden-pattern #12): it
  * names steps and states, never a file, a setting or a command line. Main
  * re-parses whatever is saved; this only composes the request.
- *
- *   Everyone          the shared setup — the only layer that can add, remove,
- *                     rename or reorder steps.
- *   Just me           this computer's tweaks: a command, a ready check, skip.
- *   This conversation the conversation's own tweaks, over the person's.
  */
 import {
   newStepId,
   type RunGroupState,
-  type RunLayer,
   type RunPlace,
   type RunProjectLayers,
   type RunReady,
   type RunSaveChange,
   type RunStep,
   type RunSuggestion,
-  type RunTweak,
-  type RunTweaks,
 } from '../../shared/run-setup'
 import { countWord } from './run-group-model'
 
 export type ReadyKind = 'none' | 'port' | 'line'
 
 export interface DraftStep {
-  /** Stable for the draft; for a step not saved yet it is the id it will get. */
+  /** Stable for the draft: a saved step's reference, or the id a new step will be given. */
   id: string
   isNew: boolean
   name: string
@@ -44,33 +40,21 @@ export interface DraftStep {
   readyTimeoutMs?: number
   /** The step is turned off: kept for later, not started by Run. */
   skipped: boolean
-  /** The NAME of the project it runs in; null = the setup's own project. */
+  /** The NAME of the project it runs in; null = the conversation's main project. */
   runsIn: string | null
   /** Where a step added from a suggestion came from: "jupiter-app · package.json". */
   origin: string | null
 }
 
 export interface RunSetupDraft {
+  /** The conversation's main project. */
   projectRoot: string
   projectName: string
-  layer: RunLayer
   steps: DraftStep[]
-  /** Saved steps the person removed (Everyone only). */
+  /** Saved steps the person removed. */
   removed: string[]
   /** The steps as the draft started, to tell what changed. */
   original: DraftStep[]
-}
-
-export const LAYER_LABELS: Record<RunLayer, string> = {
-  shared: 'Everyone',
-  personal: 'Just me',
-  conversation: 'This conversation',
-}
-
-export const LAYER_TITLES: Record<RunLayer, string> = {
-  shared: 'Change the steps for everyone who works on this project',
-  personal: 'Change the steps only on this computer',
-  conversation: 'Change the steps only in this conversation',
 }
 
 /** Every fixed sentence the panel shows — scanned by the test for #12. */
@@ -78,7 +62,6 @@ export const SETUP_STRINGS = {
   title: 'Run setup',
   close: 'Close setup',
   intro: 'Steps start in order, each in its own terminal.',
-  savesFor: 'Saves for',
   suggested: 'Suggested',
   add: 'Add',
   addStep: '+ Add a step',
@@ -110,12 +93,19 @@ export const SETUP_STRINGS = {
   askAgentNoConversation: 'Open a conversation to ask the agent',
   showLess: 'Show fewer',
   empty: 'Add the first process to start, or pick one below.',
-  structureOnlyEveryone:
-    'Only Everyone can add, rename, reorder or move a step to another project. Just me and This conversation can change a command, a ready check, or skip a step.',
-  noConversation: 'Open a conversation to keep changes for it alone.',
   dragHandle: 'Drag to reorder',
-  notHere: 'not on this computer',
+  notHere: 'not in this conversation',
 } as const
+
+/** The panel's title: "Run setup · jupiter-app, jupiter-core" — the conversation's projects. */
+export function setupTitle(places: readonly Pick<RunPlace, 'name'>[], fallback = ''): string {
+  const names: string[] = []
+  for (const place of places) {
+    if (place.name.trim() !== '' && !names.some((name) => sameProject(name, place.name))) names.push(place.name.trim())
+  }
+  if (names.length === 0 && fallback.trim() !== '') names.push(fallback.trim())
+  return names.length === 0 ? SETUP_STRINGS.title : `${SETUP_STRINGS.title} · ${names.join(', ')}`
+}
 
 /** "Show all (12)". */
 export function showAllLabel(count: number): string {
@@ -136,15 +126,6 @@ function readyFields(ready: RunReady | undefined): { readyKind: ReadyKind; ready
     : { readyKind: 'line', readyValue: ready.text }
 }
 
-function applyTweak(step: DraftStep, tweak: RunTweak | undefined): DraftStep {
-  if (tweak === undefined) return step
-  const next = { ...step }
-  if (tweak.command !== undefined) next.command = tweak.command
-  if (tweak.skip !== undefined) next.skipped = tweak.skip
-  if (tweak.ready !== undefined) Object.assign(next, readyFields(tweak.ready ?? undefined))
-  return next
-}
-
 function sameProject(a: string, b: string): boolean {
   return a.trim().toLowerCase() === b.trim().toLowerCase()
 }
@@ -155,39 +136,23 @@ function ownProject(runsIn: string | null | undefined, projectName: string): str
   return runsIn.trim()
 }
 
-function layersBelow(layer: RunLayer): Array<'personal'> {
-  return layer === 'conversation' ? ['personal'] : []
-}
-
-/** The steps as the layers BELOW `layer` leave them (what a tweak is measured against). */
-function baseSteps(project: RunProjectLayers, layer: RunLayer): DraftStep[] {
-  return (project.setup?.steps ?? []).map((step) => {
-    let draft: DraftStep = {
-      id: step.id,
-      isNew: false,
-      name: step.name,
-      command: step.command,
-      start: step.start,
-      ...readyFields(step.ready),
-      ...(step.readyTimeoutMs !== undefined ? { readyTimeoutMs: step.readyTimeoutMs } : {}),
-      skipped: step.disabled === true,
-      runsIn: ownProject(step.runsIn, project.name),
-      origin: null,
-    }
-    for (const below of layersBelow(layer)) draft = applyTweak(draft, project[below][step.id])
-    return draft
-  })
-}
-
-/** A draft for one project at one layer: the steps as that layer sees them now. */
-export function startDraft(project: RunProjectLayers, layer: RunLayer): RunSetupDraft {
-  const base = baseSteps(project, layer)
-  const steps =
-    layer === 'shared' ? base : base.map((step) => applyTweak(step, project[layer][step.id]))
+/** A draft of the combined list: the steps as they are saved now. */
+export function startDraft(project: RunProjectLayers): RunSetupDraft {
+  const steps: DraftStep[] = (project.setup?.steps ?? []).map((step) => ({
+    id: step.id,
+    isNew: false,
+    name: step.name,
+    command: step.command,
+    start: step.start,
+    ...readyFields(step.ready),
+    ...(step.readyTimeoutMs !== undefined ? { readyTimeoutMs: step.readyTimeoutMs } : {}),
+    skipped: step.disabled === true,
+    runsIn: ownProject(step.runsIn, project.name),
+    origin: null,
+  }))
   return {
     projectRoot: project.root,
     projectName: project.name,
-    layer,
     steps,
     removed: [],
     original: steps.map((step) => ({ ...step })),
@@ -196,22 +161,18 @@ export function startDraft(project: RunProjectLayers, layer: RunLayer): RunSetup
 
 /** A draft starting from the suggestions the person ticked (added after any saved steps). */
 export function draftFromSuggestions(project: RunProjectLayers, ticked: readonly RunSuggestion[]): RunSetupDraft {
-  let draft = startDraft(project, 'shared')
+  let draft = startDraft(project)
   for (const suggestion of ticked) draft = addSuggestion(draft, suggestion)
   return draft
 }
 
 /** "Set up Run": the setup as it is, with one empty step to fill in when it has none. */
 export function draftToSetUp(project: RunProjectLayers): RunSetupDraft {
-  const draft = startDraft(project, 'shared')
+  const draft = startDraft(project)
   return draft.steps.length === 0 ? addStep(draft) : draft
 }
 
 // ─── editing ─────────────────────────────────────────────────────────────────
-
-export function isStructural(layer: RunLayer): boolean {
-  return layer === 'shared'
-}
 
 function takenIds(draft: RunSetupDraft): string[] {
   return [...draft.steps.map((step) => step.id), ...draft.removed]
@@ -221,7 +182,6 @@ export function addStep(
   draft: RunSetupDraft,
   fields: Partial<Pick<DraftStep, 'name' | 'command' | 'origin' | 'runsIn'>> = {},
 ): RunSetupDraft {
-  if (!isStructural(draft.layer)) return draft
   const name = fields.name ?? ''
   const step: DraftStep = {
     id: newStepId(name || 'step', takenIds(draft)),
@@ -297,11 +257,10 @@ export function addSuggestion(draft: RunSetupDraft, suggestion: RunSuggestion): 
   })
 }
 
-/** Remove a step (Everyone) — or, in a tweak layer, skip it: a tweak cannot delete a shared step. */
+/** Remove a step from the list. */
 export function removeStep(draft: RunSetupDraft, id: string): RunSetupDraft {
   const step = draft.steps.find((candidate) => candidate.id === id)
   if (step === undefined) return draft
-  if (!isStructural(draft.layer)) return changeStep(draft, id, { skipped: !step.skipped })
   return {
     ...draft,
     steps: draft.steps.filter((candidate) => candidate.id !== id),
@@ -310,7 +269,6 @@ export function removeStep(draft: RunSetupDraft, id: string): RunSetupDraft {
 }
 
 export function moveStep(draft: RunSetupDraft, id: string, to: number): RunSetupDraft {
-  if (!isStructural(draft.layer)) return draft
   const from = draft.steps.findIndex((step) => step.id === id)
   if (from < 0) return draft
   const target = Math.max(0, Math.min(draft.steps.length - 1, to))
@@ -321,18 +279,12 @@ export function moveStep(draft: RunSetupDraft, id: string, to: number): RunSetup
   return { ...draft, steps }
 }
 
-/** Fields a tweak layer may change; the rest belong to Everyone. */
-const TWEAKABLE: ReadonlySet<keyof DraftStep> = new Set(['command', 'readyKind', 'readyValue', 'skipped'])
-
 export type StepPatch = Partial<
   Pick<DraftStep, 'name' | 'command' | 'start' | 'readyKind' | 'readyValue' | 'skipped' | 'runsIn'>
 >
 
 export function changeStep(draft: RunSetupDraft, id: string, patch: StepPatch): RunSetupDraft {
-  const allowed: StepPatch = {}
-  for (const [key, value] of Object.entries(patch) as Array<[keyof StepPatch, never]>) {
-    if (isStructural(draft.layer) || TWEAKABLE.has(key)) allowed[key] = value
-  }
+  const allowed: StepPatch = { ...patch }
   if (Object.keys(allowed).length === 0) return draft
   if ('runsIn' in allowed) allowed.runsIn = ownProject(allowed.runsIn, draft.projectName)
   return {
@@ -360,9 +312,8 @@ function readyOf(step: DraftStep): RunReady | undefined | 'invalid' {
 }
 
 /** Plain sentences saying what keeps the draft from saving; empty when it can be saved. */
-export function validateDraft(draft: RunSetupDraft, options: { hasConversation: boolean }): string[] {
+export function validateDraft(draft: RunSetupDraft): string[] {
   const problems: string[] = []
-  if (draft.layer === 'conversation' && !options.hasConversation) problems.push(SETUP_STRINGS.noConversation)
   const names = new Map<string, number>()
   draft.steps.forEach((step, index) => {
     // A row nobody has typed in is not a problem: Save leaves it out.
@@ -416,7 +367,7 @@ export interface DraftDiff {
   removed: DraftStep[]
   /** The order of the saved steps changed. */
   moved: boolean
-  /** Steps a tweak layer newly skips / un-skips. */
+  /** Steps newly turned off / on. */
   skipped: DraftStep[]
   unskipped: DraftStep[]
 }
@@ -507,42 +458,13 @@ function toRunStep(step: DraftStep): RunStep {
   return out
 }
 
-function readyKey(ready: RunReady | undefined | 'invalid'): string {
-  if (ready === undefined) return ''
-  if (ready === 'invalid') return 'invalid'
-  return ready.kind === 'port' ? `port:${ready.port}` : `line:${ready.text}`
-}
-
 /**
- * The one change a Save sends. Everyone writes the whole step list; a tweak
- * layer writes, for every shared step, only what differs from the layers
- * below it (an unchanged step drops its tweak). `existing` is the layer's
- * current tweaks — kept for steps the shared setup no longer names.
+ * The one change a Save sends: the whole combined list, in order. A saved
+ * step keeps its id (main knows from it where the step is stored); its
+ * `runsIn` names the project it runs in, absent for the main project.
  */
-export function saveChange(
-  draft: RunSetupDraft,
-  project: RunProjectLayers,
-): RunSaveChange {
-  if (draft.layer === 'shared') {
-    return { layer: 'shared', projectRoot: draft.projectRoot, setup: { version: 1, steps: savedSteps(draft.steps).map(toRunStep) } }
-  }
-  const below = new Map(baseSteps(project, draft.layer).map((step) => [step.id, step]))
-  const existing: RunTweaks = project[draft.layer]
-  const tweaks: RunTweaks = {}
-  for (const [id, tweak] of Object.entries(existing)) {
-    if (!below.has(id)) tweaks[id] = tweak
-  }
-  for (const step of draft.steps) {
-    const base = below.get(step.id)
-    if (base === undefined) continue
-    const tweak: RunTweak = {}
-    if (step.command.trim() !== base.command.trim()) tweak.command = step.command.trim()
-    const ready = readyOf(step)
-    if (readyKey(ready) !== readyKey(readyOf(base)) && ready !== 'invalid') tweak.ready = ready ?? null
-    if (step.skipped !== base.skipped) tweak.skip = step.skipped
-    if (Object.keys(tweak).length > 0) tweaks[step.id] = tweak
-  }
-  return { layer: draft.layer, projectRoot: draft.projectRoot, tweaks }
+export function saveChange(draft: RunSetupDraft): RunSaveChange {
+  return { layer: 'shared', steps: savedSteps(draft.steps).map(toRunStep) }
 }
 
 // ─── the sentence ────────────────────────────────────────────────────────────
@@ -554,11 +476,8 @@ function quoteList(steps: readonly DraftStep[], one: string, many: string): stri
   return `${many.replace('#', countWord(steps.length))}`
 }
 
-const LAYER_REACH: Record<RunLayer, string> = {
-  shared: 'Everyone working on this project gets the change.',
-  personal: 'Only on this computer.',
-  conversation: 'Only in this conversation.',
-}
+/** Where a saved change reaches: this computer, and every conversation with these projects. */
+const REACH = 'Kept on this computer, for every conversation with these projects.'
 
 /**
  * What Save will do, in one or two sentences: which steps start, restart and
@@ -568,15 +487,13 @@ const LAYER_REACH: Record<RunLayer, string> = {
 export function saveSentence(draft: RunSetupDraft, state: RunGroupState | null): string {
   if (!isDirty(draft)) return 'Nothing has changed yet.'
   const diff = diffDraft(draft)
-  const reach = LAYER_REACH[draft.layer]
-  const prefix = `${draft.projectRoot}::`
-  const going = (state?.active ?? false)
-    ? state!.steps.filter((step) => step.key.startsWith(prefix) && GOING.has(step.status))
-    : []
+  const reach = REACH
+  // A saved step's id in the draft IS its key in the Run.
+  const going = (state?.active ?? false) ? state!.steps.filter((step) => GOING.has(step.status)) : []
   if (going.length === 0) {
     return `Saving keeps the new setup; nothing starts until you press Run. ${reach}`
   }
-  const goingIds = new Set(going.map((step) => step.key.slice(prefix.length)))
+  const goingIds = new Set(going.map((step) => step.key))
   const starts = [...diff.added, ...diff.unskipped]
   const restarts = diff.changed.filter((step) => goingIds.has(step.id))
   const stops = [...diff.removed, ...diff.skipped].filter((step) => goingIds.has(step.id))
@@ -652,7 +569,7 @@ export function startsLabel(steps: readonly DraftStep[], index: number): string 
 // ─── where a step runs ───────────────────────────────────────────────────────
 
 export interface RunsInChoice {
-  /** '' is the setup's own project. */
+  /** '' is the main project. */
   value: string
   label: string
   /** Named by the step but not one of the projects Flow can run it in here. */
@@ -660,9 +577,9 @@ export interface RunsInChoice {
 }
 
 /**
- * The "Runs in" choices for a step: the setup's own project first, then every
- * other project a step can run in here. A project the step names that is not
- * among them is kept (marked), so opening the panel never loses it.
+ * The "Runs in" choices for a step: the conversation's projects, the main one
+ * first. A project the step names that is not among them is kept (marked), so
+ * opening the panel never loses it — Save refuses it with a sentence.
  */
 export function runsInChoices(
   draft: RunSetupDraft,

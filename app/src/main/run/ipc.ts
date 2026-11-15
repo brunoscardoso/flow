@@ -3,7 +3,7 @@
 // Every request is checked HERE and rebuilt field by field before it reaches
 // the supervisor or the setup store: only the app window may call, a scope's
 // root must be one the renderer may address (a thread's checkout is answered
-// as its project), and a setup or a set of tweaks is re-parsed so nothing the
+// as its project), and a saved step list is re-parsed so nothing the
 // renderer invented is written. The supervisor is the one owner of every Run
 // (allowed-pattern #14); these handlers only translate.
 
@@ -11,8 +11,7 @@ import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 
 import type { IpcInvokeChannel, IpcRequest, IpcResponse } from '../../shared/ipc-contract'
 import {
-  parseRunSetup,
-  parseRunTweaks,
+  parseRunSaveSteps,
   type RunGroupState,
   type RunResolution,
   type RunSaveChange,
@@ -91,22 +90,16 @@ export function registerRunChannels(deps: RunChannelDependencies): () => void {
 
   function changeOf(raw: unknown, channel: string): RunSaveChange {
     const change = record(raw, channel, 'change')
-    const projectRoot = requiredString(change['projectRoot'], channel, 'change.projectRoot')
-    const layer = change['layer']
-    if (layer === 'shared') {
-      let text: string
-      try {
-        text = JSON.stringify(change['setup'] ?? null)
-      } catch {
-        throw new RunRequestError(channel, 'change.setup could not be read')
-      }
-      if (text.length > MAX_SETUP_JSON) throw new RunRequestError(channel, 'change.setup is too large')
-      return { layer, projectRoot, setup: parseRunSetup(text).setup }
+    if (change['layer'] !== 'shared') throw new RunRequestError(channel, 'change.layer must be shared')
+    let text: string
+    try {
+      text = JSON.stringify(change['steps'] ?? null)
+    } catch {
+      throw new RunRequestError(channel, 'change.steps could not be read')
     }
-    if (layer === 'personal' || layer === 'conversation') {
-      return { layer, projectRoot, tweaks: parseRunTweaks(change['tweaks']) }
-    }
-    throw new RunRequestError(channel, 'change.layer must be shared, personal or conversation')
+    if (text.length > MAX_SETUP_JSON) throw new RunRequestError(channel, 'change.steps is too large')
+    if (!Array.isArray(change['steps'])) throw new RunRequestError(channel, 'change.steps must be a list')
+    return { layer: 'shared', steps: parseRunSaveSteps(JSON.parse(text) as unknown) }
   }
 
   function handle<C extends IpcInvokeChannel>(
