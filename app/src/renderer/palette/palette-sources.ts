@@ -10,7 +10,8 @@
 import type { SlashCommand, ThreadSummary } from '../../shared/ipc-contract'
 import type { PaletteCandidate } from './palette-types'
 import { fuzzyScore } from './palette-fuzzy'
-import { foldSlashCommands, buildStaticCommands, type PaletteCommand, type PaletteEmit } from './palette-commands'
+import { ASK_BLUEPRINT_EVENT } from '../../shared/ask-contract'
+import { ASK_COMMAND_ID, foldSlashCommands, buildStaticCommands, type PaletteCommand, type PaletteEmit } from './palette-commands'
 
 /** Injected IPC + emitter surface — the view binds these to the live app. */
 export interface PaletteSourceDeps {
@@ -138,6 +139,30 @@ function toCommandCandidate(command: PaletteCommand, score: number): PaletteCand
     score,
     run: command.run,
   }
+}
+
+/**
+ * The row that carries typed text into the Ask panel: Ask the Blueprint:
+ * "<text>". Null for an empty term. The plain "Ask the Blueprint" command is
+ * dropped from a typed list by {@link withoutPlainAsk} so the two never sit
+ * side by side.
+ */
+export function askCandidate(term: string, emit: PaletteEmit): PaletteCandidate | null {
+  const text = term.trim()
+  if (text === '') return null
+  return {
+    kind: 'command',
+    id: 'cmd:ask-blueprint-text',
+    label: `Ask the Blueprint: "${text}"`,
+    icon: 'sparkles',
+    score: 0,
+    run: () => emit(ASK_BLUEPRINT_EVENT, { text }),
+  }
+}
+
+/** A typed term has its own Ask row; the plain command would only repeat it. */
+export function withoutPlainAsk(candidates: PaletteCandidate[], term: string): PaletteCandidate[] {
+  return term.trim() === '' ? candidates : candidates.filter((candidate) => candidate.id !== ASK_COMMAND_ID)
 }
 
 /** Bind the static registry (no slash folding) to the emitter — the synchronous

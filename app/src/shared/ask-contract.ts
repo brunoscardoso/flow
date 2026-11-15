@@ -179,6 +179,12 @@ export interface AskBlueprintOpenDetail {
   threadId?: string
   /** That conversation's title, for its chip. */
   threadTitle?: string
+  /** `history` opens straight to the saved list for `tags` (See all). */
+  view?: 'history'
+  /** A saved answer to show — opens the panel on it, in place of a fresh question. */
+  entryId?: string
+  /** Ask the text now instead of leaving it in the box (Ask again). */
+  submit?: boolean
 }
 
 /** Read an untrusted event detail into the shape above; anything malformed is dropped, never thrown. */
@@ -189,6 +195,9 @@ export function parseAskOpenDetail(detail: unknown): AskBlueprintOpenDetail {
   if (typeof raw['text'] === 'string' && raw['text'].trim() !== '') out.text = raw['text']
   if (typeof raw['threadId'] === 'string' && raw['threadId'] !== '') out.threadId = raw['threadId']
   if (typeof raw['threadTitle'] === 'string' && raw['threadTitle'] !== '') out.threadTitle = raw['threadTitle']
+  if (raw['view'] === 'history') out.view = 'history'
+  if (typeof raw['entryId'] === 'string' && raw['entryId'] !== '') out.entryId = raw['entryId']
+  if (raw['submit'] === true) out.submit = true
   if (Array.isArray(raw['tags'])) {
     const tags: AskOpenTag[] = []
     for (const item of raw['tags']) {

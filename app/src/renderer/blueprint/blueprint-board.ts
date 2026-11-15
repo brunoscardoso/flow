@@ -258,7 +258,8 @@ import {
   learnDotClass,
   type InFlightMark,
 } from './learn-inflight'
-import type { AskBlueprintOpenDetail } from '../../shared/ask-contract'
+import { ASK_BLUEPRINT_EVENT, type AskBlueprintOpenDetail, type AskOpenTag } from '../../shared/ask-contract'
+import { savedSectionView, type SavedRowView } from './ask-saved-model'
 import {
   askDecoration,
   decorationKey,
@@ -1656,6 +1657,9 @@ export class BlueprintBoard {
   #paneBackButtons: HTMLElement[] = []
   /** Feature id the open brief belongs to — what a feature learn writes to. */
   #briefFeatureRef: string | null = null
+  /** The feature brief's "Questions asked" section, and the read that fills it. */
+  #briefAsked: HTMLElement | null = null
+  #briefAskedSeq = 0
   /**
    * The feature being UNDERSTOOD right now, or null.
    *
@@ -3318,6 +3322,8 @@ export class BlueprintBoard {
       this.#briefScope = result.nodes.map((node) => node.nodeId)
       this.#briefFeatureRef = featureId
     }
+    this.#dropBriefAsked()
+    if (featureId !== undefined) void this.#loadBriefAsked(featureId)
     this.showBrief(
       {
         nodes: result.nodes,
@@ -3799,6 +3805,7 @@ export class BlueprintBoard {
     this.#clearBriefActions()
     this.#briefFoot?.remove()
     this.#briefFoot = null
+    this.#dropBriefAsked()
     this.#brief = null
     this.#curated = null
     this.#curatedView = null
@@ -4678,6 +4685,20 @@ export class BlueprintBoard {
             label: 'Read as a story',
             title: `Read ${storyName}'s code as a story, from where it starts`,
             press: () => this.openStorylineForPart(storyRef, storyName),
+          }),
+        )
+      }
+
+      // ASK ABOUT THIS — the Ask panel with this feature tagged.
+      const askRef = this.#briefFeatureRef
+      if (askRef !== null) {
+        const askName = this.#featureNameFor(askRef, this.#brief?.delta.identity?.name) ?? askRef
+        actions.appendChild(
+          this.#headerButton({
+            icon: 'sparkles',
+            label: 'Ask about this',
+            title: `Ask the Blueprint about ${askName}`,
+            press: () => this.#askAbout(askRef, { text: '' }),
           }),
         )
       }
@@ -15583,7 +15604,12 @@ export class BlueprintBoard {
         : tag,
     )
     const fresh = detail.text !== undefined || tags.length > 0
-    this.#askPanel().open(fresh ? { text: detail.text ?? '', tags } : {})
+    this.#askPanel().open({
+      ...(fresh ? { text: detail.text ?? '', tags } : {}),
+      ...(detail.view !== undefined ? { view: detail.view } : {}),
+      ...(detail.entryId !== undefined ? { entryId: detail.entryId } : {}),
+      ...(detail.submit === true ? { submit: true } : {}),
+    })
   }
 
   /** Which features "Saved questions" reads when nothing is tagged: what this sheet draws. */
@@ -16869,6 +16895,123 @@ export class BlueprintBoard {
     // nothing left to reconcile here, which is the point: a two-phase update
     // is what let the bar arrive seconds before the stage.
     this.#takeBoardFocus()
+  }
+
+  /** Send the ONE open event, with this feature tagged. */
+  #askAbout(featureId: string, extra: Omit<AskBlueprintOpenDetail, 'tags'>): void {
+    const tag: AskOpenTag = { id: featureId, kind: kindOfId(featureId) === 'part' ? 'part' : 'feature' }
+    document.dispatchEvent(
+      new CustomEvent(ASK_BLUEPRINT_EVENT, { detail: { ...extra, tags: [tag] } satisfies AskBlueprintOpenDetail }),
+    )
+  }
+
+  #dropBriefAsked(): void {
+    this.#briefAskedSeq += 1
+    this.#briefAsked?.remove()
+    this.#briefAsked = null
+  }
+
+  /**
+   * Read the saved answers about this feature ONCE, when its brief opens (not
+   * on any broadcast), and draw the section. Nothing saved draws nothing; a
+   * failed read is logged and draws nothing — never an error wall.
+   */
+  async #loadBriefAsked(featureId: string): Promise<void> {
+    const rootId = this.#activeRoot
+    const api = window.flow.ask
+    if (rootId === null || api === undefined) return
+    const seq = this.#briefAskedSeq
+    try {
+      const [list, stale] = await Promise.all([
+        api.list({ rootId, featureIds: [featureId] }),
+        api.stale({ rootId, featureId }).catch(() => null),
+      ])
+      if (seq !== this.#briefAskedSeq || this.#briefFeatureRef !== featureId) return
+      if (!list.ok) {
+        console.warn('Saved questions could not be read:', list.detail)
+        return
+      }
+      const view = savedSectionView(list.threads, stale !== null && stale.ok ? stale.results : [], Date.now())
+      if (view === null) return
+      const section = this.#buildBriefAsked(featureId, view)
+      this.#briefAsked = section
+      this.#stage.parentElement?.insertBefore(section, this.#stage.nextSibling)
+    } catch (error) {
+      console.warn('Saved questions could not be read:', error)
+    }
+  }
+
+  #buildBriefAsked(featureId: string, view: NonNullable<ReturnType<typeof savedSectionView>>): HTMLElement {
+    const section = document.createElement('div')
+    section.className = 'fb-brief-asked'
+    const head = document.createElement('div')
+    head.className = 'fb-asked-head'
+    const caps = document.createElement('span')
+    caps.className = 'fb-asked-caps'
+    caps.textContent = view.heading.toUpperCase()
+    head.appendChild(caps)
+    const spacer = document.createElement('span')
+    spacer.className = 'fb-asked-spacer'
+    head.appendChild(spacer)
+    if (view.hasMore) {
+      const all = document.createElement('button')
+      all.type = 'button'
+      all.className = 'fb-asked-link'
+      all.textContent = 'See all'
+      all.addEventListener('click', () => this.#askAbout(featureId, { view: 'history' }))
+      head.appendChild(all)
+    }
+    section.appendChild(head)
+    for (const row of view.rows) section.appendChild(this.#buildAskedRow(featureId, row))
+    return section
+  }
+
+  #buildAskedRow(featureId: string, row: SavedRowView): HTMLElement {
+    const open = (): void => this.#askAbout(featureId, { entryId: row.id })
+    const wrap = document.createElement('div')
+    wrap.className = 'fb-asked-row' + (row.stale ? ' stale' : '')
+    const main = document.createElement('button')
+    main.type = 'button'
+    main.className = 'fb-asked-main'
+    const question = document.createElement('span')
+    question.className = 'fb-asked-q'
+    question.textContent = row.question
+    const meta = document.createElement('span')
+    meta.className = 'fb-asked-meta'
+    if (row.chip !== null) {
+      const chip = document.createElement('span')
+      chip.className = 'fb-asked-chip'
+      chip.textContent = row.chip
+      meta.appendChild(chip)
+    }
+    meta.append(row.meta)
+    main.append(question, meta)
+    main.addEventListener('click', open)
+    wrap.appendChild(main)
+    if (row.stale) {
+      const foot = document.createElement('div')
+      foot.className = 'fb-asked-stale'
+      const note = document.createElement('span')
+      note.textContent = 'The code under this answer changed since'
+      const again = document.createElement('button')
+      again.type = 'button'
+      again.className = 'fb-asked-again'
+      again.textContent = 'Ask again'
+      again.addEventListener('click', () => {
+        const tags: AskOpenTag[] = (row.tags.length > 0 ? row.tags : [featureId]).map((id) => ({
+          id,
+          kind: kindOfId(id) === 'part' ? 'part' : 'feature',
+        }))
+        document.dispatchEvent(
+          new CustomEvent(ASK_BLUEPRINT_EVENT, {
+            detail: { text: row.question, tags, submit: true } satisfies AskBlueprintOpenDetail,
+          }),
+        )
+      })
+      foot.append(note, again)
+      wrap.appendChild(foot)
+    }
+    return wrap
   }
 
   /**
@@ -21513,6 +21656,80 @@ const BOARD_STYLES = `
   /* THE OPEN FEATURE'S ACTIONS, ON THE HEADER. Same buttons the brief built —
      re-parented, not restyled beyond sitting on a header row: they keep the
      ghost look every other control up here already has. */
+  /* QUESTIONS ASKED — the saved answers about this feature, under the diagram.
+     (No backticks in here: this block lives inside a template literal.) */
+  .flow-board-root .fb-brief-asked {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px var(--fl-space-md, 12px) 12px;
+    border-top: 1px solid var(--fb-card-border);
+  }
+  .flow-board-root .fb-asked-head { display: flex; align-items: center; gap: 8px; }
+  .flow-board-root .fb-asked-caps {
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: var(--fl-color-text-secondary);
+  }
+  .flow-board-root .fb-asked-spacer { flex: 1; }
+  .flow-board-root .fb-asked-link,
+  .flow-board-root .fb-asked-again {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    font-size: 12px;
+    color: var(--fl-color-accent);
+    cursor: pointer;
+  }
+  .flow-board-root .fb-asked-link:hover,
+  .flow-board-root .fb-asked-again:hover { text-decoration: underline; }
+  .flow-board-root .fb-asked-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    border: 1px solid var(--fb-card-border);
+    border-radius: 8px;
+    background: var(--fl-color-surface-raised);
+  }
+  .flow-board-root .fb-asked-row.stale { border-color: var(--fb-ask-warn, var(--fb-card-border)); }
+  .flow-board-root .fb-asked-main {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px;
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .flow-board-root .fb-asked-q { font-weight: 500; }
+  .flow-board-root .fb-asked-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--fl-color-text-secondary);
+  }
+  .flow-board-root .fb-asked-chip {
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    background: var(--fl-color-surface);
+    color: var(--fl-color-accent);
+  }
+  .flow-board-root .fb-asked-stale {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 10px 10px;
+    font-size: 12px;
+    color: var(--fb-ask-warn, var(--fl-color-text-secondary));
+  }
   /* The brief's footer — under the diagram, in the same gutter the bar uses so
      the two read as one frame around the picture. */
   .flow-board-root .fb-brief-foot {

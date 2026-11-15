@@ -244,11 +244,27 @@ export class AskPanelView {
   }
 
   /** Open — with text or tags, a fresh question; with neither, where it was left. */
-  open(input: { text?: string; tags?: AskTag[] } = {}): void {
+  open(input: { text?: string; tags?: AskTag[]; view?: 'history'; entryId?: string; submit?: boolean } = {}): void {
     this.#subscribe()
     this.#staleRead = false
     this.#threadCandidates = null
-    this.#dispatch({ type: 'open', ...input })
+    const { view, entryId, submit, ...fresh } = input
+    this.#dispatch({ type: 'open', ...fresh })
+    if (entryId !== undefined) {
+      // A saved answer: the list is read (for its stale marks too) and the
+      // entry opens in place of a question.
+      this.#dispatch({ type: 'show-history' })
+      void this.#readHistory(entryId)
+      return
+    }
+    if (view === 'history') {
+      this.#showHistory()
+      return
+    }
+    if (submit === true && input.text !== undefined) {
+      this.#submit(false)
+      return
+    }
     if (input.text !== undefined) this.#suggestFrom(input.text)
     if (this.#state.view === 'compose') {
       this.#textarea.focus()
@@ -431,7 +447,7 @@ export class AskPanelView {
     void this.#readHistory()
   }
 
-  async #readHistory(): Promise<void> {
+  async #readHistory(openId?: string): Promise<void> {
     const rootId = this.#host.rootId()
     const api = window.flow.ask
     if (rootId === null || api === undefined) return
@@ -452,6 +468,8 @@ export class AskPanelView {
       return
     }
     this.#dispatch({ type: 'history', threads: list.threads, stale: stale !== null && stale.ok ? stale.results : [] })
+    const wanted = openId === undefined ? undefined : list.threads.find((thread) => thread.id === openId)
+    if (wanted !== undefined) this.#dispatch({ type: 'open-saved', thread: wanted })
   }
 
   /* ── Typing, pasting and the @ picker ───────────────────────────────── */
