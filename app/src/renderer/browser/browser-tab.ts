@@ -38,6 +38,7 @@ import { detectDevServerUrl } from './dev-server-detect'
 import { initInspectMode } from './inspect-mode'
 import { addCapturesToContext } from './browser-capture-chip'
 import { adoptBrowserScope } from './browser-scope'
+import { loadIndicator } from './load-indicator'
 import { runInWantedScope, tabScopeGate } from '../tab-scope-gate'
 import type { TabScopeKey } from '../tab-scope-model'
 
@@ -98,13 +99,15 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   // ── Element: chrome over a sandboxed <webview> in an overlaid viewport ──────
   const container = document.createElement('div')
   container.className = 'fl-browser-tab'
-  container.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:0;'
+  // min-width + overflow: nothing inside (a long URL on the loading screen)
+  // may widen the tab past its panel.
+  container.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:0;min-width:0;overflow:hidden;'
 
   // The <webview> and the empty-state overlay share a relative viewport so the
   // overlay can cover the guest's blank frame.
   const viewport = document.createElement('div')
   viewport.className = 'fl-browser-viewport'
-  viewport.style.cssText = 'position:relative;flex:1;min-height:0;width:100%;'
+  viewport.style.cssText = 'position:relative;flex:1;min-height:0;min-width:0;width:100%;overflow:hidden;'
 
   const webview = document.createElement('webview') as unknown as WebviewElement
   webview.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:0;'
@@ -149,7 +152,11 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     'background:var(--fl-color-accent, #2b6cff)', 'color:#fff',
     'font:600 12px/1.3 var(--fl-font-ui, sans-serif)',
   ].join(';')
-  viewport.append(webview as unknown as HTMLElement, overlay.element, inspectHint)
+  // A load over a page already on screen: a thin bar, never the full screen.
+  const loadBar = document.createElement('div')
+  loadBar.className = 'fl-browser-loadbar'
+  loadBar.hidden = true
+  viewport.append(webview as unknown as HTMLElement, overlay.element, loadBar, inspectHint)
 
   // Inspect mode: the toggle routes through main to the guest picker; captured
   // elements arrive as the webview's `ipc-message` events.
@@ -210,6 +217,17 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
 
   // ── Empty-state overlay driven by the webview's own load lifecycle ──────────
   let loadFailed = false
+  // Whether a real page is on screen beneath the overlay — what decides
+  // between the loading screen and the bar (`load-indicator.ts`).
+  let hasPage = false
+  /** Show that `url` is loading, keeping a page on screen when there is one. */
+  const showLoading = (url: string): void => {
+    if (loadIndicator(hasPage) === 'bar') {
+      loadBar.hidden = false
+      return
+    }
+    overlay.set('loading', { url })
+  }
   const onStartLoading = (): void => {
     loadFailed = false
     let url = ''
@@ -218,9 +236,10 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     } catch {
       // getURL throws before the guest attaches — the overlay just omits the URL.
     }
-    overlay.set('loading', { url })
+    showLoading(url)
   }
   const onStopLoading = (): void => {
+    loadBar.hidden = true
     if (loadFailed) return
     // The blank page a conversation starts on is not a page to look at: the
     // empty state (with its URL form) stays up over it.
@@ -230,7 +249,8 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     } catch {
       // Not attached yet — treat as a real load.
     }
-    overlay.set(url === BLANK_URL ? 'idle' : 'hidden')
+    hasPage = url !== BLANK_URL
+    overlay.set(hasPage ? 'hidden' : 'idle')
   }
   const onFailLoad = (event: Event): void => {
     const failure = event as WebviewFailLoadEvent
@@ -238,6 +258,8 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     if (failure.isMainFrame === false) return
     if (failure.errorCode === ERR_ABORTED) return
     loadFailed = true
+    hasPage = false
+    loadBar.hidden = true
     overlay.set('failed', {
       url: failure.validatedURL ?? '',
       description: failure.errorDescription ?? '',
@@ -317,7 +339,9 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
    *  previous owner's pages is cut. */
   const go = (url: string, fresh: boolean): void => {
     chrome.setUrl(url)
-    overlay.set('loading', { url })
+    // A new owner's page must not show the previous owner's while it loads.
+    if (fresh) hasPage = false
+    showLoading(url)
     // BEFORE THE FIRST MOUNT THERE IS NOTHING TO NAVIGATE. `src` is how the
     // guest gets its first page (the webview comes up blank if it loads while
     // detached); after that the controller drives it, because `src` does not
@@ -337,6 +361,8 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   /** Start empty: the previous owner's page goes, the empty state shows. */
   const goBlank = (): void => {
     chrome.setUrl(initialUrl ?? '')
+    hasPage = false
+    loadBar.hidden = true
     overlay.set('idle')
     if (!hasNavigated) return
     clearHistorySoon(webview.loadURL(BLANK_URL))
@@ -564,10 +590,45 @@ function ensureOverlayStyles(): void {
       font-weight: var(--fl-text-ui-weight-medium, 600);
     }
     .fl-browser-overlay-sub {
-      max-width: 420px;
+      max-width: min(420px, 100%);
       color: var(--fl-color-text-secondary);
       font-size: var(--fl-text-ui-size);
       line-height: 1.4;
+      /* A sign-in URL is one unbreakable word hundreds of characters long:
+         break it anywhere, and keep it to three lines. */
+      overflow-wrap: anywhere;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 3;
+      overflow: hidden;
+    }
+    .fl-browser-overlay { overflow: hidden; }
+    .fl-browser-loadbar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      z-index: 2;
+      overflow: hidden;
+      pointer-events: none;
+    }
+    .fl-browser-loadbar[hidden] { display: none; }
+    .fl-browser-loadbar::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 30%;
+      background: var(--fl-color-accent);
+      animation: fl-browser-loadbar 1.1s ease-in-out infinite;
+    }
+    @keyframes fl-browser-loadbar {
+      from { left: -30%; }
+      to { left: 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .fl-browser-loadbar::after { animation: none; left: 0; width: 100%; opacity: 0.6; }
     }
     .fl-browser-overlay-form {
       display: flex;
