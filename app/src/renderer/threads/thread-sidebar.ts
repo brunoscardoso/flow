@@ -74,7 +74,6 @@ import {
 import { shouldClearSearchOnThreadCreate, shouldClearSearchOnThreadRename } from './search-filter'
 import { sidebarRefreshAction, threadEventsAffectSidebar } from './sidebar-refresh-model'
 import { sidebarRowMark } from './sidebar-row-selection'
-import { applyRunUpdate, RUN_MARK_TITLE, runningThreads } from '../terminal/run-group-model'
 import { isolationMark, type IsolationSubject } from './thread-isolation'
 import { projectName, splitRoots } from './multi-project-picker'
 import { applyAccentOverrides } from '../project-accent'
@@ -331,11 +330,6 @@ export class ThreadSidebar {
    *  refresh owed on reveal (#1696). Cleared by refresh() itself: any refresh
    *  makes the list current, so the debt is settled by whichever runs first. */
   #refreshOwedWhileHidden = false
-  /** Conversations with a Run going — the small running mark on their rows. */
-  #runningThreads = new Set<string>()
-  /** The running set changed while the sidebar was hidden — one re-render
-   *  (no read) owed on reveal. */
-  #runMarksOwed = false
   /** Fires the owed refresh on the hidden→visible transition (#1696).
    *  `offsetParent` is null under any display:none ancestor — both the rail
    *  switch (pane display) and the collapse mode (`#listWrap.hidden`) hide the
@@ -556,16 +550,6 @@ export class ThreadSidebar {
   /** Load roots + threads and subscribe to change events. */
   async init(): Promise<void> {
     const api = window.flow
-    void api.run
-      ?.states()
-      .then((summaries) => {
-        const running = runningThreads(summaries)
-        const same = running.size === this.#runningThreads.size && [...running].every((id) => this.#runningThreads.has(id))
-        if (same) return
-        this.#runningThreads = running
-        this.#onRunMarksChanged()
-      })
-      .catch(() => undefined)
     this.#unsubscribes.push(
       // #1696: a streaming turn broadcasts a 50ms event batch continuously,
       // and every one used to refetch ALL threads plus every root's tasks and
@@ -579,16 +563,6 @@ export class ThreadSidebar {
       api.tasks.onUpdated(() => {
         this.#onChangeBatch(true)
       }),
-      // A Run going in a conversation marks its row. `run:updated` fires on
-      // transitions only; the rows are re-drawn only when a conversation
-      // starts or stops having a Run, and only while the sidebar is on screen
-      // (forbidden-pattern #14 — never a full refresh per event).
-      api.run?.onUpdated((state) => {
-        const next = applyRunUpdate(this.#runningThreads, state)
-        if (!next.changed) return
-        this.#runningThreads = next.running
-        this.#onRunMarksChanged()
-      }) ?? (() => undefined),
       // The chat's `—` asks; this panel decides and remembers. It is an ASK,
       // not a reach: the control cannot see the persisted mode and must not
       // have to, and the same event works from anywhere else that ever grows
@@ -667,11 +641,8 @@ export class ThreadSidebar {
     // the hidden→visible transition — rail switch back to Threads, sidebar
     // reopen, or collapse-mode expand — and settles the one owed refresh.
     this.#revealObserver = new IntersectionObserver((entries) => {
-      if (!entries.some((entry) => entry.isIntersecting)) return
-      if (this.#refreshOwedWhileHidden) void this.refresh()
-      else if (this.#runMarksOwed) {
-        this.#runMarksOwed = false
-        this.#renderRows()
+      if (entries.some((entry) => entry.isIntersecting) && this.#refreshOwedWhileHidden) {
+        void this.refresh()
       }
     })
     this.#revealObserver.observe(this.#listWrap)
@@ -795,24 +766,6 @@ export class ThreadSidebar {
   /** Route a change batch per visibility (#1696): an irrelevant batch is
    *  dropped by the caller; a relevant one refreshes now when the list is on
    *  screen, or marks one refresh owed on reveal when it is not. */
-  #onRunMarksChanged(): void {
-    if (this.#disposed) return
-    if (this.#listWrap.offsetParent !== null) this.#renderRows()
-    else this.#runMarksOwed = true
-  }
-
-  /** The small running mark for a conversation with a Run going, or null. */
-  #runMark(threadId: string | null): HTMLElement | null {
-    if (threadId === null || !this.#runningThreads.has(threadId)) return null
-    const mark = document.createElement('fl-icon')
-    mark.setAttribute('name', 'play')
-    mark.setAttribute('size', '10')
-    mark.title = RUN_MARK_TITLE
-    mark.setAttribute('aria-label', RUN_MARK_TITLE)
-    mark.style.cssText = 'flex:none;color:var(--fl-color-success);'
-    return mark
-  }
-
   #onChangeBatch(affectsSidebar: boolean): void {
     const action = sidebarRefreshAction({
       affectsSidebar,
@@ -2121,8 +2074,6 @@ export class ThreadSidebar {
       pin.style.cssText = 'flex:none;color:var(--fl-color-text-secondary);'
       rowEl.appendChild(pin)
     }
-    const runMark = this.#runMark(thread.id)
-    if (runMark !== null) rowEl.appendChild(runMark)
 
     const title = document.createElement('span')
     title.style.cssText = [
@@ -2601,8 +2552,6 @@ export class ThreadSidebar {
       pin.style.cssText = 'flex:none;color:var(--fl-color-text-secondary);'
       rowEl.appendChild(pin)
     }
-    const taskRunMark = this.#runMark(thread?.id ?? null)
-    if (taskRunMark !== null) rowEl.appendChild(taskRunMark)
 
     const title = document.createElement('span')
     title.style.cssText = [

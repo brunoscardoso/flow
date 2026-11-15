@@ -9,7 +9,6 @@
  */
 import type {
   RunGroupState,
-  RunScopeSummary,
   RunStepState,
   RunStepStatus,
   RunSuggestion,
@@ -287,39 +286,3 @@ export function askAgentPrompt(
 
 // ─── the sidebar's running mark ──────────────────────────────────────────────
 
-/** The conversation a Run's scope key belongs to, or null for a project view. */
-export function threadIdOfScopeKey(scopeKey: string): string | null {
-  const at = scopeKey.lastIndexOf('::')
-  if (at < 0) return null
-  const id = scopeKey.slice(at + 2)
-  return id === '' ? null : id
-}
-
-/** Conversations with a Run going, from `run.states`. */
-export function runningThreads(summaries: readonly RunScopeSummary[]): Set<string> {
-  const out = new Set<string>()
-  for (const summary of summaries) {
-    if (summary.threadId !== null && summary.running > 0) out.add(summary.threadId)
-  }
-  return out
-}
-
-/**
- * Fold one `run:updated` into the running set. `changed` is false when the
- * update says nothing the sidebar draws — the caller then does nothing
- * (forbidden-pattern #14: no repaint per event).
- */
-export function applyRunUpdate(
-  running: ReadonlySet<string>,
-  state: RunGroupState,
-): { running: Set<string>; changed: boolean } {
-  const threadId = threadIdOfScopeKey(state.scopeKey)
-  const next = new Set(running)
-  if (threadId === null) return { running: next, changed: false }
-  const had = next.has(threadId)
-  if (state.active) next.add(threadId)
-  else next.delete(threadId)
-  return { running: next, changed: had !== state.active }
-}
-
-export const RUN_MARK_TITLE = 'A Run is going in this conversation'

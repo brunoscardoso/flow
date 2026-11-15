@@ -1,6 +1,5 @@
 import type { RunGroupState, RunStepState, RunStepStatus, RunSuggestion, RunView } from '../../shared/run-setup'
 import {
-  applyRunUpdate,
   askAgentPrompt,
   groupHasRun,
   orderRunTabs,
@@ -8,13 +7,10 @@ import {
   pendingTabId,
   pendingTabTooltip,
   pillFace,
-  RUN_MARK_TITLE,
   RUN_STRINGS,
-  runningThreads,
   stepKeyOfPendingTab,
   stepOfTerminal,
   stepTabFace,
-  threadIdOfScopeKey,
 } from './run-group-model'
 import { SETUP_STRINGS, setupTitle } from './run-setup-model'
 
@@ -188,28 +184,6 @@ describe('a step whose project is not on this computer', () => {
   })
 })
 
-describe('the sidebar running mark', () => {
-  it('reads conversations from summaries and scope keys', () => {
-    expect(threadIdOfScopeKey(`${ROOT}::thread-1`)).toBe('thread-1')
-    expect(threadIdOfScopeKey(`${ROOT}::`)).toBeNull()
-    expect(
-      [...runningThreads([
-        { scopeKey: 'a::t1', rootPath: 'a', threadId: 't1', running: 2 },
-        { scopeKey: 'a::', rootPath: 'a', threadId: null, running: 1 },
-        { scopeKey: 'a::t2', rootPath: 'a', threadId: 't2', running: 0 },
-      ])],
-    ).toEqual(['t1'])
-  })
-
-  it('reports a change only when a conversation starts or stops having a Run', () => {
-    const first = applyRunUpdate(new Set(), group([step('a', 'running')], true))
-    expect(first.changed).toBe(true)
-    expect(applyRunUpdate(first.running, group([step('a', 'ready')], true)).changed).toBe(false)
-    expect(applyRunUpdate(first.running, group([step('a', 'stopped')], false))).toEqual({ running: new Set(), changed: true })
-    expect(applyRunUpdate(new Set(), { scopeKey: `${ROOT}::`, active: true, steps: [] }).changed).toBe(false)
-  })
-})
-
 // ─── forbidden-pattern #12: no command, path or setting in UI text ───────────
 
 const FORBIDDEN: Array<[string, RegExp]> = [
@@ -228,7 +202,6 @@ function uiStrings(): string[] {
     ...Object.values(RUN_STRINGS),
     ...Object.values(SETUP_STRINGS),
     setupTitle([{ name: 'jupiter-app' }, { name: 'jupiter-core' }]),
-    RUN_MARK_TITLE,
   ]
   const statuses: RunStepStatus[] = ['idle', 'waiting', 'starting', 'running', 'ready', 'exited', 'stopped', 'blocked', 'timed-out']
   for (const status of statuses) {
