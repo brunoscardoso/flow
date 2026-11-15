@@ -365,6 +365,10 @@ export interface LaunchpadMenu {
   empty: boolean
   /** "Run all running steps": shown when there are running steps; disabled while they run. */
   runAll: { shown: boolean; disabled: boolean; title: string }
+  /** "Reload all": shown once the running steps have been started (moved here from the pill). */
+  reloadAll: boolean
+  /** "Stop all": shown while the running steps run (moved here from the pill). */
+  stopAll: boolean
 }
 
 /**
@@ -394,6 +398,7 @@ export function launchpadMenu(view: RunView | null): LaunchpadMenu {
   }
   const services = view?.resolution.steps.length ?? 0
   const active = view?.state.active ?? false
+  const face = pillFace(view)
   return {
     groups,
     empty: groups.length === 0,
@@ -402,17 +407,27 @@ export function launchpadMenu(view: RunView | null): LaunchpadMenu {
       disabled: services === 0 || active,
       title: services === 0 ? RUN_STRINGS.runAllNone : active ? RUN_STRINGS.runAllGoing : RUN_STRINGS.runTitle,
     },
+    reloadAll: face.canReload,
+    stopAll: face.canStop,
   }
 }
 
 /** The menu's items in keyboard order (arrow keys move through them). */
-export type LaunchpadMenuEntry = { kind: 'once'; key: string } | { kind: 'add' } | { kind: 'run-all' } | { kind: 'edit' }
+export type LaunchpadMenuEntry =
+  | { kind: 'once'; key: string }
+  | { kind: 'add' }
+  | { kind: 'run-all' }
+  | { kind: 'reload-all' }
+  | { kind: 'stop-all' }
+  | { kind: 'edit' }
 
 export function launchpadMenuEntries(menu: LaunchpadMenu): LaunchpadMenuEntry[] {
   const out: LaunchpadMenuEntry[] = []
   for (const group of menu.groups) for (const item of group.items) if (!item.disabled) out.push({ kind: 'once', key: item.key })
   if (menu.empty) out.push({ kind: 'add' })
   if (menu.runAll.shown && !menu.runAll.disabled) out.push({ kind: 'run-all' })
+  if (menu.reloadAll) out.push({ kind: 'reload-all' })
+  if (menu.stopAll) out.push({ kind: 'stop-all' })
   out.push({ kind: 'edit' })
   return out
 }

@@ -70,23 +70,6 @@ function icon(name: string, size: string): HTMLElement {
   return glyph
 }
 
-function iconButton(icon: string, label: string, title: string, onClick: () => void): HTMLButtonElement {
-  const node = document.createElement('button')
-  node.type = 'button'
-  node.className = 'fl-run-pill-btn'
-  node.title = title
-  node.setAttribute('aria-label', label)
-  const glyph = document.createElement('fl-icon')
-  glyph.setAttribute('name', icon)
-  glyph.setAttribute('size', '12')
-  node.appendChild(glyph)
-  node.addEventListener('click', (event) => {
-    event.stopPropagation()
-    onClick()
-  })
-  return node
-}
-
 export class RunGroupView {
   /** Goes before the tab strip in the terminal header. */
   readonly element: HTMLElement
@@ -382,6 +365,8 @@ export class RunGroupView {
       close()
       if (entry.kind === 'once') this.#pressOnce(entry.key)
       else if (entry.kind === 'run-all') this.#act((api, scope) => api.start({ scope }))
+      else if (entry.kind === 'reload-all') this.#act((api, scope) => api.reload({ scope }))
+      else if (entry.kind === 'stop-all') this.#act((api, scope) => api.stop({ scope }))
       else this.#openSetup({ addOnce: entry.kind === 'add' })
     }
     const row = (entry: LaunchpadMenuEntry, className: string, disabled = false): HTMLButtonElement => {
@@ -452,6 +437,18 @@ export class RunGroupView {
       runAll.title = menu.runAll.title
       runAll.append(icon('play', '12'), document.createTextNode(RUN_STRINGS.runAll))
       element.appendChild(runAll)
+    }
+    if (menu.reloadAll) {
+      const reload = row({ kind: 'reload-all' }, 'fl-run-menu-item small')
+      reload.title = RUN_STRINGS.reloadAllTitle
+      reload.append(icon('refresh', '12'), document.createTextNode(RUN_STRINGS.reloadAll))
+      element.appendChild(reload)
+    }
+    if (menu.stopAll) {
+      const stop = row({ kind: 'stop-all' }, 'fl-run-menu-item small')
+      stop.title = RUN_STRINGS.stopAllTitle
+      stop.append(icon('square', '12'), document.createTextNode(RUN_STRINGS.stopAll))
+      element.appendChild(stop)
     }
     const edit = row({ kind: 'edit' }, 'fl-run-menu-item small')
     edit.append(icon('settings', '12'), document.createTextNode(RUN_STRINGS.editLaunchpad))
@@ -637,20 +634,8 @@ export class RunGroupView {
       }
     })
     pill.appendChild(open)
-    // No label or count while steps run: the step tabs already show each
-    // step's state, so the pill keeps only its actions (user decision).
-    if (face.canReload) {
-      pill.appendChild(
-        iconButton('refresh', RUN_STRINGS.reloadAll, RUN_STRINGS.reloadAllTitle, () =>
-          this.#act((api, scope) => api.reload({ scope })),
-        ),
-      )
-    }
-    if (face.canStop) {
-      pill.appendChild(
-        iconButton('square', RUN_STRINGS.stopAll, RUN_STRINGS.stopAllTitle, () => this.#act((api, scope) => api.stop({ scope }))),
-      )
-    }
+    // Reload all and Stop all live in the menu (user decision 2026-11-15): the
+    // pill is only the Launchpad name and its chevron.
     root.append(pill)
   }
 }
@@ -679,7 +664,7 @@ function injectRunStyles(): void {
     .fl-run-setup-entry:hover { color: var(--fl-color-text); border-color: var(--fl-color-accent); }
     .fl-run-pill {
       display: inline-flex; align-items: center; gap: var(--fl-space-xs);
-      height: 22px; padding: 0 2px 0 var(--fl-space-sm);
+      height: 22px; padding: 0 var(--fl-space-sm);
       border: var(--fl-border-width) solid transparent;
       border-radius: var(--fl-radius-sm);
       background: transparent;

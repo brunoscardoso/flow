@@ -347,7 +347,9 @@ describe('the Launchpad menu', () => {
     const going = launchpadMenu(view([step('web', 'running')], true))
     expect(going.empty).toBe(true)
     expect(going.runAll).toEqual({ shown: true, disabled: true, title: RUN_STRINGS.runAllGoing })
-    expect(launchpadMenuEntries(going)).toEqual([{ kind: 'add' }, { kind: 'edit' }])
+    // While steps run, Reload all and Stop all are in the menu (moved from the pill).
+    expect(going).toMatchObject({ reloadAll: true, stopAll: true })
+    expect(launchpadMenuEntries(going)).toEqual([{ kind: 'add' }, { kind: 'reload-all' }, { kind: 'stop-all' }, { kind: 'edit' }])
     const actionsOnly = launchpadMenu(withOnce(view([], false, 0), [onceStep('migrate')]))
     expect(actionsOnly.runAll.shown).toBe(false)
     expect(launchpadMenuEntries(actionsOnly)).toEqual([{ kind: 'once', key: '/work/jupiter::migrate' }, { kind: 'edit' }])
