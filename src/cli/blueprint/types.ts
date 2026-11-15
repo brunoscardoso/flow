@@ -406,6 +406,12 @@ export interface QaSource {
   file?: string;
   /** Content stamp of `file` at write time — minted by the writer, never supplied. */
   hashStamp?: AnchorHashStamp;
+  /**
+   * Workspace answers only: the project slug the source belongs to. `file` is
+   * relative to THAT project's checkout and stamped against it. Absent on a
+   * project answer, whose sources all belong to the one repo.
+   */
+  project?: string;
 }
 
 /** One saved answer (or follow-up) in `qa.jsonl`. */
@@ -437,6 +443,42 @@ export interface QaEntry {
   partial: boolean;
   /** "in progress on branch X" — unmerged work is context, never a fact. */
   branchInProgress?: string;
+  /**
+   * Set ONLY on a pointer read back from a project's log: the answer itself is
+   * saved in the Workspace repository (`<workspace>/qa.jsonl`) under
+   * `entryId`, and this project holds only its question and tags. `answer` is
+   * empty on such an entry — read the Workspace record for the rest.
+   */
+  workspaceAnswer?: QaWorkspaceRef;
+}
+
+/** Where a pointer's full answer lives. */
+export interface QaWorkspaceRef {
+  /** The Workspace's slug. */
+  workspace: string;
+  /** The Workspace record's id (`wqa-…`) — also the pointer's own id. */
+  entryId: string;
+}
+
+/**
+ * The line a Workspace answer leaves in each cited local project's own
+ * `qa.jsonl`. It has no `answer` field on purpose, so an older reader skips it
+ * instead of listing an empty answer; the current reader lists it as a thread
+ * with `workspaceAnswer` set. Written ONLY by `appendWorkspaceQaEntry`.
+ */
+export interface QaPointerEntry {
+  kind: 'workspace-pointer';
+  /** The Workspace record's id — a follow-up's pointer folds under its parent's. */
+  id: string;
+  ts: string;
+  workspace: string;
+  author: string;
+  question: string;
+  /** The Workspace tags that concern this project (its features, itself, its connections). */
+  tags: string[];
+  /** This project's feature-backed sources, without files (staleness is the Workspace record's). */
+  sources: QaSource[];
+  parentId?: string;
 }
 
 /** What a caller hands `appendQaEntry`: the record without writer-minted fields. */
@@ -469,4 +511,61 @@ export interface QaStaleness {
   changedFiles: string[];
   /** Stamped files that are gone (or escape the repo root). */
   missingFiles: string[];
+}
+
+// ── Ask the Blueprint at Workspace level (`<workspace>/qa.jsonl`) ──────────
+// One line per Workspace answer (or follow-up) at the Workspace repository's
+// root, beside `links.jsonl`, written ONLY by `appendWorkspaceQaEntry`, which
+// also leaves a `QaPointerEntry` in each cited local project's own log.
+
+/**
+ * One project of the Workspace as the writer sees it: where its knowledge is
+ * shared and, when it is on this computer, its checkout.
+ */
+export interface WorkspaceQaProject {
+  slug: string;
+  name: string;
+  /** This machine's checkout, or null when the project is not on this computer. */
+  localPath: string | null;
+  /** The project's knowledge folder inside the Workspace repository. */
+  flowPath: string;
+}
+
+/** Every project of the Workspace, by slug. */
+export type WorkspaceQaProjects = Readonly<Record<string, WorkspaceQaProject>>;
+
+/** One saved Workspace answer (or follow-up). Sources always name their project. */
+export interface WorkspaceQaEntry extends QaEntry {
+  /** Minted by the writer: `wqa-<yyyymmddThhmmss>-<hex>`. */
+  id: string;
+  /** The Workspace's slug. */
+  workspace: string;
+  /** Projects whose code was read for this answer (all on this computer at the time). */
+  projectsRead: string[];
+  /** Projects in scope answered from shared knowledge only (not read, or not on this computer). */
+  knowledgeOnly: string[];
+  /** Every project the tags or sources name, in Workspace order. */
+  cited: string[];
+}
+
+/** What a caller hands `appendWorkspaceQaEntry`. */
+export interface WorkspaceQaRecordInput extends Omit<QaRecordInput, 'sources'> {
+  sources?: Array<Omit<QaSource, 'hashStamp'>>;
+  projectsRead?: string[];
+  knowledgeOnly?: string[];
+}
+
+/** A Workspace root entry with its follow-ups attached. */
+export interface WorkspaceQaThread extends WorkspaceQaEntry {
+  followUps: WorkspaceQaEntry[];
+}
+
+/**
+ * "Has the code under this Workspace answer changed?", per project. Files are
+ * written `<project>/<path>`. A project whose stamped files cannot be checked
+ * here (not on this computer, or no longer in the Workspace) is listed in
+ * `notChecked` and never counted as fresh evidence.
+ */
+export interface WorkspaceQaStaleness extends QaStaleness {
+  notChecked: string[];
 }

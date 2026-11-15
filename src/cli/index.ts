@@ -154,7 +154,7 @@ program
   )
   .option(
     '--input <file>',
-    'qa record/follow-up: the saved-answer JSON to write, from a file or - for stdin (qa list/stale take --feature and --json)'
+    'qa record/follow-up: the saved-answer JSON to write, from a file or - for stdin (qa list/stale take --feature and --json; add --workspace for the Workspace log)'
   )
   .option(
     '--project <name>',
@@ -185,8 +185,13 @@ program
     "The plan's starting commit for storyline --plan (default: the run's recorded start, else HEAD when the story's files differ from it)",
   )
   .option(
-    '--workspace <w>',
-    'Which Workspace, when the repo is in more than one (workspace graph, features ports)',
+    '--workspace [w]',
+    'Which Workspace, when the repo is in more than one (workspace graph, features ports); qa: switches to the Workspace answer log of --target\'s Workspace (bare, or naming which)',
+  )
+  .option(
+    '--tag <tag>',
+    'qa list/stale --workspace: the scope as a Workspace tag — feature:<project>::<slug>[/<part>], project:<project> or link:<project>::<project> — repeatable; none = the whole Workspace',
+    (value: string, previous: string[] = []) => [...previous, value],
   )
   .option(
     '--endpoint <endpoint>',
