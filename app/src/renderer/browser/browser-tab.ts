@@ -127,10 +127,16 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     console.warn('flow: browser guest preload URL missing — inspect mode disabled')
   }
 
-  const overlay = buildOverlay((url) => {
-    void browser.navigate({ url }).catch((error: unknown) => console.warn('flow: browser navigate failed', error))
-    chrome.setUrl(url)
-  })
+  // The best-guess dev-server URL — declared before the overlay, which reads it
+  // while it is built (a later `const` would be read before it exists).
+  const initialUrl = detectDevServerUrl()
+  // Through `go`, never straight to the controller: before the first page the
+  // guest is not attached, so a controller navigate goes nowhere — the Open
+  // button "did nothing" exactly then.
+  const overlay = buildOverlay(
+    (url) => go(url, false),
+    () => initialUrl ?? 'http://localhost:3000',
+  )
   // Host-side inspect affordance — a strip shown the moment inspect is armed, so
   // the user gets feedback even before the guest's own crosshair paints. The
   // guest bridge still draws the per-element highlight + does the selecting.
@@ -159,10 +165,7 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     onReload: () => {
       void browser.reload({}).catch((error: unknown) => console.warn('flow: browser reload failed', error))
     },
-    onNavigate: (url) => {
-      chrome.setUrl(url)
-      void browser.navigate({ url }).catch((error: unknown) => console.warn('flow: browser navigate failed', error))
-    },
+    onNavigate: (url) => go(url, false),
     onToggleInspect: (on) => {
       inspectMode.setActive(on)
       inspectHint.hidden = !on
@@ -246,11 +249,14 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   webview.addEventListener('did-fail-load', onFailLoad)
 
   // ── Live toolbar state from the webview's own navigation events ─────────────
+  // The blank page under the empty state is not an address anyone typed: the
+  // bar keeps showing where the tab means to go (the dev server it guessed).
+  const showUrl = (url: string): void => chrome.setUrl(url === BLANK_URL ? (initialUrl ?? '') : url)
   const syncNavState = (): void => {
     // getURL/canGo* exist only after the guest has attached; guard so an early
     // event (dom-ready before first nav) never throws.
     try {
-      chrome.setUrl(webview.getURL())
+      showUrl(webview.getURL())
       chrome.setCanGoBack(webview.canGoBack())
       chrome.setCanGoForward(webview.canGoForward())
     } catch {
@@ -259,7 +265,7 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   }
   const onNavigated = (event: Event): void => {
     const url = (event as WebviewNavigationEvent).url
-    if (typeof url === 'string') chrome.setUrl(url)
+    if (typeof url === 'string') showUrl(url)
     syncNavState()
   }
   webview.addEventListener('did-navigate', onNavigated)
@@ -270,7 +276,6 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   // ── Initial target: the best-guess dev-server URL, loaded on first OPEN ─────
   // Deferred (not set at construction) because a <webview> that loads its guest
   // while detached from the document can come up blank. The URL bar goes anywhere.
-  const initialUrl = detectDevServerUrl()
   chrome.setUrl(initialUrl ?? '')
   overlay.set(initialUrl !== null ? 'loading' : 'idle', { url: initialUrl ?? '' })
   let hasNavigated = false
@@ -444,7 +449,7 @@ interface OverlayDetail {
  * inline "enter a URL" affordance so the overlay is a way OUT of the empty state,
  * not just a sign (forbidden-pattern #12 — offer an action, not a dead end).
  */
-function buildOverlay(onNavigate: (url: string) => void): {
+function buildOverlay(onNavigate: (url: string) => void, defaultUrl: () => string): {
   element: HTMLElement
   set: (state: OverlayState, detail?: OverlayDetail) => void
 } {
@@ -477,7 +482,8 @@ function buildOverlay(onNavigate: (url: string) => void): {
   go.textContent = 'Open'
   form.append(input, go)
   const open = (): void => {
-    const value = input.value.trim()
+    // An empty field opens the address it suggests, not nothing.
+    const value = input.value.trim() || defaultUrl()
     if (value.length > 0) onNavigate(normalizeUrl(value))
   }
   form.addEventListener('submit', (event) => {
@@ -510,8 +516,10 @@ function buildOverlay(onNavigate: (url: string) => void): {
       if (detail.url) input.value = detail.url
     } else {
       title.textContent = 'No page open'
-      sub.textContent = 'Enter a URL to load, or start your dev server (e.g. http://localhost:3000):'
+      sub.textContent = 'Start your dev server, then open it here — or enter another address:'
       form.hidden = false
+      input.placeholder = defaultUrl()
+      if (input.value.trim() === '') input.value = defaultUrl()
     }
   }
   set('idle')
