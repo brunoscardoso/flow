@@ -66,10 +66,11 @@ test('the Sync status header button is gone — no sync claim exists in the no-p
   // click is offered: the learn chip is hidden, and so is the header Learning
   // button that now stands where "New Blueprint" used to.
   await expect(window.locator('.flow-board-root .fb-learn-chip')).toBeHidden()
-  const learning = window
-    .locator('.flow-board-root .fb-header fl-button')
-    .filter({ hasText: 'Learn' })
-  if ((await learning.count()) > 0) await expect(learning.first()).toBeHidden()
+  // The tile IS in the DOM (positive: the guard cannot pass because the selector
+  // matches nothing) and has no way to be pressed.
+  const learning = window.locator('.flow-board-root .fb-header button.fb-learn-tile[aria-label="Learn"]')
+  await expect(learning).toHaveCount(1)
+  await expect(learning).toBeHidden()
 
   expect(errors, `uncaught errors:\n${errors.join('\n')}`).toEqual([])
 })

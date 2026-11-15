@@ -11,6 +11,9 @@ import type { CagedSessionParams, CliRunResult } from '../agent/learn-session'
 import { gatherAskContext, type AskContextDeps, type AskResolvedScope, type AskScopeProject } from './ask-context'
 import { resolveAskScope, type AskScopeReads } from './ask-ipc'
 import {
+  ASK_DIG_MAX_MS,
+  ASK_DIG_MAX_READS,
+  ASK_WORKSPACE_DIG_MAX_MS,
   ASK_WORKSPACE_DIG_MAX_READS,
   resolveSources,
   runAsk,
@@ -358,5 +361,92 @@ describe('runAsk in Workspace scope', () => {
     expect(result.outcome).toBe('partial')
     expect(result.answer?.projectsRead).toEqual(['backend'])
     expect(result.answer?.couldNotFind).toMatch(/Code not read in Frontend and Mobile\./)
+  })
+  it('the Workspace dig budget is 60 reads and 4 minutes, wider than the project ask, and the 60th read stops the dig', async () => {
+    expect([ASK_WORKSPACE_DIG_MAX_READS, ASK_WORKSPACE_DIG_MAX_MS]).toEqual([60, 4 * 60_000])
+    expect(ASK_WORKSPACE_DIG_MAX_READS).toBeGreaterThan(ASK_DIG_MAX_READS)
+    expect(ASK_WORKSPACE_DIG_MAX_MS).toBeGreaterThan(ASK_DIG_MAX_MS)
+
+    let abortedAt59: boolean | null = null
+    let abortedAt60: boolean | null = null
+    const h = harness([
+      async () => JSON.stringify({ explanation: 'Probably.', knowledge: 'thin', sources: [] }),
+      async (params) => {
+        for (let i = 1; i <= 59; i += 1) params.onRead?.(`${BACKEND}/src/engine.ts`)
+        abortedAt59 = params.abortSignal?.aborted ?? null
+        params.onRead?.(`${BACKEND}/src/engine.ts`)
+        abortedAt60 = params.abortSignal?.aborted ?? null
+        return ''
+      },
+    ])
+    // No `limits` override: the defaults of a Workspace ask are what is under test.
+    const result = await runAsk(request(scope()), h.deps)
+    expect(h.sessions).toHaveLength(2) // the positive: the dig ran
+    expect(abortedAt59).toBe(false)
+    expect(abortedAt60).toBe(true)
+    expect(result.outcome).toBe('partial')
+  })
+
+  it('a Workspace ask whose only readable code is the board project digs with no extra roots, still contained', async () => {
+    const h = harness([
+      async () => JSON.stringify({ explanation: 'Probably.', knowledge: 'thin', sources: [] }),
+      async () => JSON.stringify({ explanation: 'Found.', sources: [] }),
+    ])
+    const s = scope({ projects: [project('frontend', FRONTEND, ['feature:chats']), project('mobile', null, ['feature:login'])] })
+    await runAsk(request(s), h.deps)
+    expect(h.sessions.map((session) => session.cwd)).toEqual([FRONTEND, FRONTEND])
+    // Present and empty is "contained to the cwd", not "no containment".
+    expect(h.sessions.map((session) => session.readRoots)).toEqual([[], []])
+  })
+})
+
+describe('gatherAskContext budget across many projects', () => {
+  const many = (slugs: string[], perProject: number): AskResolvedScope => ({
+    workspace: { slug: 'team', name: 'Team' },
+    projects: slugs.map((slug) =>
+      project(slug, `/work/${slug}`, Array.from({ length: perProject }, (_, i) => `feature:f${i}`)),
+    ),
+    workspaceProjects: slugs,
+    links: [],
+  })
+  const deps = (notes: number): AskContextDeps => ({
+    searchKnowledge: async () => [],
+    readFeatureGraph: async () => ({ nodes: [], edges: [] }),
+    readNotes: async () => Array.from({ length: notes }, (_, i) => ({ ts: String(i), text: `note ${i}`, anchors: [] })),
+    threadStore: { getThread: () => null, listMessages: () => [], listToolCallPaths: () => [] },
+    git: async () => ({ ok: false, stdout: '' }),
+  })
+
+  it('six projects share the prompt budget: no project crowds the rest out, and a tagged feature always survives', async () => {
+    const slugs = ['a', 'b', 'c', 'd', 'e', 'f']
+    const s = many(slugs, 60)
+    const tag = 'feature:f::f59' // the last of the last project: the cheapest to lose
+    const context = await gatherAskContext({ rootPath: '/work/a', question: 'q', tags: [tag], conversationIds: [], workspace: s }, deps(30))
+    const byProject = new Map<string, number>()
+    for (const feature of context.features) {
+      const owner = feature.id.split('::')[0].replace('feature:', '')
+      byProject.set(owner, (byProject.get(owner) ?? 0) + 1)
+    }
+    // The positive first: every project is represented.
+    expect([...byProject.keys()].sort()).toEqual(slugs)
+    expect(context.features.length).toBeLessThanOrEqual(120)
+    for (const count of byProject.values()) expect(count).toBeLessThanOrEqual(20)
+    expect(context.features.find((feature) => feature.id === tag)).toMatchObject({ tagged: true })
+    // Notes: a bounded share per project, never one project's whole log.
+    const perProjectNotes = new Map<string, number>()
+    for (const note of context.notes) perProjectNotes.set(note.project ?? '', (perProjectNotes.get(note.project ?? '') ?? 0) + 1)
+    for (const count of perProjectNotes.values()) expect(count).toBeLessThanOrEqual(3)
+    expect(context.knownIds).toContain(tag)
+  })
+
+  it('links are kept only between two in-scope projects and capped', async () => {
+    const s = many(['a', 'b'], 2)
+    s.links = [
+      ...Array.from({ length: 60 }, (_, i) => ({ kind: 'calls', from: `a/x${i}`, to: `b/y${i}`, fromProject: 'a', toProject: 'b' })),
+      { kind: 'calls', from: 'a/x', to: 'z/y', fromProject: 'a', toProject: 'z' },
+    ] as AskResolvedScope['links']
+    const context = await gatherAskContext({ rootPath: '/work/a', question: 'q', tags: [], conversationIds: [], workspace: s }, deps(0))
+    expect(context.workspace?.links.length).toBe(40)
+    expect(context.workspace?.links.every((link) => link.fromProject !== 'z' && link.toProject !== 'z')).toBe(true)
   })
 })

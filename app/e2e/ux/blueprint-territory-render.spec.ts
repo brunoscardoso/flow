@@ -400,12 +400,13 @@ test.fixme('a cell is a dot and a name; the second line and the control are earn
   expect(block!.height, 'the title block is more than one line tall').toBeLessThan(24)
   await expect(window.locator('.fb-terr-block')).toContainText('area = lines of code')
 
-  // Ask the brain lives at the strip's right end, at the ROOT only.
-  const ask = await boxOf(window, '.fb-terr-ask')
-  expect(ask, 'the Ask the brain field is not on the strip').not.toBeNull()
-  expect(ask!.x, 'Ask the brain is not at the right end of the strip').toBeGreaterThan(
-    strip!.x + strip!.width / 2,
-  )
+  // The Ask field lives in the board HEADER now (the strip's keyword box is gone).
+  const ask = await boxOf(window, '[data-ask="field"]')
+  expect(ask, 'the Ask field is not in the header').not.toBeNull()
+  expect(ask!.width, 'the Ask field paints nothing').toBeGreaterThan(40)
+  const header = await boxOf(window, '.flow-board-root .fb-header')
+  expect(header, 'the board header is not in the DOM').not.toBeNull()
+  expect(ask!.y, 'the Ask field is not inside the header band').toBeLessThan(header!.y + header!.height)
 })
 
 // FIXME (unrelated to plan cell-hover-diagram): the root crumb is the project's name in a Workspace, not 'Features' (the header-control repair above is verified past it)

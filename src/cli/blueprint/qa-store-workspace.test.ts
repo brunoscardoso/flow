@@ -18,6 +18,8 @@ import { join } from 'node:path';
 const { createWorkspace, linkRepo } = await import('../handlers/workspace-model.js');
 const { classifyKnowledgePathDetailed } = await import('../handlers/knowledge-classes.js');
 const {
+  appendQaEntry,
+  qaStaleness,
   appendWorkspaceQaEntry,
   listQaForFeature,
   listWorkspaceQa,
@@ -154,6 +156,28 @@ describeWithGit('Workspace Q&A store', () => {
     expect(thread).toMatchObject({ id: entry.id, question: input.question, answer: '', workspaceAnswer: { workspace: 'team', entryId: entry.id } });
     expect(listQaForFeature(repos.frontend, 'chats').map((t) => t.id)).toEqual([entry.id]);
     expect(listQaForFeature(repos.backend, 'chat-engine').map((t) => t.id)).toEqual([entry.id]);
+  });
+
+  it('an entry written before Workspace answers existed still reads, folds and checks staleness beside a pointer', () => {
+    // The old shape first: a plain project answer, no workspace field at all.
+    const old = appendQaEntry(repos.frontend, {
+      author: 'Test Person',
+      question: 'What renders the chat list?',
+      answer: 'The Chats screen.',
+      tags: ['feature:chats'],
+      sources: [{ label: 'Chats screen', file: 'src/chats.tsx', featureId: 'feature:chats' }],
+    }, new Date('2026-11-01T09:00:00.000Z'));
+    expect(old).not.toHaveProperty('workspace');
+
+    const s = scope();
+    const entry = appendWorkspaceQaEntry(s.workspace.path, s.projects, input, T1);
+    const threads = readQaThreads(repos.frontend);
+    expect(threads.map((t) => t.id).sort()).toEqual([old.id, entry.id].sort());
+    expect(threads.find((t) => t.id === old.id)).toMatchObject({ answer: 'The Chats screen.' });
+    expect(threads.find((t) => t.id === old.id)).not.toHaveProperty('workspaceAnswer');
+    expect(listQaForFeature(repos.frontend, 'chats').map((t) => t.id).sort()).toEqual([old.id, entry.id].sort());
+    // Project staleness keeps working for the old entry.
+    expect(qaStaleness(repos.frontend, readQaEntries(repos.frontend).filter((e) => e.id === old.id)).get(old.id)?.stale).toBe(false);
   });
 
   it('a follow-up folds under its parent in the Workspace and in the project', () => {

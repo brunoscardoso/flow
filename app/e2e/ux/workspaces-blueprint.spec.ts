@@ -211,7 +211,7 @@ test('the board opens at the Workspace: a coloured country per project, connecti
   const toggle = page.locator('.fb-ws-title [data-ws-connections="toggle"]')
   await expect(toggle).toHaveAttribute('aria-pressed', 'false')
   // Connections recorded, pairs never checked: the toggle carries an Update.
-  await expect(page.locator('.fb-ws-title [data-ws-update]')).toHaveText('Update')
+  await expect(page.locator('.fb-ws-title [data-ws-update]')).toHaveAttribute('aria-label', 'Update connections')
 
   // ── SHOWN ON TOGGLE, QUIETLY (2026-10-06: "only when hover the mouse"): no
   // lines at rest — the features that have connections are outlined. ──
@@ -521,9 +521,10 @@ test('Learn connections: code finds one, the model suggests one, the map draws b
   const control = page.locator('.fb-ws-title [data-ws-control]')
   await expect(control).toHaveAttribute('data-ws-control', 'learn')
   await expect(control.locator('[data-ws-connections]')).toHaveCount(1)
-  // THE HEADER PATTERN: every control is the app's own ghost button.
-  await expect(control.locator('fl-button.fb-head-btn')).toHaveCount(1)
-  await expect(control.locator('[data-ws-connections]')).toHaveText('Learn connections')
+  // THE HEADER PATTERN: every control is a header tile — a square with an icon and NO label text.
+  await expect(control.locator('button.fb-head-tile')).toHaveCount(1)
+  await expect(control.locator('[data-ws-connections]')).toHaveAttribute('aria-label', 'Learn connections')
+  await expect(control.locator('[data-ws-connections]')).toHaveText('')
   await expect(control.locator('[data-ws-connections]')).toHaveAttribute('title', /0 of 3 pairs checked/)
 
   // LEARN: it counts the run, then it IS the Connections toggle — already on,
@@ -540,7 +541,7 @@ test('Learn connections: code finds one, the model suggests one, the map draws b
   await screenshot(page, 'learning-connections-dark')
   await expect(page.locator('.fb-ws-title [data-ws-connections="toggle"]')).toHaveAttribute('title', /3 of 3 pairs checked/, { timeout: 120_000 })
   await expect(page.locator('.fb-ws-title > .fb-ws-learning-line')).toBeHidden()
-  await expect(page.locator('.fb-ws-title [data-ws-connections="toggle"]')).toHaveText('Connections · 2')
+  await expect(page.locator('.fb-ws-title [data-ws-connections="toggle"]')).toHaveAttribute('aria-label', 'Connections, 2')
   await expect(page.locator('.fb-ws-title [data-ws-control]')).toHaveAttribute('data-ws-control', 'toggle')
   await expect(page.locator('.fb-ws-title [data-ws-connections="toggle"]')).toHaveAttribute('aria-pressed', 'true')
   await expect(page.locator('.fb-ws-title [data-ws-update]')).toHaveCount(0)
@@ -614,7 +615,7 @@ test('the Learning panel lists every project of the Workspace, the thread’s ow
   await page.locator('[data-view-action="blueprint"]').click()
   await expect(page.locator('.fb-ws-country')).toHaveCount(3, { timeout: 120_000 })
 
-  await page.locator('.fb-header fl-button[title="Show learning progress"]').click()
+  await page.locator('.fb-header button.fb-learn-tile[aria-label="Learn"]').click()
   const rows = page.locator('.fb-lp-project')
   await expect(rows).toHaveCount(3, { timeout: 30_000 })
   await expect(page.locator('.fb-lp-overall .fb-lp-headline')).toBeVisible()

@@ -37,7 +37,12 @@ test('#449 — no-project header offers Open Project… and hides Refresh', asyn
   // sees first that this guards.
   const primary = window.locator('.flow-board-root .fb-header fl-button:visible').first()
   await expect(primary).toHaveText(/Open Project/)
-  await expect(window.locator('.flow-board-root .fb-header fl-button:visible', { hasText: 'Learn' })).toHaveCount(0)
+  // The Learn tile is not an fl-button any more, so the old filter matched nothing
+  // whether or not it was shown. Name the tile itself: present in the DOM, not visible.
+  const learn = window.locator('.flow-board-root .fb-header button.fb-learn-tile[aria-label="Learn"]')
+  await expect(learn).toHaveCount(1)
+  await expect(learn).toBeHidden()
+  await expect(window.locator('.flow-board-root .fb-header button.fb-learn-tile:visible')).toHaveCount(0)
   await expect(
     window.locator('.flow-board-root .fb-header fl-button:has-text("Refresh")'),
   ).toHaveCount(0)

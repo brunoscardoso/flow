@@ -21,6 +21,7 @@ const {
   PersonalFilesRefusal,
   assertNoPersonalFiles,
   classifyKnowledgePath,
+  classifyKnowledgePathDetailed,
   findPersonalFiles,
   knowledgeRepoLocalEntries,
   matchesKnowledgePattern,
@@ -110,6 +111,17 @@ describe('classifyKnowledgePath', () => {
     expect(classifyKnowledgePath('merges/2026-10-06-abc.md', { root: 'workspace' })).toBe('authored');
     // A personal file dropped at the root by hand is still recognised.
     expect(classifyKnowledgePath('.scratchpad.md', { root: 'workspace' })).toBe('personal');
+  });
+
+  it("classifies the Workspace root's qa.jsonl as append-only by its own row, and a project's log by its folder", () => {
+    // Positives first: the neighbouring root files keep their classes.
+    expect(classifyKnowledgePath('links.jsonl', { root: 'workspace' })).toBe('append-only');
+    expect(classifyKnowledgePath('qa.jsonl', { root: 'workspace' })).toBe('append-only');
+    expect(classifyKnowledgePathDetailed('qa.jsonl', { root: 'workspace' }).row?.pattern).toBe('/qa.jsonl');
+    // A stray file at a closed root is still not shared: the row names one file, not a family.
+    expect(classifyKnowledgePath('qa-notes.md', { root: 'workspace' })).not.toBe('append-only');
+    // The project-level log is append-only under its own brain folder, as before.
+    expect(classifyKnowledgePath('brain/.structure/qa.jsonl')).toBe('append-only');
   });
 
   /**

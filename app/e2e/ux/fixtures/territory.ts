@@ -45,10 +45,10 @@ function escapeRegExp(text: string): string {
 /**
  * The Learning panel's door. The header's learn CHIP (`.fb-learn-chip`) is
  * only painted by the module-card stage (`#buildBoard` → `#renderLearnChip`),
- * which the Territory never draws; the permanent "Learn" header button is the
+ * which the Territory never draws; the permanent "Learn" header tile (`button.fb-learn-tile`, accessible name "Learn") is the
  * door a person has on the default sheet.
  */
-export const LEARN_BUTTON = '.flow-board-root fl-button[title="Show learning progress"]'
+export const LEARN_BUTTON = '.flow-board-root .fb-header button.fb-learn-tile[aria-label="Learn"]'
 
 export async function openLearningPanel(win: Page): Promise<void> {
   // The board is ONE instance per window: a panel left open in another

@@ -1584,7 +1584,7 @@ test('a double-click zooms while there is a level below, and opens the code stor
 
   // ── THE PROJECT LEVEL: the header is up (Learn in it), and carries no story. ──
   await expect(header).toBeVisible()
-  await expect(header.locator('fl-button[title="Show learning progress"]')).toBeVisible()
+  await expect(header.locator('button.fb-learn-tile[aria-label="Learn"]')).toBeVisible()
   await expect(terrCell(page, FEATURE)).toBeVisible()
   await expect(storyButton).toHaveCount(0)
   // No diagram door anywhere — Learn door first (positive).

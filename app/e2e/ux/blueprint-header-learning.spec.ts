@@ -37,14 +37,12 @@ test('the header retires New Blueprint and offers Learning instead', async ({ wi
   ).toHaveCount(0)
 
   // PRESENT and reachable, with a project open.
-  const learning = window
-    .locator('.flow-board-root .fb-header fl-button')
-    .filter({ hasText: 'Learn' })
-  await expect(learning.first()).toBeVisible({ timeout: 30_000 })
+  const learning = window.locator('.flow-board-root .fb-header button.fb-learn-tile[aria-label="Learn"]')
+  await expect(learning).toBeVisible({ timeout: 30_000 })
 
   // And it does the one thing it claims: opens the learning panel — including
   // when the learn chip is hidden because nothing has been learned yet.
-  await learning.first().click()
+  await learning.click()
   await expect(window.locator('.fb-learn-panel')).toBeVisible({ timeout: 30_000 })
 
   await window.screenshot({ path: 'e2e/__screens/blueprint-header-learning.png' })

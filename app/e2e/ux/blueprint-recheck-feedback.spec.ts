@@ -235,7 +235,7 @@ test('the header offers no Refresh — the Learning panel ⟳ is the manual re-d
   // Its slot is now the permanent way into the Learning panel — reachable even
   // when the learn chip has nothing to report and hides itself.
   await expect(
-    window.locator('.fb-header fl-button', { hasText: 'Learn' }).first(),
+    window.locator('.fb-header button.fb-learn-tile[aria-label="Learn"]'),
   ).toBeVisible()
 
   const recheck = await openLearnPanel(window)

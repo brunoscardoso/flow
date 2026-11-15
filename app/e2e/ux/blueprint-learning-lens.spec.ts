@@ -126,7 +126,7 @@ async function openBoard(window: Page): Promise<void> {
  * through the same `#toggleLearnPanel`.
  */
 async function toggleLearnPanel(window: Page): Promise<void> {
-  const entry = window.locator(`${boardRoot} fl-button[title="Show learning progress"]`)
+  const entry = window.locator(`${boardRoot} button.fb-learn-tile[aria-label="Learn"]`)
   await expect(entry).toBeVisible({ timeout: 60_000 })
   await entry.click()
 }
