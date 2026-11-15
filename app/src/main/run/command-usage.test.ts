@@ -11,7 +11,9 @@ import {
   feedLine,
   MAX_USAGE_ENTRIES,
   newLineBuffer,
+  onceUsageSuggestions,
   parseUsageEntries,
+  rankOnceSuggestions,
   usageScore,
   usageSuggestions,
   type UsageEntry,
@@ -271,5 +273,55 @@ describe('usageSuggestions — agent background noise is left out', () => {
       Date.parse('2026-11-14T12:00:00Z'),
     )
     expect(out.map((x) => x.command)).toEqual(['npm run dev'])
+  })
+})
+
+describe('one-time actions — the one-shot jobs a person typed', () => {
+  const NOW_MS = Date.parse('2026-11-14T12:00:00Z')
+  const at = (hoursAgo: number): string => new Date(NOW_MS - hoursAgo * 3_600_000).toISOString()
+
+  it('records one-shot runner jobs now, but never housekeeping, a bare runner or a secret', () => {
+    for (const line of ['npm run build', 'uv run alembic upgrade head', 'npx prisma migrate dev', 'pytest tests/api', 'npm test'])
+      expect([line, isRecordableCommand(line)]).toEqual([line, true])
+    for (const line of ['npm install', 'npm i lodash', 'pnpm add zod', 'uv add httpx', 'npm --version', 'node', 'python', 'npm login', 'git status', 'DB_PASSWORD=x alembic upgrade head'])
+      expect([line, isRecordableCommand(line)]).toEqual([line, false])
+  })
+
+  it('offers typed one-shots for a one-time action, marked once — and keeps them out of a running step’s list', () => {
+    const typed: UsageEntry[] = [
+      { command: 'uv run alembic upgrade head', count: 4, lastUsedAt: at(1) },
+      { command: 'npm run codegen', count: 1, lastUsedAt: at(2) },
+      { command: 'npm run dev', count: 9, lastUsedAt: at(1) },
+      { command: 'npm run build', count: 5, lastUsedAt: at(1) },
+    ]
+    const once = onceUsageSuggestions({ root: '/core', name: 'jupiter-core' }, typed, NOW_MS)
+    expect(once.map((x) => x.command)).toEqual(['npm run build', 'uv run alembic upgrade head', 'npm run codegen'])
+    expect(once.every((x) => x.use === 'once' && x.projectName === 'jupiter-core')).toBe(true)
+    expect(once[1]!.source).toBe('you ran it 4 times')
+    const running = usageSuggestions({ root: '/core', name: 'jupiter-core' }, typed, [], NOW_MS)
+    expect(running.map((x) => x.command)).toEqual(['npm run dev'])
+    expect(running.every((x) => x.use === undefined)).toBe(true)
+  })
+
+  it('ranks migrations first, lifts what the person ran, and keeps project order', () => {
+    const file = (projectRoot: string, name: string, command: string, source: string): RunSuggestion => ({
+      projectRoot, projectName: projectRoot.slice(1), name, command, source, use: 'once',
+    })
+    const files = [
+      file('/app', 'test', 'npm test', 'package.json'),
+      file('/app', 'codegen', 'npm run codegen', 'package.json'),
+      file('/core', 'migrate', 'uv run alembic upgrade head', 'Alembic'),
+      file('/app', 'db:migrate', 'npm run db:migrate', 'package.json'),
+    ]
+    const usage = [{ ...file('/app', 'codegen', 'npm run codegen', 'you ran it 5 times'), kind: 'usage' as const, score: 5 }]
+    const ranked = rankOnceSuggestions(files, usage, ['/app', '/core'])
+    expect(ranked.map((x) => `${x.projectRoot} ${x.command}`)).toEqual([
+      '/app npm run codegen',
+      '/app npm run db:migrate',
+      '/app npm test',
+      '/core uv run alembic upgrade head',
+    ])
+    expect(ranked[0]!.source).toBe('package.json · you ran it 5 times')
+    expect(ranked.every((x) => x.use === 'once')).toBe(true)
   })
 })

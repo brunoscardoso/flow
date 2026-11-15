@@ -2,7 +2,7 @@
 
 import { join } from 'path'
 
-import { composeServices, pyprojectScripts, readmeRunLines, suggestRunSteps, type SuggestFs } from './run-suggest'
+import { composeServices, oncePriority, pyprojectScripts, readmeRunLines, suggestOnceSteps, suggestRunSteps, type SuggestFs } from './run-suggest'
 
 function memoryFs(files: Record<string, string>): SuggestFs & { reads: string[] } {
   const reads: string[] = []
@@ -135,5 +135,48 @@ describe('parsers', () => {
   it('readmeRunLines ignores code outside a run section and non-shell fences', () => {
     const text = '## Usage\n```bash\nnpm run dev\n```\n## Local development\n```js\nrun()\n```\n```\nyarn dev\n```\n'
     expect(readmeRunLines(text)).toEqual(['yarn dev'])
+  })
+})
+
+describe('suggestOnceSteps — one-time actions', () => {
+  it('offers migration, seed, codegen and test scripts and the tools a project uses, all marked once', async () => {
+    const fs = memoryFs({
+      [at('package.json')]: JSON.stringify({
+        scripts: { dev: 'next dev', 'db:migrate': 'x', seed: 'x', codegen: 'x', test: 'jest', build: 'next build', 'test:watch': 'jest --watch', pretest: 'x' },
+      }),
+      [at('yarn.lock')]: '',
+      [at('alembic.ini')]: '',
+      [at('uv.lock')]: '',
+      [at('prisma/schema.prisma')]: '',
+      [at('Makefile')]: 'migrate:\n\tx\nserve:\n\tx\ndb-seed:\n\tx\n',
+    })
+    const found = await suggestOnceSteps([{ root: ROOT, name: 'shop' }], fs)
+    expect(found.map((s) => `${s.command} (${s.source})`)).toEqual([
+      'yarn db:migrate (package.json)',
+      'yarn seed (package.json)',
+      'yarn codegen (package.json)',
+      'yarn test (package.json)',
+      'uv run alembic upgrade head (Alembic)',
+      'npx prisma migrate dev (Prisma)',
+      'npx prisma generate (Prisma)',
+      'make migrate (Makefile)',
+      'make db-seed (Makefile)',
+    ])
+    expect(found.every((s) => s.use === 'once' && s.projectName === 'shop')).toBe(true)
+  })
+
+  it('reads a conversation checkout, and an unreadable project offers nothing', async () => {
+    const fs = memoryFs({ ['/checkout/manage.py']: '' })
+    expect((await suggestOnceSteps([{ root: ROOT, dir: '/checkout', name: 'shop' }], fs)).map((s) => s.command)).toEqual([
+      'python manage.py migrate',
+    ])
+    expect(await suggestOnceSteps([{ root: '/none', name: 'none' }], memoryFs({}))).toEqual([])
+  })
+
+  it('orders migrations before seeds, codegen and tests', () => {
+    const p = (command: string): number => oncePriority({ name: '', command })
+    expect(p('npm run db:migrate')).toBeGreaterThan(p('npm run seed'))
+    expect(p('npm run seed')).toBeGreaterThan(p('npm run codegen'))
+    expect(p('npm run codegen')).toBeGreaterThan(p('npm test'))
   })
 })

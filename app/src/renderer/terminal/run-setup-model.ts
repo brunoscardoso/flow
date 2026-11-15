@@ -1,5 +1,5 @@
 /**
- * THE SETUP PANEL'S DRAFT — editing the Run's ONE combined list of steps
+ * THE LAUNCHPAD PAGE'S DRAFT — editing the ONE combined list of entries
  * before Save: add, remove, move, change, and which of the conversation's
  * projects each step runs in; the sentences that say what is wrong; the one
  * sentence that says what Save will do to a Run that is going; and the short
@@ -9,11 +9,17 @@
  * order kept on this computer. Each step belongs to the project it runs in;
  * Save sends the whole list and main stores each step with its project.
  *
+ * Two kinds of entry share that list: RUNNING steps (they start with Run, in
+ * order, each in its own tab) and ONE-TIME actions (never started by Run; a
+ * person presses one from the Launchpad menu). The page shows them as two
+ * sections; moving an entry moves it among its own kind only.
+ *
  * DOM-free. Every sentence is shown to a person (forbidden-pattern #12): it
  * names steps and states, never a file, a setting or a command line. Main
  * re-parses whatever is saved; this only composes the request.
  */
 import {
+  confirmByDefault,
   newStepId,
   type RunGroupState,
   type RunPlace,
@@ -44,6 +50,15 @@ export interface DraftStep {
   runsIn: string | null
   /** Where a step added from a suggestion came from: "jupiter-app · package.json". */
   origin: string | null
+  /** A running step (starts with Run) or a one-time action (pressed from the menu). */
+  kind: 'service' | 'once'
+  /** One-time actions: ask before running. */
+  confirm: boolean
+  /**
+   * The person set "Ask before running" themselves (or the action was saved
+   * already): the command no longer decides it.
+   */
+  confirmTouched: boolean
 }
 
 export interface RunSetupDraft {
@@ -57,14 +72,18 @@ export interface RunSetupDraft {
   original: DraftStep[]
 }
 
-/** Every fixed sentence the panel shows — scanned by the test for #12. */
+/** Every fixed sentence the page shows — scanned by the test for #12. */
 export const SETUP_STRINGS = {
-  title: 'Run setup',
-  close: 'Close setup',
-  intro: 'Steps start in order, each in its own terminal.',
+  title: 'Launchpad',
+  close: 'Close the Launchpad',
+  keepsRunning: 'Keeps running',
+  keepsRunningNote: 'Starts with Run, in this order. Each gets its own tab.',
+  runsOnce: 'Runs once',
+  runsOnceNote: 'Never starts with Run. Press it from the Launchpad menu when you need it.',
   suggested: 'Suggested',
   add: 'Add',
-  addStep: '+ Add a step',
+  addStep: '+ Add a running step',
+  addOnce: '+ Add a one-time action',
   name: 'Name',
   command: 'Command',
   runsIn: 'Runs in',
@@ -81,9 +100,14 @@ export const SETUP_STRINGS = {
   moveUp: 'Move up',
   moveDown: 'Move down',
   remove: 'Remove step',
+  removeOnce: 'Remove action',
   skip: 'Turn this step off — it stays here for later',
   unskip: 'Turn this step on',
+  skipOnce: 'Turn this action off — it stays here for later',
+  unskipOnce: 'Turn this action on',
   skipped: 'Off',
+  askFirst: 'Ask before running',
+  askFirstTitle: 'Show the command and ask before it runs',
   cancel: 'Cancel',
   save: 'Save',
   saveAndRun: 'Save and run',
@@ -93,18 +117,19 @@ export const SETUP_STRINGS = {
   askAgentNoConversation: 'Open a conversation to ask the agent',
   showLess: 'Show fewer',
   empty: 'Add the first process to start, or pick one below.',
+  onceEmpty: 'No one-time actions yet.',
   dragHandle: 'Drag to reorder',
   notHere: 'not in this conversation',
 } as const
 
-/** The panel's title: "Run setup · jupiter-app, jupiter-core" — the conversation's projects. */
+/** The page's title: "Launchpad for jupiter-app, jupiter-core" — the conversation's projects. */
 export function setupTitle(places: readonly Pick<RunPlace, 'name'>[], fallback = ''): string {
   const names: string[] = []
   for (const place of places) {
     if (place.name.trim() !== '' && !names.some((name) => sameProject(name, place.name))) names.push(place.name.trim())
   }
   if (names.length === 0 && fallback.trim() !== '') names.push(fallback.trim())
-  return names.length === 0 ? SETUP_STRINGS.title : `${SETUP_STRINGS.title} · ${names.join(', ')}`
+  return names.length === 0 ? SETUP_STRINGS.title : `${SETUP_STRINGS.title} for ${names.join(', ')}`
 }
 
 /** "Show all (12)". */
@@ -149,6 +174,10 @@ export function startDraft(project: RunProjectLayers): RunSetupDraft {
     skipped: step.disabled === true,
     runsIn: ownProject(step.runsIn, project.name),
     origin: null,
+    kind: step.kind === 'once' ? 'once' : 'service',
+    confirm: step.kind === 'once' && step.confirm === true,
+    // A saved action keeps the choice it was saved with.
+    confirmTouched: true,
   }))
   return {
     projectRoot: project.root,
@@ -166,7 +195,7 @@ export function draftFromSuggestions(project: RunProjectLayers, ticked: readonly
   return draft
 }
 
-/** "Set up Run": the setup as it is, with one empty step to fill in when it has none. */
+/** "Set up Launchpad": the setup as it is, with one empty running step to fill in when it has none. */
 export function draftToSetUp(project: RunProjectLayers): RunSetupDraft {
   const draft = startDraft(project)
   return draft.steps.length === 0 ? addStep(draft) : draft
@@ -180,22 +209,40 @@ function takenIds(draft: RunSetupDraft): string[] {
 
 export function addStep(
   draft: RunSetupDraft,
-  fields: Partial<Pick<DraftStep, 'name' | 'command' | 'origin' | 'runsIn'>> = {},
+  fields: Partial<Pick<DraftStep, 'name' | 'command' | 'origin' | 'runsIn' | 'kind'>> = {},
 ): RunSetupDraft {
   const name = fields.name ?? ''
+  const kind = fields.kind ?? 'service'
+  const command = fields.command ?? ''
   const step: DraftStep = {
-    id: newStepId(name || 'step', takenIds(draft)),
+    id: newStepId(name || (kind === 'once' ? 'action' : 'step'), takenIds(draft)),
     isNew: true,
     name,
-    command: fields.command ?? '',
+    command,
     start: 'now',
     readyKind: 'none',
     readyValue: '',
     skipped: false,
     runsIn: ownProject(fields.runsIn, draft.projectName),
     origin: fields.origin ?? null,
+    kind,
+    confirm: kind === 'once' && confirmByDefault(command),
+    confirmTouched: false,
   }
   return { ...draft, steps: [...draft.steps, step] }
+}
+
+/** Add a one-time action (it asks first by default when its command changes data). */
+export function addOnceAction(
+  draft: RunSetupDraft,
+  fields: Partial<Pick<DraftStep, 'name' | 'command' | 'origin' | 'runsIn'>> = {},
+): RunSetupDraft {
+  return addStep(draft, { ...fields, kind: 'once' })
+}
+
+/** The draft's entries of one kind, in order. */
+export function stepsOfKind(draft: Pick<RunSetupDraft, 'steps'>, kind: DraftStep['kind']): DraftStep[] {
+  return draft.steps.filter((step) => step.kind === kind)
 }
 
 /** A name no other step of the draft has: the suggestion's, else with its project, else numbered. */
@@ -215,8 +262,9 @@ function freeName(draft: RunSetupDraft, wanted: string, projectName: string): st
 export const STEP_SUGGESTION_LIMIT = 5
 
 /**
- * The suggestions ONE step offers: only for the project its Runs in names
- * (the main project when it names none), matching what is typed so far,
+ * The suggestions ONE step offers: only for its kind (long-running commands
+ * for a running step, one-shot jobs for a one-time action) and only for the
+ * project its Runs in names (the main project when it names none), matching what is typed so far,
  * leaving out commands another step of that project already runs — at most
  * five, best first (the order main ranked them in).
  */
@@ -232,12 +280,14 @@ export function stepSuggestions(
   const projectOf = (other: DraftStep): string => other.runsIn ?? draft.projectName
   const taken = new Set(
     draft.steps
-      .filter((other) => other.id !== stepId && sameProject(projectOf(other), project))
+      .filter((other) => other.id !== stepId && other.kind === step.kind && sameProject(projectOf(other), project))
       .map((other) => other.command.trim().toLowerCase()),
   )
   const query = step.command.trim().toLowerCase()
   const out: RunSuggestion[] = []
+  const use = step.kind === 'once' ? 'once' : undefined
   for (const suggestion of suggestions) {
+    if (suggestion.use !== use) continue
     if (!sameProject(suggestion.projectName, project)) continue
     const command = suggestion.command.trim().toLowerCase()
     if (taken.has(command) || command === query) continue
@@ -268,19 +318,28 @@ export function removeStep(draft: RunSetupDraft, id: string): RunSetupDraft {
   }
 }
 
+/**
+ * Move an entry to position `to` among the entries of ITS OWN kind (running
+ * steps and one-time actions are ordered separately); the other kind keeps
+ * every place it had.
+ */
 export function moveStep(draft: RunSetupDraft, id: string, to: number): RunSetupDraft {
-  const from = draft.steps.findIndex((step) => step.id === id)
-  if (from < 0) return draft
-  const target = Math.max(0, Math.min(draft.steps.length - 1, to))
+  const moving = draft.steps.find((step) => step.id === id)
+  if (moving === undefined) return draft
+  const same = stepsOfKind(draft, moving.kind)
+  const from = same.indexOf(moving)
+  const target = Math.max(0, Math.min(same.length - 1, to))
   if (target === from) return draft
-  const steps = [...draft.steps]
-  const [step] = steps.splice(from, 1)
-  steps.splice(target, 0, step)
+  const reordered = [...same]
+  reordered.splice(from, 1)
+  reordered.splice(target, 0, moving)
+  let next = 0
+  const steps = draft.steps.map((step) => (step.kind === moving.kind ? reordered[next++]! : step))
   return { ...draft, steps }
 }
 
 export type StepPatch = Partial<
-  Pick<DraftStep, 'name' | 'command' | 'start' | 'readyKind' | 'readyValue' | 'skipped' | 'runsIn'>
+  Pick<DraftStep, 'name' | 'command' | 'start' | 'readyKind' | 'readyValue' | 'skipped' | 'runsIn' | 'confirm'>
 >
 
 export function changeStep(draft: RunSetupDraft, id: string, patch: StepPatch): RunSetupDraft {
@@ -289,7 +348,21 @@ export function changeStep(draft: RunSetupDraft, id: string, patch: StepPatch): 
   if ('runsIn' in allowed) allowed.runsIn = ownProject(allowed.runsIn, draft.projectName)
   return {
     ...draft,
-    steps: draft.steps.map((step) => (step.id === id ? { ...step, ...allowed } : step)),
+    steps: draft.steps.map((step) => {
+      if (step.id !== id) return step
+      const next: DraftStep = { ...step, ...allowed }
+      if (step.kind !== 'once') {
+        next.confirm = false
+        return next
+      }
+      // A one-time action has no start mode or ready check.
+      next.start = 'now'
+      next.readyKind = 'none'
+      next.readyValue = ''
+      if ('confirm' in allowed) next.confirmTouched = true
+      else if ('command' in allowed && !step.confirmTouched) next.confirm = confirmByDefault(next.command)
+      return next
+    }),
   }
 }
 
@@ -323,17 +396,18 @@ export function validateDraft(draft: RunSetupDraft): string[] {
     const label = name === '' ? `Step ${index + 1}` : `“${name}”`
     if (name !== '') names.set(name.toLowerCase(), (names.get(name.toLowerCase()) ?? 0) + 1)
     if (step.command.trim() === '') problems.push(`${label} needs a command to run.`)
-    if (step.readyKind === 'port' && parsePort(step.readyValue) === null) {
+    if (step.kind === 'service' && step.readyKind === 'port' && parsePort(step.readyValue) === null) {
       problems.push(
         step.readyValue.trim() === ''
           ? `${label} waits for a port, but no port is given.`
           : `${label} waits for a port, but “${step.readyValue.trim()}” is not a port number.`,
       )
     }
-    if (step.readyKind === 'line' && step.readyValue.trim() === '') {
+    if (step.kind === 'service' && step.readyKind === 'line' && step.readyValue.trim() === '') {
       problems.push(`${label} waits for a line, but the text to wait for is empty.`)
     }
-    if (index === 0 && step.start === 'after-previous' && !step.skipped) {
+    const serviceIndex = draft.steps.filter((other, at) => at < index && other.kind === 'service').length
+    if (step.kind === 'service' && serviceIndex === 0 && step.start === 'after-previous' && !step.skipped) {
       problems.push(`${label} is the first step, so it has no step to wait for. Set it to start right away.`)
     }
   })
@@ -357,7 +431,9 @@ function sameRun(a: DraftStep, b: DraftStep): boolean {
     (a.runsIn ?? '') === (b.runsIn ?? '') &&
     a.readyKind === b.readyKind &&
     (a.readyKind === 'none' || a.readyValue.trim() === b.readyValue.trim()) &&
-    a.skipped === b.skipped
+    a.skipped === b.skipped &&
+    a.kind === b.kind &&
+    a.confirm === b.confirm
   )
 }
 
@@ -449,6 +525,13 @@ function savedSteps(steps: readonly DraftStep[]): DraftStep[] {
 }
 
 function toRunStep(step: DraftStep): RunStep {
+  if (step.kind === 'once') {
+    const once: RunStep = { id: step.id, name: step.name.trim(), command: step.command.trim(), start: 'now', kind: 'once' }
+    if (step.confirm) once.confirm = true
+    if (step.runsIn !== null && step.runsIn.trim() !== '') once.runsIn = step.runsIn.trim()
+    if (step.skipped) once.disabled = true
+    return once
+  }
   const out: RunStep = { id: step.id, name: step.name.trim(), command: step.command.trim(), start: step.start }
   const ready = readyOf(step)
   if (ready !== undefined && ready !== 'invalid') out.ready = ready
@@ -494,9 +577,11 @@ export function saveSentence(draft: RunSetupDraft, state: RunGroupState | null):
     return `Saving keeps the new setup; nothing starts until you press Run. ${reach}`
   }
   const goingIds = new Set(going.map((step) => step.key))
-  const starts = [...diff.added, ...diff.unskipped]
-  const restarts = diff.changed.filter((step) => goingIds.has(step.id))
-  const stops = [...diff.removed, ...diff.skipped].filter((step) => goingIds.has(step.id))
+  // A one-time action never starts, restarts or stops with a save.
+  const service = (step: DraftStep): boolean => step.kind === 'service'
+  const starts = [...diff.added, ...diff.unskipped].filter(service)
+  const restarts = diff.changed.filter((step) => service(step) && goingIds.has(step.id))
+  const stops = [...diff.removed, ...diff.skipped].filter((step) => service(step) && goingIds.has(step.id))
   const touched = new Set([...restarts, ...stops].map((step) => step.id))
   const keep = [...goingIds].filter((id) => !touched.has(id)).length
 
@@ -647,6 +732,7 @@ export function offeredSuggestions(
   const seen = new Set<string>()
   const items: OfferedSuggestion[] = []
   for (const suggestion of suggestions) {
+    if (suggestion.use === 'once') continue // a running step's list only
     const key = `${suggestion.projectName.toLowerCase()}::${normalizeCommand(suggestion.command)}`
     if (seen.has(key)) continue
     seen.add(key)

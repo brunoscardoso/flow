@@ -1,7 +1,12 @@
 /**
- * THE RUN SETUP PANEL — docked on the right of the terminal area, over the
- * running terminals, so changing a step never hides what is running. "Set up
- * Run" opens it straight away with one empty step to fill in.
+ * THE LAUNCHPAD PAGE — over the terminal area. "Set up Launchpad" opens it
+ * straight away with one empty step to fill in.
+ *
+ * TWO SECTIONS — "Keeps running" (the steps Run starts, in order, each in its
+ * own tab; "+ Add a running step" under them) and "Runs once" (one-time
+ * actions, never started by Run, pressed from the Launchpad menu; each has
+ * Runs in and "Ask before running"). "+ Add a one-time action" sits in the
+ * footer row beside Cancel and Save.
  *
  * ONE ORDERED LIST — every step of every project of the conversation,
  * combined in the one order kept on this computer. Every step of the Run is a card: line 1 its name and
@@ -20,6 +25,7 @@
 import type { RunGroupState, RunSaveAnswer, RunSaveChange, RunSuggestion, RunView } from '../../shared/run-setup'
 import { RUN_STRINGS } from './run-group-model'
 import {
+  addOnceAction,
   addStep,
   changeStep,
   draftToSetUp,
@@ -33,6 +39,7 @@ import {
   SETUP_STRINGS,
   startDraft,
   startsOptions,
+  stepsOfKind,
   stepSuggestions,
   validateDraft,
   type DraftStep,
@@ -173,6 +180,15 @@ export class RunSetupPanel {
     this.#deps.onClosed()
   }
 
+  /** Add a new one-time action to fill in (the menu's "Add one"). */
+  addOnceAction(): void {
+    const draft = this.#draft
+    if (draft === null || this.#root === null) return
+    const next = addOnceAction(draft)
+    this.#focusId = next.steps[next.steps.length - 1]?.id ?? null
+    this.#update(next)
+  }
+
   /** Suggestions arrived after opening — the list updates. */
   setSuggestions(suggestions: RunSuggestion[]): void {
     this.#suggestions = suggestions
@@ -223,7 +239,6 @@ export class RunSetupPanel {
       page.appendChild(el('p', 'fl-run-muted', RUN_STRINGS.failedToRead))
       return
     }
-    titles.appendChild(el('p', 'fl-run-note', SETUP_STRINGS.intro))
 
     const body = el('div', 'fl-run-body')
     const main = el('div', 'fl-run-main')
@@ -231,12 +246,32 @@ export class RunSetupPanel {
     page.appendChild(body)
     for (const problem of this.#view?.resolution.project.problems ?? []) main.appendChild(el('p', 'fl-run-note', problem))
 
+    // Keeps running: the steps Run starts, in order.
+    const services = stepsOfKind(draft, 'service')
+    const running = this.#section(SETUP_STRINGS.keepsRunning, SETUP_STRINGS.keepsRunningNote)
     const list = el('div', 'fl-run-steps')
-    if (draft.steps.length === 0) list.appendChild(el('p', 'fl-run-muted', SETUP_STRINGS.empty))
-    draft.steps.forEach((step, index) => list.appendChild(this.#card(draft, step, index)))
-    main.appendChild(list)
+    if (services.length === 0) list.appendChild(el('p', 'fl-run-muted', SETUP_STRINGS.empty))
+    services.forEach((step, index) => list.appendChild(this.#card(draft, step, index, services)))
+    running.appendChild(list)
+    const addRunning = button('fl-run-chip dashed', SETUP_STRINGS.addStep, () => {
+      const next = addStep(this.#draft ?? draft)
+      this.#focusId = next.steps[next.steps.length - 1]?.id ?? null
+      this.#update(next)
+    })
+    addRunning.classList.add('fl-run-add')
+    running.appendChild(addRunning)
+    main.appendChild(running)
 
-    // Add a step, then Cancel and Save, right under the steps they act on.
+    // Runs once: one-time actions, pressed from the Launchpad menu.
+    const actions = stepsOfKind(draft, 'once')
+    const once = this.#section(SETUP_STRINGS.runsOnce, SETUP_STRINGS.runsOnceNote)
+    const onceList = el('div', 'fl-run-steps')
+    if (actions.length === 0) onceList.appendChild(el('p', 'fl-run-muted', SETUP_STRINGS.onceEmpty))
+    actions.forEach((step, index) => onceList.appendChild(this.#card(draft, step, index, actions)))
+    once.appendChild(onceList)
+    main.appendChild(once)
+
+    // Add a one-time action, then Cancel and Save, right under what they act on.
     this.#footer = el('div', 'fl-run-setup-foot')
     main.appendChild(this.#footer)
 
@@ -260,9 +295,20 @@ export class RunSetupPanel {
     }
   }
 
-  #card(draft: RunSetupDraft, step: DraftStep, index: number): HTMLElement {
+  #section(title: string, note: string): HTMLElement {
+    const section = el('section', 'fl-run-section')
+    const head = el('div', 'fl-run-section-head')
+    head.append(el('span', 'fl-run-section-name', title), el('p', 'fl-run-note', note))
+    section.appendChild(head)
+    return section
+  }
+
+  /** One entry's card. `index` is its place among `siblings` — the entries of its own kind. */
+  #card(draft: RunSetupDraft, step: DraftStep, index: number, siblings: readonly DraftStep[]): HTMLElement {
     const current = (): RunSetupDraft => this.#draft ?? draft
+    const once = step.kind === 'once'
     const card = el('div', 'fl-run-card')
+    card.classList.toggle('once', once)
     card.classList.toggle('skipped', step.skipped)
     card.dataset['stepId'] = step.id
 
@@ -273,7 +319,7 @@ export class RunSetupPanel {
     const handle = el('span', 'fl-run-handle')
     handle.setAttribute('aria-hidden', 'true')
     const down = iconButton('chevron-down', SETUP_STRINGS.moveDown, () => this.#update(moveStep(current(), step.id, index + 1)))
-    down.disabled = index === draft.steps.length - 1
+    down.disabled = index === siblings.length - 1
     move.append(up, handle, down)
     handle.title = SETUP_STRINGS.dragHandle
     // Only the handle starts a drag, so text in the fields stays selectable.
@@ -290,14 +336,17 @@ export class RunSetupPanel {
       card.draggable = false
       card.classList.remove('dragging')
     })
+    // An entry is dropped only among its own kind: a running step never becomes an action.
+    const sameKind = (id: string | null): boolean =>
+      id !== null && current().steps.find((candidate) => candidate.id === id)?.kind === step.kind
     card.addEventListener('dragover', (event) => {
-      if (this.#dragId !== null && this.#dragId !== step.id) event.preventDefault()
+      if (this.#dragId !== null && this.#dragId !== step.id && sameKind(this.#dragId)) event.preventDefault()
     })
     card.addEventListener('drop', (event) => {
       event.preventDefault()
       const dragged = this.#dragId
       this.#dragId = null
-      if (dragged !== null && dragged !== step.id) this.#update(moveStep(current(), dragged, index))
+      if (dragged !== null && dragged !== step.id && sameKind(dragged)) this.#update(moveStep(current(), dragged, index))
     })
     card.appendChild(move)
 
@@ -378,7 +427,28 @@ export class RunSetupPanel {
     runsIn.addEventListener('change', () =>
       this.#update(changeStep(current(), step.id, { runsIn: runsIn.value === '' ? null : runsIn.value })),
     )
-    const starts = select(startsOptions(draft.steps, index), step.start, SETUP_STRINGS.starts)
+    if (once) {
+      // A one-time action: where it runs, and whether it asks first. No start mode, no ready check.
+      const check = el('label', 'fl-run-check')
+      const box = el('input')
+      box.type = 'checkbox'
+      box.checked = step.confirm
+      box.title = SETUP_STRINGS.askFirstTitle
+      box.addEventListener('change', () => this.#update(changeStep(current(), step.id, { confirm: box.checked })))
+      // Until the person sets it, the command decides it (a migration asks first): keep the box in step.
+      command.addEventListener('input', () => {
+        box.checked = current().steps.find((candidate) => candidate.id === step.id)?.confirm ?? box.checked
+      })
+      check.append(box, el('span', 'fl-run-label', SETUP_STRINGS.askFirst))
+      check.title = SETUP_STRINGS.askFirstTitle
+      line2.append(inline(SETUP_STRINGS.runsIn, runsIn), check)
+      if (step.skipped) line2.appendChild(el('span', 'fl-run-skipped', SETUP_STRINGS.skipped))
+      body.appendChild(line2)
+      card.appendChild(body)
+      card.appendChild(this.#tools(step, current))
+      return card
+    }
+    const starts = select(startsOptions(siblings, index), step.start, SETUP_STRINGS.starts)
     starts.addEventListener('change', () =>
       this.#update(changeStep(current(), step.id, { start: starts.value === 'after-previous' ? 'after-previous' : 'now' })),
     )
@@ -414,21 +484,32 @@ export class RunSetupPanel {
     body.appendChild(line2)
     card.appendChild(body)
 
-    // Right: the on/off switch (a step turned off stays for later), then remove.
+    card.appendChild(this.#tools(step, current))
+    return card
+  }
+
+  /** Right of a card: the on/off switch (an entry turned off stays for later), then remove. */
+  #tools(step: DraftStep, current: () => RunSetupDraft): HTMLElement {
+    const once = step.kind === 'once'
+    const off = once ? SETUP_STRINGS.skipOnce : SETUP_STRINGS.skip
+    const on = once ? SETUP_STRINGS.unskipOnce : SETUP_STRINGS.unskip
     const tools = el('div', 'fl-run-card-tools')
     const toggle = document.createElement('button')
     toggle.type = 'button'
     toggle.className = `fl-run-toggle${step.skipped ? '' : ' on'}`
     toggle.setAttribute('role', 'switch')
     toggle.setAttribute('aria-checked', step.skipped ? 'false' : 'true')
-    toggle.setAttribute('aria-label', step.skipped ? SETUP_STRINGS.unskip : SETUP_STRINGS.skip)
-    toggle.title = step.skipped ? SETUP_STRINGS.unskip : SETUP_STRINGS.skip
+    toggle.setAttribute('aria-label', step.skipped ? on : off)
+    toggle.title = step.skipped ? on : off
     toggle.appendChild(el('span', 'fl-run-toggle-knob'))
     toggle.addEventListener('click', () => this.#update(changeStep(current(), step.id, { skipped: !step.skipped })))
     tools.appendChild(toggle)
-    tools.appendChild(iconButton('trash', SETUP_STRINGS.remove, () => this.#update(removeStep(current(), step.id))))
-    card.appendChild(tools)
-    return card
+    tools.appendChild(
+      iconButton('trash', once ? SETUP_STRINGS.removeOnce : SETUP_STRINGS.remove, () =>
+        this.#update(removeStep(current(), step.id)),
+      ),
+    )
+    return tools
   }
 
   #renderFooter(): void {
@@ -437,9 +518,9 @@ export class RunSetupPanel {
     if (foot === null || draft === null) return
     foot.textContent = ''
     const row = el('div', 'fl-run-foot-actions')
-    const add = button('fl-run-chip dashed', SETUP_STRINGS.addStep, () => {
+    const add = button('fl-run-chip dashed', SETUP_STRINGS.addOnce, () => {
       const current = this.#draft ?? draft
-      const next = addStep(current)
+      const next = addOnceAction(current)
       this.#focusId = next.steps[next.steps.length - 1]?.id ?? null
       this.#update(next)
     })
@@ -468,7 +549,8 @@ export class RunSetupPanel {
     actions.appendChild(save)
     if (nothingGoing) {
       const saveAndRun = button('fl-run-btn primary', SETUP_STRINGS.saveAndRun, () => void this.#save(true))
-      saveAndRun.disabled = blocked || draft.steps.every((step) => step.skipped)
+      // Save and run starts the running steps: nothing to start, nothing to offer.
+      saveAndRun.disabled = blocked || !draft.steps.some((step) => step.kind === 'service' && !step.skipped && step.command.trim() !== '')
       actions.appendChild(saveAndRun)
     }
     foot.appendChild(actions)
@@ -489,7 +571,7 @@ export class RunSetupPanel {
       }
       view = answer.view
     } catch (error) {
-      console.warn('flow: saving the Run setup failed', error)
+      console.warn('flow: saving the Launchpad failed', error)
       this.#error = RUN_STRINGS.failedToAct
       return
     } finally {

@@ -1,14 +1,16 @@
 /**
- * THE RUN GROUP'S FACE — what the pill in the terminal tab bar says, what each
- * step's tab says, the order the tabs stand in, and the first-time picker's
- * rows. DOM-free so every sentence is testable (forbidden-pattern #12: no
+ * THE LAUNCHPAD'S FACE — what the pill in the terminal tab bar says, what its
+ * menu offers, what each step's (and each one-time action's) tab says, the
+ * order the tabs stand in, and the ask before a one-time action runs. DOM-free so every sentence is testable (forbidden-pattern #12: no
  * command line, path or setting name in any of it — the commands a person
  * typed into a step are data, shown as data, never as advice).
  *
  * Main owns the Run (allowed-pattern #14); this only draws the state it reports.
  */
 import type {
+  ResolvedRunStep,
   RunGroupState,
+  RunOnceState,
   RunStepState,
   RunStepStatus,
   RunSuggestion,
@@ -17,26 +19,41 @@ import type {
 
 // ─── strings ─────────────────────────────────────────────────────────────────
 
-/** Every fixed sentence the Run group shows — scanned by the test for #12. */
+/** Every fixed sentence the Launchpad shows — scanned by the test for #12. */
 export const RUN_STRINGS = {
-  setUp: 'Set up Run',
-  setUpTitle: 'Choose the commands that start this project, and start them with one button',
+  setUp: 'Set up Launchpad',
+  setUpTitle: 'Choose the commands that start this project, and the ones you run now and then',
+  launchpad: 'Launchpad',
+  launchpadTitle: 'Run a one-time action, or start every running step',
   run: 'Run',
   runTitle: 'Start every step, in order',
+  runAll: 'Run all running steps',
+  runAllGoing: 'Every running step has started',
+  runAllNone: 'No running steps yet',
+  menuOnce: 'Run once',
+  noOnce: 'No one-time actions yet',
+  addOnce: 'Add one',
+  editLaunchpad: 'Edit Launchpad',
+  asksFirst: 'asks first',
+  onceRunningTitle: 'Running now. Press to show it.',
+  onceRunTitle: 'Run this once, in its own tab',
+  confirmCancel: 'Cancel',
+  confirmRun: 'Run',
   reloadAll: 'Reload all',
   reloadAllTitle: 'Restart every step, in order',
   stopAll: 'Stop all',
   stopAllTitle: 'End every step and free its ports',
   setup: 'Setup',
-  setupTitle: 'Edit the Run setup',
+  setupTitle: 'Edit the Launchpad',
   reloadStep: 'Reload step',
   reloadStepTitle: 'Restart only this step',
   startStepTitle: 'Not started. Click to start this step.',
-  startRunTitle: 'Not started. Click to start the Run.',
+  startRunTitle: 'Not started. Click to start every running step.',
   stopped: 'Stopped',
-  loading: 'Reading the setup…',
-  failedToRead: 'The Run setup could not be read.',
-  failedToAct: 'Flow could not reach the Run. Nothing was changed.',
+  loading: 'Reading the Launchpad…',
+  failedToRead: 'The Launchpad could not be read.',
+  failedToAct: 'Flow could not reach the Launchpad. Nothing was changed.',
+  failedToRunOnce: 'Flow could not run this action. Nothing was started.',
 } as const
 
 const NUMBER_WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten']
@@ -81,7 +98,7 @@ export function groupHasRun(state: RunGroupState | null): boolean {
 
 /**
  * The pill: `null` view (no Run for this panel — no project, older preload,
- * not read yet) hides it; a scope with no steps offers "Set up Run".
+ * not read yet) hides it; a scope with no steps offers "Set up Launchpad".
  */
 export function pillFace(view: RunView | null): RunPillFace {
   const hidden: RunPillFace = {
@@ -182,6 +199,56 @@ export function stepTabFace(step: RunStepState): RunStepTabFace {
   }
 }
 
+// ─── a one-time action's tab ─────────────────────────────────────────────────
+
+/** "2.4 s", "12 s", "3 min 5 s" — how long a one-time action ran. */
+export function durationLabel(ms: number): string {
+  const safe = Number.isFinite(ms) && ms > 0 ? ms : 0
+  if (safe < 10_000) return `${(Math.round(safe / 100) / 10).toFixed(1)} s`
+  const total = Math.round(safe / 1000)
+  if (total < 60) return `${total} s`
+  const minutes = Math.floor(total / 60)
+  const seconds = total % 60
+  return seconds === 0 ? `${minutes} min` : `${minutes} min ${seconds} s`
+}
+
+export interface RunOnceTabFace {
+  label: string
+  tone: RunDotTone
+  /** Finished cleanly: the tab shows a check. */
+  finished: boolean
+  tooltip: string
+}
+
+/** What a one-time action's tab says: running, finished (with how long), or ended with its code. */
+export function onceTabFace(once: RunOnceState): RunOnceTabFace {
+  const name = once.name
+  const took = once.durationMs === null ? '' : ` in ${durationLabel(once.durationMs)}`
+  if (once.status === 'running') {
+    return { label: `${name} · running`, tone: 'busy', finished: false, tooltip: `“${name}” is running in ${once.projectName}.` }
+  }
+  if (once.status === 'stopped') {
+    return { label: `${name} · stopped`, tone: 'off', finished: false, tooltip: `“${name}” was stopped.` }
+  }
+  if (once.exitCode === 0) {
+    return { label: `${name} · finished`, tone: 'ok', finished: true, tooltip: `Finished${took}.` }
+  }
+  const code = once.exitCode === null ? '' : ` (${once.exitCode})`
+  const after = once.durationMs === null ? '' : ` after ${durationLabel(once.durationMs)}`
+  return {
+    label: `${name} · ended${code}`,
+    tone: 'bad',
+    finished: false,
+    tooltip: once.exitCode === null ? `Ended${after}.` : `Ended with code ${once.exitCode}${after}.`,
+  }
+}
+
+/** The one-time action a terminal runs in this group, or null. */
+export function onceOfTerminal(state: RunGroupState | null, terminalId: string | null): RunOnceState | null {
+  if (state === null || terminalId === null) return null
+  return (state.once ?? []).find((once) => once.terminalId === terminalId) ?? null
+}
+
 /** What clicking a step's tab that has no terminal does. */
 export type PendingTabAction = 'start-run' | 'reload-step' | 'none'
 
@@ -219,19 +286,24 @@ export function stepKeyOfPendingTab(id: string): string | null {
 export type OrderedRunTab<T> =
   | { kind: 'step'; item: T; step: RunStepState }
   | { kind: 'pending'; step: RunStepState }
+  | { kind: 'once'; item: T; once: RunOnceState }
   | { kind: 'plain'; item: T }
 
 /**
  * Order the visible tabs: this scope's Run steps first, in step order (a step
- * with no terminal stands in as a pending tab), then every other tab exactly
- * as it was. A step whose terminal exists but is not visible is left out.
+ * with no terminal stands in as a pending tab), then its one-time actions'
+ * tabs in the order they were first pressed (never pending: an action has a
+ * tab only once it ran), then every other tab exactly as it was. A step whose
+ * terminal exists but is not visible is left out.
  */
 export function orderRunTabs<T>(
   visible: readonly T[],
   idOf: (item: T) => string,
   state: RunGroupState | null,
 ): Array<OrderedRunTab<T>> {
-  if (state === null || state.steps.length === 0) return visible.map((item) => ({ kind: 'plain', item }))
+  if (state === null || (state.steps.length === 0 && (state.once ?? []).length === 0)) {
+    return visible.map((item) => ({ kind: 'plain', item }))
+  }
   const byId = new Map(visible.map((item) => [idOf(item), item]))
   const used = new Set<string>()
   const out: Array<OrderedRunTab<T>> = []
@@ -247,6 +319,13 @@ export function orderRunTabs<T>(
     used.add(step.terminalId)
     out.push({ kind: 'step', item, step })
   }
+  for (const once of state.once ?? []) {
+    if (once.terminalId === null) continue
+    const item = byId.get(once.terminalId)
+    if (item === undefined || used.has(once.terminalId)) continue
+    used.add(once.terminalId)
+    out.push({ kind: 'once', item, once })
+  }
   for (const item of visible) {
     if (!used.has(idOf(item))) out.push({ kind: 'plain', item })
   }
@@ -257,6 +336,116 @@ export function orderRunTabs<T>(
 export function stepOfTerminal(state: RunGroupState | null, terminalId: string | null): RunStepState | null {
   if (state === null || terminalId === null) return null
   return state.steps.find((step) => step.terminalId === terminalId) ?? null
+}
+
+// ─── the Launchpad menu ──────────────────────────────────────────────────────
+
+export interface LaunchpadMenuItem {
+  key: string
+  name: string
+  /** The person's own command — data, shown in mono. */
+  command: string
+  /** "asks first" is shown beside it. */
+  asksFirst: boolean
+  /** A run of it is going: pressing it shows its tab. */
+  running: boolean
+  /** Its project is not on this computer: it can't run. */
+  disabled: boolean
+  title: string
+}
+
+export interface LaunchpadMenuGroup {
+  projectName: string
+  items: LaunchpadMenuItem[]
+}
+
+export interface LaunchpadMenu {
+  groups: LaunchpadMenuGroup[]
+  /** No one-time action is turned on: the menu says so and offers to add one. */
+  empty: boolean
+  /** "Run all running steps": shown when there are running steps; disabled while they run. */
+  runAll: { shown: boolean; disabled: boolean; title: string }
+}
+
+/**
+ * What the Launchpad menu offers: the conversation's one-time actions that
+ * are turned on, grouped by the project they run in (first-seen order), then
+ * "Run all running steps" and "Edit Launchpad".
+ */
+export function launchpadMenu(view: RunView | null): LaunchpadMenu {
+  const once: readonly ResolvedRunStep[] = view?.resolution.once ?? []
+  const states = new Map((view?.state.once ?? []).map((entry) => [entry.key, entry]))
+  const groups: LaunchpadMenuGroup[] = []
+  for (const step of once) {
+    const running = states.get(step.key)?.status === 'running'
+    const disabled = step.unavailable !== undefined
+    const item: LaunchpadMenuItem = {
+      key: step.key,
+      name: step.name,
+      command: step.command,
+      asksFirst: step.confirm === true,
+      running,
+      disabled,
+      title: disabled ? (step.unavailable ?? '') : running ? RUN_STRINGS.onceRunningTitle : RUN_STRINGS.onceRunTitle,
+    }
+    const group = groups.find((candidate) => candidate.projectName.toLowerCase() === step.projectName.toLowerCase())
+    if (group !== undefined) group.items.push(item)
+    else groups.push({ projectName: step.projectName, items: [item] })
+  }
+  const services = view?.resolution.steps.length ?? 0
+  const active = view?.state.active ?? false
+  return {
+    groups,
+    empty: groups.length === 0,
+    runAll: {
+      shown: services > 0,
+      disabled: services === 0 || active,
+      title: services === 0 ? RUN_STRINGS.runAllNone : active ? RUN_STRINGS.runAllGoing : RUN_STRINGS.runTitle,
+    },
+  }
+}
+
+/** The menu's items in keyboard order (arrow keys move through them). */
+export type LaunchpadMenuEntry = { kind: 'once'; key: string } | { kind: 'add' } | { kind: 'run-all' } | { kind: 'edit' }
+
+export function launchpadMenuEntries(menu: LaunchpadMenu): LaunchpadMenuEntry[] {
+  const out: LaunchpadMenuEntry[] = []
+  for (const group of menu.groups) for (const item of group.items) if (!item.disabled) out.push({ kind: 'once', key: item.key })
+  if (menu.empty) out.push({ kind: 'add' })
+  if (menu.runAll.shown && !menu.runAll.disabled) out.push({ kind: 'run-all' })
+  out.push({ kind: 'edit' })
+  return out
+}
+
+/** The next focus index for an arrow key, wrapping. */
+export function moveMenuFocus(current: number, count: number, key: 'ArrowDown' | 'ArrowUp' | 'Home' | 'End'): number {
+  if (count <= 0) return -1
+  if (key === 'Home') return 0
+  if (key === 'End') return count - 1
+  if (current < 0) return key === 'ArrowDown' ? 0 : count - 1
+  return key === 'ArrowDown' ? (current + 1) % count : (current - 1 + count) % count
+}
+
+export interface RunOnceAsk {
+  title: string
+  where: string
+  command: string
+}
+
+/**
+ * The ask before a one-time action runs: its name, where it runs — the
+ * conversation's checkout of its project, or the project's folder when it has
+ * none — and the command itself.
+ */
+export function onceAsk(step: Pick<ResolvedRunStep, 'name' | 'projectName' | 'projectRoot' | 'cwd' | 'command'>): RunOnceAsk {
+  const checkout = step.cwd !== step.projectRoot
+  return {
+    title: `Run “${step.name}”?`,
+    where: checkout
+      ? `This runs in ${step.projectName}, in this conversation's checkout:`
+      : `This runs in ${step.projectName}, in its folder:`,
+    command: step.command,
+  }
 }
 
 // ─── asking the agent ────────────────────────────────────────────────────────
@@ -272,9 +461,9 @@ export function askAgentPrompt(
 ): string {
   const others = projectNames.filter((name) => name !== scopeName)
   const lines = [
-    `Help me set up Run for ${scopeName}: the processes I start every working session, each in its own terminal, in one order.`,
+    `Help me set up the Launchpad for ${scopeName}: the processes I start every working session, each in its own terminal, in one order.`,
     'Look at how this project is started locally and propose the steps. For each step give a name, the command, the project it runs in, and when it starts: right away, or after the step above — and whether that step counts as ready when a port answers or when a line appears in its output.',
-    'Do not start anything; I will add the steps in the Run setup myself.',
+    'Do not start anything; I will add the steps in the Launchpad myself.',
   ]
   if (others.length > 0) lines.splice(2, 0, `A step can also run in ${others.join(', ')}.`)
   if (found.length > 0) {

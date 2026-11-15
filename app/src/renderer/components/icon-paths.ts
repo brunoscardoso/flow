@@ -74,6 +74,10 @@ export const ICON_PATHS = {
   map: 'M1.5 4 L6 2 L10 4 L14.5 2 V12 L10 14 L6 12 L1.5 14 Z M6 2 V12 M10 4 V14',
   // A triangle pointing right — start (the Run group's Run button).
   play: 'M5 3.5 L12.5 8 L5 12.5 Z',
+  // A rocket lifting off to the upper right: a nose-coned body, two fins, a
+  // porthole and an exhaust trail — the Launchpad's mark.
+  rocket:
+    'M13.5 2.5 C10.5 2.5 8 4 6 7 L9 10 C12 8 13.5 5.5 13.5 2.5 Z M6 7 L3.5 7 L5 5 L7.5 5 M9 10 L9 12.5 L11 10.5 L11 8.5 M4.5 11.5 L2.5 13.5 M10.5 5.5 A0.9 0.9 0 1 0 10.49 5.5',
   refresh: 'M13.5 8 A5.5 5.5 0 1 1 11.6 3.9 M11.5 1.5 L11.8 4.2 L9 4.5',
   spinner: 'M8 2.5 A5.5 5.5 0 0 1 13.5 8',
   // A COG: a toothed ring around a hub.

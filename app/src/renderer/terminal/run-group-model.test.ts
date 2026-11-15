@@ -1,7 +1,22 @@
-import type { RunGroupState, RunStepState, RunStepStatus, RunSuggestion, RunView } from '../../shared/run-setup'
+import type {
+  ResolvedRunStep,
+  RunGroupState,
+  RunOnceState,
+  RunStepState,
+  RunStepStatus,
+  RunSuggestion,
+  RunView,
+} from '../../shared/run-setup'
 import {
   askAgentPrompt,
+  durationLabel,
   groupHasRun,
+  launchpadMenu,
+  launchpadMenuEntries,
+  moveMenuFocus,
+  onceAsk,
+  onceOfTerminal,
+  onceTabFace,
   orderRunTabs,
   pendingTabAction,
   pendingTabId,
@@ -12,6 +27,7 @@ import {
   stepOfTerminal,
   stepTabFace,
 } from './run-group-model'
+import { parseRunSetup } from '../../shared/run-setup'
 import { SETUP_STRINGS, setupTitle } from './run-setup-model'
 
 const ROOT = '/work/jupiter'
@@ -57,8 +73,46 @@ function view(steps: RunStepState[], active = false, setupCount = steps.length):
   }
 }
 
+function onceStep(name: string, extra: Partial<ResolvedRunStep> = {}): ResolvedRunStep {
+  return {
+    key: `${ROOT}::${name}`,
+    projectRoot: ROOT,
+    projectName: 'jupiter',
+    cwd: ROOT,
+    id: name,
+    name,
+    command: `npm run ${name}`,
+    start: 'now',
+    readyTimeoutMs: 60_000,
+    from: { command: 'shared', ready: 'shared' },
+    kind: 'once',
+    ...extra,
+  }
+}
+
+function onceState(name: string, extra: Partial<RunOnceState> = {}): RunOnceState {
+  return {
+    key: `${ROOT}::${name}`,
+    name,
+    projectRoot: ROOT,
+    projectName: 'jupiter',
+    status: 'running',
+    terminalId: `o-${name}`,
+    exitCode: null,
+    durationMs: null,
+    ...extra,
+  }
+}
+
+function withOnce(base: RunView, once: ResolvedRunStep[], live: RunOnceState[] = []): RunView {
+  return {
+    resolution: { ...base.resolution, once },
+    state: { ...base.state, ...(live.length > 0 ? { once: live } : {}) },
+  }
+}
+
 describe('pillFace', () => {
-  it('hides without a view and offers Set up Run for a scope with no steps', () => {
+  it('hides without a view and offers Set up Launchpad for a scope with no steps', () => {
     expect(pillFace(null).mode).toBe('hidden')
     expect(pillFace(view([], false, 0)).mode).toBe('set-up')
   })
@@ -215,6 +269,31 @@ function uiStrings(): string[] {
     all.push(face.summaryTitle)
   }
   all.push(stepTabFace(step('x', 'blocked', { notHere: true })).label, stepTabFace(step('x', 'blocked', { notHere: true })).tooltip)
+  // The Launchpad menu, a one-time action's tab and the ask before it runs.
+  for (const live of [
+    onceState('migrate'),
+    onceState('migrate', { status: 'exited', exitCode: 0, durationMs: 2_400 }),
+    onceState('migrate', { status: 'exited', exitCode: 1, durationMs: 75_000 }),
+    onceState('migrate', { status: 'exited', exitCode: null, durationMs: null }),
+    onceState('migrate', { status: 'stopped' }),
+  ]) {
+    const face = onceTabFace(live)
+    all.push(face.label, face.tooltip)
+  }
+  const menuViews = [
+    view([], false, 0),
+    withOnce(view([step('a', 'running')], true), [onceStep('migrate', { confirm: true }), onceStep('seed', { unavailable: "jupiter-core is not on this computer, so this step can't start." })], [onceState('migrate')]),
+    withOnce(view([step('a', 'idle')]), [onceStep('gen')]),
+  ]
+  for (const v of menuViews) {
+    const menu = launchpadMenu(v)
+    all.push(menu.runAll.title)
+    for (const group of menu.groups) for (const item of group.items) all.push(item.title)
+  }
+  const ask = onceAsk(onceStep('migrate'))
+  all.push(ask.title, ask.where, onceAsk(onceStep('migrate', { cwd: '/work/.jupiter-threads/blue' })).where)
+  // The sentence the page shows for a stored entry of a kind this build can't run.
+  all.push(...parseRunSetup(JSON.stringify({ version: 1, steps: [{ name: 'x', command: 'y', kind: 'later' }] })).problems)
   return all.filter((text) => text !== '')
 }
 
@@ -232,5 +311,115 @@ describe('UI text (forbidden-pattern #12)', () => {
   it('the scan catches what it is meant to catch', () => {
     const bad = ['run `planflow-ai init`', 'edit flow/run/setup.json', 'set remote_branch_pattern', 'pass --force']
     for (const text of bad) expect(FORBIDDEN.some(([, pattern]) => pattern.test(text))).toBe(true)
+  })
+})
+
+describe('the Launchpad menu', () => {
+  it('groups the turned-on one-time actions by project, with the command, asks first and running', () => {
+    const v = withOnce(
+      view([step('web', 'idle')]),
+      [
+        onceStep('migrate', { confirm: true, projectName: 'jupiter-core', projectRoot: '/work/core' }),
+        onceStep('codegen'),
+        onceStep('seed', { projectName: 'jupiter-core', projectRoot: '/work/core' }),
+      ],
+      [onceState('codegen')],
+    )
+    const menu = launchpadMenu(v)
+    expect(menu.empty).toBe(false)
+    expect(menu.groups.map((group) => [group.projectName, group.items.map((item) => item.name)])).toEqual([
+      ['jupiter-core', ['migrate', 'seed']],
+      ['jupiter', ['codegen']],
+    ])
+    expect(menu.groups[0]!.items[0]).toMatchObject({ command: 'npm run migrate', asksFirst: true, running: false, disabled: false })
+    expect(menu.groups[1]!.items[0]).toMatchObject({ running: true, title: RUN_STRINGS.onceRunningTitle })
+    expect(menu.runAll).toEqual({ shown: true, disabled: false, title: RUN_STRINGS.runTitle })
+    expect(launchpadMenuEntries(menu)).toEqual([
+      { kind: 'once', key: '/work/jupiter::migrate' },
+      { kind: 'once', key: '/work/jupiter::seed' },
+      { kind: 'once', key: '/work/jupiter::codegen' },
+      { kind: 'run-all' },
+      { kind: 'edit' },
+    ])
+  })
+
+  it('with no actions it says so and offers to add one; Run all is disabled while steps run and hidden without steps', () => {
+    const going = launchpadMenu(view([step('web', 'running')], true))
+    expect(going.empty).toBe(true)
+    expect(going.runAll).toEqual({ shown: true, disabled: true, title: RUN_STRINGS.runAllGoing })
+    expect(launchpadMenuEntries(going)).toEqual([{ kind: 'add' }, { kind: 'edit' }])
+    const actionsOnly = launchpadMenu(withOnce(view([], false, 0), [onceStep('migrate')]))
+    expect(actionsOnly.runAll.shown).toBe(false)
+    expect(launchpadMenuEntries(actionsOnly)).toEqual([{ kind: 'once', key: '/work/jupiter::migrate' }, { kind: 'edit' }])
+    expect(launchpadMenu(null)).toMatchObject({ empty: true, groups: [], runAll: { shown: false } })
+  })
+
+  it('an action whose project is not here is shown disabled with the reason, and skipped by the keyboard', () => {
+    const reason = "jupiter-core is not on this computer, so this step can't start."
+    const menu = launchpadMenu(withOnce(view([], false, 0), [onceStep('seed', { unavailable: reason })]))
+    expect(menu.groups[0]!.items[0]).toMatchObject({ disabled: true, title: reason })
+    expect(launchpadMenuEntries(menu)).toEqual([{ kind: 'edit' }])
+  })
+
+  it('arrow keys move and wrap; Home and End jump', () => {
+    expect(moveMenuFocus(-1, 3, 'ArrowDown')).toBe(0)
+    expect(moveMenuFocus(-1, 3, 'ArrowUp')).toBe(2)
+    expect(moveMenuFocus(2, 3, 'ArrowDown')).toBe(0)
+    expect(moveMenuFocus(0, 3, 'ArrowUp')).toBe(2)
+    expect(moveMenuFocus(1, 3, 'Home')).toBe(0)
+    expect(moveMenuFocus(1, 3, 'End')).toBe(2)
+    expect(moveMenuFocus(0, 0, 'ArrowDown')).toBe(-1)
+  })
+
+  it('Run all and pill counts never include a one-time action', () => {
+    const v = withOnce(view([step('web', 'idle')]), [onceStep('migrate'), onceStep('seed')], [onceState('migrate')])
+    expect(pillFace(v)).toMatchObject({ mode: 'ready', summary: '1 step', canRun: true, canStop: false })
+  })
+})
+
+describe('the ask before a one-time action runs', () => {
+  it('names the action, the project and its checkout or folder, and shows the command', () => {
+    expect(onceAsk(onceStep('migrate', { cwd: '/work/.jupiter-threads/blue', command: 'uv run alembic upgrade head' }))).toEqual({
+      title: 'Run “migrate”?',
+      where: "This runs in jupiter, in this conversation's checkout:",
+      command: 'uv run alembic upgrade head',
+    })
+    expect(onceAsk(onceStep('migrate')).where).toBe('This runs in jupiter, in its folder:')
+  })
+})
+
+describe('a one-time action’s tab', () => {
+  it('reads running, then finished with how long, or ended with its code', () => {
+    expect(onceTabFace(onceState('migrate'))).toMatchObject({ label: 'migrate · running', tone: 'busy', finished: false })
+    expect(onceTabFace(onceState('migrate', { status: 'exited', exitCode: 0, durationMs: 2_400 }))).toEqual({
+      label: 'migrate · finished',
+      tone: 'ok',
+      finished: true,
+      tooltip: 'Finished in 2.4 s.',
+    })
+    expect(onceTabFace(onceState('migrate', { status: 'exited', exitCode: 2, durationMs: 12_000 }))).toMatchObject({
+      label: 'migrate · ended (2)',
+      tone: 'bad',
+      tooltip: 'Ended with code 2 after 12 s.',
+    })
+  })
+
+  it('says durations plainly', () => {
+    expect(durationLabel(0)).toBe('0.0 s')
+    expect(durationLabel(2_449)).toBe('2.4 s')
+    expect(durationLabel(42_000)).toBe('42 s')
+    expect(durationLabel(185_000)).toBe('3 min 5 s')
+    expect(durationLabel(120_000)).toBe('2 min')
+  })
+
+  it('stands after the running steps and before plain tabs, and is found by its terminal', () => {
+    const state: RunGroupState = { ...group([step('web', 'running')], true), once: [onceState('migrate'), onceState('gone', { terminalId: 'missing' })] }
+    const ordered = orderRunTabs(['plain-1', 'o-migrate', 't-web'], (t) => t, state)
+    expect(ordered.map((o) => (o.kind === 'pending' ? 'pending' : `${o.kind}:${o.item}`))).toEqual(['step:t-web', 'once:o-migrate', 'plain:plain-1'])
+    expect(onceOfTerminal(state, 'o-migrate')?.name).toBe('migrate')
+    expect(stepOfTerminal(state, 'o-migrate')).toBeNull()
+    // Actions alone (no running steps) still order their tabs.
+    const onlyOnce: RunGroupState = { scopeKey: 'k', active: false, steps: [], once: [onceState('migrate')] }
+    expect(orderRunTabs(['plain-1', 'o-migrate'], (t) => t, onlyOnce).map((o) => o.kind)).toEqual(['once', 'plain'])
   })
 })

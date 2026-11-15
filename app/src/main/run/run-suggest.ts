@@ -277,6 +277,128 @@ async function fromReadme(root: string, fs: SuggestFs): Promise<Candidate[]> {
   return readmeRunLines(text).map((command) => ({ name: nameFromCommand(command), command, source: 'README' }))
 }
 
+// ─── one-time actions ────────────────────────────────────────────────────────
+
+/** Script and target names that read as a job worth a button: migrations, seeds, codegen, tests. */
+const ONCE_SCRIPT =
+  /(^|[:_-])(migrate|migration|migrations|seed|seeds|gen|generate|codegen|schema|db|reset|setup|bootstrap|test|tests|e2e|typecheck|lint)([:_-]|$)/i
+
+/**
+ * How strongly a command reads as a one-time action worth offering first:
+ * migrations, then seeds, codegen, then tests and checks.
+ */
+export function oncePriority(suggestion: Pick<RunSuggestion, 'name' | 'command'>): number {
+  const text = `${suggestion.name} ${suggestion.command}`.toLowerCase()
+  if (/migrat|alembic (upgrade|downgrade)|db:?push/.test(text)) return 50
+  if (/seed/.test(text)) return 42
+  if (/codegen|generate|\bgen\b|schema/.test(text)) return 36
+  if (/reset|setup|bootstrap/.test(text)) return 30
+  if (/e2e|test/.test(text)) return 24
+  if (/typecheck|lint/.test(text)) return 16
+  return 10
+}
+
+/**
+ * True for a command worth offering as a ONE-TIME action: a job that ends (a
+ * build, a test run) or one that changes data or code once (a migration, a
+ * seed, codegen) — never one that keeps running.
+ */
+export function looksOnceCommand(command: string): boolean {
+  if (looksLongRunningCommand(command)) return false
+  return looksOneShotCommand(command) || oncePriority({ name: '', command }) > 10
+}
+
+async function onceFromPackageJson(root: string, fs: SuggestFs): Promise<Candidate[]> {
+  const text = await fs.readFile(join(root, 'package.json'))
+  if (text === null) return []
+  let scripts: unknown
+  try {
+    scripts = (JSON.parse(text) as { scripts?: unknown }).scripts
+  } catch {
+    return []
+  }
+  if (typeof scripts !== 'object' || scripts === null || Array.isArray(scripts)) return []
+  const run = await packageRunner(root, fs)
+  const out: Candidate[] = []
+  for (const [name, body] of Object.entries(scripts as Record<string, unknown>)) {
+    if (typeof body !== 'string' || body.trim() === '') continue
+    const hooked = /^(pre|post)(.+)$/.exec(name)?.[2]
+    if (hooked !== undefined && hooked in (scripts as Record<string, unknown>)) continue
+    if (!ONCE_SCRIPT.test(name) || LONG_RUNNING_SCRIPT.test(name)) continue
+    out.push({ name, command: run(name), source: 'package.json' })
+  }
+  return out
+}
+
+const ONCE_MAKE_TARGET = /^((?:db[-_])?(?:migrate|migration|seed|gen|generate|codegen|schema|reset|setup|bootstrap|test|e2e|lint)(?:[-_][A-Za-z0-9_-]+)?)\s*:(?!=)/
+
+async function onceFromMakefile(root: string, fs: SuggestFs): Promise<Candidate[]> {
+  const text = await fs.readFile(join(root, 'Makefile'))
+  if (text === null) return []
+  const out: Candidate[] = []
+  for (const line of text.split(/\r?\n/)) {
+    const match = ONCE_MAKE_TARGET.exec(line)
+    if (match === null) continue
+    out.push({ name: match[1]!, command: `make ${match[1]!}`, source: 'Makefile' })
+  }
+  return out
+}
+
+/** The migration and codegen tools a project's own files show it uses. */
+async function onceFromTools(root: string, fs: SuggestFs): Promise<Candidate[]> {
+  const out: Candidate[] = []
+  const uv = await fs.exists(join(root, 'uv.lock'))
+  const py = (command: string): string => (uv ? `uv run ${command}` : command)
+  if (await fs.exists(join(root, 'alembic.ini'))) {
+    out.push({ name: 'migrate', command: py('alembic upgrade head'), source: 'Alembic' })
+  }
+  if (await fs.exists(join(root, 'manage.py'))) {
+    out.push({ name: 'migrate', command: py('python manage.py migrate'), source: 'Django' })
+  }
+  if (await fs.exists(join(root, 'prisma', 'schema.prisma'))) {
+    out.push({ name: 'migrate', command: 'npx prisma migrate dev', source: 'Prisma' })
+    out.push({ name: 'generate', command: 'npx prisma generate', source: 'Prisma' })
+  }
+  for (const file of ['drizzle.config.ts', 'drizzle.config.js', 'drizzle.config.mjs']) {
+    if (!(await fs.exists(join(root, file)))) continue
+    out.push({ name: 'migrate', command: 'npx drizzle-kit migrate', source: 'Drizzle' })
+    break
+  }
+  if (await fs.exists(join(root, 'bin', 'rails'))) {
+    out.push({ name: 'migrate', command: 'bin/rails db:migrate', source: 'Rails' })
+  }
+  return out
+}
+
+const ONCE_SCANNERS = [onceFromPackageJson, onceFromTools, onceFromMakefile]
+
+/**
+ * Every project's candidates for a ONE-TIME action — migrations, seeds,
+ * codegen, tests — in scope order, de-duplicated per project by command.
+ * Each is marked `use: 'once'`. Read-only; never throws.
+ */
+export async function suggestOnceSteps(projects: SuggestProject[], fs: SuggestFs): Promise<RunSuggestion[]> {
+  const out: RunSuggestion[] = []
+  for (const project of projects) {
+    const seen = new Set<string>()
+    for (const scan of ONCE_SCANNERS) {
+      let found: Candidate[]
+      try {
+        found = await scan(project.dir ?? project.root, fs)
+      } catch {
+        found = []
+      }
+      for (const candidate of found) {
+        const key = candidate.command.replace(/\s+/g, ' ').trim()
+        if (key === '' || seen.has(key)) continue
+        seen.add(key)
+        out.push({ projectRoot: project.root, projectName: project.name, ...candidate, command: key, use: 'once' })
+      }
+    }
+  }
+  return out
+}
+
 // ─── the scanner ─────────────────────────────────────────────────────────────
 
 const SCANNERS = [fromPackageJson, fromProcfile, fromCompose, fromMakefile, fromPyproject, fromReadme]

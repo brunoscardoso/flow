@@ -12,6 +12,13 @@
  *     Reload — forced or not — starts it: there is nowhere to run it.
  *   - Reload all / Reload one / Stop all / apply a saved setup (start new,
  *     restart changed, stop removed, keep the rest).
+ *   - One-time actions (`runOnce`) are never started by Run, Reload all or a
+ *     saved setup: only a person pressing one. Each runs once in its own tab,
+ *     which stays after it ends so its output can be read; pressing it again
+ *     while it runs starts nothing (the caller shows its tab), and after it
+ *     ended starts it again in a fresh tab. Stop all leaves it alone — ending
+ *     a migration halfway is worse than letting it finish; closing its tab
+ *     ends it (the terminal kills its process group).
  *   - State is broadcast only when it CHANGED (allowed-pattern #17): changes
  *     inside one tick are coalesced, and a report identical to the last one
  *     is never sent.
@@ -28,6 +35,7 @@ import {
   runScopeKey,
   type ResolvedRunStep,
   type RunGroupState,
+  type RunOnceState,
   type RunReady,
   type RunResolution,
   type RunScope,
@@ -70,7 +78,12 @@ export interface RunSupervisorDeps {
   ready: RunReadyChecks
   /** Defer the coalesced report — `queueMicrotask` by default. */
   defer?: (fn: () => void) => void
+  /** The clock, for how long a one-time action ran — `Date.now` by default. */
+  now?: () => number
 }
+
+/** A one-time action asked for that this scope does not have (or cannot run here). */
+export class RunOnceError extends Error {}
 
 /** How long a reload waits for the old process to let go of its port. */
 export const PORT_RELEASE_LIMIT_MS = 4_000
@@ -116,10 +129,23 @@ interface StepRun {
   epoch: number
 }
 
+/** One run of a one-time action; it exists while its tab does. */
+interface OnceRun {
+  step: ResolvedRunStep
+  terminalId: string
+  alive: boolean
+  status: RunOnceState['status']
+  exitCode: number | null
+  startedAt: number
+  durationMs: number | null
+}
+
 interface ScopeRun {
   scope: RunScope
   key: string
   steps: StepRun[]
+  /** One-time actions with a tab, in the order they were first pressed. */
+  once: OnceRun[]
   /** Bumped by Stop and Reload all: every sequence started before it stops at its next await. */
   generation: number
   lastReported: string | null
@@ -193,6 +219,8 @@ export class RunSupervisor {
   readonly #defer: (fn: () => void) => void
   readonly #runs = new Map<string, ScopeRun>()
   readonly #owned = new Map<string, { run: ScopeRun; step: StepRun }>()
+  readonly #ownedOnce = new Map<string, { run: ScopeRun; once: OnceRun }>()
+  readonly #now: () => number
   readonly #listeners = new Set<(state: RunGroupState) => void>()
   readonly #unsubscribe: Array<() => void>
   #disposed = false
@@ -200,6 +228,7 @@ export class RunSupervisor {
   constructor(deps: RunSupervisorDeps) {
     this.#deps = deps
     this.#defer = deps.defer ?? queueMicrotask
+    this.#now = deps.now ?? Date.now
     this.#unsubscribe = [
       deps.terminals.onExit((event) => this.#onExit(event.terminalId, event.exitCode)),
       deps.terminals.onRemoved((event) => this.#onRemoved(event.terminalId)),
@@ -331,6 +360,60 @@ export class RunSupervisor {
     return this.#snapshot(run)
   }
 
+  /**
+   * Run a one-time action once, in its own tab. Never started by anything
+   * else. While a run of it is going nothing new starts (the caller shows its
+   * tab); after it ended, it starts again in a fresh tab that replaces the old
+   * one. Refused (RunOnceError) for an action this scope does not have, or
+   * whose project is not on this computer.
+   */
+  async runOnce(scope: RunScope, stepKey: string): Promise<RunGroupState> {
+    const resolution = await this.#deps.setups.resolve(scope)
+    if (this.#disposed) return this.state(scope)
+    const step = (resolution.once ?? []).find((candidate) => candidate.key === stepKey)
+    if (step === undefined) throw new RunOnceError('That action is not part of this Launchpad any more.')
+    if (step.unavailable !== undefined) throw new RunOnceError(step.unavailable)
+    const run = this.#ensureRun(scope, resolution)
+    const existing = run.once.find((entry) => entry.step.key === stepKey)
+    // Checked after the await: two quick presses never start two copies.
+    if (existing !== undefined && existing.alive) return this.#snapshot(run)
+    let info: TerminalInfo
+    try {
+      info = this.#deps.terminals.createUserTerminal({
+        rootId: step.projectRoot,
+        cols: TERMINAL_COLS,
+        rows: TERMINAL_ROWS,
+        owner: { rootPath: run.scope.rootPath, threadId: run.scope.threadId },
+        command: step.command,
+        cwd: step.cwd,
+        title: step.name,
+        run: { scopeKey: run.key, stepId: step.id, projectRoot: step.projectRoot },
+      })
+    } catch {
+      throw new RunOnceError('This action could not be started.')
+    }
+    const fresh: OnceRun = {
+      step,
+      terminalId: info.terminalId,
+      alive: true,
+      status: 'running',
+      exitCode: null,
+      startedAt: this.#now(),
+      durationMs: null,
+    }
+    if (existing !== undefined) {
+      // The old run's tab gives way to the new one, in the same place.
+      this.#ownedOnce.delete(existing.terminalId)
+      run.once[run.once.indexOf(existing)] = fresh
+      this.#deps.terminals.dispose(existing.terminalId)
+    } else {
+      run.once.push(fresh)
+    }
+    this.#ownedOnce.set(info.terminalId, { run, once: fresh })
+    this.#report(run)
+    return this.#snapshot(run)
+  }
+
   /** Quit: end every Run's processes and tabs, and stop listening. */
   disposeAll(): void {
     if (this.#disposed) return
@@ -344,9 +427,12 @@ export class RunSupervisor {
         if (step.terminalId !== null) this.#deps.terminals.dispose(step.terminalId)
         step.terminalId = null
       }
+      for (const once of run.once) this.#deps.terminals.dispose(once.terminalId)
+      run.once = []
     }
     this.#runs.clear()
     this.#owned.clear()
+    this.#ownedOnce.clear()
     this.#listeners.clear()
   }
 
@@ -370,12 +456,32 @@ export class RunSupervisor {
       scope,
       key: resolution.scopeKey,
       steps: resolution.steps.map(newStepRun),
+      // One-time actions are not part of the Run: their tabs stay as they are.
+      once: previous?.once ?? [],
       generation: (previous?.generation ?? 0) + 1,
       lastReported: previous?.lastReported ?? null,
       reportQueued: false,
     }
     this.#runs.set(run.key, run)
+    for (const once of run.once) this.#ownedOnce.set(once.terminalId, { run, once })
     this.#report(run)
+    return run
+  }
+
+  /** The scope's ScopeRun, made (every step idle, nothing started) when it has none yet. */
+  #ensureRun(scope: RunScope, resolution: RunResolution): ScopeRun {
+    const existing = this.#runs.get(resolution.scopeKey)
+    if (existing !== undefined) return existing
+    const run: ScopeRun = {
+      scope,
+      key: resolution.scopeKey,
+      steps: resolution.steps.map(newStepRun),
+      once: [],
+      generation: 1,
+      lastReported: null,
+      reportQueued: false,
+    }
+    this.#runs.set(run.key, run)
     return run
   }
 
@@ -540,6 +646,16 @@ export class RunSupervisor {
   }
 
   #onExit(terminalId: string, exitCode: number): void {
+    const once = this.#ownedOnce.get(terminalId)
+    if (once !== undefined) {
+      if (!once.once.alive) return
+      once.once.alive = false
+      once.once.status = 'exited'
+      once.once.exitCode = exitCode
+      once.once.durationMs = Math.max(0, this.#now() - once.once.startedAt)
+      this.#report(once.run)
+      return
+    }
     const owned = this.#owned.get(terminalId)
     if (owned === undefined) return
     const { run, step } = owned
@@ -560,6 +676,14 @@ export class RunSupervisor {
 
   /** A person closed a step's tab: the step is stopped and has no tab. */
   #onRemoved(terminalId: string): void {
+    const once = this.#ownedOnce.get(terminalId)
+    if (once !== undefined) {
+      // A person closed its tab: the action's run is gone (the terminal ended its process group).
+      this.#ownedOnce.delete(terminalId)
+      once.run.once = once.run.once.filter((entry) => entry !== once.once)
+      this.#report(once.run)
+      return
+    }
     const owned = this.#owned.get(terminalId)
     if (owned === undefined) return
     this.#owned.delete(terminalId)
@@ -582,8 +706,8 @@ export class RunSupervisor {
     for (const run of this.#runs.values()) {
       for (const step of run.steps) {
         if (step.alive && portOf(step.step) === port) {
-          if (run === self) return `“${step.step.name}” in this Run`
-          return run.scope.threadId === null ? "the project's own Run" : 'a Run in another conversation'
+          if (run === self) return `“${step.step.name}” in this Launchpad`
+          return run.scope.threadId === null ? "the project's own Launchpad" : 'a Launchpad in another conversation'
         }
       }
     }
@@ -638,6 +762,19 @@ export class RunSupervisor {
       detail: step.detail,
       ...(step.step.unavailable !== undefined ? { notHere: true } : {}),
     }))
-    return { scopeKey: run.key, active: this.#isActive(run), steps }
+    const state: RunGroupState = { scopeKey: run.key, active: this.#isActive(run), steps }
+    if (run.once.length > 0) {
+      state.once = run.once.map((once) => ({
+        key: once.step.key,
+        name: once.step.name,
+        projectRoot: once.step.projectRoot,
+        projectName: once.step.projectName,
+        status: once.status,
+        terminalId: once.terminalId,
+        exitCode: once.exitCode,
+        durationMs: once.durationMs,
+      }))
+    }
+    return state
   }
 }
