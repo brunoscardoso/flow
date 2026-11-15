@@ -94,9 +94,7 @@ import {
   orderRunTabs,
   pendingTabTooltip,
   pendingTabId,
-  RUN_STRINGS,
   stepKeyOfPendingTab,
-  stepOfTerminal,
   stepTabFace,
 } from './run-group-model'
 import { RUN_TONE_COLOR, RunGroupView } from './run-group-view'
@@ -258,20 +256,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     document.dispatchEvent(new CustomEvent('flow:hide-terminal'))
   })
 
-  // The Run group's Reload for the step on screen (FR-6) — shown only while
-  // the active tab is one of this conversation's Run steps.
-  const reloadStepButton = document.createElement('button')
-  reloadStepButton.className = 'fl-term-tool'
-  reloadStepButton.hidden = true
-  reloadStepButton.title = RUN_STRINGS.reloadStepTitle
-  reloadStepButton.setAttribute('aria-label', RUN_STRINGS.reloadStep)
-  const reloadStepIcon = document.createElement('fl-icon')
-  reloadStepIcon.setAttribute('name', 'refresh')
-  reloadStepIcon.setAttribute('size', '14')
-  reloadStepButton.appendChild(reloadStepIcon)
-
   header.appendChild(tabsEl)
-  header.appendChild(reloadStepButton)
   header.appendChild(takeoverButton)
   header.appendChild(splitButton)
   header.appendChild(newButton)
@@ -647,7 +632,6 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     tabsEl.tabs = descriptors
     tabsEl.activeId = activeId
     empty.hidden = visible.length > 0 || descriptors.length > 0
-    reloadStepButton.hidden = stepOfTerminal(runState, activeId) === null
     // #1133: Split is only offered when there is something to split and room
     // to split it into — a disabled button with a reason beats a dead click.
     const splittable = canSplit(layout, activeId)
@@ -1484,7 +1468,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     },
   })
   runGroup = group
-  header.insertBefore(group.element, reloadStepButton)
+  header.insertBefore(group.element, takeoverButton)
   if (ownerScope !== undefined) group.setScope(ownerScope)
 
   // ── Wiring ─────────────────────────────────────────────────────────────
@@ -1502,11 +1486,6 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
         active.term?.focus()
       }
     }
-  })
-
-  reloadStepButton.addEventListener('click', () => {
-    const step = stepOfTerminal(runGroup?.state ?? null, activeId)
-    if (step !== null) runGroup?.reloadStep(step.key)
   })
 
   tabsEl.addEventListener('fl-tab-select', (event) => {

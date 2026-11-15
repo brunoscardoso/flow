@@ -510,11 +510,13 @@ export class RunGroupView {
       document.removeEventListener('mousedown', onOutside, true)
       liveAnchor()?.setAttribute('aria-expanded', 'false')
       if (this.#menu?.element === element) this.#menu = null
+      liveAnchor()?.closest('.fl-run-pill')?.classList.toggle('open', this.#panel.isOpen)
     }
     document.addEventListener('keydown', onKey, true)
     document.addEventListener('mousedown', onOutside, true)
     anchor.setAttribute('aria-expanded', 'true')
     this.#menu = { element, close }
+    anchor.closest('.fl-run-pill')?.classList.add('open')
     // The first one-time action (else the first item) takes the keyboard.
     if (entries.length > 0) focusAt(0)
   }
@@ -605,7 +607,7 @@ export class RunGroupView {
       start.title = RUN_STRINGS.setUpTitle
       start.append(document.createTextNode(RUN_STRINGS.setUp))
       start.addEventListener('click', () => this.#toggleSetup())
-      root.append(separator(), start)
+      root.append(start)
       return
     }
 
@@ -613,6 +615,8 @@ export class RunGroupView {
     pill.className = 'fl-run-pill'
     pill.setAttribute('role', 'group')
     pill.setAttribute('aria-label', RUN_STRINGS.launchpad)
+    // Accent only while its menu or its setup is open (user decision 2026-11-15).
+    pill.classList.toggle('open', this.#menu !== null || this.#panel.isOpen)
     // "Launchpad ▾": the menu of one-time actions, Run all and Edit.
     const open = document.createElement('button')
     open.type = 'button'
@@ -647,16 +651,10 @@ export class RunGroupView {
         iconButton('square', RUN_STRINGS.stopAll, RUN_STRINGS.stopAllTitle, () => this.#act((api, scope) => api.stop({ scope }))),
       )
     }
-    root.append(separator(), pill)
+    root.append(pill)
   }
 }
 
-function separator(): HTMLElement {
-  const line = document.createElement('span')
-  line.className = 'fl-run-sep'
-  line.setAttribute('aria-hidden', 'true')
-  return line
-}
 
 // ─── styles (Flow tokens only) ───────────────────────────────────────────────
 
@@ -669,7 +667,6 @@ function injectRunStyles(): void {
   style.textContent = `
     .fl-run-group { display: inline-flex; align-items: center; flex: none; gap: var(--fl-space-xs); padding-right: var(--fl-space-xs); }
     .fl-run-group[hidden] { display: none; }
-    .fl-run-sep { width: var(--fl-border-width); height: 16px; background: var(--fl-color-separator); margin: 0 2px; }
     .fl-run-setup-entry {
       display: inline-flex; align-items: center; gap: var(--fl-space-xs);
       height: 22px; padding: 0 var(--fl-space-sm);
@@ -683,12 +680,14 @@ function injectRunStyles(): void {
     .fl-run-pill {
       display: inline-flex; align-items: center; gap: var(--fl-space-xs);
       height: 22px; padding: 0 2px 0 var(--fl-space-sm);
-      border: var(--fl-border-width) solid var(--fl-color-accent);
+      border: var(--fl-border-width) solid transparent;
       border-radius: var(--fl-radius-sm);
-      background: var(--fl-color-accent-muted);
+      background: transparent;
       font-family: var(--fl-font-ui); font-size: var(--fl-text-caption-size);
       white-space: nowrap;
     }
+    .fl-run-pill:hover { border-color: var(--fl-color-border); }
+    .fl-run-pill.open { border-color: var(--fl-color-accent); background: var(--fl-color-accent-muted); }
     .fl-run-pill-label, .fl-run-pill-run { font-weight: var(--fl-text-ui-weight-medium); color: var(--fl-color-text); }
     .fl-run-pill-run {
       display: inline-flex; align-items: center; gap: var(--fl-space-xs);
