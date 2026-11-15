@@ -635,8 +635,9 @@ export function qaStaleness(repoRoot: string, entries: readonly QaEntry[]): Map<
 // ONE WRITER, TWO STORES. A Workspace answer is saved once at the Workspace
 // repository's root (`qa.jsonl`, beside `links.jsonl`, append-only — named in
 // `WORKSPACE_ROOT_TABLE`), and a small pointer (`QaPointerEntry`) is appended
-// to each cited LOCAL project's own `qa.jsonl`, so that project's Ask history
-// and feature briefs list it. Both are written by `appendWorkspaceQaEntry`
+// to each cited project's own `qa.jsonl` — its checkout's when it is on this
+// computer, its shared folder in the Workspace repository when it is not — so
+// that project's Ask history and feature briefs list it. Both are written by `appendWorkspaceQaEntry`
 // alone — reached only through `blueprint qa … --workspace` — every check
 // decided before the first byte, and every append under its store's lock, so
 // the record and its pointers never disagree (allowed-pattern #14).
@@ -979,6 +980,21 @@ function buildWorkspaceEntry(
   return entry;
 }
 
+/**
+ * The flow folder a cited project's pointer is written into, or null when it
+ * has none. A project on this computer: its checkout's `flow/` (Phase 1's
+ * rule). A project NOT on this computer: its shared folder in the Workspace
+ * repository (`projects/<slug>/`) — the folder that project's own checkout
+ * links its `flow/` to elsewhere, so its board lists the answer after sync.
+ */
+function pointerDirOf(project: WorkspaceQaProject): string | null {
+  if (project.localPath !== null) {
+    const dir = join(project.localPath, 'flow');
+    return existsSync(dir) ? dir : null;
+  }
+  return existsSync(project.flowPath) ? project.flowPath : null;
+}
+
 /** Does a Workspace tag concern this project? */
 function tagConcerns(tag: string, slug: string): boolean {
   const project = PROJECT_TAG_PATTERN.exec(tag);
@@ -1022,8 +1038,8 @@ function releaseLocks(paths: readonly string[]): void {
  * source naming its project, a file only in a project on this computer),
  * stamps each file source against its OWN project's checkout, then — holding
  * the Workspace log's lock and every pointed project's lock — appends the
- * Workspace record and one `QaPointerEntry` to each cited local project's
- * `qa.jsonl`. Throws `QaRefusal` with nothing written on any problem.
+ * Workspace record and one `QaPointerEntry` to each cited project's
+ * `qa.jsonl` (see `pointerDirOf`). Throws `QaRefusal` with nothing written on any problem.
  *
  * `workspaceRoot` is the Workspace repository; `projects` is every project of
  * the Workspace (`resolveWorkspaceQaScope` builds both from the Workspace
@@ -1039,7 +1055,8 @@ export function appendWorkspaceQaEntry(
   const entry = buildWorkspaceEntry(workspaceRoot, workspaceSlug, projects, input, now);
   const pointed = entry.cited
     .map((slug) => projects[slug] as WorkspaceQaProject)
-    .filter((project) => project.localPath !== null && existsSync(join(project.localPath, 'flow')));
+    .map((project) => ({ slug: project.slug, dir: pointerDirOf(project) }))
+    .filter((target): target is { slug: string; dir: string } => target.dir !== null);
 
   // Every lock first, in a fixed order (the Workspace's, then projects by
   // slug), so two writers can never hold each other's halves.
@@ -1062,7 +1079,7 @@ export function appendWorkspaceQaEntry(
   const targets = [...pointed]
     .sort((a, b) => a.slug.localeCompare(b.slug))
     .map((project) => {
-      const blueprintDir = ensureBlueprintDir(join(project.localPath as string, 'flow'));
+      const blueprintDir = ensureBlueprintDir(project.dir);
       take(join(blueprintDir, QA_LOCK_FILENAME), `${project.slug}'s saved-answer log`);
       return { slug: project.slug, path: join(blueprintDir, QA_FILENAME) };
     });
@@ -1081,7 +1098,7 @@ export function appendWorkspaceQaEntry(
 export function workspaceQaPointedProjects(entry: WorkspaceQaEntry, projects: WorkspaceQaProjects): string[] {
   return entry.cited.filter((slug) => {
     const project = projects[slug];
-    return project !== undefined && project.localPath !== null && existsSync(join(project.localPath, 'flow'));
+    return project !== undefined && pointerDirOf(project) !== null;
   });
 }
 

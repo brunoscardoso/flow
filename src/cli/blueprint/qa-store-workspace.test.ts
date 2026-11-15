@@ -1,7 +1,7 @@
 /**
  * Ask the Blueprint at Workspace level — the ONE writer of `<workspace>/qa.jsonl`
- * (`appendWorkspaceQaEntry`), the pointers it leaves in each cited local
- * project's own log, the Workspace readers and per-project staleness, plus the
+ * (`appendWorkspaceQaEntry`), the pointers it leaves in each cited project's
+ * own log (the checkout's, or the shared folder of a project not on this computer), the Workspace readers and per-project staleness, plus the
  * verb (`blueprint qa … --workspace`) run as a subprocess from source.
  *
  * In process, a REAL git, a throwaway sandbox: every Flow folder and code repo
@@ -27,6 +27,7 @@ const {
   readWorkspaceQaEntries,
   resolveWorkspaceQaScope,
   workspaceQaPath,
+  workspaceQaPointedProjects,
   workspaceQaStaleness,
 } = await import('./qa-store.js');
 const { getPackageRoot } = await import('../utils/files.js');
@@ -237,6 +238,33 @@ describeWithGit('Workspace Q&A store', () => {
       T1,
     );
     expect(ok.sources[0]).toEqual({ label: 'Login', featureId: 'feature:mobile::login', project: 'mobile' });
+  });
+
+  it('a cited project not on this computer gets its pointer in its shared folder, where its own checkout will find it', () => {
+    rmSync(repos.mobile, { recursive: true, force: true });
+    const s = scope();
+    expect(s.projects.mobile.localPath).toBeNull();
+    const sharedLog = join(projectFolder('mobile'), 'brain', '.structure', 'qa.jsonl');
+    expect(linesOf(sharedLog)).toBe(0);
+    const entry = appendWorkspaceQaEntry(
+      s.workspace.path,
+      s.projects,
+      { ...input, sources: [...input.sources, { label: 'Login', featureId: 'feature:mobile::login' }] },
+      T1,
+    );
+    expect(entry.cited.sort()).toEqual(['backend', 'frontend', 'mobile']);
+    expect(linesOf(projectLog('backend'))).toBe(1);
+    expect(linesOf(sharedLog)).toBe(1);
+    const pointer = JSON.parse(readFileSync(sharedLog, 'utf-8').trim()) as Record<string, unknown>;
+    expect(pointer).toMatchObject({ kind: 'workspace-pointer', id: entry.id, sources: [{ label: 'Login', featureId: 'feature:mobile::login', project: 'mobile' }] });
+    expect(workspaceQaPointedProjects(entry, s.projects).sort()).toEqual(['backend', 'frontend', 'mobile']);
+
+    // A refusal still writes nothing — not even into the shared folder.
+    expect(() =>
+      appendWorkspaceQaEntry(s.workspace.path, s.projects, { ...input, tags: ['feature:chats'], sources: [{ label: 'Login', featureId: 'feature:mobile::login' }] }, T1),
+    ).toThrow(expect.objectContaining({ reason: 'unqualified-tag' }));
+    expect(linesOf(sharedLog)).toBe(1);
+    expect(readWorkspaceQaEntries(workspaceRoot())).toHaveLength(1);
   });
 
   it('the Workspace root file is an append-only member of the closed root', () => {

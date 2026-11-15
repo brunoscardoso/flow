@@ -471,6 +471,7 @@ const flowApi: FlowApi = {
     stop: (request) => invoke('ask:stop', request),
     list: (request) => invoke('ask:list', request),
     stale: (request) => invoke('ask:stale', request),
+    saveConnection: (request) => invoke('ask:saveConnection', request),
     onState: (listener) => subscribe('ask:state', listener),
   },
   // Feature view sharing: share STATE only. The session token that authorises

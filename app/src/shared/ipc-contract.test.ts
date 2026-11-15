@@ -228,6 +228,7 @@ const INVOKE_MAP_KEYS: Record<IpcInvokeChannel, true> = {
   'ask:stop': true,
   'ask:list': true,
   'ask:stale': true,
+  'ask:saveConnection': true,
   'project:list': true,
   'project:addressableRoots': true,
   'project:add': true,

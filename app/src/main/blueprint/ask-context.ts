@@ -17,9 +17,21 @@
 // `merged: false` makes the orchestrator say "in progress on branch X" and
 // keeps that work out of the facts it writes.
 //
+// WORKSPACE SCOPE (plan `ask_the_blueprint_workspace`, note 5). Given the
+// resolved scope — every in-scope project with its feature graph (from the
+// Workspace map), its checkout when it is on this computer and its knowledge
+// folder — each project's graph is sliced with a SHARE of the budget, its notes
+// are read and matched on its own, every id is qualified with its project
+// (`feature:<project>::<slug>`), and the recorded links between in-scope
+// projects are added. All per-project reads run in parallel (NFR-4). One
+// project — no scope — reads exactly as before.
+//
 // Every read is injected, so the whole module tests without a repository, a
 // database or a spawned process.
 
+import { join } from 'node:path'
+
+import { qualifyFeatureId, splitQualifiedFeatureId, type AskConnectionKind } from '../../shared/ask-contract'
 import type { BlueprintFeatureEdge, BlueprintFeatureNode } from '../../shared/ipc-contract'
 import { isFileChangeTool } from '../../shared/tool-file-changes'
 import type { MessageRecord, ThreadRecord } from '../store/thread-store'
@@ -40,6 +52,13 @@ const MAX_BRAIN_HITS = 8
 const MAX_NOTES = 15
 /** Untagged features listed when nothing is tagged, so the model can name one. */
 const MAX_UNTAGGED_FEATURES = 60
+/** Workspace scope: features one prompt carries across every project's slice (NFR-2). */
+const MAX_WORKSPACE_FEATURES = 120
+/** Workspace scope: the smallest slice and note share one project gets, however many are in scope. */
+const MIN_PROJECT_FEATURES = 8
+const MIN_PROJECT_NOTES = 3
+/** Workspace scope: recorded links between in-scope projects handed to the prompt. */
+const MAX_LINKS = 40
 const MAX_SUMMARY_CHARS = 240
 
 /** A plan or discovery document a conversation touched or named. */
@@ -174,6 +193,8 @@ export interface AskNote {
   ts: string
   text: string
   anchors: string[]
+  /** Workspace scope: the project it was recorded in. */
+  project?: string
 }
 
 /** A feature or part in the slice the prompt carries. */
@@ -185,6 +206,43 @@ export interface AskFeature {
   /** For a part, the feature it belongs to. */
   partOf?: string
   tagged: boolean
+  /** Workspace scope: the project it is in (its id is qualified with it). */
+  project?: string
+}
+
+// ── Workspace scope ─────────────────────────────────────────────────────────
+
+/** One in-scope project, as the gate resolved it. */
+export interface AskScopeProject {
+  slug: string
+  name: string
+  /** Its checkout on this computer — a root open in Flow — or null (knowledge only). */
+  rootPath: string | null
+  /** The folder its knowledge lives in (the checkout's `flow/`, or its shared folder); null when unknown. */
+  flowDir: string | null
+  /** Its feature graph from the Workspace map; null when it could not be read. */
+  graph: { nodes: BlueprintFeatureNode[]; edges: BlueprintFeatureEdge[] } | null
+}
+
+/** One recorded Workspace link, ends as addresses (`<project>/<ref>`). */
+export interface AskWorkspaceLink {
+  kind: AskConnectionKind
+  from: string
+  to: string
+  fromProject: string
+  toProject: string
+  note?: string
+}
+
+/** A Workspace ask's scope — what the gate hands every later step. */
+export interface AskResolvedScope {
+  workspace: { slug: string; name: string }
+  /** The in-scope projects, in the Workspace's order. */
+  projects: AskScopeProject[]
+  /** Every project slug of the Workspace (tags may name any of them). */
+  workspaceProjects: string[]
+  /** Every recorded link of the Workspace (in-scope or not — suggestions are checked against all). */
+  links: AskWorkspaceLink[]
 }
 
 /** Everything an answer is given before it reads code. */
@@ -197,6 +255,13 @@ export interface AskContext {
   threads: CondensedThread[]
   /** Every feature or part id on the Blueprint — what a source may resolve to. Empty = no graph could be read. */
   knownIds: string[]
+  /** Workspace scope only: the projects and the recorded links between in-scope projects. */
+  workspace?: {
+    slug: string
+    name: string
+    projects: Array<{ slug: string; name: string; local: boolean; readable: boolean }>
+    links: AskWorkspaceLink[]
+  }
 }
 
 /** The reads `gatherAskContext` makes. All required (allowed-pattern #26). */
@@ -205,8 +270,8 @@ export interface AskContextDeps {
   searchKnowledge: (rootPath: string, query: string) => Promise<AskKnowledgeHit[]>
   /** The feature graph (`blueprint features graph`). Fail-soft: no nodes on failure. */
   readFeatureGraph: (rootPath: string) => Promise<{ nodes: BlueprintFeatureNode[]; edges: BlueprintFeatureEdge[] }>
-  /** Active investigation notes, oldest first. Fail-soft: [] on failure. */
-  readNotes: (rootPath: string) => Promise<AskNote[]>
+  /** Active investigation notes of the knowledge folder `flowDir` (a checkout's `flow/`), oldest first. Fail-soft: [] on failure. */
+  readNotes: (flowDir: string) => Promise<AskNote[]>
   threadStore: AskThreadReader
   git: AskGit
 }
@@ -241,6 +306,7 @@ export function sliceFeatureGraph(
   nodes: readonly BlueprintFeatureNode[],
   edges: readonly BlueprintFeatureEdge[],
   tags: readonly string[],
+  maxUntagged: number = MAX_UNTAGGED_FEATURES,
 ): { features: AskFeature[]; relations: Array<{ from: string; to: string }> } {
   const addressable = nodes.filter(isAddressable)
   const byId = new Map(addressable.map((node) => [node.id, node]))
@@ -249,7 +315,7 @@ export function sliceFeatureGraph(
     return {
       features: addressable
         .filter((node) => node.kind === 'core')
-        .slice(0, MAX_UNTAGGED_FEATURES)
+        .slice(0, maxUntagged)
         .map((node) => toAskFeature(node, false)),
       relations: [],
     }
@@ -278,28 +344,106 @@ export function sliceFeatureGraph(
 }
 
 /** Notes worth showing: those naming a tagged feature's slug first, then the newest. */
-function pickNotes(notes: readonly AskNote[], features: readonly AskFeature[]): AskNote[] {
+function pickNotes(notes: readonly AskNote[], features: readonly AskFeature[], max: number = MAX_NOTES): AskNote[] {
   const slugs = features.filter((feature) => feature.tagged).map((feature) => feature.id.replace(/^feature:/, '').split('/')[0])
   const mentions = (note: AskNote): boolean =>
     slugs.some((slug) => note.text.includes(slug) || note.anchors.some((anchor) => anchor.includes(slug)))
   const relevant = notes.filter(mentions)
   const rest = notes.filter((note) => !mentions(note))
-  return [...relevant.slice(-MAX_NOTES), ...rest.slice(-MAX_NOTES)].slice(0, MAX_NOTES)
+  return [...relevant.slice(-max), ...rest.slice(-max)].slice(0, max)
 }
 
-/** Gather an answer's knowledge. Never throws — each read is fail-soft. */
-export async function gatherAskContext(
-  input: { rootPath: string; question: string; tags: readonly string[]; conversationIds: readonly string[] },
+/** The project-local ids a Workspace tag names in `project`: its qualified feature tags, unqualified. */
+function localTagsOf(tags: readonly string[], project: string): string[] {
+  const out: string[] = []
+  for (const tag of tags) {
+    const split = splitQualifiedFeatureId(tag)
+    if (split !== null && split.project === project) out.push(split.localId)
+  }
+  return out
+}
+
+/** One project's slice, qualified: ids, owners and relations all carry `feature:<project>::`. */
+function sliceProject(
+  project: AskScopeProject,
+  tags: readonly string[],
+  share: number,
+): { features: AskFeature[]; relations: Array<{ from: string; to: string }>; knownIds: string[] } {
+  if (project.graph === null) return { features: [], relations: [], knownIds: [] }
+  const local = localTagsOf(tags, project.slug)
+  const sliced = sliceFeatureGraph(project.graph.nodes, project.graph.edges, local, share)
+  // A tagged slice is uncapped on one project; across several it gets its share, tagged first.
+  const ordered = [...sliced.features.filter((f) => f.tagged), ...sliced.features.filter((f) => !f.tagged)].slice(0, Math.max(share, local.length))
+  const kept = new Set(ordered.map((feature) => feature.id))
+  const q = (id: string): string => qualifyFeatureId(project.slug, id)
+  return {
+    features: ordered.map((feature) => ({
+      ...feature,
+      id: q(feature.id),
+      ...(feature.partOf !== undefined ? { partOf: q(feature.partOf) } : {}),
+      project: project.slug,
+    })),
+    relations: sliced.relations
+      .filter((relation) => kept.has(relation.from) || kept.has(relation.to))
+      .map((relation) => ({ from: q(relation.from), to: q(relation.to) })),
+    knownIds: project.graph.nodes.filter(isAddressable).map((node) => q(node.id)),
+  }
+}
+
+/** Workspace scope: every in-scope project read in parallel, each with its share of the budget. */
+async function gatherWorkspaceKnowledge(
+  input: { rootPath: string; question: string; tags: readonly string[]; workspace: AskResolvedScope },
   deps: AskContextDeps,
-): Promise<AskContext> {
-  const [hits, graph, notes] = await Promise.all([
+): Promise<Omit<AskContext, 'threads'>> {
+  const scope = input.workspace
+  const inScope = new Set(scope.projects.map((project) => project.slug))
+  const count = Math.max(1, scope.projects.length)
+  const featureShare = Math.max(MIN_PROJECT_FEATURES, Math.floor(MAX_WORKSPACE_FEATURES / count))
+  const noteShare = Math.max(MIN_PROJECT_NOTES, Math.floor(MAX_NOTES / count))
+  const [hits, perProject] = await Promise.all([
     deps.searchKnowledge(input.rootPath, input.question).catch(() => [] as AskKnowledgeHit[]),
-    deps.readFeatureGraph(input.rootPath).catch(() => ({ nodes: [], edges: [] })),
-    deps.readNotes(input.rootPath).catch(() => [] as AskNote[]),
+    Promise.all(
+      scope.projects.map(async (project) => {
+        const slice = sliceProject(project, input.tags, featureShare)
+        const notes =
+          project.flowDir === null ? [] : await deps.readNotes(project.flowDir).catch(() => [] as AskNote[])
+        const picked = pickNotes(
+          notes,
+          slice.features.map((feature) => ({ ...feature, id: splitQualifiedFeatureId(feature.id)?.localId ?? feature.id })),
+          noteShare,
+        ).map((note) => ({ ...note, project: project.slug }))
+        return { slice, notes: picked }
+      }),
+    ),
   ])
-  const { features, relations } = sliceFeatureGraph(graph.nodes, graph.edges, input.tags)
+  const links = scope.links
+    .filter((link) => inScope.has(link.fromProject) && inScope.has(link.toProject))
+    .slice(0, MAX_LINKS)
+  return {
+    // A hit from a project outside the scope is not what was asked about.
+    hits: hits.filter((hit) => hit.project === undefined || inScope.has(hit.project)).slice(0, MAX_BRAIN_HITS),
+    features: perProject.flatMap((entry) => entry.slice.features),
+    relations: perProject.flatMap((entry) => entry.slice.relations),
+    notes: perProject.flatMap((entry) => entry.notes).slice(0, Math.max(MAX_NOTES, noteShare * count)),
+    knownIds: perProject.flatMap((entry) => entry.slice.knownIds),
+    workspace: {
+      slug: scope.workspace.slug,
+      name: scope.workspace.name,
+      projects: scope.projects.map((project) => ({
+        slug: project.slug,
+        name: project.name,
+        local: project.rootPath !== null,
+        readable: project.graph !== null,
+      })),
+      links,
+    },
+  }
+}
+
+/** The tagged conversations, condensed, with their merge state. */
+async function gatherThreads(conversationIds: readonly string[], deps: AskContextDeps): Promise<CondensedThread[]> {
   const threads: CondensedThread[] = []
-  for (const id of input.conversationIds) {
+  for (const id of conversationIds) {
     let condensed: CondensedThread | null = null
     try {
       condensed = condenseThreadForAsk(deps.threadStore, id)
@@ -309,6 +453,35 @@ export async function gatherAskContext(
     if (condensed === null) continue
     threads.push(await withMergeState(condensed, deps.git).catch(() => condensed as CondensedThread))
   }
+  return threads
+}
+
+/** Gather an answer's knowledge. Never throws — each read is fail-soft. */
+export async function gatherAskContext(
+  input: {
+    rootPath: string
+    question: string
+    tags: readonly string[]
+    conversationIds: readonly string[]
+    /** Workspace scope; absent = the project of `rootPath`, read as before. */
+    workspace?: AskResolvedScope
+  },
+  deps: AskContextDeps,
+): Promise<AskContext> {
+  if (input.workspace !== undefined) {
+    const [knowledge, threads] = await Promise.all([
+      gatherWorkspaceKnowledge({ ...input, workspace: input.workspace }, deps),
+      gatherThreads(input.conversationIds, deps),
+    ])
+    return { ...knowledge, threads }
+  }
+  const [hits, graph, notes] = await Promise.all([
+    deps.searchKnowledge(input.rootPath, input.question).catch(() => [] as AskKnowledgeHit[]),
+    deps.readFeatureGraph(input.rootPath).catch(() => ({ nodes: [], edges: [] })),
+    deps.readNotes(join(input.rootPath, 'flow')).catch(() => [] as AskNote[]),
+  ])
+  const { features, relations } = sliceFeatureGraph(graph.nodes, graph.edges, input.tags)
+  const threads = await gatherThreads(input.conversationIds, deps)
   return {
     hits: hits.slice(0, MAX_BRAIN_HITS),
     features,

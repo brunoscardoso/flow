@@ -61,7 +61,7 @@ import { runInCliHost } from '../cli-host/client'
 import { bindAgentBinary, ensureAgentBinary } from './agent-binary'
 import { runInBackground } from './background-priority'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs'
-import { dirname, join, relative } from 'path'
+import { dirname, join, relative, resolve as resolvePath, sep as pathSep } from 'path'
 
 import type {
   Options,
@@ -140,6 +140,37 @@ export interface CagedSessionParams {
   /** Called as the session works — tool calls, thinking, writing. Feeds the
    *  Learning panel's activity log and its stall watchdog. */
   onActivity?: (kind: string, detail?: string) => void
+  /**
+   * Extra folders the session may read besides `cwd` (other checkouts, for a
+   * question that spans projects). PRESENT — even empty — CONTAINS every read
+   * to `cwd` plus these: a Read/Grep/Glob whose path is outside all of them
+   * is denied. Omitted → exactly the pre-existing session (no extra roots, no
+   * containment check of its own).
+   */
+  readRoots?: readonly string[]
+}
+
+/** True when `path` (absolute, or relative to `cwd`) is `cwd` or one of `roots`, or inside one. */
+export function isInsideReadRoots(path: string, cwd: string, roots: readonly string[]): boolean {
+  const full = resolvePath(cwd, path)
+  return [cwd, ...roots].some((root) => {
+    const base = resolvePath(root)
+    return full === base || full.startsWith(base.endsWith(pathSep) ? base : base + pathSep)
+  })
+}
+
+/** The path a read tool's input names: Read's `file_path`, Grep/Glob's optional `path`. Null = none (the cwd). */
+function readToolPath(input: unknown): string | null {
+  if (typeof input !== 'object' || input === null) return null
+  const record = input as { file_path?: unknown; path?: unknown; notebook_path?: unknown }
+  for (const value of [record.file_path, record.path, record.notebook_path]) {
+    if (typeof value === 'string' && value.trim() !== '') return value
+  }
+  return null
+}
+
+function outsideMessage(toolName: string): string {
+  return `learn session reads only inside its folders — ${toolName} on a path outside them is not permitted`
 }
 
 /**
@@ -155,9 +186,13 @@ export interface CagedSessionParams {
  * needs it. Read observation lives in the PreToolUse hook below
  * (allowed-pattern #10: approve at canUseTool, observe at hooks).
  */
-export function createCagedCanUseTool(): CanUseTool {
+export function createCagedCanUseTool(containment?: { cwd: string; roots: readonly string[] }): CanUseTool {
   return async (toolName, input, options) => {
     if (CAGED_READ_TOOL_SET.has(toolName)) {
+      const path = containment === undefined ? null : readToolPath(input)
+      if (containment !== undefined && path !== null && !isInsideReadRoots(path, containment.cwd, containment.roots)) {
+        return { behavior: 'deny', message: outsideMessage(toolName), toolUseID: options.toolUseID }
+      }
       return { behavior: 'allow', updatedInput: input, toolUseID: options.toolUseID }
     }
     return {
@@ -196,6 +231,30 @@ export function createLearnReadHooks(onRead?: (filePath: string) => void): {
 }
 
 /**
+ * THE READ CONTAINMENT. The read trio is pre-approved (`allowedTools`), so
+ * canUseTool never sees it — a PreToolUse hook is the only channel that can
+ * refuse a pre-approved read (allowed-pattern #10). Denies a Read, Grep or
+ * Glob whose path resolves outside `cwd` and every extra root; a call naming
+ * no path searches the cwd and passes.
+ */
+export function createReadContainmentHook(cwd: string, roots: readonly string[]): HookCallbackMatcher {
+  const preToolUse: HookCallback = (input) => {
+    if (input.hook_event_name !== 'PreToolUse' || !CAGED_READ_TOOL_SET.has(input.tool_name)) return Promise.resolve({})
+    const path = readToolPath(input.tool_input)
+    if (path === null || isInsideReadRoots(path, cwd, roots)) return Promise.resolve({})
+    return Promise.resolve({
+      continue: true,
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'deny' as const,
+        permissionDecisionReason: outsideMessage(input.tool_name),
+      },
+    })
+  }
+  return { matcher: CAGED_READ_TOOLS.join('|'), hooks: [preToolUse] }
+}
+
+/**
  * Build the SDK Options for a caged session. Pure given its inputs (the
  * AbortController is supplied by the caller) so the option shape is unit-
  * testable without a live SDK. See the Spike Findings for why this exact set
@@ -208,7 +267,11 @@ export function buildCagedOptions(params: {
   maxTurns?: number
   authEnv?: NodeJS.ProcessEnv
   onRead?: (filePath: string) => void
+  /** See CagedSessionParams.readRoots — present (even empty) = reads contained to cwd plus these. */
+  readRoots?: readonly string[]
 }): Options {
+  const containment = params.readRoots === undefined ? undefined : { cwd: params.cwd, roots: params.readRoots }
+  const readHooks = createLearnReadHooks(params.onRead)
   const options: Options = {
     cwd: params.cwd,
     maxTurns: params.maxTurns ?? DEFAULT_CAGED_MAX_TURNS,
@@ -216,10 +279,14 @@ export function buildCagedOptions(params: {
     allowedTools: [...CAGED_READ_TOOLS],
     permissionMode: 'default',
     // Deny everything outside the whitelist in code (belt-and-suspenders).
-    canUseTool: createCagedCanUseTool(),
+    canUseTool: createCagedCanUseTool(containment),
     // Read observation goes through hooks, which fire even for the pre-approved
-    // whitelist — canUseTool never sees them (see createLearnReadHooks).
-    hooks: createLearnReadHooks(params.onRead),
+    // whitelist — canUseTool never sees them (see createLearnReadHooks). The
+    // containment hook runs FIRST, so a refused read is never counted.
+    hooks:
+      containment === undefined
+        ? readHooks
+        : { PreToolUse: [createReadContainmentHook(containment.cwd, containment.roots), ...readHooks.PreToolUse] },
     // THE ONLY PROOF OF LIFE DURING THE COMPOSING PHASE. Without partial
     // messages the SDK is silent from the last tool result until the finished
     // assistant message lands — minutes, on a real feature — and a watchdog
@@ -303,7 +370,9 @@ export async function runCagedSession(params: CagedSessionParams): Promise<strin
     {
       threadId: 'learn',
       cwd: params.cwd,
-      additionalRoots: [],
+      // The caller's extra read roots (a question spanning several checkouts);
+      // none → a single-root session exactly as before.
+      additionalRoots: params.readRoots === undefined ? [] : [...params.readRoots],
       prompt: params.prompt,
       ...(params.model !== undefined ? { model: params.model } : {}),
       resumeSessionId: null,
@@ -359,6 +428,7 @@ function cagedProviderExtras(params: CagedSessionParams): Partial<Options> {
     ...(params.maxTurns !== undefined ? { maxTurns: params.maxTurns } : {}),
     ...(params.authEnv !== undefined ? { authEnv: params.authEnv } : {}),
     ...(params.onRead !== undefined ? { onRead: params.onRead } : {}),
+    ...(params.readRoots !== undefined ? { readRoots: params.readRoots } : {}),
   })
   const { cwd: _cwd, abortController: _abort, model: _model, ...extras } = full
   return extras

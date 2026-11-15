@@ -66,6 +66,8 @@ import type {
   AskListRequest,
   AskListResponse,
   AskRequest,
+  AskSaveConnectionRequest,
+  AskSaveConnectionResponse,
   AskStaleRequest,
   AskStaleResponse,
   AskStartResponse,
@@ -6996,6 +6998,8 @@ export interface IpcInvokeMap {
   'ask:list': { request: AskListRequest; response: AskListResponse }
   /** Which saved answers have code that changed since, through the CLI's `qa stale`. */
   'ask:stale': { request: AskStaleRequest; response: AskStaleResponse }
+  /** Save as connection — record one suggested connection through the Workspace's one link writer. */
+  'ask:saveConnection': { request: AskSaveConnectionRequest; response: AskSaveConnectionResponse }
 
   // project (projects are addressed by absolute rootPath, matching main)
   'project:list': { request: Record<string, never>; response: RegisteredProject[] }
@@ -7986,6 +7990,7 @@ export const IPC_INVOKE_CHANNELS = [
   'ask:stop',
   'ask:list',
   'ask:stale',
+  'ask:saveConnection',
   'project:list',
   'project:addressableRoots',
   'project:add',
@@ -8496,6 +8501,7 @@ export interface FlowAskApi {
   stop(request: IpcRequest<'ask:stop'>): Promise<IpcResponse<'ask:stop'>>
   list(request: IpcRequest<'ask:list'>): Promise<IpcResponse<'ask:list'>>
   stale(request: IpcRequest<'ask:stale'>): Promise<IpcResponse<'ask:stale'>>
+  saveConnection(request: IpcRequest<'ask:saveConnection'>): Promise<IpcResponse<'ask:saveConnection'>>
   onState(listener: (event: IpcEventPayload<'ask:state'>) => void): Unsubscribe
 }
 
