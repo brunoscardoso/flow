@@ -238,6 +238,8 @@ export function orderRunTabs<T>(
   const out: Array<OrderedRunTab<T>> = []
   for (const step of state.steps) {
     if (step.terminalId === null) {
+      // A tab the person closed is gone, not a placeholder reading "stopped".
+      if (step.status === 'stopped') continue
       out.push({ kind: 'pending', step })
       continue
     }

@@ -251,6 +251,43 @@ function freeName(draft: RunSetupDraft, wanted: string, projectName: string): st
 }
 
 /** Add a suggestion as a step that runs in the suggestion's project, its command filled in. */
+/** How many suggestions a step offers at once; anything else is typed. */
+export const STEP_SUGGESTION_LIMIT = 5
+
+/**
+ * The suggestions ONE step offers: only for the project its Runs in names
+ * (the main project when it names none), matching what is typed so far,
+ * leaving out commands another step of that project already runs — at most
+ * five, best first (the order main ranked them in).
+ */
+export function stepSuggestions(
+  draft: RunSetupDraft,
+  stepId: string,
+  suggestions: readonly RunSuggestion[],
+  limit = STEP_SUGGESTION_LIMIT,
+): RunSuggestion[] {
+  const step = draft.steps.find((candidate) => candidate.id === stepId)
+  if (step === undefined) return []
+  const project = step.runsIn ?? draft.projectName
+  const projectOf = (other: DraftStep): string => other.runsIn ?? draft.projectName
+  const taken = new Set(
+    draft.steps
+      .filter((other) => other.id !== stepId && sameProject(projectOf(other), project))
+      .map((other) => other.command.trim().toLowerCase()),
+  )
+  const query = step.command.trim().toLowerCase()
+  const out: RunSuggestion[] = []
+  for (const suggestion of suggestions) {
+    if (!sameProject(suggestion.projectName, project)) continue
+    const command = suggestion.command.trim().toLowerCase()
+    if (taken.has(command) || command === query) continue
+    if (query !== '' && !command.includes(query) && !suggestion.name.toLowerCase().includes(query)) continue
+    out.push(suggestion)
+    if (out.length >= limit) break
+  }
+  return out
+}
+
 export function addSuggestion(draft: RunSetupDraft, suggestion: RunSuggestion): RunSetupDraft {
   return addStep(draft, {
     name: freeName(draft, suggestion.name, suggestion.projectName),

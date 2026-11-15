@@ -3,6 +3,7 @@ import {
   addStep,
   addSuggestion,
   changeStep,
+  stepSuggestions,
   diffDraft,
   draftFromSuggestions,
   draftToSetUp,
@@ -20,6 +21,7 @@ import {
   showAllLabel,
   addedAsLabel,
   validateDraft,
+  type RunSetupDraft,
 } from './run-setup-model'
 
 const ROOT = '/work/jupiter'
@@ -394,5 +396,41 @@ describe('turning a step off', () => {
     expect(steps.find((step) => step.id === 'api')?.disabled).toBeUndefined()
     const reread = startDraft(project({ setup: change.layer === 'shared' ? change.setup : null }), 'shared')
     expect(reread.steps.find((step) => step.id === 'worker')?.skipped).toBe(true)
+  })
+})
+
+describe('stepSuggestions — each step offers its own project, five at most', () => {
+  const sug = (projectName: string, command: string, name = command.split(' ').pop()!): RunSuggestion => ({
+    projectRoot: `/${projectName}`, projectName, name, command, source: 'package.json',
+  })
+  const all = [
+    sug('jupiter', 'npm run dev'), sug('jupiter', 'npm start'), sug('jupiter', 'npm run storybook'),
+    sug('jupiter', 'npm run preview'), sug('jupiter', 'npm run serve'), sug('jupiter', 'npm run watch'),
+    sug('core', 'uv run python -m core', 'core'), sug('core', 'docker compose up postgres', 'postgres'),
+  ]
+  const empty = (): RunSetupDraft => addStep(startDraft(project({ setup: { version: 1, steps: [] } }), 'shared'))
+
+  it('the main project by default, capped at five', () => {
+    const draft = empty()
+    const found = stepSuggestions(draft, draft.steps[0]!.id, all)
+    expect(found).toHaveLength(5)
+    expect(found.every((s) => s.projectName === 'jupiter')).toBe(true)
+  })
+
+  it('follows the project the step runs in, and what is typed', () => {
+    let draft = empty()
+    const id = draft.steps[0]!.id
+    draft = changeStep(draft, id, { runsIn: 'core' })
+    expect(stepSuggestions(draft, id, all).map((s) => s.command)).toEqual(['uv run python -m core', 'docker compose up postgres'])
+    draft = changeStep(draft, id, { command: 'postg' })
+    expect(stepSuggestions(draft, id, all).map((s) => s.command)).toEqual(['docker compose up postgres'])
+  })
+
+  it('leaves out what another step of that project already runs', () => {
+    let draft = empty()
+    draft = changeStep(draft, draft.steps[0]!.id, { command: 'npm run dev' })
+    draft = addStep(draft)
+    const second = draft.steps[1]!.id
+    expect(stepSuggestions(draft, second, all).map((s) => s.command)).not.toContain('npm run dev')
   })
 })

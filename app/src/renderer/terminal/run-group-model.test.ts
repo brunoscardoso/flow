@@ -146,6 +146,14 @@ describe('orderRunTabs (note 9)', () => {
     ])
   })
 
+  it('a step whose tab the person closed is gone, not a "stopped" placeholder', () => {
+    const closed = { ...step('storybook', 'stopped'), terminalId: null }
+    const state = group([step('temporal', 'running'), closed], true)
+    const ordered = orderRunTabs(tabs, (t) => t, state)
+    expect(ordered.some((o) => o.kind === 'pending')).toBe(false)
+    expect(ordered[0]).toMatchObject({ kind: 'step', item: 't-temporal' })
+  })
+
   it('leaves plain terminals exactly as they were without a Run', () => {
     expect(orderRunTabs(tabs, (t) => t, null).map((o) => o.kind)).toEqual(['plain', 'plain', 'plain', 'plain'])
     expect(groupHasRun(null)).toBe(false)

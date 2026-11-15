@@ -549,7 +549,18 @@ function injectRunStyles(): void {
     .fl-run-btn.primary { background: var(--fl-color-accent); border-color: var(--fl-color-accent); color: var(--fl-color-on-accent); font-weight: var(--fl-text-ui-weight-medium); }
     .fl-run-btn:disabled { opacity: 0.45; cursor: default; }
     .fl-run-setup[hidden] { display: none; }
+    .fl-run-step-hints { display: flex; flex-direction: column; gap: 1px; margin-left: 168px; }
+    .fl-run-step-hints[hidden] { display: none; }
+    .fl-run-hint {
+      display: flex; align-items: baseline; gap: var(--fl-space-sm); min-width: 0; text-align: left;
+      padding: 3px var(--fl-space-sm); border: none; border-radius: var(--fl-radius-sm);
+      background: transparent; color: var(--fl-color-text); cursor: pointer; font-family: var(--fl-font-ui);
+    }
+    .fl-run-hint:hover, .fl-run-hint:focus-visible { background: var(--fl-color-surface-raised); outline: none; }
+    .fl-run-hint-command { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--fl-font-mono); font-size: var(--fl-text-mono-size); }
+    .fl-run-hint-source { flex: none; white-space: nowrap; }
     @container (max-width: 520px) {
+      .fl-run-step-hints { margin-left: 0; }
       .fl-run-card-line:not(.small) { flex-wrap: wrap; }
       .fl-run-name { flex: 1 1 100%; width: auto; }
     }

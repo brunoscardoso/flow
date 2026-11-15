@@ -19,28 +19,25 @@
 import type { RunGroupState, RunSaveAnswer, RunSaveChange, RunSuggestion, RunView } from '../../shared/run-setup'
 import { RUN_STRINGS } from './run-group-model'
 import {
-  addedAsLabel,
   addStep,
-  addSuggestion,
   changeStep,
   draftToSetUp,
   isDirty,
   isStructural,
   moveStep,
-  offeredSuggestions,
   removeStep,
   runsInChoices,
   saveChange,
   saveSentence,
   SETUP_STRINGS,
-  showAllLabel,
   startDraft,
   startsOptions,
+  stepSuggestions,
   validateDraft,
   type DraftStep,
-  type OfferedSuggestion,
   type ReadyKind,
   type RunSetupDraft,
+  type StepPatch,
 } from './run-setup-model'
 
 export interface RunSetupPanelDeps {
@@ -110,7 +107,6 @@ export class RunSetupPanel {
   #view: RunView | null = null
   #draft: RunSetupDraft | null = null
   #suggestions: RunSuggestion[] = []
-  #showAll = false
   #saving = false
   #error: string | null = null
   #footer: HTMLElement | null = null
@@ -156,7 +152,6 @@ export class RunSetupPanel {
     this.#view = view
     this.#suggestions = options.suggestions ?? this.#suggestions
     this.#draft = options.draft ?? draftToSetUp(view.resolution.project)
-    this.#showAll = false
     this.#error = null
     this.#focusId = this.#draft.steps.find((step) => step.isNew && step.name === '')?.id ?? null
     if (this.#root === null) {
@@ -236,8 +231,7 @@ export class RunSetupPanel {
 
     const body = el('div', 'fl-run-body')
     const main = el('div', 'fl-run-main')
-    const aside = el('div', 'fl-run-aside')
-    body.append(main, aside)
+    body.append(main)
     page.appendChild(body)
     for (const problem of this.#view?.resolution.project.problems ?? []) main.appendChild(el('p', 'fl-run-note', problem))
 
@@ -254,7 +248,6 @@ export class RunSetupPanel {
       })
       add.classList.add('fl-run-add')
       main.appendChild(add)
-      aside.appendChild(this.#suggested(draft))
     }
 
     const ask = this.#deps.askAgent()
@@ -265,7 +258,7 @@ export class RunSetupPanel {
       ask === null ? SETUP_STRINGS.askAgentNoConversation : SETUP_STRINGS.askAgentTitle,
     )
     askButton.disabled = ask === null
-    aside.appendChild(askButton)
+    main.appendChild(askButton)
 
     page.appendChild(el('span', 'fl-run-grow'))
     this.#footer = el('div', 'fl-run-setup-foot')
@@ -343,9 +336,53 @@ export class RunSetupPanel {
     command.placeholder = SETUP_STRINGS.commandPlaceholder
     command.setAttribute('aria-label', SETUP_STRINGS.command)
     command.spellcheck = false
-    command.addEventListener('input', () => this.#update(changeStep(current(), step.id, { command: command.value }), false))
     line1.append(name, command)
     body.appendChild(line1)
+
+    // This step's own suggestions: only for the project its Runs in names,
+    // matching what is typed, at most five. Anything else is typed by hand.
+    const hints = el('div', 'fl-run-step-hints')
+    hints.setAttribute('role', 'listbox')
+    hints.setAttribute('aria-label', SETUP_STRINGS.suggested)
+    const paintHints = (): void => {
+      const now = current()
+      const live = now.steps.find((candidate) => candidate.id === step.id)
+      const show = live !== undefined && (document.activeElement === command || (live.isNew && live.command.trim() === ''))
+      const found = show ? stepSuggestions(now, step.id, this.#suggestions) : []
+      hints.textContent = ''
+      hints.hidden = found.length === 0
+      for (const suggestion of found) {
+        const option = document.createElement('button')
+        option.type = 'button'
+        option.className = 'fl-run-hint'
+        option.setAttribute('role', 'option')
+        option.appendChild(el('span', 'fl-run-hint-command', suggestion.command))
+        option.appendChild(el('span', 'fl-run-muted fl-run-hint-source', suggestion.source))
+        // Keep the command field focused through the press, so blur does not hide the list first.
+        option.addEventListener('mousedown', (event) => event.preventDefault())
+        option.addEventListener('click', () => {
+          const latest = current().steps.find((candidate) => candidate.id === step.id)
+          const patch: StepPatch = { command: suggestion.command }
+          if (latest !== undefined && latest.name.trim() === '') patch.name = suggestion.name
+          this.#update(changeStep(current(), step.id, patch))
+        })
+        hints.appendChild(option)
+      }
+    }
+    command.addEventListener('input', () => {
+      this.#update(changeStep(current(), step.id, { command: command.value }), false)
+      paintHints()
+    })
+    command.addEventListener('focus', paintHints)
+    command.addEventListener('blur', () => paintHints())
+    command.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && !hints.hidden) {
+        event.stopPropagation()
+        hints.hidden = true
+      }
+    })
+    body.appendChild(hints)
+    queueMicrotask(paintHints)
 
     // Line 2: runs in, starts, ready when.
     const line2 = el('div', 'fl-run-card-line small')
@@ -415,55 +452,6 @@ export class RunSetupPanel {
     }
     card.appendChild(tools)
     return card
-  }
-
-  #suggested(draft: RunSetupDraft): HTMLElement {
-    const offered = offeredSuggestions(draft, this.#suggestions)
-    const section = el('div', 'fl-run-suggested')
-    if (offered.total === 0) return section
-    section.appendChild(el('div', 'fl-run-section-title', SETUP_STRINGS.suggested))
-    const row = (item: OfferedSuggestion, meta: string): HTMLElement => {
-      const line = el('div', 'fl-run-suggest-row')
-      const text = el('div', 'fl-run-suggest-text')
-      text.appendChild(el('span', 'fl-run-suggest-command', item.suggestion.command))
-      text.appendChild(el('span', 'fl-run-muted', meta))
-      line.appendChild(text)
-      if (item.addedAs !== null) {
-        line.appendChild(el('span', 'fl-run-muted fl-run-added', addedAsLabel(item.addedAs)))
-      } else {
-        line.appendChild(
-          button('fl-run-btn small', SETUP_STRINGS.add, () => this.#update(addSuggestion(this.#draft ?? draft, item.suggestion))),
-        )
-      }
-      return line
-    }
-    if (!this.#showAll) {
-      const list = el('div', 'fl-run-suggest-list')
-      for (const item of offered.top) list.appendChild(row(item, item.meta))
-      section.appendChild(list)
-      if (offered.total > offered.top.length) {
-        section.appendChild(
-          button('fl-run-link', showAllLabel(offered.total), () => {
-            this.#showAll = true
-            this.#render()
-          }),
-        )
-      }
-      return section
-    }
-    const list = el('div', 'fl-run-suggest-list scroll')
-    for (const group of offered.groups) {
-      list.appendChild(el('div', 'fl-run-group-title', group.projectName))
-      for (const item of group.items) list.appendChild(row(item, item.suggestion.source))
-    }
-    section.appendChild(list)
-    section.appendChild(
-      button('fl-run-link', SETUP_STRINGS.showLess, () => {
-        this.#showAll = false
-        this.#render()
-      }),
-    )
-    return section
   }
 
   #renderFooter(): void {
