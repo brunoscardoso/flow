@@ -24,6 +24,20 @@ export interface RunStep {
    * own project.
    */
   runsIn?: string
+  /**
+   * What the entry is. Absent (or 'service'): a step that keeps running and
+   * starts with Run. 'once': a one-time action — never started by Run, run
+   * only when a person presses it from the Launchpad menu. Absent on every
+   * entry stored before one-time actions existed, so old data reads unchanged.
+   */
+  kind?: 'service' | 'once'
+  /** One-time actions only: show the command and ask before running it. */
+  confirm?: boolean
+}
+
+/** True for a one-time action — never started by Run. */
+export function isOnceStep(step: Pick<RunStep, 'kind'>): boolean {
+  return step.kind === 'once'
 }
 
 export interface RunSetup {
@@ -68,6 +82,10 @@ export interface ResolvedRunStep {
    * it, and nothing (not even a forced Reload) starts it.
    */
   unavailable?: string
+  /** Set on a one-time action (resolved into `RunResolution.once`, never into `steps`). */
+  kind?: 'once'
+  /** One-time actions only: ask before running. */
+  confirm?: boolean
 }
 
 export type RunStepStatus =
@@ -94,10 +112,29 @@ export interface RunStepState {
   notHere?: boolean
 }
 
+/** Where a one-time action's run is: going, finished (any exit code), or its process was ended. */
+export type RunOnceStatus = 'running' | 'exited' | 'stopped'
+
+/** One run of a one-time action — it has a tab while this exists. */
+export interface RunOnceState {
+  key: string
+  name: string
+  projectRoot: string
+  projectName: string
+  status: RunOnceStatus
+  terminalId: string | null
+  exitCode: number | null
+  /** How long it ran, once it ended; null while it runs. */
+  durationMs: number | null
+}
+
 export interface RunGroupState {
   scopeKey: string
+  /** A RUNNING step is going. One-time actions never make a group active. */
   active: boolean
   steps: RunStepState[]
+  /** One-time actions that have a tab. Absent when there are none. */
+  once?: RunOnceState[]
 }
 
 export const DEFAULT_READY_TIMEOUT_MS = 60_000
@@ -187,7 +224,16 @@ function parseStepEntry(
     problems.push(`The step "${name}" has nothing to run and was left out.`)
     return null
   }
-  const parsedReady = parseReady(entry.ready)
+  let kind: 'service' | 'once' = 'service'
+  if (entry.kind === 'once') kind = 'once'
+  else if (entry.kind !== undefined && entry.kind !== null && entry.kind !== 'service') {
+    // A kind this build does not know: running it as a step could start
+    // something that was never meant to start with Run.
+    problems.push(`The step "${name}" is of a kind this version of Flow can't run, so it was left out.`)
+    return null
+  }
+  // A one-time action never waits to be ready: its check (if any) is ignored.
+  const parsedReady: { ready?: RunReady; problem?: string } = kind === 'once' ? {} : parseReady(entry.ready)
   if (parsedReady.problem !== undefined) {
     problems.push(`The step "${name}" has ${parsedReady.problem}, so it was left out.`)
     return null
@@ -204,7 +250,11 @@ function parseStepEntry(
     id,
     name,
     command,
-    start: entry.start === 'after-previous' ? 'after-previous' : 'now',
+    start: kind === 'service' && entry.start === 'after-previous' ? 'after-previous' : 'now',
+  }
+  if (kind === 'once') {
+    step.kind = 'once'
+    if (entry.confirm === true) step.confirm = true
   }
   if (parsedReady.ready !== undefined) step.ready = parsedReady.ready
   if (entry.disabled === true) step.disabled = true
@@ -215,7 +265,7 @@ function parseStepEntry(
       problems.push(`The step "${name}" names a project it runs in that could not be read, so it runs in this project.`)
     }
   }
-  if (typeof entry.readyTimeoutMs === 'number' && Number.isFinite(entry.readyTimeoutMs)) {
+  if (kind === 'service' && typeof entry.readyTimeoutMs === 'number' && Number.isFinite(entry.readyTimeoutMs)) {
     step.readyTimeoutMs = clampReadyTimeout(entry.readyTimeoutMs)
   }
   return step
@@ -230,10 +280,10 @@ export function parseRunSetup(text: string): { setup: RunSetup; problems: string
   try {
     raw = JSON.parse(text)
   } catch {
-    return { setup: emptyRunSetup(), problems: ['The Run setup could not be read, so it was treated as empty.'] }
+    return { setup: emptyRunSetup(), problems: ['The Launchpad could not be read, so it was treated as empty.'] }
   }
   if (!isRecord(raw) || !Array.isArray(raw.steps)) {
-    return { setup: emptyRunSetup(), problems: ['The Run setup has no list of steps, so it was treated as empty.'] }
+    return { setup: emptyRunSetup(), problems: ['The Launchpad has no list of steps, so it was treated as empty.'] }
   }
   const steps: RunStep[] = []
   const taken = new Set<string>()
@@ -307,10 +357,14 @@ export function serializeRunSetup(setup: RunSetup): string {
       command: step.command,
       start: step.start,
     }
-    if (step.ready !== undefined) {
+    if (step.kind === 'once') {
+      out.kind = 'once'
+      if (step.confirm === true) out.confirm = true
+    }
+    if (step.ready !== undefined && step.kind !== 'once') {
       out.ready = step.ready.kind === 'port' ? { kind: 'port', port: step.ready.port } : { kind: 'line', text: step.ready.text }
     }
-    if (step.readyTimeoutMs !== undefined) out.readyTimeoutMs = step.readyTimeoutMs
+    if (step.readyTimeoutMs !== undefined && step.kind !== 'once') out.readyTimeoutMs = step.readyTimeoutMs
     if (step.runsIn !== undefined && step.runsIn.trim() !== '') out.runsIn = step.runsIn.trim()
     if (step.disabled === true) out.disabled = true
     return out
@@ -371,14 +425,15 @@ export function placeOfStep(
 }
 
 /**
- * The Run's steps: the setup's ONE ordered list, each step with the layers
- * merged and the project it runs in resolved. A step's key stays the setup's
- * own project and the step id, whichever project it runs in — tweaks follow it.
+ * Every entry of the setup that is turned on, with the layers merged and the
+ * project it runs in resolved, in the setup's ONE order — running steps and
+ * one-time actions alike. A step's key stays the setup's own project and the
+ * step id, whichever project it runs in — tweaks follow it.
  */
-export function resolveRunSteps(
+function resolveEnabled(
   project: RunProjectInput,
-  places: readonly RunPlace[] = [],
-  options: { keyOf?: (step: RunStep) => string } = {},
+  places: readonly RunPlace[],
+  options: { keyOf?: (step: RunStep) => string },
 ): ResolvedRunStep[] {
   const resolved: ResolvedRunStep[] = []
   for (const step of project.setup?.steps ?? []) {
@@ -399,13 +454,14 @@ export function resolveRunSteps(
       commandFrom = 'conversation'
     }
 
-    let ready: RunReady | undefined = step.ready
+    const once = isOnceStep(step)
+    let ready: RunReady | undefined = once ? undefined : step.ready
     let readyFrom: RunLayer = 'shared'
-    if (personal?.ready !== undefined) {
+    if (!once && personal?.ready !== undefined) {
       ready = personal.ready ?? undefined
       readyFrom = 'personal'
     }
-    if (conversation?.ready !== undefined) {
+    if (!once && conversation?.ready !== undefined) {
       ready = conversation.ready ?? undefined
       readyFrom = 'conversation'
     }
@@ -419,15 +475,67 @@ export function resolveRunSteps(
       id: step.id,
       name: step.name,
       command,
-      start: step.start,
+      start: once ? 'now' : step.start,
       readyTimeoutMs: clampReadyTimeout(step.readyTimeoutMs),
       from: { command: commandFrom, ready: readyFrom },
     }
     if (ready !== undefined) out.ready = ready
     if (place.unavailable !== undefined) out.unavailable = place.unavailable
+    if (once) {
+      out.kind = 'once'
+      if (step.confirm === true) out.confirm = true
+    }
     resolved.push(out)
   }
   return resolved
+}
+
+/**
+ * The Run's steps: the setup's running steps, in its ONE order. One-time
+ * actions are NEVER among them — Run, Reload all, the pending tabs and the
+ * pill's counts all read this list (see `resolveOnceSteps`).
+ */
+export function resolveRunSteps(
+  project: RunProjectInput,
+  places: readonly RunPlace[] = [],
+  options: { keyOf?: (step: RunStep) => string } = {},
+): ResolvedRunStep[] {
+  return resolveEnabled(project, places, options).filter((step) => step.kind !== 'once')
+}
+
+/** The setup's one-time actions that are turned on, in its order — what the Launchpad menu offers. */
+export function resolveOnceSteps(
+  project: RunProjectInput,
+  places: readonly RunPlace[] = [],
+  options: { keyOf?: (step: RunStep) => string } = {},
+): ResolvedRunStep[] {
+  return resolveEnabled(project, places, options).filter((step) => step.kind === 'once')
+}
+
+/**
+ * Whether a one-time action should ask before running when it is first set
+ * up: true for commands that change a database or its data — migrations,
+ * schema pushes, seeds. A person can always change it.
+ */
+export function confirmByDefault(command: string): boolean {
+  const text = command.toLowerCase().replace(/\s+/g, ' ').trim()
+  if (text === '') return false
+  const patterns: RegExp[] = [
+    /\balembic (upgrade|downgrade|stamp)\b/,
+    /\bprisma (migrate|db (push|seed|execute))\b/,
+    /\bdrizzle-kit (push|migrate|drop)\b/,
+    /\bmanage\.py (migrate|flush|loaddata|sqlflush)\b/,
+    /\bknex (migrate|seed)/,
+    /\btypeorm\b.*\b(migration|schema:(sync|drop))/,
+    /\bsequelize(-cli)? db:/,
+    /\b(rails|rake|bin\/rails) db:/,
+    /\b(db|database)[:_-]?(migrate|seed|reset|push|drop)\b/,
+    /\b(migrate|migration|migrations)\b/,
+    /\bseed(s|er|ing)?\b/,
+    /\b(dbmate|goose|flyway|atlas) (up|down|migrate|apply|reset)\b/,
+    /\bsupabase db (push|reset)\b/,
+  ]
+  return patterns.some((pattern) => pattern.test(text))
 }
 
 // ─── tweaks ──────────────────────────────────────────────────────────────────
@@ -491,6 +599,8 @@ export interface RunSuggestion {
   kind?: 'usage' | 'file'
   /** Usage only: the higher, the sooner it is offered (count × recency). */
   score?: number
+  /** What it suits: absent for a running step, 'once' for a one-time action. */
+  use?: 'once'
 }
 
 /** One project of a scope with every layer read, as `resolve` answers it. */
@@ -516,7 +626,10 @@ export interface RunResolution {
    * scope's projects only, the main project first.
    */
   places: RunPlace[]
+  /** The Run's running steps — never a one-time action. */
   steps: ResolvedRunStep[]
+  /** The one-time actions that are turned on, for the Launchpad menu. Absent from older builds. */
+  once?: ResolvedRunStep[]
 }
 
 /**

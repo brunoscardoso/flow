@@ -65,6 +65,10 @@ function harness(options: { trusted?: boolean; saveError?: Error } = {}) {
         calls.push({ apply: scope })
         return empty(scope)
       },
+      runOnce: async (scope, stepKey) => {
+        calls.push({ once: [scope, stepKey] })
+        return empty(scope)
+      },
       state: (scope) => empty(scope),
       states: () => [],
       onUpdated: (listener) => {
@@ -115,6 +119,14 @@ describe('registerRunChannels', () => {
     const h = harness()
     await h.call('run:start', { scope: { rootPath: CHECKOUT, threadId: 't1', extra: 'x' } })
     expect(h.calls).toEqual([{ start: { rootPath: ROOT, threadId: 't1' } }])
+  })
+
+  it('run:once passes only the scope and the action key — never a command — and refuses a missing key', async () => {
+    const h = harness()
+    await h.call('run:once', { scope: { rootPath: CHECKOUT, threadId: 't1' }, stepKey: `${ROOT}::migrate`, command: 'rm -rf /' })
+    expect(h.calls).toEqual([{ once: [{ rootPath: ROOT, threadId: 't1' }, `${ROOT}::migrate`] }])
+    await expect(h.call('run:once', { scope: { rootPath: ROOT, threadId: null } })).rejects.toThrow('stepKey must be a non-empty string')
+    expect(h.calls).toHaveLength(1)
   })
 
   it('run:get answers an unknown scope with its steps, all idle', async () => {

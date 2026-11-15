@@ -101,6 +101,7 @@ const INVOKE_MAP_KEYS: Record<IpcInvokeChannel, true> = {
   'run:start': true,
   'run:reload': true,
   'run:stop': true,
+  'run:once': true,
   'run:states': true,
   'attachments:read': true,
   'attachments:revealPath': true,

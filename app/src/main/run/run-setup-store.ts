@@ -30,6 +30,7 @@ import {
   mergeRunOrder,
   newStepId,
   parseRunSetup,
+  resolveOnceSteps,
   resolveRunSteps,
   runScopeKey,
   runStepRef,
@@ -188,6 +189,7 @@ export class RunSetupStore {
       project,
       places,
       steps: resolveRunSteps(project, places, { keyOf: (step) => step.id }),
+      once: resolveOnceSteps(project, places, { keyOf: (step) => step.id }),
     }
   }
 
@@ -263,7 +265,7 @@ export class RunSetupStore {
     try {
       text = this.#deps.personal.getRunSetup(root)
     } catch {
-      return { setup: null, problems: ['The Run setup could not be read, so it was treated as empty.'] }
+      return { setup: null, problems: ['The Launchpad could not be read, so it was treated as empty.'] }
     }
     if (text === null) return { setup: null, problems: [] }
     return parseRunSetup(text)

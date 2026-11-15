@@ -1,5 +1,6 @@
 import type { RunGroupState, RunProjectLayers, RunStepStatus, RunSuggestion } from '../../shared/run-setup'
 import {
+  addOnceAction,
   addStep,
   addSuggestion,
   changeStep,
@@ -17,6 +18,7 @@ import {
   startDraft,
   startsLabel,
   startsOptions,
+  stepsOfKind,
   SETUP_STRINGS,
   setupTitle,
   showAllLabel,
@@ -196,9 +198,9 @@ describe('one list across projects', () => {
   })
 
   it('titles the setup with the conversation\'s projects', () => {
-    expect(setupTitle(places)).toBe('Run setup · jupiter, jupiter-core, jupiter-app')
-    expect(setupTitle([], 'jupiter')).toBe('Run setup · jupiter')
-    expect(setupTitle([])).toBe('Run setup')
+    expect(setupTitle(places)).toBe('Launchpad for jupiter, jupiter-core, jupiter-app')
+    expect(setupTitle([], 'jupiter')).toBe('Launchpad for jupiter')
+    expect(setupTitle([])).toBe('Launchpad')
   })
 })
 
@@ -414,5 +416,118 @@ describe('stepSuggestions — each step offers its own project, five at most', (
     draft = addStep(draft)
     const second = draft.steps[1]!.id
     expect(stepSuggestions(draft, second, all).map((s) => s.command)).not.toContain('npm run dev')
+  })
+})
+
+describe('one-time actions in the draft', () => {
+  function mixed(): RunProjectLayers {
+    return project({
+      setup: {
+        version: 1,
+        steps: [
+          { id: 'temporal', name: 'temporal', command: 'temporal server start-dev', start: 'now' },
+          { id: 'migrate', name: 'migrate', command: 'uv run alembic upgrade head', start: 'now', kind: 'once', confirm: true },
+          { id: 'app', name: 'app', command: 'npm run dev', start: 'now' },
+          { id: 'gen', name: 'codegen', command: 'npm run codegen', start: 'now', kind: 'once' },
+        ],
+      },
+    })
+  }
+
+  it('reads kind and confirm from the saved setup, and splits the list by kind', () => {
+    const draft = startDraft(mixed())
+    expect(stepsOfKind(draft, 'service').map((step) => step.id)).toEqual(['temporal', 'app'])
+    expect(stepsOfKind(draft, 'once').map((step) => [step.id, step.confirm])).toEqual([
+      ['migrate', true],
+      ['gen', false],
+    ])
+  })
+
+  it('a new action asks first while its command reads as a migration, until the person decides', () => {
+    let draft = addOnceAction(startDraft(project()))
+    const id = draft.steps[draft.steps.length - 1]!.id
+    expect(draft.steps.find((step) => step.id === id)).toMatchObject({ kind: 'once', confirm: false, isNew: true })
+    draft = changeStep(draft, id, { command: 'npx prisma migrate dev' })
+    expect(draft.steps.find((step) => step.id === id)!.confirm).toBe(true)
+    draft = changeStep(draft, id, { command: 'npx prisma generate' })
+    expect(draft.steps.find((step) => step.id === id)!.confirm).toBe(false)
+    draft = changeStep(draft, id, { confirm: true })
+    draft = changeStep(draft, id, { command: 'npm run codegen' })
+    expect(draft.steps.find((step) => step.id === id)!.confirm).toBe(true)
+  })
+
+  it('a saved action keeps its choice when its command changes', () => {
+    const draft = changeStep(startDraft(mixed()), 'gen', { command: 'npm run db:migrate' })
+    expect(draft.steps.find((step) => step.id === 'gen')!.confirm).toBe(false)
+  })
+
+  it('saves kind and confirm, and no start mode or ready check for an action', () => {
+    let draft = startDraft(mixed())
+    draft = changeStep(draft, 'migrate', { start: 'after-previous', readyKind: 'port', readyValue: '9', confirm: false })
+    draft = addOnceAction(draft, { name: 'seed', command: 'npm run seed' })
+    const steps = saveChange(draft).steps
+    expect(steps.find((step) => step.id === 'migrate')).toEqual({ id: 'migrate', name: 'migrate', command: 'uv run alembic upgrade head', start: 'now', kind: 'once' })
+    expect(steps.find((step) => step.name === 'seed')).toMatchObject({ kind: 'once', confirm: true, start: 'now' })
+    expect(steps.find((step) => step.id === 'app')).toEqual({ id: 'app', name: 'app', command: 'npm run dev', start: 'now' })
+  })
+
+  it('moves an entry among its own kind only; the other kind keeps its places', () => {
+    const draft = startDraft(mixed())
+    expect(moveStep(draft, 'app', 0).steps.map((step) => step.id)).toEqual(['app', 'migrate', 'temporal', 'gen'])
+    expect(moveStep(draft, 'gen', 0).steps.map((step) => step.id)).toEqual(['temporal', 'gen', 'app', 'migrate'])
+    expect(moveStep(draft, 'migrate', 5).steps.map((step) => step.id)).toEqual(['temporal', 'gen', 'app', 'migrate'])
+  })
+
+  it('the first RUNNING step may not wait for the one above, whatever actions stand before it', () => {
+    let draft = startDraft(
+      project({
+        setup: {
+          version: 1,
+          steps: [
+            { id: 'm', name: 'm', command: 'make migrate', start: 'now', kind: 'once' },
+            { id: 'web', name: 'web', command: 'npm run dev', start: 'now' },
+          ],
+        },
+      }),
+    )
+    draft = changeStep(draft, 'web', { start: 'after-previous' })
+    expect(validateDraft(draft)).toEqual(['“web” is the first step, so it has no step to wait for. Set it to start right away.'])
+  })
+
+  it('adding or changing an action while steps run starts, restarts and stops nothing', () => {
+    let draft = startDraft(mixed())
+    draft = addOnceAction(draft, { name: 'seed', command: 'npm run seed' })
+    draft = changeStep(draft, 'gen', { command: 'npm run gen' })
+    draft = removeStep(draft, 'migrate')
+    const state = going({ temporal: 'running', app: 'running' })
+    expect(saveSentence(draft, state)).toBe(
+      'Saving changes no running step. The two running ones keep running. Kept on this computer, for every conversation with these projects.',
+    )
+  })
+
+  it('a step offers only suggestions of its kind and its project, at most five', () => {
+    const s = (command: string, use?: 'once', projectName = 'jupiter'): RunSuggestion => ({
+      projectRoot: ROOT, projectName, name: command, command, source: 'package.json', ...(use === undefined ? {} : { use }),
+    })
+    const suggestions = [
+      s('npm run storybook'),
+      s('npm run db:migrate', 'once'),
+      s('npm run seed', 'once'),
+      s('make migrate', 'once', 'other'),
+      ...['a', 'b', 'c', 'd', 'e'].map((x) => s(`npm run gen:${x}`, 'once')),
+    ]
+    let draft = addOnceAction(startDraft(mixed()))
+    const action = draft.steps[draft.steps.length - 1]!.id
+    draft = addStep(draft)
+    const step = draft.steps[draft.steps.length - 1]!.id
+    expect(stepSuggestions(draft, action, suggestions).map((x) => x.command)).toEqual([
+      'npm run db:migrate',
+      'npm run seed',
+      'npm run gen:a',
+      'npm run gen:b',
+      'npm run gen:c',
+    ])
+    expect(stepSuggestions(draft, step, suggestions).map((x) => x.command)).toEqual(['npm run storybook'])
+    expect(offeredSuggestions(draft, suggestions).total).toBe(1)
   })
 })

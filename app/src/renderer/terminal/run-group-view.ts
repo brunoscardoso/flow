@@ -1,8 +1,13 @@
 /**
- * THE RUN GROUP — the pill at the start of the terminal tab bar (Run · "4
- * running" · Reload all · Stop all · Setup), or a dashed "Set up Run" before a
- * setup exists, which opens the setup panel straight away with one empty step
- * (the panel carries the suggestions and "Ask the agent to set it up").
+ * THE LAUNCHPAD — the pill at the start of the terminal tab bar ("Launchpad ▾",
+ * with Reload all and Stop all beside it once running steps have started), or
+ * a dashed "Set up Launchpad" before a setup exists, which opens the setup
+ * page straight away with one empty step (the page carries the suggestions
+ * and "Ask the agent to set it up").
+ *
+ * "Launchpad ▾" opens a menu: the conversation's one-time actions grouped by
+ * project (each runs once, in its own tab — after an ask when it asks first),
+ * then "Run all running steps" and "Edit Launchpad".
  *
  * The scope is the conversation on screen (the terminal panel's owner scope):
  * its project and its thread. Main owns every Run (allowed-pattern #14) — this
@@ -22,8 +27,20 @@ import {
   type RunSuggestion,
   type RunView,
 } from '../../shared/run-setup'
+import { markModalOverlay } from '../modal-overlay'
 import { baseName } from '../project-label'
-import { askAgentPrompt, pendingTabAction, pillFace, RUN_STRINGS, type RunDotTone } from './run-group-model'
+import {
+  askAgentPrompt,
+  launchpadMenu,
+  launchpadMenuEntries,
+  moveMenuFocus,
+  onceAsk,
+  pendingTabAction,
+  pillFace,
+  RUN_STRINGS,
+  type LaunchpadMenuEntry,
+  type RunDotTone,
+} from './run-group-model'
 import { RunSetupPanel } from './run-setup-panel'
 
 export interface RunGroupDeps {
@@ -34,6 +51,8 @@ export interface RunGroupDeps {
   isOnScreen(): boolean
   /** The group's state moved — the tab strip re-renders. */
   onChange(): void
+  /** Show a terminal's tab (now, or as soon as it arrives). */
+  focusTerminal(terminalId: string): void
 }
 
 /** The colour token for each dot tone — Flow's existing status colours. */
@@ -42,6 +61,13 @@ export const RUN_TONE_COLOR: Record<RunDotTone, string> = {
   busy: 'var(--fl-color-warning)',
   bad: 'var(--fl-color-error)',
   off: 'var(--fl-color-text-secondary)',
+}
+
+function icon(name: string, size: string): HTMLElement {
+  const glyph = document.createElement('fl-icon')
+  glyph.setAttribute('name', name)
+  glyph.setAttribute('size', size)
+  return glyph
 }
 
 function iconButton(icon: string, label: string, title: string, onClick: () => void): HTMLButtonElement {
@@ -72,6 +98,10 @@ export class RunGroupView {
   #inflight = false
   #suggestions: RunSuggestion[] | null = null
   readonly #panel: RunSetupPanel
+  /** The open Launchpad menu, and how to close it. */
+  #menu: { element: HTMLElement; close: () => void } | null = null
+  /** The open ask before a one-time action runs. */
+  #ask: { close: () => void } | null = null
 
   constructor(deps: RunGroupDeps) {
     injectRunStyles()
@@ -113,6 +143,8 @@ export class RunGroupView {
     this.#stale = true
     this.#inflight = false
     this.#seq += 1
+    this.#closeMenu()
+    this.#ask?.close()
     if (this.#panel.isOpen) this.#panel.close()
     this.#renderPill()
     this.#deps.onChange()
@@ -168,7 +200,7 @@ export class RunGroupView {
       })
       .catch((error: unknown) => {
         if (seq !== this.#seq) return
-        console.warn('flow: could not read the Run setup', error)
+        console.warn('flow: could not read the Launchpad', error)
         this.#stale = true
       })
       .finally(() => {
@@ -201,27 +233,290 @@ export class RunGroupView {
 
   // ─── acting ────────────────────────────────────────────────────────────────
 
-  #act(intent: (run: NonNullable<FlowApi['run']>, scope: RunScope) => Promise<RunGroupState>): void {
+  #act(
+    intent: (run: NonNullable<FlowApi['run']>, scope: RunScope) => Promise<RunGroupState>,
+    options: { failure?: string; then?: (state: RunGroupState) => void } = {},
+  ): void {
     const run = this.#deps.api.run
     const scope = this.#scope
     if (run === undefined || scope === null) return
     intent(run, scope)
-      .then((state) => this.#onUpdated(state))
+      .then((state) => {
+        this.#onUpdated(state)
+        options.then?.(state)
+      })
       .catch((error: unknown) => {
-        console.warn('flow: a Run request failed', error)
+        console.warn('flow: a Launchpad request failed', error)
         document.dispatchEvent(
           new CustomEvent('flow:notify', {
             detail: {
               kind: 'state-change',
               rootId: scope.rootPath,
-              title: RUN_STRINGS.run,
-              body: RUN_STRINGS.failedToAct,
+              title: RUN_STRINGS.launchpad,
+              body: options.failure ?? RUN_STRINGS.failedToAct,
               timestamp: new Date().toISOString(),
               level: 'error',
             },
           }),
         )
       })
+  }
+
+  // ─── one-time actions ──────────────────────────────────────────────────────
+
+  /** A one-time action was pressed: ask first when it asks first, then run it. */
+  #pressOnce(stepKey: string): void {
+    const view = this.#view
+    const step = view?.resolution.once?.find((candidate) => candidate.key === stepKey)
+    if (view === null || step === undefined || step.unavailable !== undefined) return
+    const live = view.state.once?.find((entry) => entry.key === stepKey)
+    // Already running: show it; never a second copy (main refuses one too).
+    if (live !== undefined && live.status === 'running' && live.terminalId !== null) {
+      this.#deps.focusTerminal(live.terminalId)
+      return
+    }
+    if (step.confirm === true) this.#openAsk(step)
+    else this.#runOnce(stepKey)
+  }
+
+  #runOnce(stepKey: string): void {
+    this.#act((run, scope) => run.once({ scope, stepKey }), {
+      failure: RUN_STRINGS.failedToRunOnce,
+      then: (state) => {
+        const terminalId = state.once?.find((entry) => entry.key === stepKey)?.terminalId ?? null
+        if (terminalId !== null) {
+          this.#panel.tuck()
+          this.#deps.focusTerminal(terminalId)
+        }
+      },
+    })
+  }
+
+  /** The ask before a one-time action that asks first: Cancel, or Run (focused). */
+  #openAsk(step: NonNullable<RunView['resolution']['once']>[number]): void {
+    this.#ask?.close()
+    const copy = onceAsk(step)
+    const overlay = document.createElement('div')
+    overlay.className = 'fl-run-ask-overlay'
+    // A modal: the terminal must not take the keyboard while the ask is open (#683, #1430).
+    markModalOverlay(overlay)
+    const box = document.createElement('div')
+    box.className = 'fl-run-ask'
+    box.setAttribute('role', 'alertdialog')
+    box.setAttribute('aria-modal', 'true')
+    const title = document.createElement('div')
+    title.className = 'fl-run-ask-title'
+    title.id = `fl-run-ask-title-${Date.now()}`
+    title.textContent = copy.title
+    box.setAttribute('aria-labelledby', title.id)
+    const where = document.createElement('p')
+    where.className = 'fl-run-ask-where'
+    where.textContent = copy.where
+    const command = document.createElement('pre')
+    command.className = 'fl-run-ask-command'
+    command.textContent = copy.command
+    const actions = document.createElement('div')
+    actions.className = 'fl-run-ask-actions'
+    const cancel = document.createElement('button')
+    cancel.type = 'button'
+    cancel.className = 'fl-run-btn'
+    cancel.textContent = RUN_STRINGS.confirmCancel
+    const go = document.createElement('button')
+    go.type = 'button'
+    go.className = 'fl-run-btn primary'
+    go.textContent = RUN_STRINGS.confirmRun
+    actions.append(cancel, go)
+    box.append(title, where, command, actions)
+    overlay.appendChild(box)
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const close = (): void => {
+      overlay.remove()
+      document.removeEventListener('keydown', onKey, true)
+      if (this.#ask?.close === close) this.#ask = null
+      previous?.focus?.()
+    }
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        close()
+      } else if (event.key === 'Tab') {
+        // Keep the keyboard inside the ask: two buttons, round and round.
+        event.preventDefault()
+        ;(document.activeElement === go ? cancel : go).focus()
+      }
+    }
+    cancel.addEventListener('click', close)
+    go.addEventListener('click', () => {
+      close()
+      this.#runOnce(step.key)
+    })
+    overlay.addEventListener('mousedown', (event) => {
+      if (event.target === overlay) close()
+    })
+    document.addEventListener('keydown', onKey, true)
+    document.body.appendChild(overlay)
+    this.#ask = { close }
+    go.focus()
+  }
+
+  // ─── the menu ──────────────────────────────────────────────────────────────
+
+  #closeMenu(): void {
+    this.#menu?.close()
+  }
+
+  #toggleMenu(anchor: HTMLElement): void {
+    if (this.#menu !== null) {
+      this.#closeMenu()
+      return
+    }
+    const menu = launchpadMenu(this.#view)
+    const entries = launchpadMenuEntries(menu)
+    const element = document.createElement('div')
+    element.className = 'fl-run-menu'
+    element.setAttribute('role', 'menu')
+    element.setAttribute('aria-label', RUN_STRINGS.launchpad)
+    const buttons: HTMLButtonElement[] = []
+    const activate = (entry: LaunchpadMenuEntry): void => {
+      close()
+      if (entry.kind === 'once') this.#pressOnce(entry.key)
+      else if (entry.kind === 'run-all') this.#act((api, scope) => api.start({ scope }))
+      else this.#openSetup({ addOnce: entry.kind === 'add' })
+    }
+    const row = (entry: LaunchpadMenuEntry, className: string, disabled = false): HTMLButtonElement => {
+      const node = document.createElement('button')
+      node.type = 'button'
+      node.className = className
+      node.setAttribute('role', 'menuitem')
+      node.tabIndex = -1
+      node.disabled = disabled
+      if (!disabled) {
+        node.addEventListener('click', (event) => {
+          event.stopPropagation()
+          activate(entry)
+        })
+        buttons.push(node)
+      }
+      return node
+    }
+
+    const header = document.createElement('div')
+    header.className = 'fl-run-menu-head'
+    header.textContent = RUN_STRINGS.menuOnce
+    element.appendChild(header)
+    if (menu.empty) {
+      const none = document.createElement('div')
+      none.className = 'fl-run-menu-empty'
+      none.textContent = RUN_STRINGS.noOnce
+      element.appendChild(none)
+      const add = row({ kind: 'add' }, 'fl-run-menu-item small')
+      add.append(icon('plus', '12'), document.createTextNode(RUN_STRINGS.addOnce))
+      element.appendChild(add)
+    }
+    for (const group of menu.groups) {
+      const label = document.createElement('div')
+      label.className = 'fl-run-menu-group'
+      label.textContent = group.projectName
+      element.appendChild(label)
+      for (const item of group.items) {
+        const node = row({ kind: 'once', key: item.key }, 'fl-run-menu-item once', item.disabled)
+        node.title = item.title
+        node.classList.toggle('running', item.running)
+        const lead = icon(item.running ? 'spinner' : 'play', '12')
+        if (item.running) lead.setAttribute('spin', '')
+        const text = document.createElement('span')
+        text.className = 'fl-run-menu-text'
+        const nameLine = document.createElement('span')
+        nameLine.className = 'fl-run-menu-name'
+        nameLine.textContent = item.name
+        if (item.asksFirst) {
+          const tag = document.createElement('span')
+          tag.className = 'fl-run-menu-tag'
+          tag.textContent = RUN_STRINGS.asksFirst
+          nameLine.appendChild(tag)
+        }
+        const command = document.createElement('span')
+        command.className = 'fl-run-menu-command'
+        command.textContent = item.command
+        text.append(nameLine, command)
+        node.append(lead, text)
+        element.appendChild(node)
+      }
+    }
+    const divider = document.createElement('div')
+    divider.className = 'fl-run-menu-divider'
+    element.appendChild(divider)
+    if (menu.runAll.shown) {
+      const runAll = row({ kind: 'run-all' }, 'fl-run-menu-item small', menu.runAll.disabled)
+      runAll.title = menu.runAll.title
+      runAll.append(icon('play', '12'), document.createTextNode(RUN_STRINGS.runAll))
+      element.appendChild(runAll)
+    }
+    const edit = row({ kind: 'edit' }, 'fl-run-menu-item small')
+    edit.append(icon('settings', '12'), document.createTextNode(RUN_STRINGS.editLaunchpad))
+    element.appendChild(edit)
+
+    // Fixed under the pill (above it when there is no room below), so a short
+    // terminal panel never clips it.
+    const anchorBox = anchor.getBoundingClientRect()
+    element.style.left = `${Math.max(4, Math.min(anchorBox.left, window.innerWidth - 284))}px`
+    element.style.top = `${anchorBox.bottom + 4}px`
+    document.body.appendChild(element)
+    const menuBox = element.getBoundingClientRect()
+    if (menuBox.bottom > window.innerHeight - 4 && anchorBox.top - menuBox.height - 4 >= 4) {
+      element.style.top = `${anchorBox.top - menuBox.height - 4}px`
+    }
+
+    let focus = -1
+    const focusAt = (index: number): void => {
+      focus = index
+      buttons[index]?.focus()
+    }
+    // The pill re-draws on every state change, so the live button is looked up, not kept.
+    const liveAnchor = (): HTMLElement | null => this.element.querySelector<HTMLElement>('.fl-run-pill-run')
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        close()
+        liveAnchor()?.focus()
+        return
+      }
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
+        event.preventDefault()
+        focusAt(moveMenuFocus(focus, buttons.length, event.key))
+        return
+      }
+      if (event.key === 'Enter' || event.key === ' ') {
+        const at = buttons.indexOf(document.activeElement as HTMLButtonElement)
+        if (at >= 0) {
+          event.preventDefault()
+          buttons[at]!.click()
+        }
+      } else if (event.key === 'Tab') {
+        close()
+      }
+    }
+    const onOutside = (event: MouseEvent): void => {
+      const target = event.target as Node | null
+      // A press on the pill's own button toggles the menu itself (its click handler).
+      if (target !== null && (element.contains(target) || (liveAnchor()?.contains(target) ?? false))) return
+      close()
+    }
+    const close = (): void => {
+      element.remove()
+      document.removeEventListener('keydown', onKey, true)
+      document.removeEventListener('mousedown', onOutside, true)
+      liveAnchor()?.setAttribute('aria-expanded', 'false')
+      if (this.#menu?.element === element) this.#menu = null
+    }
+    document.addEventListener('keydown', onKey, true)
+    document.addEventListener('mousedown', onOutside, true)
+    anchor.setAttribute('aria-expanded', 'true')
+    this.#menu = { element, close }
+    // The first one-time action (else the first item) takes the keyboard.
+    if (entries.length > 0) focusAt(0)
   }
 
   async #loadSuggestions(): Promise<RunSuggestion[]> {
@@ -232,7 +527,7 @@ export class RunGroupView {
     try {
       this.#suggestions = await run.suggest({ scope })
     } catch (error) {
-      console.warn('flow: could not read the Run suggestions', error)
+      console.warn('flow: could not read the Launchpad suggestions', error)
       this.#suggestions = []
     }
     return this.#suggestions
@@ -248,14 +543,24 @@ export class RunGroupView {
       this.#panel.close()
       return
     }
-    if (this.#panel.isTucked) {
-      this.#panel.untuck()
+    this.#openSetup()
+  }
+
+  /**
+   * Open the setup page (or bring back a tucked one with its unsaved edits).
+   * `addOnce`: with a new one-time action to fill in.
+   */
+  #openSetup(options: { addOnce?: boolean } = {}): void {
+    if (this.#panel.isOpen || this.#panel.isTucked) {
+      if (this.#panel.isTucked) this.#panel.untuck()
+      if (options.addOnce === true) this.#panel.addOnceAction()
       this.#renderPill()
       return
     }
     const view = this.#view
     if (view === null) return
     this.#panel.open(view, { suggestions: this.#suggestions ?? [] })
+    if (options.addOnce === true) this.#panel.addOnceAction()
     this.#renderPill()
     void this.#loadSuggestions().then((found) => {
       if (this.#panel.isOpen && this.#view === view) this.#panel.setSuggestions(found)
@@ -299,8 +604,8 @@ export class RunGroupView {
       start.className = 'fl-run-setup-entry'
       start.title = RUN_STRINGS.setUpTitle
       const glyph = document.createElement('fl-icon')
-      glyph.setAttribute('name', 'play')
-      glyph.setAttribute('size', '10')
+      glyph.setAttribute('name', 'rocket')
+      glyph.setAttribute('size', '12')
       start.append(glyph, document.createTextNode(RUN_STRINGS.setUp))
       start.addEventListener('click', () => this.#toggleSetup())
       root.appendChild(start)
@@ -311,20 +616,28 @@ export class RunGroupView {
     const pill = document.createElement('div')
     pill.className = 'fl-run-pill'
     pill.setAttribute('role', 'group')
-    pill.setAttribute('aria-label', RUN_STRINGS.run)
-    if (face.canRun) {
-      const run = document.createElement('button')
-      run.type = 'button'
-      run.className = 'fl-run-pill-run'
-      run.title = RUN_STRINGS.runTitle
-      const glyph = document.createElement('fl-icon')
-      glyph.setAttribute('name', 'play')
-      glyph.setAttribute('size', '10')
-      run.append(glyph, document.createTextNode(RUN_STRINGS.run))
-      run.addEventListener('click', () => this.#act((api, scope) => api.start({ scope })))
-      pill.appendChild(run)
-    }
-    // No label or count while it runs: the step tabs already show each
+    pill.setAttribute('aria-label', RUN_STRINGS.launchpad)
+    // "Launchpad ▾": the menu of one-time actions, Run all and Edit.
+    const open = document.createElement('button')
+    open.type = 'button'
+    open.className = 'fl-run-pill-run'
+    open.title = RUN_STRINGS.launchpadTitle
+    open.setAttribute('aria-haspopup', 'menu')
+    open.setAttribute('aria-expanded', String(this.#menu !== null))
+    open.append(icon('rocket', '12'), document.createTextNode(RUN_STRINGS.launchpad), icon('chevron-down', '10'))
+    open.classList.toggle('active', this.#panel.isOpen)
+    open.addEventListener('click', (event) => {
+      event.stopPropagation()
+      this.#toggleMenu(open)
+    })
+    open.addEventListener('keydown', (event) => {
+      if ((event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') && this.#menu === null) {
+        event.preventDefault()
+        this.#toggleMenu(open)
+      }
+    })
+    pill.appendChild(open)
+    // No label or count while steps run: the step tabs already show each
     // step's state, so the pill keeps only its actions (user decision).
     if (face.canReload) {
       pill.appendChild(
@@ -338,15 +651,6 @@ export class RunGroupView {
         iconButton('square', RUN_STRINGS.stopAll, RUN_STRINGS.stopAllTitle, () => this.#act((api, scope) => api.stop({ scope }))),
       )
     }
-    const setup = document.createElement('button')
-    setup.type = 'button'
-    setup.className = 'fl-run-pill-setup'
-    setup.textContent = RUN_STRINGS.setup
-    setup.title = RUN_STRINGS.setupTitle
-    setup.setAttribute('aria-pressed', String(this.#panel.isOpen))
-    setup.classList.toggle('active', this.#panel.isOpen)
-    setup.addEventListener('click', () => this.#toggleSetup())
-    pill.appendChild(setup)
     root.appendChild(pill)
     root.appendChild(separator())
   }
@@ -396,7 +700,73 @@ function injectRunStyles(): void {
       border: none; background: transparent; padding: 0; cursor: pointer;
       font: inherit; font-weight: var(--fl-text-ui-weight-medium);
     }
-    .fl-run-pill-run:hover { color: var(--fl-color-accent); }
+    .fl-run-pill-run:hover, .fl-run-pill-run.active { color: var(--fl-color-accent); }
+    .fl-run-pill-run:focus-visible { outline: 2px solid var(--fl-color-focus-ring); outline-offset: 2px; border-radius: var(--fl-radius-sm); }
+
+    .fl-run-menu {
+      position: fixed; z-index: 900; min-width: 280px; max-width: min(420px, calc(100vw - 8px));
+      max-height: calc(100vh - 16px); overflow-y: auto; box-sizing: border-box;
+      padding: var(--fl-space-xs); display: flex; flex-direction: column; gap: 1px;
+      background: var(--fl-color-surface-raised); color: var(--fl-color-text);
+      border: var(--fl-border-width) solid var(--fl-color-border); border-radius: var(--fl-radius-md);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+      font-family: var(--fl-font-ui); font-size: var(--fl-text-ui-size);
+    }
+    .fl-run-menu-head {
+      padding: var(--fl-space-xs) var(--fl-space-sm); color: var(--fl-color-text-secondary);
+      font-size: var(--fl-text-caption-size); font-weight: var(--fl-text-ui-weight-medium);
+      text-transform: uppercase; letter-spacing: 0.06em;
+    }
+    .fl-run-menu-group { padding: var(--fl-space-xs) var(--fl-space-sm) 0; color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); }
+    .fl-run-menu-empty { padding: 0 var(--fl-space-sm) var(--fl-space-xs); color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); }
+    .fl-run-menu-item {
+      display: flex; align-items: center; gap: var(--fl-space-sm); width: 100%; min-height: 44px; box-sizing: border-box;
+      padding: var(--fl-space-xs) var(--fl-space-sm); border: none; border-radius: var(--fl-radius-sm);
+      background: transparent; color: var(--fl-color-text); text-align: left; cursor: pointer;
+      font: inherit;
+    }
+    .fl-run-menu-item.small { min-height: 32px; }
+    .fl-run-menu-item:hover:not(:disabled), .fl-run-menu-item:focus-visible { background: var(--fl-color-accent-muted); outline: none; }
+    .fl-run-menu-item:disabled { opacity: 0.5; cursor: default; }
+    .fl-run-menu-item.once > fl-icon { color: var(--fl-color-accent); }
+    .fl-run-menu-item.running > fl-icon { color: var(--fl-color-warning); }
+    .fl-run-menu-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .fl-run-menu-name { display: inline-flex; align-items: center; gap: var(--fl-space-sm); font-weight: var(--fl-text-ui-weight-medium); }
+    .fl-run-menu-command { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fl-color-text-secondary); font-family: var(--fl-font-mono); font-size: var(--fl-text-mono-size); }
+    .fl-run-menu-tag {
+      padding: 0 var(--fl-space-xs); border-radius: var(--fl-radius-pill);
+      border: var(--fl-border-width) solid var(--fl-color-warning); color: var(--fl-color-warning);
+      font-size: var(--fl-text-caption-size); font-weight: normal; line-height: 1.4;
+    }
+    .fl-run-menu-divider { height: var(--fl-border-width); background: var(--fl-color-separator); margin: var(--fl-space-xs) 0; }
+
+    .fl-run-ask-overlay {
+      position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center;
+      background: rgba(0, 0, 0, 0.35);
+    }
+    .fl-run-ask {
+      width: min(460px, calc(100vw - 32px)); box-sizing: border-box; padding: var(--fl-space-lg);
+      display: flex; flex-direction: column; gap: var(--fl-space-sm);
+      background: var(--fl-color-surface-raised); color: var(--fl-color-text);
+      border: var(--fl-border-width) solid var(--fl-color-border); border-radius: var(--fl-radius-md);
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); font-family: var(--fl-font-ui); font-size: var(--fl-text-ui-size);
+    }
+    .fl-run-ask-title { font-weight: var(--fl-text-ui-weight-medium); }
+    .fl-run-ask-where { margin: 0; color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); }
+    .fl-run-ask-command {
+      margin: 0; padding: var(--fl-space-sm); border-radius: var(--fl-radius-sm); white-space: pre-wrap; word-break: break-all;
+      background: var(--fl-color-bg); border: var(--fl-border-width) solid var(--fl-color-border);
+      font-family: var(--fl-font-mono); font-size: var(--fl-text-mono-size);
+    }
+    .fl-run-ask-actions { display: flex; justify-content: flex-end; gap: var(--fl-space-sm); margin-top: var(--fl-space-xs); }
+    .fl-run-ask .fl-run-btn:focus-visible { outline: 2px solid var(--fl-color-focus-ring); outline-offset: 2px; }
+
+    .fl-run-section { display: flex; flex-direction: column; gap: var(--fl-space-xs); }
+    .fl-run-section + .fl-run-section { margin-top: var(--fl-space-md); }
+    .fl-run-section-head { display: flex; flex-direction: column; gap: 2px; }
+    .fl-run-section-name { font-weight: var(--fl-text-ui-weight-medium); }
+    .fl-run-check { display: inline-flex; align-items: center; gap: var(--fl-space-xs); cursor: pointer; }
+    .fl-run-check input { margin: 0; accent-color: var(--fl-color-accent); }
     .fl-run-pill-summary { color: var(--fl-color-text-secondary); }
     .fl-run-pill-btn, .fl-run-icon-btn {
       display: inline-flex; align-items: center; justify-content: center;

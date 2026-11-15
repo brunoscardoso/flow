@@ -1,7 +1,9 @@
 /**
  * COMMAND USAGE — the commands a person keeps typing into Flow's own
  * terminals, and the ones the agent started in the background, turned into
- * the Run setup's "you ran it 6 times" / "the agent started it" suggestions.
+ * the Run setup's "you ran it 6 times" / "the agent started it" suggestions —
+ * for a running step (long-running commands) and for a one-time action (the
+ * one-shot jobs a person runs now and then: migrations, codegen, seeds, tests).
  *
  *   - `feedLine` is the terminal's hot path: per keystroke it appends to a
  *     string and nothing else. A line counts only when Enter ends it and it
@@ -19,7 +21,7 @@
  */
 import type { RunSuggestion } from '../../shared/run-setup'
 import { MAX_LINE_LENGTH } from '../terminal/line-buffer'
-import { looksLongRunningCommand, looksOneShotCommand, nameForCommand } from './run-suggest'
+import { looksLongRunningCommand, looksOnceCommand, looksOneShotCommand, nameForCommand, oncePriority } from './run-suggest'
 
 export interface UsageEntry {
   command: string
@@ -104,20 +106,42 @@ const RUNNER_PROGRAMS = new Set([
   'cargo', 'go', 'air', 'rails', 'bundle', 'bin/rails', 'bin/dev', 'php', 'artisan', 'mix', 'iex',
   'java', 'gradle', './gradlew', 'mvn', './mvnw', 'dotnet', 'turbo', 'nx', 'vite', 'next', 'expo',
   'redis-server', 'mongod', 'postgres', 'stripe', 'ngrok', 'foreman', 'overmind', 'honcho', 'tilt', 'skaffold',
+  // One-shot jobs worth offering as one-time actions: migrations, codegen, tests.
+  'alembic', 'prisma', 'drizzle-kit', 'knex', 'typeorm', 'sequelize', 'rake', 'dbmate', 'goose', 'atlas',
+  'supabase', 'pytest', 'vitest', 'jest', 'playwright', 'graphql-codegen', 'buf', 'sqlc',
 ])
+
+/**
+ * Words that make a runner line housekeeping rather than a job worth offering
+ * again: installing, help, logging in. Never kept.
+ */
+const HOUSEKEEPING_WORD =
+  /^(install|i|ci|add|remove|rm|uninstall|update|upgrade|outdated|audit|help|--help|-h|version|--version|-v|login|logout|whoami|init|config|ls|list|link|unlink|cache|self-update)$/i
 
 /** A line that looks like it carries a credential — never kept. */
 const SECRET_LIKE = /(?:key|token|secret|passw(?:or)?d|pwd|auth|credential)[a-z_]*\s*=|--(?:password|token|secret)\b|\bbearer\s|:\/\/[^\s/@]+:[^\s/@]+@/i
 
-/** Whether a typed line may be kept as usage: a known runner, not a one-shot, no secret. */
+/**
+ * Whether a typed line may be kept as usage: a known runner, no secret, and
+ * not housekeeping (an install, help, a login). One-shot jobs ARE kept — they
+ * are what a one-time action is made of; a running step's suggestions leave
+ * them out (`usageSuggestions`).
+ */
 export function isRecordableCommand(line: string): boolean {
   if (SECRET_LIKE.test(line)) return false
-  if (looksOneShotCommand(line)) return false
-  const first = line.trim().split(/\s+/)[0] ?? ''
   // `FOO=1 npm run dev` — skip leading plain assignments to find the program.
-  const words = line.trim().split(/\s+/)
-  const program = words.find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) ?? first
-  return RUNNER_PROGRAMS.has(program) || RUNNER_PROGRAMS.has(program.split('/').pop() ?? program)
+  const words = line.trim().split(/\s+/).filter((word) => word !== '')
+  const at = words.findIndex((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word))
+  if (at < 0) return false
+  const program = words[at]!
+  const known = RUNNER_PROGRAMS.has(program) || RUNNER_PROGRAMS.has(program.split('/').pop() ?? program)
+  if (!known) return false
+  const rest = words.slice(at + 1)
+  // A bare runner (a REPL) does nothing worth offering again.
+  if (rest.length === 0) return false
+  // Housekeeping is the runner's own subcommand (`npm install`, `uv add`), not
+  // a word further on (`alembic upgrade head` is a migration).
+  return !HOUSEKEEPING_WORD.test(rest[0]!)
 }
 
 // ─── the store ───────────────────────────────────────────────────────────────
@@ -227,7 +251,8 @@ export function usageSuggestions(
   const byCommand = new Map<string, RunSuggestion>()
   for (const entry of typed) {
     const command = normalize(entry.command)
-    if (!isRecordableCommand(command)) continue
+    // A job that ends (a build, a migration) is a one-time action, never a running step.
+    if (!isRecordableCommand(command) || looksOneShotCommand(command) || looksOnceCommand(command)) continue
     if (!looksLongRunningCommand(command) && entry.count < OFTEN_RUN) continue
     byCommand.set(command, {
       projectRoot: project.root,
@@ -272,6 +297,76 @@ export function usageSuggestions(
     })
   }
   return [...byCommand.values()].sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+}
+
+/**
+ * One project's suggestions for a ONE-TIME action from what the person typed:
+ * the one-shot jobs (a migration, codegen, a seed, a test run), best first.
+ * What the agent ran is left out — it runs tests over and over, which says
+ * nothing about what the person wants a button for.
+ */
+export function onceUsageSuggestions(
+  project: { root: string; name: string },
+  typed: readonly UsageEntry[],
+  now: number,
+): RunSuggestion[] {
+  const out: RunSuggestion[] = []
+  const seen = new Set<string>()
+  for (const entry of typed) {
+    const command = normalize(entry.command)
+    if (seen.has(command) || !isRecordableCommand(command) || !looksOnceCommand(command)) continue
+    seen.add(command)
+    out.push({
+      projectRoot: project.root,
+      projectName: project.name,
+      name: nameForCommand(command),
+      command,
+      source: timesLabel(entry.count),
+      kind: 'usage',
+      score: usageScore(entry.count, entry.lastUsedAt, now),
+      use: 'once',
+    })
+  }
+  return out.sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+}
+
+/**
+ * The order a one-time action's suggestions are offered in: what the person
+ * actually ran lifts a declared command (and says so); otherwise migrations
+ * first, then seeds, codegen and tests. Per project, in project order.
+ */
+export function rankOnceSuggestions(
+  files: readonly RunSuggestion[],
+  usage: readonly RunSuggestion[],
+  projectOrder: readonly string[],
+): RunSuggestion[] {
+  const keyOf = (s: RunSuggestion): string => `${s.projectRoot}::${normalize(s.command)}`
+  const used = new Map(usage.map((s) => [keyOf(s), s]))
+  const pool = new Map<string, RunSuggestion & { rank: number }>()
+  for (const file of files) {
+    const key = keyOf(file)
+    if (pool.has(key)) continue
+    const hit = used.get(key)
+    pool.set(key, {
+      ...file,
+      use: 'once',
+      kind: hit !== undefined ? 'usage' : 'file',
+      source: hit !== undefined ? `${file.source} · ${hit.source}` : file.source,
+      rank: oncePriority(file) + (hit !== undefined ? 25 + Math.min(15, hit.score ?? 0) : 0),
+    })
+  }
+  for (const use of usage) {
+    const key = keyOf(use)
+    if (pool.has(key)) continue
+    pool.set(key, { ...use, use: 'once', kind: 'usage', rank: 10 + oncePriority(use) / 2 + Math.min(15, use.score ?? 0) })
+  }
+  const order = (root: string): number => {
+    const at = projectOrder.indexOf(root)
+    return at === -1 ? projectOrder.length : at
+  }
+  return [...pool.values()]
+    .sort((a, b) => order(a.projectRoot) - order(b.projectRoot) || b.rank - a.rank)
+    .map(({ rank: _rank, ...rest }) => rest)
 }
 
 /** How strongly a command reads as THE way to run a project: dev/start first, extras (storybook, preview) last. */

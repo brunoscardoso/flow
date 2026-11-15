@@ -305,6 +305,7 @@ const flowApi: FlowApi = {
     start: (request) => invoke('run:start', request),
     reload: (request) => invoke('run:reload', request),
     stop: (request) => invoke('run:stop', request),
+    once: (request) => invoke('run:once', request),
     states: () => invoke('run:states', {}),
     onUpdated: (listener) => subscribe('run:updated', listener),
   },

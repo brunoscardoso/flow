@@ -193,8 +193,8 @@ import {
 import { registerRunChannels } from './run/ipc'
 import { createTcpConnect, waitForLine, waitForPort, waitForPortFree } from './run/ready-check'
 import { RunSetupStore } from './run/run-setup-store'
-import { CommandUsageStore, rankSuggestions, usageSuggestions } from './run/command-usage'
-import { nodeSuggestFs, suggestRunSteps } from './run/run-suggest'
+import { CommandUsageStore, onceUsageSuggestions, rankOnceSuggestions, rankSuggestions, usageSuggestions } from './run/command-usage'
+import { nodeSuggestFs, suggestOnceSteps, suggestRunSteps } from './run/run-suggest'
 import { RunSupervisor } from './run/run-supervisor'
 import { wireShellPersistence } from './terminal/shell-persistence'
 import { registerFileChannels } from './project/files'
@@ -3586,11 +3586,16 @@ const understandFeature = async (request: {
             now,
           ),
         )
-        const files = await suggestRunSteps(
-          places.map((place) => ({ root: place.root, dir: place.cwd ?? place.root, name: place.name })),
-          suggestFs,
+        const projects = places.map((place) => ({ root: place.root, dir: place.cwd ?? place.root, name: place.name }))
+        const files = await suggestRunSteps(projects, suggestFs)
+        const order = places.map((place) => place.root)
+        // One-time actions: the one-shot jobs typed there, then what the
+        // project's files and tools declare (migrations, seeds, codegen, tests).
+        const onceUsed = places.flatMap((place) =>
+          onceUsageSuggestions({ root: place.root, name: place.name }, usage.entries(place.root), now),
         )
-        return rankSuggestions(files, used, places.map((place) => place.root))
+        const onceFiles = await suggestOnceSteps(projects, suggestFs)
+        return [...rankSuggestions(files, used, order), ...rankOnceSuggestions(onceFiles, onceUsed, order)]
       },
       resolveRoot: (rootPath) =>
         addressableRoots.isAddressable(rootPath) ? (addressableRoots.ownerCheckoutFor(rootPath) ?? rootPath) : null,

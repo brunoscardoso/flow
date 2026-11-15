@@ -1,6 +1,7 @@
 import {
   DEFAULT_READY_TIMEOUT_MS,
   clampReadyTimeout,
+  confirmByDefault,
   mergeRunOrder,
   newStepId,
   notHereSentence,
@@ -8,6 +9,7 @@ import {
   parseRunSetup,
   parseRunStepRef,
   placeOfStep,
+  resolveOnceSteps,
   resolveRunSteps,
   runScopeKey,
   runStepRef,
@@ -265,5 +267,97 @@ describe('parseRunSaveSteps', () => {
       { id: 'worker', name: 'Worker', command: 'uv run worker', start: 'after-previous', runsIn: 'core', disabled: true },
     ])
     expect(parseRunSaveSteps({ steps: [] })).toEqual([])
+  })
+})
+
+describe('one-time actions (kind: once)', () => {
+  const withOnce: RunSetup = {
+    version: 1,
+    steps: [
+      { id: 'db', name: 'Database', command: 'docker compose up db', start: 'now' },
+      { id: 'migrate', name: 'Migrate', command: 'uv run alembic upgrade head', start: 'now', kind: 'once', confirm: true },
+      { id: 'gen', name: 'Codegen', command: 'npm run codegen', start: 'now', kind: 'once' },
+      { id: 'off', name: 'Seed', command: 'npm run seed', start: 'now', kind: 'once', confirm: true, disabled: true },
+    ],
+  }
+
+  it('round-trips kind and confirm, and older entries (no kind) read unchanged', () => {
+    const text = serializeRunSetup(withOnce)
+    const { setup, problems } = parseRunSetup(text)
+    expect(problems).toEqual([])
+    expect(setup).toEqual(withOnce)
+    expect(text).not.toContain('"service"')
+    expect(JSON.parse(text).steps[0]).toEqual({ id: 'db', name: 'Database', command: 'docker compose up db', start: 'now' })
+  })
+
+  it('reads kind: service as a running step, and drops what a once step cannot have', () => {
+    const { setup } = parseRunSetup(
+      JSON.stringify({
+        version: 1,
+        steps: [
+          { id: 'a', name: 'a', command: 'npm run dev', start: 'now', kind: 'service', confirm: true },
+          { id: 'b', name: 'b', command: 'npm run migrate', start: 'after-previous', kind: 'once', ready: { kind: 'port', port: 1 }, readyTimeoutMs: 9000, confirm: 'yes' },
+        ],
+      }),
+    )
+    expect(setup.steps[0]).toEqual({ id: 'a', name: 'a', command: 'npm run dev', start: 'now' })
+    expect(setup.steps[1]).toEqual({ id: 'b', name: 'b', command: 'npm run migrate', start: 'now', kind: 'once' })
+  })
+
+  it('leaves out an entry of an unknown kind with a plain sentence, never runs it as a step', () => {
+    const { setup, problems } = parseRunSetup(
+      JSON.stringify({ version: 1, steps: [{ id: 'x', name: 'Nightly', command: 'npm run x', kind: 'scheduled' }, { id: 'y', name: 'y', command: 'npm run y', kind: 42 }] }),
+    )
+    expect(setup.steps).toEqual([])
+    expect(problems).toEqual([
+      'The step "Nightly" is of a kind this version of Flow can\'t run, so it was left out.',
+      'The step "y" is of a kind this version of Flow can\'t run, so it was left out.',
+    ])
+  })
+
+  it('a save keeps kind and confirm as sent', () => {
+    expect(parseRunSaveSteps([{ id: '/p::m', name: 'm', command: 'npm run migrate', kind: 'once', confirm: true }])).toEqual([
+      { id: '/p::m', name: 'm', command: 'npm run migrate', start: 'now', kind: 'once', confirm: true },
+    ])
+  })
+
+  it('Run never resolves a once step; the menu gets the enabled ones, with confirm', () => {
+    const input = project({ setup: withOnce })
+    expect(resolveRunSteps(input).map((step) => step.id)).toEqual(['db'])
+    const once = resolveOnceSteps(input)
+    expect(once.map((step) => [step.id, step.kind, step.confirm ?? false])).toEqual([
+      ['migrate', 'once', true],
+      ['gen', 'once', false],
+    ])
+    expect(once[0]).toMatchObject({ cwd: '/p', projectName: 'p', start: 'now' })
+    expect(once[0]!.ready).toBeUndefined()
+  })
+})
+
+describe('confirmByDefault', () => {
+  it('asks first for migrations, schema pushes and seeds', () => {
+    for (const command of [
+      'alembic upgrade head',
+      'uv run alembic downgrade -1',
+      'npx prisma migrate dev',
+      'npx prisma db push',
+      'npx prisma db seed',
+      'npx drizzle-kit push',
+      'npx drizzle-kit migrate',
+      'python manage.py migrate',
+      'npx knex migrate:latest',
+      'npx typeorm migration:run -d src/data-source.ts',
+      'bin/rails db:migrate',
+      'rails db:seed',
+      'npm run db:migrate',
+      'npm run seed',
+      'make migrate',
+    ])
+      expect([command, confirmByDefault(command)]).toEqual([command, true])
+  })
+
+  it('does not ask for codegen, tests or an empty command', () => {
+    for (const command of ['', 'npm run codegen', 'npx prisma generate', 'pytest', 'npm test', 'python manage.py makemigrations', 'npm run build'])
+      expect([command, confirmByDefault(command)]).toEqual([command, false])
   })
 })

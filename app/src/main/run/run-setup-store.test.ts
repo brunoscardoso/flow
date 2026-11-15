@@ -337,3 +337,38 @@ describe('RunSetupStore — where it is kept', () => {
   })
 })
 
+
+describe('RunSetupStore — one-time actions', () => {
+  const threads: Record<string, FakeThread> = {
+    t1: { projectRoot: A, worktreePath: '/work/.a-threads/blue', roots: [B], rootWorktrees: [] },
+  }
+  const T1 = { rootPath: A, threadId: 't1' }
+
+  it('stores an action with its project, keeps kind and confirm, and resolves it apart from the Run', async () => {
+    const personal = fakePersonal()
+    const s = new RunSetupStore({ threads: fakeThreads(threads), personal })
+    await s.save(T1, {
+      layer: 'shared',
+      steps: [
+        step('web'),
+        step('migrate', { runsIn: 'b', kind: 'once', confirm: true }),
+        step('gen', { kind: 'once' }),
+        step('seed', { kind: 'once', disabled: true }),
+      ],
+    })
+    expect(storedSteps(personal, B)).toEqual([{ id: 'migrate', name: 'migrate', command: 'run migrate', start: 'now', kind: 'once', confirm: true }])
+    const resolution = await s.resolve(T1)
+    expect(resolution.steps.map((x) => x.key)).toEqual([`${A}::web`])
+    expect(resolution.once?.map((x) => [x.key, x.cwd, x.confirm ?? false])).toEqual([
+      [`${B}::migrate`, B, true],
+      [`${A}::gen`, '/work/.a-threads/blue', false],
+    ])
+    // The page still sees every entry, actions included, in the one order.
+    expect(resolution.project.setup?.steps.map((x) => [x.id, x.kind ?? 'service'])).toEqual([
+      [`${A}::web`, 'service'],
+      [`${B}::migrate`, 'once'],
+      [`${A}::gen`, 'once'],
+      [`${A}::seed`, 'once'],
+    ])
+  })
+})

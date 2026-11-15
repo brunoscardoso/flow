@@ -24,7 +24,7 @@ import { RunSetupError } from './run-setup-store'
 import { idleGroupState, type RunSupervisor } from './run-supervisor'
 
 export interface RunChannelDependencies {
-  supervisor: Pick<RunSupervisor, 'start' | 'reload' | 'stop' | 'apply' | 'state' | 'states' | 'onUpdated'>
+  supervisor: Pick<RunSupervisor, 'start' | 'reload' | 'stop' | 'apply' | 'state' | 'states' | 'onUpdated' | 'runOnce'>
   setups: {
     resolve(scope: RunScope): Promise<RunResolution>
     save(scope: RunScope, change: RunSaveChange): Promise<void>
@@ -159,6 +159,15 @@ export function registerRunChannels(deps: RunChannelDependencies): () => void {
   })
 
   handle('run:stop', (request) => supervisor.stop(scopeOf(request['scope'], 'run:stop')))
+
+  // A person pressed a one-time action in the Launchpad menu. Only its key
+  // crosses: the command is read from the person's own saved setup here, never
+  // taken from the renderer.
+  handle('run:once', (request) => {
+    const channel = 'run:once'
+    const scope = scopeOf(request['scope'], channel)
+    return supervisor.runOnce(scope, requiredString(request['stepKey'], channel, 'stepKey'))
+  })
 
   handle('run:states', () => supervisor.states())
 

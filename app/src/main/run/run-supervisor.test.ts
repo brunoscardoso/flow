@@ -3,6 +3,7 @@
 
 import type { TerminalInfo } from '../../shared/ipc-contract'
 import {
+  resolveOnceSteps,
   resolveRunSteps,
   runScopeKey,
   type RunGroupState,
@@ -13,7 +14,7 @@ import {
 } from '../../shared/run-setup'
 import type { ReadyOutcome, ReadyWait } from './ready-check'
 import { RunSetupStore } from './run-setup-store'
-import { RunSupervisor, type RunReadyChecks, type RunTerminalPort } from './run-supervisor'
+import { RunOnceError, RunSupervisor, type RunReadyChecks, type RunTerminalPort } from './run-supervisor'
 
 const ROOT = '/repos/shop'
 const SCOPE: RunScope = { rootPath: ROOT, threadId: 't1' }
@@ -124,7 +125,14 @@ function setupStore(initial: RunSetup): {
     resolve: async (scope: RunScope): Promise<RunResolution> => {
       holder.resolves += 1
       const project = { root: ROOT, name: 'shop', cwd: '/repos/.shop-threads/blue', setup: holder.setup, personal: {}, conversation: {}, hasSharedSetup: true, problems: [] }
-      return { scope, scopeKey: runScopeKey(scope), project, places: holder.places, steps: resolveRunSteps(project, holder.places) }
+      return {
+        scope,
+        scopeKey: runScopeKey(scope),
+        project,
+        places: holder.places,
+        steps: resolveRunSteps(project, holder.places),
+        once: resolveOnceSteps(project, holder.places),
+      }
     },
   }
   return holder
@@ -139,11 +147,11 @@ const THREE: RunSetup = {
   ],
 }
 
-function harness(setup: RunSetup = THREE) {
+function harness(setup: RunSetup = THREE, clock: { now: number } = { now: 0 }) {
   const terminals = new FakeTerminals()
   const ready = new FakeReady()
   const store = setupStore(setup)
-  const supervisor = new RunSupervisor({ terminals, setups: store, ready })
+  const supervisor = new RunSupervisor({ terminals, setups: store, ready, now: () => clock.now })
   const updates: RunGroupState[] = []
   supervisor.onUpdated((state) => updates.push(state))
   const statusOf = (): Array<[string, string]> => supervisor.state(SCOPE).steps.map((s) => [s.key.split('::')[1]!, s.status])
@@ -289,7 +297,7 @@ describe('RunSupervisor — start', () => {
     await h.supervisor.start(SCOPE)
     await flush()
     expect(h.supervisor.state(SCOPE).steps[0]?.detail).toBe(
-      'Port 5432 is already in use by a Run in another conversation, so this step was not started. Reload starts it anyway.',
+      'Port 5432 is already in use by a Launchpad in another conversation, so this step was not started. Reload starts it anyway.',
     )
   })
 
@@ -538,5 +546,119 @@ describe('RunSupervisor — reporting and quit', () => {
     expect(h.ready.last('port:5432').cancelled).toBe(true)
     expect(h.terminals.listenerCount()).toBe(0)
     expect(h.supervisor.state(SCOPE).steps).toEqual([])
+  })
+})
+
+describe('RunSupervisor — one-time actions', () => {
+  const MIXED: RunSetup = {
+    version: 1,
+    steps: [
+      { id: 'web', name: 'Web', command: 'npm run dev', start: 'now' },
+      { id: 'migrate', name: 'Migrate', command: 'uv run alembic upgrade head', start: 'now', kind: 'once', confirm: true },
+      { id: 'gen', name: 'Codegen', command: 'npm run codegen', start: 'now', kind: 'once' },
+    ],
+  }
+  const MIGRATE = `${ROOT}::migrate`
+
+  it('Run, Reload all and a save never start a one-time action', async () => {
+    const h = harness(MIXED)
+    await h.supervisor.start(SCOPE)
+    await flush()
+    expect(h.terminals.commands()).toEqual(['npm run dev'])
+    await h.supervisor.reload(SCOPE)
+    await flush()
+    await h.supervisor.apply(SCOPE)
+    await flush()
+    expect(h.terminals.commands()).toEqual(['npm run dev', 'npm run dev'])
+    expect(h.supervisor.state(SCOPE).steps.map((step) => step.key)).toEqual([`${ROOT}::web`])
+    expect(h.supervisor.state(SCOPE).once).toBeUndefined()
+  })
+
+  it('runs one once, in its own tab, in the conversation checkout, and counts nothing as a running step', async () => {
+    const h = harness(MIXED, { now: 1_000 })
+    const state = await h.supervisor.runOnce(SCOPE, MIGRATE)
+    expect(h.terminals.created).toHaveLength(1)
+    expect(h.terminals.created[0]).toMatchObject({
+      command: 'uv run alembic upgrade head',
+      cwd: '/repos/.shop-threads/blue',
+      title: 'Migrate',
+      owner: { rootPath: ROOT, threadId: 't1' },
+      run: { scopeKey: runScopeKey(SCOPE), stepId: 'migrate', projectRoot: ROOT },
+    })
+    expect(state.active).toBe(false)
+    expect(state.steps.every((step) => step.status === 'idle')).toBe(true)
+    expect(state.once).toEqual([
+      { key: MIGRATE, name: 'Migrate', projectRoot: ROOT, projectName: 'shop', status: 'running', terminalId: 'term-1', exitCode: null, durationMs: null },
+    ])
+    expect(h.supervisor.states()).toEqual([])
+  })
+
+  it('a second press while it runs starts nothing; two quick presses start one copy', async () => {
+    const h = harness(MIXED)
+    await Promise.all([h.supervisor.runOnce(SCOPE, MIGRATE), h.supervisor.runOnce(SCOPE, MIGRATE)])
+    await h.supervisor.runOnce(SCOPE, MIGRATE)
+    expect(h.terminals.created).toHaveLength(1)
+    expect(h.terminals.disposed).toEqual([])
+  })
+
+  it('reads finished with how long it took, or ended with its code; the tab stays', async () => {
+    const clock = { now: 10_000 }
+    const h = harness(MIXED, clock)
+    await h.supervisor.runOnce(SCOPE, MIGRATE)
+    await h.supervisor.runOnce(SCOPE, `${ROOT}::gen`)
+    clock.now = 12_400
+    h.terminals.exit('term-1', 0)
+    h.terminals.exit('term-2', 3)
+    await flush()
+    expect(h.supervisor.state(SCOPE).once).toEqual([
+      expect.objectContaining({ key: MIGRATE, status: 'exited', exitCode: 0, durationMs: 2_400, terminalId: 'term-1' }),
+      expect.objectContaining({ key: `${ROOT}::gen`, status: 'exited', exitCode: 3, durationMs: 2_400, terminalId: 'term-2' }),
+    ])
+    expect(h.terminals.disposed).toEqual([])
+    expect(h.updates.at(-1)?.once?.map((once) => once.status)).toEqual(['exited', 'exited'])
+  })
+
+  it('pressing it after it ended runs it again in a fresh tab that replaces the old one', async () => {
+    const h = harness(MIXED)
+    await h.supervisor.runOnce(SCOPE, MIGRATE)
+    h.terminals.exit('term-1', 1)
+    const again = await h.supervisor.runOnce(SCOPE, MIGRATE)
+    expect(h.terminals.disposed).toEqual(['term-1'])
+    expect(again.once).toEqual([expect.objectContaining({ key: MIGRATE, status: 'running', terminalId: 'term-2', exitCode: null })])
+  })
+
+  it('closing its tab removes it; Stop all leaves a running action alone', async () => {
+    const h = harness(MIXED)
+    await h.supervisor.start(SCOPE)
+    await h.supervisor.runOnce(SCOPE, MIGRATE)
+    await flush()
+    await h.supervisor.stop(SCOPE)
+    expect(h.terminals.stopped).toEqual(['term-1'])
+    expect(h.supervisor.state(SCOPE).once?.[0]).toMatchObject({ status: 'running', terminalId: 'term-2' })
+    h.terminals.closeByUser('term-2')
+    await flush()
+    expect(h.supervisor.state(SCOPE).once).toBeUndefined()
+    expect(h.updates.at(-1)?.once).toBeUndefined()
+  })
+
+  it('a Run after a one-time action keeps its tab; quitting removes it', async () => {
+    const h = harness(MIXED)
+    await h.supervisor.runOnce(SCOPE, MIGRATE)
+    await h.supervisor.start(SCOPE)
+    await flush()
+    expect(h.terminals.disposed).toEqual([])
+    expect(h.supervisor.state(SCOPE).once?.[0]?.terminalId).toBe('term-1')
+    h.supervisor.disposeAll()
+    expect(h.terminals.disposed.sort()).toEqual(['term-1', 'term-2'])
+  })
+
+  it('refuses a key that is not a one-time action, or whose project is not here — nothing starts', async () => {
+    const h = harness(MIXED)
+    await expect(h.supervisor.runOnce(SCOPE, `${ROOT}::web`)).rejects.toBeInstanceOf(RunOnceError)
+    await expect(h.supervisor.runOnce(SCOPE, `${ROOT}::nope`)).rejects.toBeInstanceOf(RunOnceError)
+    const away = harness({ version: 1, steps: [{ id: 'm', name: 'm', command: 'make migrate', start: 'now', kind: 'once', runsIn: 'elsewhere' }] })
+    await expect(away.supervisor.runOnce(SCOPE, `${ROOT}::m`)).rejects.toThrow('elsewhere is not on this computer')
+    expect(h.terminals.created).toEqual([])
+    expect(away.terminals.created).toEqual([])
   })
 })

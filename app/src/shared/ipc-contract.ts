@@ -5903,6 +5903,9 @@ export interface IpcInvokeMap {
   'run:reload': { request: { scope: RunScope; stepKey?: string; force?: boolean }; response: RunGroupState }
   /** Stop all: end every step's process. */
   'run:stop': { request: { scope: RunScope }; response: RunGroupState }
+  // Run one one-time action of the scope's Launchpad, once, in its own tab.
+  // Never started by `run:start`; a press while it runs starts nothing.
+  'run:once': { request: { scope: RunScope; stepKey: string }; response: RunGroupState }
   /** Which scopes have a Run going. */
   'run:states': { request: Record<string, never>; response: RunScopeSummary[] }
 
@@ -7783,6 +7786,7 @@ export const IPC_INVOKE_CHANNELS = [
   'run:start',
   'run:reload',
   'run:stop',
+  'run:once',
   'run:states',
   'attachments:read',
   'attachments:revealPath',
@@ -8251,6 +8255,7 @@ export interface FlowRunApi {
   start(request: IpcRequest<'run:start'>): Promise<IpcResponse<'run:start'>>
   reload(request: IpcRequest<'run:reload'>): Promise<IpcResponse<'run:reload'>>
   stop(request: IpcRequest<'run:stop'>): Promise<IpcResponse<'run:stop'>>
+  once(request: IpcRequest<'run:once'>): Promise<IpcResponse<'run:once'>>
   states(): Promise<IpcResponse<'run:states'>>
   onUpdated(listener: (state: IpcEventPayload<'run:updated'>) => void): Unsubscribe
 }

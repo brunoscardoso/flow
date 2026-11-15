@@ -90,6 +90,7 @@ import { resolveXtermTheme } from './xterm-theme'
 import { isModalOverlayOpen } from '../modal-overlay'
 import { detectTerminalLinks, isOpenableTerminalUrl } from './terminal-links'
 import {
+  onceTabFace,
   orderRunTabs,
   pendingTabTooltip,
   pendingTabId,
@@ -412,6 +413,8 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
   let deferredNewFor: string | null = null
   /** The Run group — built once the panel's wiring is in place (below). */
   let runGroup: RunGroupView | null = null
+  /** A Launchpad terminal to show as soon as its tab arrives (main may answer before the tab exists). */
+  let focusWhenCreated: string | null = null
 
   /** The panel's current scoping inputs for the pure decision layer. */
   function scopeState(): TerminalScopeState {
@@ -576,6 +579,20 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
           pending: face.pending,
           accent: RUN_TONE_COLOR[face.tone],
           tooltip: runState === null ? face.tooltip : pendingTabTooltip(entry.step, runState),
+        }
+      }
+      if (entry.kind === 'once') {
+        // A one-time action: running, then finished (a check) or ended with its code.
+        // The tab stays after it ends so its output can be read; closing it is the person's call.
+        const face = onceTabFace(entry.once)
+        return {
+          id: entry.item.info.terminalId,
+          label: face.label,
+          closable: true,
+          renamable: false,
+          ...(face.finished ? { icon: 'check' } : {}),
+          accent: RUN_TONE_COLOR[face.tone],
+          tooltip: face.tooltip,
         }
       }
       if (entry.kind === 'step') {
@@ -1456,6 +1473,14 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     dock: hosts,
     isOnScreen: () => panel.isConnected,
     onChange: () => renderTabs(),
+    focusTerminal: (terminalId) => {
+      if (tabs.has(terminalId)) {
+        focusWhenCreated = null
+        activateTab(terminalId, { focus: true }) // the person pressed the action
+      } else {
+        focusWhenCreated = terminalId
+      }
+    },
   })
   runGroup = group
   header.insertBefore(group.element, tabsEl)
@@ -1536,6 +1561,10 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
 
   api.terminal.onCreated((info) => {
     addTab(info)
+    if (focusWhenCreated === info.terminalId) {
+      focusWhenCreated = null
+      activateTab(info.terminalId, { focus: true }) // a one-time action the person just pressed
+    }
   })
 
   // Main disposed a terminal (user close, thread teardown, quit) — drop its tab.
