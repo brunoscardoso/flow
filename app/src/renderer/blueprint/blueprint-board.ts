@@ -258,17 +258,22 @@ import {
   learnDotClass,
   type InFlightMark,
 } from './learn-inflight'
-import { ASK_BLUEPRINT_EVENT, type AskBlueprintOpenDetail, type AskOpenTag } from '../../shared/ask-contract'
+import { ASK_BLUEPRINT_EVENT, qualifyFeatureId, type AskBlueprintOpenDetail, type AskOpenTag } from '../../shared/ask-contract'
 import { savedSectionView, type SavedRowView } from './ask-saved-model'
 import {
   askDecoration,
   decorationKey,
   initialAskState,
   kindOfId,
+  linkTagId,
   projectDecoration,
+  projectWorkspaceDecoration,
   tagsFromOpen,
+  type AskScope,
+  type AskTag,
 } from './ask-panel-model'
 import { AskPanelView, paintCellMarks } from './ask-panel-view'
+import { workspaceCandidates, type PickerCandidate, type SuggestNode } from './ask-tag-suggest'
 // ── Territory (plan_blueprint_territory_v1) ────────────────────────────────
 // The three pure modules that replaced the retired ring's three. NOTHING
 // decidable without a document lives in this file: where a cell sits, what it
@@ -277,8 +282,6 @@ import { AskPanelView, paintCellMarks } from './ask-panel-view'
 // and only WIRED here.
 import {
   activationOf as territoryActivationOf,
-  ASK_FIELD_LABEL,
-  ASK_FIELD_TITLE,
   buildTerritoryView,
   CONTROL_GLYPH,
   CORPUS_CONTROL_GLYPH,
@@ -320,6 +323,7 @@ import { REVEAL_IN_TREE_EVENT, type RevealInTreeDetail } from '../editor/file-tr
 // how connections are routed are all decided in these two pure modules.
 import {
   buildWorkspaceSheet,
+  colourSlot,
   connectionsChip,
   CONNECTIONS_UNREADABLE,
   connectionsControlView,
@@ -2109,22 +2113,18 @@ export class BlueprintBoard {
     // Learning: a permanent way into the learning panel. The learn chip also
     // toggles it, but the chip hides itself when there is nothing learned yet —
     // which is exactly when a user wants to check whether learning is running.
-    const learning = document.createElement('fl-button')
-    learning.setAttribute('variant', 'ghost')
-    learning.setAttribute('small', '')
-    learning.setAttribute('title', 'Show learning progress')
-    // AN ICON LIKE EVERY OTHER BUTTON UP HERE. It was the one word without
-    // one, which read as a different kind of thing sitting in the same row.
-    const learningIcon = document.createElement('fl-icon')
-    learningIcon.setAttribute('name', 'brain')
-    learningIcon.setAttribute('size', '12')
-    learning.appendChild(learningIcon)
-    const learningText = document.createElement('span')
-    // "Learn", not "Learning" — a present participle on a permanent button
-    // reads as a status ("we are always learning") rather than an action.
-    learningText.textContent = 'Learn'
-    learning.appendChild(learningText)
-    learning.addEventListener('click', () => this.#toggleLearnPanel())
+    // A TILE LIKE ITS NEIGHBOURS (mockup G + D, user pick 2026-11-15): the
+    // header's actions are equal 32px squares with a 16px line icon, their
+    // names in the tooltip and the accessible name. "Learn", not "Learning" —
+    // a present participle on a permanent button reads as a status.
+    const learning = this.#headerTile({
+      icon: 'brain-lobes',
+      name: 'Learn',
+      title: 'Learn · show learning progress',
+      pressed: false,
+      press: () => this.#toggleLearnPanel(),
+    })
+    learning.classList.add('fb-learn-tile')
     this.#learningButton = learning
 
     // Out-of-sync warning dot on the learn chip: the retired "Sync status"
@@ -2352,7 +2352,7 @@ export class BlueprintBoard {
         return
       }
       // `/` OPENS ASK THE BLUEPRINT on the feature map (and closes it again).
-      if (event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey && !isTypingTarget(event.target) && this.#territory !== null) {
+      if (event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey && !isTypingTarget(event.target) && this.#activeRoot !== null && (this.#territory !== null || this.#wsMounted?.kind === 'root')) {
         this.#toggleAsk()
         event.preventDefault()
         return
@@ -6411,6 +6411,13 @@ export class BlueprintBoard {
     else this.openLearnPanel()
   }
 
+  /** The Learn tile shows the panel is open, as every tile shows its state. */
+  #paintLearnTile(): void {
+    const tile = this.#learningButton as HTMLElement | undefined
+    if (tile === undefined) return
+    tile.setAttribute('aria-pressed', String(this.#learnPanelOpen))
+  }
+
   /**
    * Open the learning status panel as pane 2 of #split. Mutually exclusive with
    * the peek drawer — if the drawer holds the pane, it is closed first (keeps the
@@ -6436,6 +6443,7 @@ export class BlueprintBoard {
     this.#split.setAttribute('sizes', sizes.join(','))
     if (!this.#learnPanel.isConnected) this.#split.appendChild(this.#learnPanel)
     this.#learnPanelOpen = true
+    this.#paintLearnTile()
     // Fresh each time it opens: other projects learn while it is closed.
     this.#learnOtherSnapshots.clear()
     this.#lpConfirm = null
@@ -6455,6 +6463,7 @@ export class BlueprintBoard {
   closeLearnPanel(): void {
     if (this.#learnPanel.isConnected) this.#split.removeChild(this.#learnPanel)
     this.#learnPanelOpen = false
+    this.#paintLearnTile()
     this.#learnResetConfirm = false
     this.#learnAllConfirm = false
     this.#stopLearnLivePoll()
@@ -12385,6 +12394,55 @@ export class BlueprintBoard {
   }
 
   /**
+   * THE HEADER'S TILE (mockup G + D, user pick 2026-11-15). Connections and
+   * Learn are equal 32px squares — one 1px border, one 8px radius, one 16px
+   * line icon — with their names in the tooltip and the accessible name. A
+   * count rides as a small badge; a toggle that is on (or a panel that is
+   * open) keeps `aria-pressed`, which the tile draws raised, so the state is
+   * visible on every tile.
+   */
+  #headerTile(input: {
+    icon: string
+    name: string
+    title: string
+    badge?: string | null
+    disabled?: boolean
+    busy?: boolean
+    pressed?: boolean | null
+    press: () => void
+  }): HTMLButtonElement {
+    const tile = document.createElement('button')
+    tile.type = 'button'
+    tile.className = 'fb-head-tile'
+    const icon = document.createElement('fl-icon')
+    icon.setAttribute('name', input.icon)
+    icon.setAttribute('size', '16')
+    if (input.busy === true) icon.classList.add('fb-head-tile-spin')
+    tile.appendChild(icon)
+    if (input.badge !== undefined && input.badge !== null && input.badge !== '') {
+      const badge = document.createElement('span')
+      badge.className = 'fb-head-tile-badge'
+      badge.textContent = input.badge
+      badge.setAttribute('aria-hidden', 'true')
+      tile.appendChild(badge)
+    }
+    tile.title = input.title
+    tile.setAttribute('aria-label', input.badge !== undefined && input.badge !== null && input.badge !== '' ? `${input.name}, ${input.badge}` : input.name)
+    if (input.disabled === true) {
+      tile.disabled = true
+      tile.setAttribute('aria-disabled', 'true')
+    }
+    if (input.busy === true) tile.setAttribute('aria-busy', 'true')
+    if (input.pressed !== undefined && input.pressed !== null) tile.setAttribute('aria-pressed', String(input.pressed))
+    tile.addEventListener('click', (event) => {
+      event.stopPropagation()
+      if (input.disabled === true) return
+      input.press()
+    })
+    return tile
+  }
+
+  /**
    * THE CONNECTIONS CONTROL — one pill that is whatever the Workspace needs
    * now (connectionsControlView): Learn connections, the run's progress, the
    * show/hide toggle, and an attached Update while pairs changed since they
@@ -12401,14 +12459,19 @@ export class BlueprintBoard {
     const group = document.createElement('span')
     group.className = 'fb-ws-conn'
     group.dataset['wsControl'] = view.mode
-    const icon: Record<typeof view.mode, string> = { learn: 'sparkles', learning: 'spinner', toggle: 'link', none: 'link', unreadable: 'warning' }
-    const main = this.#headerButton({
+    const icon: Record<typeof view.mode, string> = { learn: 'sparkles', learning: 'spinner', toggle: 'connections', none: 'connections', unreadable: 'warning' }
+    // The figure a mode carries rides as the badge: the count, or the run's progress.
+    const count = this.#wsGraph?.links?.length ?? null
+    const badge = view.mode === 'toggle' ? (count === null ? null : String(count)) : view.mode === 'learning' ? view.label : null
+    const name = view.mode === 'learn' ? 'Learn connections' : 'Connections'
+    const main = this.#headerTile({
       icon: icon[view.mode],
-      label: view.label,
-      title: view.title,
-      // The learning label is just a figure; its sentence is the accessible name.
-      ariaLabel: view.mode === 'learning' ? view.title : view.label,
+      name,
+      // The name leads the tooltip; the sentence after it says what a press does.
+      title: view.mode === 'learn' || view.mode === 'learning' ? view.title : `${name} · ${view.title}`,
+      badge,
       disabled: view.disabled,
+      busy: view.mode === 'learning',
       pressed: view.mode === 'toggle' ? view.pressed : null,
       press: () => {
         if (view.mode === 'learn') {
@@ -12422,14 +12485,12 @@ export class BlueprintBoard {
       },
     })
     main.dataset['wsConnections'] = view.mode === 'toggle' ? 'toggle' : view.mode
-    main.setAttribute('aria-busy', String(view.mode === 'learning'))
     group.appendChild(main)
     if (view.update !== null) {
-      const update = this.#headerButton({
+      const update = this.#headerTile({
         icon: 'refresh',
-        label: view.update.label,
-        title: view.update.title,
-        ariaLabel: 'Update connections',
+        name: 'Update connections',
+        title: `Update connections · ${view.update.title}`,
         press: () => void this.#learnConnections(),
       })
       update.dataset['wsUpdate'] = 'button'
@@ -12512,16 +12573,18 @@ export class BlueprintBoard {
     this.#workspaceChanged()
   }
 
-  /** The Connections toggle — off by default, remembered per viewer. */
+  /** The Connections toggle — off by default, remembered per viewer. A tile, like its neighbours. */
   #buildConnectionsToggle(): HTMLElement {
     const unreadable = this.#wsGraph?.links === null
     const on = this.#wsShowConnections && !unreadable
-    let title = on ? 'Hide how these projects connect' : 'Show how these projects connect'
-    if (unreadable) title = WS_LINKS_UNREADABLE
-    const button = this.#headerButton({
-      icon: unreadable ? 'warning' : 'link',
-      label: 'Connections',
+    let title = on ? 'Connections · Hide how these projects connect' : 'Connections · Show how these projects connect'
+    if (unreadable) title = `Connections · ${WS_LINKS_UNREADABLE}`
+    const count = unreadable ? null : (this.#wsCurrentProject()?.connections ?? null)
+    const button = this.#headerTile({
+      icon: unreadable ? 'warning' : 'connections',
+      name: 'Connections',
       title,
+      badge: count === null ? null : String(count),
       disabled: unreadable,
       pressed: on,
       press: () => {
@@ -12542,6 +12605,8 @@ export class BlueprintBoard {
     figure: string
     figureTitle: string
     extra?: HTMLElement | null
+    /** The Workspace sheet only: a shared project's own sheet has no field. */
+    ask?: boolean
   }): HTMLElement {
     const strip = document.createElement('div')
     strip.className = 'fb-terr-title fb-ws-title'
@@ -12571,6 +12636,9 @@ export class BlueprintBoard {
     const controls = document.createElement('div')
     controls.className = 'fb-ws-controls'
     if (input.extra !== undefined && input.extra !== null) controls.appendChild(input.extra)
+    // ORDER, LEFT TO RIGHT (user, 2026-11-15): the Ask field, Connections, then
+    // the header's Learn tile.
+    if (input.ask === true) this.#mountAskField(controls)
     controls.appendChild(this.#buildConnectionsControl())
     strip.appendChild(controls)
     strip.appendChild(this.#buildLearningLine())
@@ -12670,6 +12738,8 @@ export class BlueprintBoard {
       name.setAttribute('aria-label', country.zoomable ? `${country.name} — open this project` : `${country.name} — ${COULD_NOT_READ}`)
       name.addEventListener('click', (event) => {
         event.stopPropagation()
+        // ASK OPEN: the band's press tags the project instead of zooming.
+        if (this.#askTagWorkspaceProject(country.slug)) return
         void this.#zoomIntoProject(country.slug)
       })
       band.appendChild(name)
@@ -12698,7 +12768,15 @@ export class BlueprintBoard {
         el.classList.add('fb-ws-zoomable')
         el.addEventListener('click', (event) => {
           event.stopPropagation()
+          if (this.#askTagWorkspaceProject(country.slug)) return
           void this.#zoomIntoProject(country.slug)
+        })
+      } else {
+        // A project that cannot be opened can still be asked about.
+        el.addEventListener('click', (event) => {
+          if (this.#ask?.isOpen !== true) return
+          event.stopPropagation()
+          this.#askTagWorkspaceProject(country.slug)
         })
       }
       countries.set(country.slug, el)
@@ -12808,6 +12886,8 @@ export class BlueprintBoard {
         this.#paintWorkspaceSelection()
       }
       const zoomIn = (): void => {
+        // ASK OPEN: every press on a feature tags it (FR-3), wherever it came from.
+        if (this.#askTagWorkspaceCell(cell.project, cell.id, cell.name)) return
         // A PRESS ENDS THE HOVER: a grow still pending would re-lay the map
         // under the zoom (and read its diagram) a moment later.
         this.#hoverDispatch({ type: 'reset' })
@@ -12815,6 +12895,7 @@ export class BlueprintBoard {
       }
       el.addEventListener('click', (event) => {
         event.stopPropagation()
+        if (this.#askTagWorkspaceCell(cell.project, cell.id, cell.name)) return
         // A press goes in; Shift+press keeps the feature's lines on screen.
         if (event.shiftKey) {
           select()
@@ -12824,6 +12905,7 @@ export class BlueprintBoard {
       })
       el.addEventListener('dblclick', (event) => {
         event.stopPropagation()
+        if (this.#ask?.isOpen === true) return
         if (!event.shiftKey) zoomIn()
       })
       // HOVER GROWS IT IN PLACE, its diagram read from the feature's OWN
@@ -12867,6 +12949,7 @@ export class BlueprintBoard {
         if (event.key !== 'Enter' && event.key !== ' ') return
         event.preventDefault()
         event.stopPropagation()
+        if (this.#askTagWorkspaceCell(cell.project, cell.id, cell.name)) return
         this.#openOnClick(cell.key, zoomIn)
       })
       cells.set(cell.key, el)
@@ -12879,6 +12962,7 @@ export class BlueprintBoard {
       kicker: view.title.kicker,
       figure: view.title.figure,
       figureTitle: view.title.figureTitle,
+      ask: true,
     })
     const { foot, detail } = this.#buildWorkspaceFoot({
       crumbs: [{ name: view.title.name, press: null }],
@@ -12889,7 +12973,12 @@ export class BlueprintBoard {
     wrap.append(sheet, foot)
     this.#stage.appendChild(wrap)
     this.#wsMounted = { kind: 'root', sheet, view, cells, countries, focusView: null, detail }
+    // A PROJECT QUESTION does not follow the reader out to the Workspace: its
+    // tags name one project's features, which this sheet speaks of differently.
+    if (this.#ask?.isOpen === true && this.#ask.state.scope.kind !== 'workspace') this.#ask.close()
     this.#paintWorkspaceSelection()
+    // AN OPEN QUESTION SURVIVES A RE-RENDER: its marks go on the new cells and bands.
+    this.#paintAsk(true)
     this.#paintInFlight()
     this.#announce(`${view.title.name}, ${String(view.countries.length)} projects`)
     this.#restoreBoardFocus()
@@ -12950,6 +13039,9 @@ export class BlueprintBoard {
     }
     mounted.detail.textContent = text
     mounted.detail.title = text
+    // AN OPEN QUESTION STANDS OVER THE SELECTION: a hover repaint must not
+    // take its lit/dim away (it is given back when the panel closes).
+    if (this.#ask?.isOpen === true) this.#paintAsk(true)
   }
 
   /** The SVG layer: ribbons at rest, the selected feature's lines when one is pressed. */
@@ -12974,6 +13066,7 @@ export class BlueprintBoard {
           const { x, y, w, h } = ribbon.bridge
           const band = svgEl('rect', { x: String(x), y: String(y), width: String(w), height: String(h), rx: '3', class: 'fb-ws-bridge' })
           band.dataset['wsRibbon'] = ribbon.key
+          this.#wireRibbonTag(band, ribbon.key)
           svg.appendChild(band)
           // Side by side → light the two vertical borders; stacked → the two horizontal ones.
           const edges: Array<[number, number, number, number]> =
@@ -12986,6 +13079,7 @@ export class BlueprintBoard {
         } else {
           const path = svgEl('path', { d: ribbon.path, class: 'fb-ws-ribbon', 'stroke-width': String(ribbon.width) })
           path.dataset['wsRibbon'] = ribbon.key
+          this.#wireRibbonTag(path, ribbon.key)
           svg.appendChild(path)
           for (const end of [ribbon.from, ribbon.to]) svg.appendChild(svgEl('circle', { cx: String(end.x), cy: String(end.y), r: '4', class: 'fb-ws-end' }))
         }
@@ -12997,6 +13091,7 @@ export class BlueprintBoard {
         const pillTitle = svgEl('title', {})
         pillTitle.textContent = `${this.#wsProjectName(a ?? '')} ↔ ${this.#wsProjectName(b ?? '')}: ${String(ribbon.count)} connection${ribbon.count === 1 ? '' : 's'} — Shift+press a feature to see its own`
         pill.appendChild(pillTitle)
+        this.#wireRibbonTag(pill, ribbon.key)
         svg.append(pill, count)
       }
     } else {
@@ -13017,6 +13112,19 @@ export class BlueprintBoard {
       )
     }
     mounted.sheet.appendChild(svg)
+  }
+
+  /**
+   * A ribbon pressed while Ask is open tags the connection between its two
+   * projects. Ribbons take presses only then (the sheet's open class gives
+   * them pointer events), so at rest they stay what they were: a drawing.
+   */
+  #wireRibbonTag(target: SVGElement, ribbonKey: string): void {
+    target.addEventListener('click', (event) => {
+      if (this.#ask?.isOpen !== true) return
+      event.stopPropagation()
+      this.#askTagWorkspaceLink(ribbonKey)
+    })
   }
 
   /** Connection lines: a halo, the line with its arrow, its start dot, and a hover sentence. */
@@ -15218,26 +15326,23 @@ export class BlueprintBoard {
       strip.appendChild(story)
     }
 
-    // CONNECTIONS — this project's links to the others, run off the edge. At
-    // the project's own top level only: deeper levels are one feature's.
+    // ASK THE BLUEPRINT — at every depth (plan ask_the_blueprint, FR-1), the
+    // field first; then CONNECTIONS — this project's links to the others, run
+    // off the edge, at the project's own top level only.
+    this.#mountAskField(strip)
     if (this.#featureStack.length === 0 && this.#wsKnown()) strip.appendChild(this.#buildConnectionsToggle())
-    // ASK THE BLUEPRINT — at every depth (plan ask_the_blueprint, FR-1).
-    const ask = this.#headerButton({
-      icon: 'message',
-      label: ASK_FIELD_LABEL,
-      title: ASK_FIELD_TITLE,
-      ariaLabel: ASK_FIELD_TITLE,
-      pressed: this.#ask?.isOpen ?? false,
-      press: () => this.#toggleAsk(),
-    })
-    ask.classList.add('fb-terr-ask')
-    ask.dataset['ask'] = 'open'
-    const key = document.createElement('kbd')
-    key.className = 'fb-terr-ask-key'
-    key.textContent = '/'
-    ask.appendChild(key)
-    strip.appendChild(ask)
     return strip
+  }
+
+  /**
+   * The Ask field in a strip — one field for the project strip and the
+   * Workspace sheet's, MOVED into each strip so the question survives a
+   * repaint. Nothing is mounted when no project is open: there is nothing to
+   * ask.
+   */
+  #mountAskField(parent: HTMLElement): void {
+    if (this.#activeRoot === null) return
+    this.#askPanel().mountField(parent)
   }
 
   /**
@@ -15567,22 +15672,102 @@ export class BlueprintBoard {
    * `askDecoration` says something different from what is already drawn.
    */
 
-  /** The panel, built on first open and kept for the board's lifetime. */
+  /**
+   * The panel and its header field, built with the first strip that shows the
+   * field and kept for the board's lifetime (a project switch disposes them).
+   */
   #askPanel(): AskPanelView {
     if (this.#ask !== null) return this.#ask
     const panel = new AskPanelView({
       rootId: () => this.#activeRoot,
-      graphNodes: () => this.#featureGraph?.nodes ?? [],
+      scope: () => this.#askSheetScope(),
+      workspaceScope: () => this.#askWorkspaceScope(),
+      graphNodes: (scope) => this.#askGraphNodes(scope),
+      extraCandidates: (scope) => this.#askExtraCandidates(scope),
       historyScope: () => this.#askHistoryScope(),
+      project: (slug) => this.#askProjectLook(slug),
+      featureName: (project, id) => this.#wsFeatureName(project, id) ?? null,
+      isMapTarget: (target) => target instanceof Node && this.#stage.contains(target),
       onChange: () => this.#paintAsk(false),
+      canPeek: (project) => project === undefined || project === this.#wsCurrentProject()?.slug,
       peekFile: (relPath) => this.openPeek(relPath),
+      onConnectionSaved: () => this.#workspaceChanged(),
+      onClosed: () => this.#restoreBoardFocus(),
     })
     this.element.appendChild(panel.element)
     this.#ask = panel
     return panel
   }
 
-  /** The strip's Ask button and the shortcut: open, or close when open. */
+  /** The Workspace sheet (its root, not a shared project's) is what the board shows. */
+  #onWorkspaceSheet(): boolean {
+    return this.#territory === null && this.#wsMounted?.kind === 'root'
+  }
+
+  /** The Workspace as an Ask scope, or null outside one. */
+  #askWorkspaceScope(): AskScope | null {
+    const graph = this.#wsGraph
+    if (!this.#wsKnown() || graph === null || graph.workspace === null) return null
+    return {
+      kind: 'workspace',
+      workspace: graph.workspace.slug,
+      name: graph.workspace.name,
+      projects: graph.projects.map((project) => ({ slug: project.slug, name: project.name })),
+    }
+  }
+
+  /** What a fresh question asks: the Workspace on its sheet, the project everywhere else. */
+  #askSheetScope(): AskScope {
+    if (this.#onWorkspaceSheet()) {
+      const workspace = this.#askWorkspaceScope()
+      if (workspace !== null) return workspace
+    }
+    return { kind: 'project', name: this.#wsCurrentProject()?.name ?? null }
+  }
+
+  /**
+   * The features and parts suggestions and the @ picker read. On the
+   * Workspace, EVERY project's graph, each id qualified with its project — two
+   * projects' same slug stay two rows (FR-5).
+   */
+  #askGraphNodes(scope: AskScope): readonly SuggestNode[] {
+    if (scope.kind === 'project') return this.#featureGraph?.nodes ?? []
+    const out: SuggestNode[] = []
+    for (const project of this.#wsGraph?.projects ?? []) {
+      for (const node of project.graph?.nodes ?? []) {
+        if (node.kind === 'child') continue
+        out.push({
+          id: qualifyFeatureId(project.slug, node.id),
+          name: node.name,
+          kind: node.kind,
+          ...(node.summary !== undefined && node.summary !== null ? { summary: node.summary } : {}),
+          ...(node.partOf !== undefined && node.partOf !== null ? { partOf: node.partOf } : {}),
+          project: project.slug,
+        })
+      }
+    }
+    return out
+  }
+
+  /** On the Workspace: its projects and the connections between them. */
+  #askExtraCandidates(scope: AskScope): readonly PickerCandidate[] {
+    if (scope.kind !== 'workspace') return []
+    const projects = this.#wsGraph?.projects ?? []
+    return workspaceCandidates(
+      projects.map((project) => ({ slug: project.slug, name: project.name, description: project.description })),
+      this.#wsGraph?.links ?? null,
+    )
+  }
+
+  /** A project's name and its one colour — the app's accent for a checkout here, else its slot. */
+  #askProjectLook(slug: string): { name: string; color: string | null } | null {
+    const project = this.#wsGraph?.projects.find((entry) => entry.slug === slug)
+    if (project === undefined) return null
+    const color = project.local !== null ? ensureAccentProperty(project.local) : `var(--fb-ws-hue-${String(colourSlot(project.colorIndex))})`
+    return { name: project.name, color }
+  }
+
+  /** The header field and the shortcut: open, or close when open. */
   #toggleAsk(): void {
     if (this.#ask?.isOpen === true) {
       this.#ask.close()
@@ -15593,18 +15778,34 @@ export class BlueprintBoard {
 
   /**
    * Open the Ask panel — the one door every opener uses (`flow:ask-blueprint`,
-   * wired in `index.ts`, plus the strip button and the shortcut). Tags without
-   * a label take the name the board knows them by.
+   * wired in `index.ts`, plus the header field and the shortcut). Tags without
+   * a label take the name the board knows them by. A pointer to a Workspace
+   * answer (`workspace: true`) opens in the Workspace wherever it was pressed.
    */
   openAsk(detail: AskBlueprintOpenDetail): void {
-    const names = new Map((this.#featureGraph?.nodes ?? []).map((node) => [node.id, node.name]))
-    const tags = tagsFromOpen(detail.tags, detail.threadId, detail.threadTitle).map((tag) =>
-      detail.tags?.find((given) => given.id === tag.id)?.label === undefined && names.has(tag.id)
+    if (this.#activeRoot === null) return
+    const workspace = detail.workspace === true ? this.#askWorkspaceScope() : null
+    const scope = workspace ?? this.#askSheetScope()
+    const current = this.#wsCurrentProject()?.slug
+    // An opener's tag on the Workspace that did not say its project is this
+    // board's own project — the feature brief and the palette speak project ids.
+    const given = (detail.tags ?? []).map((tag) =>
+      scope.kind === 'workspace' && tag.kind !== 'conversation' && tag.project === undefined && current !== undefined
+        ? { ...tag, project: current }
+        : tag,
+    )
+    const names = new Map(this.#askGraphNodes(scope).map((node) => [node.id, node.name]))
+    const tags = tagsFromOpen(given, detail.threadId, detail.threadTitle, scope).map((tag) =>
+      detail.tags?.find((entry) => entry.id === tag.id || qualifyFeatureId(entry.project ?? current ?? '', entry.id) === tag.id)?.label ===
+        undefined && names.has(tag.id)
         ? { ...tag, label: names.get(tag.id) as string }
         : tag,
     )
     const fresh = detail.text !== undefined || tags.length > 0
-    this.#askPanel().open({
+    // The field lives in the header strip; a board with no strip yet gets it now.
+    const panel = this.#askPanel()
+    panel.open({
+      scope,
       ...(fresh ? { text: detail.text ?? '', tags } : {}),
       ...(detail.view !== undefined ? { view: detail.view } : {}),
       ...(detail.entryId !== undefined ? { entryId: detail.entryId } : {}),
@@ -15612,7 +15813,7 @@ export class BlueprintBoard {
     })
   }
 
-  /** Which features "Saved questions" reads when nothing is tagged: what this sheet draws. */
+  /** Project scope: which features "Saved questions" reads when nothing is tagged — what this sheet draws. */
   #askHistoryScope(): string[] {
     const cells = this.#territory?.view.cells ?? []
     return cells
@@ -15621,9 +15822,15 @@ export class BlueprintBoard {
       .slice(0, 20)
   }
 
+  /** The open panel's scope is the Workspace. */
+  #askInWorkspace(): boolean {
+    return this.#ask?.state.scope.kind === 'workspace'
+  }
+
   /**
    * A cell pressed while the panel is open becomes a tag. True when the press
-   * was the panel's — the cell then does not dive.
+   * was the panel's — the cell then does not dive. A Workspace question asked
+   * from inside a project qualifies the id with that project.
    */
   #askTagFromCell(cell: TerritoryCell): boolean {
     const panel = this.#ask
@@ -15631,8 +15838,45 @@ export class BlueprintBoard {
     // A domain or a ghost is not something an answer can be about; the press
     // is swallowed rather than diving out from under an open question.
     if (cell.kind !== 'feature' && cell.kind !== 'part') return true
-    panel.addTagFromMap({ id: cell.id, kind: kindOfId(cell.id) === 'part' ? 'part' : 'feature', label: cell.name })
+    const kind = kindOfId(cell.id) === 'part' ? 'part' : 'feature'
+    const project = this.#askInWorkspace() ? this.#wsCurrentProject()?.slug : undefined
+    const tag: AskTag =
+      project !== undefined
+        ? { id: qualifyFeatureId(project, cell.id), kind, label: cell.name, project }
+        : { id: cell.id, kind, label: cell.name }
+    panel.addTagFromMap(tag)
     return true
+  }
+
+  /**
+   * THE WORKSPACE SHEET'S PRESSES WHILE ASK IS OPEN (FR-2–FR-4): a feature
+   * cell, a project band or a connection ribbon becomes a tag instead of
+   * zooming or opening a story. True when the press was the panel's.
+   */
+  #askTagOnWorkspace(tag: AskTag): boolean {
+    const panel = this.#ask
+    if (panel === null || !panel.isOpen) return false
+    // A project question is not about another project: the press is swallowed
+    // rather than zooming out from under it.
+    if (!this.#askInWorkspace()) return true
+    panel.addTagFromMap(tag)
+    return true
+  }
+
+  #askTagWorkspaceCell(project: string, id: string, name: string): boolean {
+    const kind = kindOfId(id) === 'part' ? 'part' : 'feature'
+    return this.#askTagOnWorkspace({ id: qualifyFeatureId(project, id), kind, label: name, project })
+  }
+
+  #askTagWorkspaceProject(slug: string): boolean {
+    return this.#askTagOnWorkspace({ id: `project:${slug}`, kind: 'project', label: this.#wsProjectName(slug), project: slug })
+  }
+
+  /** A ribbon's key is `a|b`; its tag is the sorted pair. */
+  #askTagWorkspaceLink(ribbonKey: string): boolean {
+    const [a, b] = ribbonKey.split('|')
+    if (a === undefined || b === undefined) return false
+    return this.#askTagOnWorkspace({ id: linkTagId(a, b), kind: 'connection', label: `${this.#wsProjectName(a)} ↔ ${this.#wsProjectName(b)}` })
   }
 
   /**
@@ -15645,10 +15889,13 @@ export class BlueprintBoard {
     const key = decorationKey(decoration)
     if (!force && key === this.#askDecorationKey) return
     this.#askDecorationKey = key
-    const button = this.#headStrip?.querySelector('.fb-terr-ask') ?? null
-    if (button !== null) {
-      button.toggleAttribute('pressed', decoration.active)
-      button.setAttribute('aria-pressed', String(decoration.active))
+    this.element.classList.toggle('fb-ask-active', decoration.active)
+    // THE WORKSPACE SHEET (note 8): painted from the same decoration, by
+    // qualified id; the project board path below is unchanged.
+    const ws = this.#wsMounted
+    if (this.#territory === null && ws !== null && ws.kind === 'root' && ws.view !== null) {
+      this.#paintWorkspaceAsk(decoration)
+      return
     }
     const mounted = this.#territory
     if (mounted === null) return
@@ -15669,6 +15916,43 @@ export class BlueprintBoard {
     }
     this.#applyTerritoryDecoration({ lit: [...marks.keys()], dimOthers: decoration.dimOthers })
   }
+
+  /**
+   * The Workspace branch of `#paintAsk`: its cells and country bands, lit and
+   * dimmed from the decoration. While Ask is open the selection's lit/dim is
+   * set aside; closing gives it back to `#paintWorkspaceSelection`.
+   */
+  #paintWorkspaceAsk(decoration: ReturnType<typeof askDecoration>): void {
+    const mounted = this.#wsMounted
+    if (mounted === null || mounted.view === null) return
+    const workspaceMarks = this.#askInWorkspace() || !decoration.active
+    mounted.sheet.classList.toggle('fb-ws-ask-open', decoration.active)
+    const drawn = mounted.view.cells.map((cell) => ({ key: cell.key, project: cell.project, id: cell.id }))
+    // A project question left open on the Workspace names nothing here.
+    const paint = projectWorkspaceDecoration(workspaceMarks ? decoration : { ...decoration, outlined: [], mentioned: [], live: [], numbers: [], facts: null, projects: [], citedProjects: [], knowledgeOnly: [] }, drawn)
+    for (const [key, el] of mounted.cells) {
+      paintCellMarks(el, paint.cells.get(key) ?? null)
+      const dim = paint.dim && !paint.lit.has(key)
+      el.classList.toggle('fb-ws-ask-dim', dim)
+      if (decoration.active) el.classList.remove('fb-ws-dim', 'fb-ws-hot', 'fb-ws-linked')
+    }
+    for (const [slug, el] of mounted.countries) {
+      const band = paint.bands.get(slug) ?? null
+      el.classList.toggle('fb-ws-ask-tagged', band?.role === 'tagged')
+      el.classList.toggle('fb-ws-ask-mentioned', band?.role === 'mentioned')
+      el.classList.toggle('fb-ws-ask-dim', paint.dim && !paint.litProjects.has(slug))
+      el.querySelector(':scope > .fb-ws-band > .fb-ws-ask-note')?.remove()
+      if (band?.knowledgeOnly === true) {
+        const note = document.createElement('span')
+        note.className = 'fb-ws-ask-note'
+        note.textContent = 'Answered from shared knowledge'
+        el.querySelector(':scope > .fb-ws-band')?.appendChild(note)
+      }
+    }
+    // CLOSING GIVES THE SHEET BACK: the selection's own lit/dim and lines.
+    if (!decoration.active) this.#paintWorkspaceSelection()
+  }
+
   /**
    * The caps LIVE on the surface currently drawn (Task 8.4).
    *
@@ -16967,7 +17251,19 @@ export class BlueprintBoard {
   }
 
   #buildAskedRow(featureId: string, row: SavedRowView): HTMLElement {
-    const open = (): void => this.#askAbout(featureId, { entryId: row.id })
+    // A WORKSPACE ANSWER, listed here through its pointer, opens where it was
+    // saved — in the Workspace — and shows the whole answer (FR-10).
+    const open = (): void => {
+      if (row.workspaceEntry !== null) {
+        document.dispatchEvent(
+          new CustomEvent(ASK_BLUEPRINT_EVENT, {
+            detail: { entryId: row.workspaceEntry, workspace: true } satisfies AskBlueprintOpenDetail,
+          }),
+        )
+        return
+      }
+      this.#askAbout(featureId, { entryId: row.id })
+    }
     const wrap = document.createElement('div')
     wrap.className = 'fb-asked-row' + (row.stale ? ' stale' : '')
     const main = document.createElement('button')
@@ -16998,13 +17294,21 @@ export class BlueprintBoard {
       again.className = 'fb-asked-again'
       again.textContent = 'Ask again'
       again.addEventListener('click', () => {
-        const tags: AskOpenTag[] = (row.tags.length > 0 ? row.tags : [featureId]).map((id) => ({
+        // Only features and parts travel through an opener; a Workspace
+        // answer's project and connection tags are asked again by its scope.
+        const ids = (row.tags.length > 0 ? row.tags : [featureId]).filter((id) => id.startsWith('feature:'))
+        const tags: AskOpenTag[] = ids.map((id) => ({
           id,
           kind: kindOfId(id) === 'part' ? 'part' : 'feature',
         }))
         document.dispatchEvent(
           new CustomEvent(ASK_BLUEPRINT_EVENT, {
-            detail: { text: row.question, tags, submit: true } satisfies AskBlueprintOpenDetail,
+            detail: {
+              text: row.question,
+              tags,
+              submit: true,
+              ...(row.workspaceEntry !== null ? { workspace: true } : {}),
+            } satisfies AskBlueprintOpenDetail,
           }),
         )
       })
@@ -20128,30 +20432,6 @@ const BOARD_STYLES = `
     color: var(--fb-ink-dim);
     white-space: nowrap;
   }
-  /* ASK THE BLUEPRINT, at the strip's right end, at every depth. A pill rather
-     than a bare mark: it is the board's one search entry point, and an
-     unlabelled glyph in a corner is a feature nobody finds. */
-  .flow-board-root .fb-terr-ask {
-    margin-left: auto;
-    flex: none;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px 10px;
-    border: 1px solid var(--fb-card-border);
-    border-radius: 10px;
-    background: var(--fb-card);
-    font-family: var(--fl-font-mono, ui-monospace, monospace);
-    font-size: 9.5px;
-    letter-spacing: 0.1em;
-    color: var(--fb-ink-dim);
-    cursor: pointer;
-  }
-  .flow-board-root .fb-terr-ask:hover {
-    border-color: var(--fb-accent);
-    color: var(--fb-accent);
-  }
-  .flow-board-root .fb-terr-ask-glyph { font-size: 11px; }
 
   /* ── A country: transparent ground with a mono label row ── */
   .flow-board-root .fb-terr-group {
@@ -23505,7 +23785,6 @@ const BOARD_STYLES = `
     cursor: pointer;
   }
   .flow-board-root .fb-terr-title > .fb-ws-toggle { margin-left: auto; }
-  .flow-board-root .fb-terr-title > .fb-ws-toggle + .fb-terr-ask { margin-left: 8px; }
   .flow-board-root .fb-ws-toggle:hover:not(:disabled),
   .flow-board-root .fb-ws-open:hover { border-color: var(--fb-ws-link); color: var(--fb-ink); }
   .flow-board-root .fb-ws-toggle[aria-pressed='true'] {
@@ -23634,20 +23913,9 @@ const BOARD_STYLES = `
      the order the strip built them — on every sheet. */
   .flow-board-root .fb-head-strip .fb-terr-title-where { flex: 1 1 auto; }
   .flow-board-root .fb-head-strip .fb-terr-title > .fb-head-btn { flex: none; margin-left: 0; }
-  /* An older rule dressed Ask the brain as an upper-case pill; as a header
-     button it wears nothing of its own. */
-  .flow-board-root .fb-head-strip fl-button.fb-terr-ask {
-    border: 0;
-    padding: 0;
-    background: none;
-    box-shadow: none;
-    text-transform: none;
-    letter-spacing: 0;
-    font: inherit;
-    color: inherit;
-    height: auto;
-    min-width: 0;
-  }
+  /* THE ASK FIELD sits after where-you-are and before the tiles, on every
+     sheet; it keeps its own width (the panel's sheet styles size it). */
+  .flow-board-root .fb-head-strip .fb-terr-title > .fb-askf { margin-left: auto; }
   /* A project's own line on the map is a fact like any other: caption, UI face. */
   .flow-board-root .fb-ws-band .fb-ws-meta {
     font-family: var(--fl-font-ui);
@@ -23655,7 +23923,6 @@ const BOARD_STYLES = `
     letter-spacing: 0;
     text-transform: none;
   }
-  .flow-board-root .fb-head-strip .fb-ws-conn { gap: 0; }
   .flow-board-root .fb-head-btn fl-icon[name='spinner'] { animation: fb-ws-spin 0.9s linear infinite; }
   @media (prefers-reduced-motion: reduce) {
     .flow-board-root .fb-head-btn fl-icon[name='spinner'] { animation: none; }
@@ -23704,20 +23971,64 @@ const BOARD_STYLES = `
   .flow-board-root .fb-header { gap: var(--fl-space-xs, 4px); }
   .flow-board-root .fb-header > .fb-nav { margin-right: var(--fl-space-xs, 4px); }
   .flow-board-root .fb-brief-headactions:empty { display: none; }
-  /* ASK THE BLUEPRINT (plan ask_the_blueprint): the accent pill from the
-     approved mockup, with its shortcut beside the label. */
-  .flow-board-root .fb-head-strip fl-button.fb-terr-ask {
-    border: 1px solid var(--fb-accent);
-    border-radius: var(--fl-radius-md, 8px);
-    background: color-mix(in srgb, var(--fb-accent) 14%, transparent);
-    padding: 0 var(--fl-space-sm, 8px);
+  /* THE HEADER'S TILES (mockup G + D, user pick 2026-11-15): Connections and
+     Learn are equal 32px squares — one 1px border, one 8px radius, one 16px
+     line icon — named in their tooltips. A count rides as a small badge, and
+     a toggle that is on (or a panel that is open) stays raised in the accent,
+     so the state is visible on every tile. */
+  .flow-board-root .fb-head-tile {
+    position: relative;
+    flex: none;
+    width: 32px;
+    height: 32px;
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    background: var(--fl-color-surface-raised, var(--fb-card));
+    border: 1px solid var(--fl-color-border, var(--fb-border));
+    border-radius: 8px;
+    color: var(--fl-color-text-secondary, var(--fb-ink));
+    cursor: pointer;
   }
-  .flow-board-root .fb-terr-ask-key {
-    margin-left: 6px;
+  .flow-board-root .fb-head-tile:hover:not(:disabled) {
+    color: var(--fl-color-text, var(--fb-ink));
+    border-color: var(--fl-color-border-strong, var(--fb-card-border));
+  }
+  .flow-board-root .fb-head-tile[aria-pressed='true'] {
+    background: color-mix(in srgb, var(--fb-accent) 22%, var(--fl-color-surface-raised, var(--fb-card)));
+    border-color: var(--fb-accent);
+    color: var(--fl-color-text, var(--fb-ink));
+  }
+  .flow-board-root .fb-head-tile:disabled { opacity: 0.5; cursor: default; }
+  .flow-board-root .fb-head-tile:focus-visible { outline: 2px solid var(--fb-accent); outline-offset: 1px; }
+  .flow-board-root .fb-head-tile-badge {
+    position: absolute;
+    top: -5px;
+    right: -7px;
+    min-width: 15px;
+    box-sizing: border-box;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--fl-color-text-secondary, var(--fb-ink-dim));
+    color: var(--fb-paper);
     font-family: var(--fl-font-mono, ui-monospace, monospace);
-    font-size: 11px;
-    color: var(--fb-ink-dim);
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 15px;
+    text-align: center;
+    pointer-events: none;
   }
+  .flow-board-root .fb-head-tile[aria-pressed='true'] .fb-head-tile-badge { background: var(--fb-accent); color: #ffffff; }
+  .flow-board-root .fb-head-tile-spin { animation: fb-ws-spin 0.9s linear infinite; }
+  @media (prefers-reduced-motion: reduce) {
+    .flow-board-root .fb-head-tile-spin { animation: none; }
+  }
+  .flow-board-root .fb-head-strip .fb-ws-conn { gap: var(--fl-space-sm, 8px); }
+  .flow-board-root .fb-head-strip .fb-ws-controls { gap: var(--fl-space-sm, 8px); }
+  .flow-board-root .fb-head-strip .fb-terr-title > .fb-head-tile { margin-left: var(--fl-space-xs, 4px); }
+  .flow-board-root .fb-header > .fb-learn-tile { margin-left: var(--fl-space-sm, 8px); }
   /* A FEATURE'S OWN ACTIONS in the header (Understand, Changes & discoveries)
      — ghost buttons too, one face and one size for the whole label. */
   .flow-board-root .fb-brief-headactions .fb-brief-time {

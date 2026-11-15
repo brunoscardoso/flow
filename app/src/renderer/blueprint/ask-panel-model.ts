@@ -17,22 +17,32 @@
 
 import type {
   AskAnswer,
+  AskConnectionKind,
   AskOpenTag,
   AskSavedThread,
   AskStaleResult,
   AskStateEvent,
   AskStep,
+  AskSuggestedConnection,
 } from '../../shared/ask-contract'
+import { qualifyFeatureId, splitQualifiedFeatureId } from '../../shared/ask-contract'
 
 /* ── State ──────────────────────────────────────────────────────────────── */
 
-export type AskTagKind = 'feature' | 'part' | 'conversation'
+/**
+ * What a chip names. `project` and `connection` exist in Workspace scope only
+ * (`project:<p>`, `link:<a>::<b>`); a feature or part there is qualified
+ * (`feature:<p>::<slug>[/<part>]`), so two projects' same slug stay two tags.
+ */
+export type AskTagKind = 'feature' | 'part' | 'conversation' | 'project' | 'connection'
 
 /** One chip in the question box. */
 export interface AskTag {
   id: string
   kind: AskTagKind
   label: string
+  /** Workspace scope: the project a feature, part or project tag is in. */
+  project?: string
 }
 
 /** A tag the pasted text names, waiting for the person to add it (FR-3). */
@@ -40,7 +50,31 @@ export interface AskSuggestion {
   id: string
   kind: 'feature' | 'part'
   label: string
+  /** Workspace scope: the project the feature or part is in. */
+  project?: string
 }
+
+/**
+ * Which knowledge a question asks. A project ask reads the board's project; a
+ * Workspace ask reads every project of the Workspace (or the tagged ones).
+ */
+export type AskScope =
+  | { kind: 'project'; name: string | null }
+  | { kind: 'workspace'; workspace: string; name: string; projects: Array<{ slug: string; name: string }> }
+
+const PROJECT_SCOPE: AskScope = { kind: 'project', name: null }
+
+/** Two scopes are the same question space when this matches. */
+export function scopeKey(scope: AskScope): string {
+  return scope.kind === 'project' ? 'project' : `workspace:${scope.workspace}`
+}
+
+/** "Save as connection" on one suggested connection, as far as it got. */
+export type AskConnectionSave =
+  | { status: 'saving' }
+  | { status: 'saved' }
+  | { status: 'exists' }
+  | { status: 'failed'; sentence: string }
 
 /** Where one turn stands. `idle` is the panel with no turn at all. */
 export type AskPanelPhase = 'idle' | 'fast' | 'digging' | 'done' | 'partial' | 'error'
@@ -86,6 +120,8 @@ export type AskPanelView = 'compose' | 'answer' | 'history'
 
 export interface AskPanelState {
   open: boolean
+  /** What the question is asked of — the project, or the Workspace. */
+  scope: AskScope
   view: AskPanelView
   /** The question box's text. */
   draft: string
@@ -103,11 +139,14 @@ export interface AskPanelState {
   historyError: string | null
   /** The question and its follow-ups, oldest first. Empty in compose. */
   turns: AskTurn[]
+  /** Save as connection, by suggested connection id. Cleared with the question. */
+  connections: Record<string, AskConnectionSave>
 }
 
 export function initialAskState(): AskPanelState {
   return {
     open: false,
+    scope: PROJECT_SCOPE,
     view: 'compose',
     draft: '',
     tags: [],
@@ -117,14 +156,19 @@ export function initialAskState(): AskPanelState {
     history: null,
     historyError: null,
     turns: [],
+    connections: {},
   }
 }
 
 /* ── Events ─────────────────────────────────────────────────────────────── */
 
 export type AskPanelEvent =
-  /** Open. With text or tags, a fresh question; with neither, where it was left. */
-  | { type: 'open'; text?: string; tags?: AskTag[] }
+  /**
+   * Open. With text or tags, a fresh question; with neither, where it was left.
+   * A scope other than the panel's starts over: a project's chips mean nothing
+   * to the Workspace, and the other way round.
+   */
+  | { type: 'open'; text?: string; tags?: AskTag[]; scope?: AskScope }
   | { type: 'close' }
   | { type: 'draft'; text: string }
   | { type: 'add-tag'; tag: AskTag }
@@ -151,6 +195,10 @@ export type AskPanelEvent =
   | { type: 'history-failed'; sentence: string }
   /** A saved answer picked from a list: shown as a turn, with its follow-ups. */
   | { type: 'open-saved'; thread: AskSavedThread }
+  /** Save as connection pressed / answered. */
+  | { type: 'connection-saving'; id: string }
+  | { type: 'connection-saved'; id: string; recorded: boolean }
+  | { type: 'connection-failed'; id: string; sentence: string }
 
 /* ── The reducer ────────────────────────────────────────────────────────── */
 
@@ -160,16 +208,23 @@ export const MAX_FOLLOW_UPS = 6
 export function reduceAsk(state: AskPanelState, event: AskPanelEvent): AskPanelState {
   switch (event.type) {
     case 'open': {
+      const base =
+        event.scope !== undefined && scopeKey(event.scope) !== scopeKey(state.scope)
+          ? { ...initialAskState(), scope: event.scope }
+          : event.scope !== undefined
+            ? { ...state, scope: event.scope }
+            : state
       const fresh = event.text !== undefined || (event.tags !== undefined && event.tags.length > 0)
-      if (!fresh) return { ...state, open: true }
+      if (!fresh) return { ...base, open: true }
       return {
-        ...state,
+        ...base,
         open: true,
         view: 'compose',
         draft: event.text ?? '',
         tags: uniqueTags(event.tags ?? []),
         suggestions: [],
         turns: [],
+        connections: {},
       }
     }
     case 'close':
@@ -224,7 +279,7 @@ export function reduceAsk(state: AskPanelState, event: AskPanelEvent): AskPanelS
     case 'stop':
       return updateNewest(state, (turn) => (turn.phase === 'digging' || turn.phase === 'fast' ? { ...turn, stopping: true } : turn))
     case 'new-question':
-      return { ...state, view: 'compose', draft: '', suggestions: [], turns: [] }
+      return { ...state, view: 'compose', draft: '', suggestions: [], turns: [], connections: {} }
     case 'show-history':
       return { ...state, view: 'history', historyError: null }
     case 'history':
@@ -236,8 +291,20 @@ export function reduceAsk(state: AskPanelState, event: AskPanelEvent): AskPanelS
       }
     case 'history-failed':
       return { ...state, history: state.history ?? [], historyError: event.sentence }
-    case 'open-saved':
-      return { ...state, view: 'answer', turns: savedTurns(event.thread, state.staleIds.includes(event.thread.id)) }
+    case 'open-saved': {
+      // The field holds the saved question and its tags, as for one just asked.
+      const turns = savedTurns(event.thread, state.staleIds.includes(event.thread.id))
+      return { ...state, view: 'answer', draft: event.thread.question, tags: turns[0]?.tags ?? state.tags, turns, connections: {} }
+    }
+    case 'connection-saving': {
+      const current = state.connections[event.id]
+      if (current !== undefined && current.status !== 'failed') return state
+      return { ...state, connections: { ...state.connections, [event.id]: { status: 'saving' } } }
+    }
+    case 'connection-saved':
+      return { ...state, connections: { ...state.connections, [event.id]: { status: event.recorded ? 'saved' : 'exists' } } }
+    case 'connection-failed':
+      return { ...state, connections: { ...state.connections, [event.id]: { status: 'failed', sentence: event.sentence } } }
   }
 }
 
@@ -252,7 +319,9 @@ function submit(state: AskPanelState, raw: string, followUp: boolean, at: number
     if (state.turns.length > MAX_FOLLOW_UPS) return state
     return { ...state, view: 'answer', turns: [...state.turns, newTurn(question, last.tags, at)] }
   }
-  return { ...state, view: 'answer', draft: '', suggestions: [], turns: [newTurn(question, state.tags, at)] }
+  // THE FIELD KEEPS THE QUESTION: the header field shows what was asked, on one
+  // line and editable, until it is cleared (mockup board 5).
+  return { ...state, view: 'answer', draft: question, suggestions: [], turns: [newTurn(question, state.tags, at)], connections: {} }
 }
 
 function newTurn(question: string, tags: AskTag[], at: number): AskTurn {
@@ -336,12 +405,14 @@ function savedTurns(thread: AskSavedThread, stale: boolean): AskTurn[] {
       savedId: entry.id,
       ...(entry.branchInProgress !== undefined ? { branchInProgress: entry.branchInProgress } : {}),
       partial: entry.partial,
+      ...(entry.projectsRead !== undefined ? { projectsRead: entry.projectsRead } : {}),
+      ...(entry.knowledgeOnly !== undefined ? { knowledgeOnly: entry.knowledgeOnly } : {}),
     }
     numberSources(answer)
     return {
       askId: null,
       question: entry.question,
-      tags: entry.tags.map((id) => ({ id, kind: kindOfId(id), label: labelOfId(id) })),
+      tags: entry.tags.map((id) => tagFromId(id)),
       phase: entry.partial ? ('partial' as const) : ('done' as const),
       answer,
       firstExplanation: entry.answer,
@@ -370,6 +441,12 @@ function updateNewest(state: AskPanelState, update: (turn: AskTurn) => AskTurn):
   const next = update(last)
   if (next === last) return state
   return { ...state, turns: [...state.turns.slice(0, -1), next] }
+}
+
+/** A saved entry's tag id as a chip, labelled from the id itself. */
+export function tagFromId(id: string): AskTag {
+  const project = projectOfId(id)
+  return { id, kind: kindOfId(id), label: labelOfId(id), ...(project !== null ? { project } : {}) }
 }
 
 function uniqueTags(tags: readonly AskTag[]): AskTag[] {
@@ -433,7 +510,7 @@ export function canFollowUp(state: AskPanelState): boolean {
   return followUpTarget(state) !== null
 }
 
-/** Feature and part ids among some tags (conversations are not on the map). */
+/** Map ids among some tags — features, parts, projects and connections (conversations are not on the map). */
 export function mapTagIds(tags: readonly AskTag[]): string[] {
   return tags.filter((tag) => tag.kind !== 'conversation').map((tag) => tag.id)
 }
@@ -443,22 +520,64 @@ export function conversationTagIds(tags: readonly AskTag[]): string[] {
   return tags.filter((tag) => tag.kind === 'conversation').map((tag) => tag.id)
 }
 
-/** A feature or part id's kind, read off its shape. */
+/** An id's kind, read off its shape. */
 export function kindOfId(id: string): AskTagKind {
+  if (id.startsWith('project:')) return 'project'
+  if (id.startsWith('link:')) return 'connection'
   if (!id.startsWith('feature:')) return 'conversation'
-  return id.slice('feature:'.length).includes('/') ? 'part' : 'feature'
+  return localFeatureId(id).slice('feature:'.length).includes('/') ? 'part' : 'feature'
+}
+
+/** `feature:<p>::<slug>[/<part>]` → `feature:<slug>[/<part>]`; anything else unchanged. */
+export function localFeatureId(id: string): string {
+  return splitQualifiedFeatureId(id)?.localId ?? id
+}
+
+/** The project an id names, when it names one: a qualified feature or part, or a project tag. */
+export function projectOfId(id: string): string | null {
+  if (id.startsWith('project:')) return id.slice('project:'.length) || null
+  return splitQualifiedFeatureId(id)?.project ?? null
+}
+
+/** `link:<a>::<b>` → the two project slugs; null for anything else. */
+export function linkProjects(id: string): [string, string] | null {
+  const match = /^link:([^:]+)::(.+)$/.exec(id)
+  return match === null ? null : [match[1], match[2]]
+}
+
+/** The connection tag between two projects — slugs sorted, so either order names one tag. */
+export function linkTagId(a: string, b: string): string {
+  const [first, second] = [a, b].sort()
+  return `link:${first}::${second}`
 }
 
 /** A readable name for an id when nothing better is known: its last segment. */
 export function labelOfId(id: string): string {
-  const bare = id.replace(/^feature:/, '')
+  const pair = linkProjects(id)
+  if (pair !== null) return `${pair[0]} ↔ ${pair[1]}`
+  if (id.startsWith('project:')) return id.slice('project:'.length)
+  const bare = localFeatureId(id).replace(/^feature:/, '')
   const last = bare.split('/').pop() ?? bare
   return last.replace(/[-_]+/g, ' ').replace(/^\w/, (c) => c.toUpperCase())
 }
 
 /** An opener's tags as chips, labelled from what it said or the id itself. */
-export function tagsFromOpen(tags: readonly AskOpenTag[] | undefined, threadId?: string, threadTitle?: string): AskTag[] {
-  const out: AskTag[] = (tags ?? []).map((tag) => ({ id: tag.id, kind: tag.kind, label: tag.label ?? labelOfId(tag.id) }))
+export function tagsFromOpen(
+  tags: readonly AskOpenTag[] | undefined,
+  threadId?: string,
+  threadTitle?: string,
+  scope: AskScope = PROJECT_SCOPE,
+): AskTag[] {
+  const out: AskTag[] = (tags ?? []).map((tag) => {
+    // ON THE WORKSPACE, a feature names its project: an opener that said
+    // which project qualifies the id here, so one grammar reaches main.
+    const id =
+      scope.kind === 'workspace' && tag.kind !== 'conversation' && tag.project !== undefined
+        ? qualifyFeatureId(tag.project, tag.id)
+        : tag.id
+    const project = tag.kind === 'conversation' ? null : (projectOfId(id) ?? tag.project ?? null)
+    return { id, kind: tag.kind, label: tag.label ?? labelOfId(id), ...(project !== null ? { project } : {}) }
+  })
   if (threadId !== undefined && !out.some((tag) => tag.id === threadId)) {
     out.push({ id: threadId, kind: 'conversation', label: threadTitle ?? 'This conversation' })
   }
@@ -485,6 +604,12 @@ export interface AskDecoration {
   numbers: Array<{ id: string; n: number; label: string }>
   /** "+N facts learned", on one cell. */
   facts: { id: string; count: number } | null
+  /** Workspace scope: projects tagged whole, or as one end of a tagged connection. */
+  projects: string[]
+  /** Workspace scope: projects the answer cites that were not tagged. */
+  citedProjects: string[]
+  /** Workspace scope: in-scope projects answered from shared knowledge only (once answered). */
+  knowledgeOnly: string[]
 }
 
 const NO_DECORATION: AskDecoration = {
@@ -495,6 +620,23 @@ const NO_DECORATION: AskDecoration = {
   live: [],
   numbers: [],
   facts: null,
+  projects: [],
+  citedProjects: [],
+  knowledgeOnly: [],
+}
+
+/** The projects some tags name whole — a project tag, or either end of a connection tag. */
+export function taggedProjects(tags: readonly AskTag[]): string[] {
+  const out = new Set<string>()
+  for (const tag of tags) {
+    if (tag.kind === 'project') {
+      const slug = projectOfId(tag.id)
+      if (slug !== null) out.add(slug)
+    } else if (tag.kind === 'connection') {
+      for (const slug of linkProjects(tag.id) ?? []) out.add(slug)
+    }
+  }
+  return [...out]
 }
 
 /**
@@ -506,27 +648,28 @@ export function askDecoration(state: AskPanelState): AskDecoration {
   const turn = state.view === 'answer' ? currentTurn(state) : null
   const tags = turn !== null ? turn.tags : state.tags
   const outlined = mapTagIds(tags)
+  const projects = taggedProjects(tags)
   if (turn === null) {
-    return { ...NO_DECORATION, active: true, dimOthers: outlined.length > 0, outlined }
+    return { ...NO_DECORATION, active: true, dimOthers: outlined.length > 0, outlined, projects }
   }
   const answer = turn.answer
   const tagged = new Set(outlined)
-  const cited = new Set<string>()
+  const citedIds = new Set<string>()
   const numbers: AskDecoration['numbers'] = []
   for (const source of answer?.sources ?? []) {
     if (source.featureId === undefined) continue
-    cited.add(source.featureId)
+    citedIds.add(source.featureId)
     if (source.n !== null) numbers.push({ id: source.featureId, n: source.n, label: shortLabel(source.label) })
   }
-  const mentioned = [...cited].filter((id) => !tagged.has(id) && !outlined.some((tag) => isWithin(id, tag)))
+  const mentioned = [...citedIds].filter((id) => !tagged.has(id) && !outlined.some((tag) => isWithin(id, tag)))
 
   const live: AskDecoration['live'] = []
   if (turn.phase === 'digging' || turn.phase === 'fast') {
-    for (const id of outlined) live.push({ id, state: cited.has(id) ? 'read' : 'reading' })
+    for (const id of outlined) live.push({ id, state: citedIds.has(id) ? 'read' : 'reading' })
     for (const id of mentioned) live.push({ id, state: 'read' })
   } else if (turn.phase === 'partial') {
     // THE DIG STOPPED: a tagged part the answer never reached is still thin.
-    for (const id of outlined) if (!cited.has(id)) live.push({ id, state: 'thin' })
+    for (const id of outlined) if (!citedIds.has(id)) live.push({ id, state: 'thin' })
   }
 
   const showNumbers = turn.phase === 'done' || turn.phase === 'partial'
@@ -536,6 +679,11 @@ export function askDecoration(state: AskPanelState): AskDecoration {
     const id = withFile?.featureId ?? outlined[0] ?? numbers[0]?.id
     if (id !== undefined) facts = { id, count: answer.factsLearned }
   }
+  const cited = new Set<string>()
+  for (const source of answer?.sources ?? []) {
+    const project = source.project ?? (source.featureId !== undefined ? projectOfId(source.featureId) : null)
+    if (project !== null && !projects.includes(project)) cited.add(project)
+  }
   return {
     active: true,
     dimOthers: true,
@@ -544,6 +692,9 @@ export function askDecoration(state: AskPanelState): AskDecoration {
     live,
     numbers: showNumbers ? numbers : [],
     facts,
+    projects,
+    citedProjects: [...cited].sort(),
+    knowledgeOnly: showNumbers ? [...(answer?.knowledgeOnly ?? [])] : [],
   }
 }
 
@@ -624,6 +775,243 @@ function ownerOf(id: string): string | null {
   if (!id.startsWith('feature:')) return null
   const slash = id.indexOf('/')
   return slash === -1 ? null : id.slice(0, slash)
+}
+
+/** How a decoration lands on one project's band on the Workspace sheet. */
+export interface AskBandMark {
+  role: 'tagged' | 'mentioned' | null
+  /** Answered from shared knowledge only — its code was not read here. */
+  knowledgeOnly: boolean
+}
+
+/** One drawn cell of the Workspace sheet: its key, its project and its project-local id. */
+export interface WorkspaceDrawnCell {
+  key: string
+  project: string
+  id: string
+}
+
+export interface WorkspaceAskPaint {
+  /** Marks by cell KEY. */
+  cells: Map<string, AskCellMark>
+  /** Marks by project slug — only projects the decoration names. */
+  bands: Map<string, AskBandMark>
+  /** Cells lit: marked, or in a project tagged whole. */
+  lit: Set<string>
+  /** Projects that stay lit: tagged, cited, knowledge-only, or holding a lit cell. */
+  litProjects: Set<string>
+  /** Everything not lit recedes. False when nothing on the sheet is named. */
+  dim: boolean
+}
+
+/**
+ * Project a decoration onto the Workspace sheet (note 8). Its cells are core
+ * features of every project; the decoration speaks qualified ids, so each cell
+ * is matched by `feature:<project>::<slug>` — two projects' same slug stay two
+ * cells. A part lands on its feature, as on the project board. Project and
+ * connection tags light whole bands.
+ */
+export function projectWorkspaceDecoration(decoration: AskDecoration, drawn: readonly WorkspaceDrawnCell[]): WorkspaceAskPaint {
+  const empty: WorkspaceAskPaint = { cells: new Map(), bands: new Map(), lit: new Set(), litProjects: new Set(), dim: false }
+  if (!decoration.active) return empty
+  const keyOf = new Map<string, WorkspaceDrawnCell>()
+  for (const cell of drawn) keyOf.set(qualifyFeatureId(cell.project, cell.id), cell)
+  const byId = projectDecoration(decoration, new Set(keyOf.keys()))
+  const cells = new Map<string, AskCellMark>()
+  const lit = new Set<string>()
+  const litProjects = new Set<string>()
+  for (const [id, mark] of byId) {
+    const cell = keyOf.get(id)
+    if (cell === undefined) continue
+    cells.set(cell.key, mark)
+    lit.add(cell.key)
+    litProjects.add(cell.project)
+  }
+  const bands = new Map<string, AskBandMark>()
+  const band = (slug: string): AskBandMark => {
+    let current = bands.get(slug)
+    if (current === undefined) {
+      current = { role: null, knowledgeOnly: false }
+      bands.set(slug, current)
+    }
+    return current
+  }
+  for (const slug of decoration.projects) band(slug).role = 'tagged'
+  for (const slug of decoration.citedProjects) {
+    const current = band(slug)
+    if (current.role === null) current.role = 'mentioned'
+  }
+  for (const slug of decoration.knowledgeOnly) band(slug).knowledgeOnly = true
+  const tagged = new Set(decoration.projects)
+  for (const cell of drawn) {
+    if (!tagged.has(cell.project)) continue
+    lit.add(cell.key)
+  }
+  for (const slug of bands.keys()) litProjects.add(slug)
+  return { cells, bands, lit, litProjects, dim: decoration.dimOthers && litProjects.size > 0 }
+}
+
+/* ── What the panel says (DOM-free, so the words are testable) ──────────── */
+
+/** "Asking about" — what the question is scoped to, before any answer. */
+export interface AskScopeLine {
+  /** The scope's chips: the tags, or the whole scope as one. */
+  items: Array<{ label: string; project?: string; kind: AskTagKind | 'scope' }>
+  /** One sentence on how to change it. */
+  hint: string
+}
+
+export function askScopeLine(state: AskPanelState): AskScopeLine {
+  const tags = state.tags.filter((tag) => tag.kind !== 'conversation')
+  const workspace = state.scope.kind === 'workspace'
+  if (tags.length > 0) {
+    return {
+      items: tags.map((tag) => ({ label: tag.label, kind: tag.kind, ...(tag.project !== undefined ? { project: tag.project } : {}) })),
+      hint: workspace ? 'Press more on the map to add them, or type @' : 'Press more features on the map to add them, or type @',
+    }
+  }
+  if (state.scope.kind === 'workspace') {
+    const n = state.scope.projects.length
+    return {
+      items: [{ label: n === 1 ? 'The one project' : `All ${String(n)} projects`, kind: 'scope' }],
+      hint: 'Press a project, feature or connection on the map to narrow it, or type @',
+    }
+  }
+  return {
+    items: [{ label: state.scope.name === null ? 'This whole project' : `All of ${state.scope.name}`, kind: 'scope' }],
+    hint: 'Press a feature on the map to narrow it, or type @',
+  }
+}
+
+/** The panel's accessible name. */
+export function askTitle(scope: AskScope): string {
+  return scope.kind === 'workspace' ? 'Ask about this Workspace' : 'Ask the Blueprint'
+}
+
+/** One status line over an answer: what it is, what was read, how long it took. */
+export interface AskStatusLine {
+  tone: 'good' | 'warn' | 'busy' | 'plain'
+  text: string
+}
+
+export function askStatusLine(turn: AskTurn, now: number): AskStatusLine | null {
+  if (turn.phase === 'error') return null
+  const answer = turn.answer
+  if (turn.saved !== null) {
+    const who = [turn.saved.author, ageLabel(turn.saved.ts, now)].filter((part) => part !== '')
+    return { tone: 'plain', text: ['Saved answer', ...who].join(' · ') }
+  }
+  const took = turn.answeredAfterMs !== null ? durationLabel(turn.answeredAfterMs) : null
+  const read = answer?.projectsRead ?? []
+  const readWords = read.length === 0 ? null : `read code in ${read.length === 1 ? read[0] : `${String(read.length)} projects`}`
+  if (turn.phase === 'fast' && answer === null) return { tone: 'busy', text: turn.stopping ? 'Stopping…' : 'Looking at what Flow already knows…' }
+  if (turn.phase === 'digging') {
+    const facts = [turn.stopping ? 'Stopping…' : 'Digging into the code']
+    if (turn.reads > 0) facts.push(`${String(turn.reads)} file${turn.reads === 1 ? '' : 's'} read`)
+    if (turn.digElapsedMs > 0) facts.push(durationLabel(turn.digElapsedMs))
+    return { tone: 'busy', text: facts.join(' · ') }
+  }
+  if (turn.phase === 'partial' || answer?.partial === true) {
+    return { tone: 'warn', text: ['Partial · the code check did not finish', readWords, took].filter((part): part is string => part !== null).join(' · ') }
+  }
+  if (answer === null) return null
+  if (answer.confidence === 'checked') {
+    const parts = ['Answered', readWords ?? 'checked against the code', turn.changedFromFirst ? 'changed from the first answer' : null, took]
+    return { tone: 'good', text: parts.filter((part): part is string => part !== null).join(' · ') }
+  }
+  const first = turn.phase === 'fast' ? 'First answer' : 'Answered'
+  return { tone: 'warn', text: [first, 'from what Flow already knows', took].filter((part): part is string => part !== null).join(' · ') }
+}
+
+/**
+ * The line saying a project's code was not read (FR-7): projects not on this
+ * computer, or not open in Flow, answered from shared knowledge only.
+ */
+export function knowledgeOnlySentence(slugs: readonly string[], name: (slug: string) => string): string | null {
+  if (slugs.length === 0) return null
+  const names = listLabel(slugs.map(name))
+  return slugs.length === 1
+    ? `${names} is not open on this computer. Its code was not read; this answer uses its shared knowledge only.`
+    : `${names} are not open on this computer. Their code was not read; this answer uses their shared knowledge only.`
+}
+
+/** The projects an answer names: its tags' projects and its sources' projects. */
+export function citedProjects(turn: AskTurn): string[] {
+  const out = new Set<string>()
+  for (const tag of turn.tags) {
+    if (tag.project !== undefined) out.add(tag.project)
+    for (const slug of linkProjects(tag.id) ?? []) out.add(slug)
+  }
+  for (const source of turn.answer?.sources ?? []) {
+    const project = source.project ?? (source.featureId !== undefined ? projectOfId(source.featureId) : null)
+    if (project !== null) out.add(project)
+  }
+  return [...out]
+}
+
+/** Where a fresh answer was saved, in one sentence; null when it was not (yet). */
+export function savedSentence(turn: AskTurn, scope: AskScope, name: (slug: string) => string): string | null {
+  if (turn.saved !== null || turn.answer?.savedId === undefined) return null
+  const conversation = turn.tags.some((tag) => tag.kind === 'conversation')
+    ? ' Used one of your conversations (its content stays private).'
+    : ''
+  if (scope.kind === 'workspace') {
+    const projects = citedProjects(turn)
+    let where = 'Saved for the Workspace'
+    if (projects.length === 1) where = `Saved for the Workspace and ${name(projects[0])}`
+    else if (projects.length === 2) where = 'Saved for the Workspace and both projects'
+    else if (projects.length > 2) where = `Saved for the Workspace and ${String(projects.length)} projects`
+    return `${where}, where your team can find it.${conversation}`
+  }
+  const labels = turn.tags.filter((tag) => tag.kind !== 'conversation').map((tag) => tag.label)
+  const text = labels.length > 0 ? `Saved on ${listLabel(labels)}, where your team can find it.` : 'Saved, where your team can find it.'
+  return `${text}${conversation}`
+}
+
+const CONNECTION_VERBS: Record<AskConnectionKind, string> = {
+  calls: 'calls',
+  exposes: 'exposes',
+  consumes: 'consumes',
+  relates: 'relates to',
+}
+
+/** One end of a suggested connection: `<project>/<feature-slug>` or `<project>/<anchor-kind>:<ref>`. */
+export interface AskConnectionEnd {
+  project: string
+  /** A feature's id in its project, when the end names a feature. */
+  featureId: string | null
+  /** What the end says when nothing better is known. */
+  ref: string
+}
+
+function connectionEnd(project: string, address: string): AskConnectionEnd {
+  const ref = address.startsWith(`${project}/`) ? address.slice(project.length + 1) : address
+  const anchor = /^(endpoint|file|module|symbol|table):/.test(ref)
+  return { project, featureId: anchor || ref === '' ? null : `feature:${ref}`, ref }
+}
+
+/** A suggested connection, read for the panel: its two ends and the verb between them. */
+export function connectionView(connection: AskSuggestedConnection): { from: AskConnectionEnd; verb: string; to: AskConnectionEnd } {
+  return {
+    from: connectionEnd(connection.fromProject, connection.from),
+    verb: CONNECTION_VERBS[connection.kind] ?? 'relates to',
+    to: connectionEnd(connection.toProject, connection.to),
+  }
+}
+
+/** What the Save as connection button says, and whether it can be pressed. */
+export function connectionButton(save: AskConnectionSave | undefined): { label: string; disabled: boolean; note: string | null } {
+  if (save === undefined) return { label: 'Save as connection', disabled: false, note: null }
+  switch (save.status) {
+    case 'saving':
+      return { label: 'Saving…', disabled: true, note: null }
+    case 'saved':
+      return { label: 'Saved', disabled: true, note: null }
+    case 'exists':
+      return { label: 'Saved', disabled: true, note: 'The Workspace already had this connection.' }
+    case 'failed':
+      return { label: 'Save as connection', disabled: false, note: save.sentence }
+  }
 }
 
 /** "3 days ago", "just now" — for the asked-before rows. `now` is injected. */

@@ -7,16 +7,32 @@
 // one to count. Ranked, and capped small: a row of twelve chips is a list to
 // read, not a suggestion.
 
-import type { AskSuggestion, AskTag } from './ask-panel-model'
+import { linkTagId, type AskSuggestion, type AskTag } from './ask-panel-model'
 
 /** What the suggester reads of one feature or part. A `FeatureGraphNodeInput` fits. */
 export interface SuggestNode {
+  /** `feature:<slug>[/<part>]`, or qualified `feature:<project>::<slug>[/<part>]` on the Workspace. */
   id: string
   name: string
   kind: 'core' | 'child' | 'part'
   summary?: string
-  /** For a part: its feature's slug. */
+  /** For a part: its feature's slug (project-local). */
   partOf?: string
+  /** On the Workspace: the project slug the node is in. */
+  project?: string
+}
+
+/** `feature:<p>::<slug>/<part>` → `<slug>/<part>`; `feature:<slug>` → `<slug>`. */
+function localSlug(id: string): string {
+  const bare = id.replace(/^feature:/, '')
+  const cut = bare.indexOf('::')
+  return cut === -1 ? bare : bare.slice(cut + 2)
+}
+
+/** A node's feature, by project — two projects' same slug are two features. */
+function ownerKey(node: SuggestNode): string {
+  const owner = node.partOf ?? localSlug(node.id).split('/')[0] ?? ''
+  return `${node.project ?? ''}::${owner}`
 }
 
 /** How many suggestions one paste offers. */
@@ -56,7 +72,7 @@ function featureNames(nodes: readonly SuggestNode[]): Map<string, string> {
   const out = new Map<string, string>()
   for (const node of nodes) {
     if (node.kind !== 'core') continue
-    out.set(node.id.replace(/^feature:/, ''), node.name)
+    out.set(`${node.project ?? ''}::${localSlug(node.id)}`, node.name)
   }
   return out
 }
@@ -64,8 +80,7 @@ function featureNames(nodes: readonly SuggestNode[]): Map<string, string> {
 /** The chip label for a node: a feature's name, or "Feature · Part" for a part. */
 export function suggestLabel(node: SuggestNode, names: ReadonlyMap<string, string>): string {
   if (node.kind !== 'part') return node.name
-  const owner = node.partOf ?? node.id.replace(/^feature:/, '').split('/')[0]
-  const ownerName = owner === undefined ? undefined : names.get(owner)
+  const ownerName = names.get(ownerKey(node))
   return ownerName === undefined ? node.name : `${ownerName} · ${node.name}`
 }
 
@@ -90,8 +105,7 @@ export function suggestTags(
     if (namesIt(lower, node.name)) score += 10 + Math.min(node.name.length, 20) / 10
     // A part said together with its feature is the most specific match there is.
     if (score > 0 && node.kind === 'part') {
-      const owner = node.partOf ?? node.id.replace(/^feature:/, '').split('/')[0]
-      const ownerName = owner === undefined ? undefined : names.get(owner)
+      const ownerName = names.get(ownerKey(node))
       if (ownerName !== undefined && namesIt(lower, ownerName)) score += 4
     }
     if (node.summary !== undefined && node.summary !== '') {
@@ -100,7 +114,12 @@ export function suggestTags(
     }
     if (score === 0) continue
     scored.push({
-      suggestion: { id: node.id, kind: node.kind === 'part' ? 'part' : 'feature', label: suggestLabel(node, names) },
+      suggestion: {
+        id: node.id,
+        kind: node.kind === 'part' ? 'part' : 'feature',
+        label: suggestLabel(node, names),
+        ...(node.project !== undefined ? { project: node.project } : {}),
+      },
       score,
     })
   }
@@ -124,7 +143,39 @@ export function graphCandidates(nodes: readonly SuggestNode[]): PickerCandidate[
       id: node.id,
       kind: node.kind === 'part' ? 'part' : 'feature',
       label: suggestLabel(node, names),
+      ...(node.project !== undefined ? { project: node.project } : {}),
       ...(node.summary !== undefined && node.summary !== '' ? { hint: node.summary } : {}),
+    })
+  }
+  return out
+}
+
+/** A Workspace's projects and the connections between them, as the picker's other rows. */
+export function workspaceCandidates(
+  projects: ReadonlyArray<{ slug: string; name: string; description?: string | null }>,
+  links: ReadonlyArray<{ from: { project: string }; to: { project: string } }> | null,
+): PickerCandidate[] {
+  const out: PickerCandidate[] = projects.map((project) => ({
+    id: `project:${project.slug}`,
+    kind: 'project' as const,
+    label: project.name,
+    project: project.slug,
+    ...(project.description !== undefined && project.description !== null && project.description !== '' ? { hint: project.description } : {}),
+  }))
+  const names = new Map(projects.map((project) => [project.slug, project.name]))
+  const counts = new Map<string, number>()
+  for (const link of links ?? []) {
+    if (link.from.project === link.to.project) continue
+    const id = linkTagId(link.from.project, link.to.project)
+    counts.set(id, (counts.get(id) ?? 0) + 1)
+  }
+  for (const [id, count] of counts) {
+    const [a, b] = id.slice('link:'.length).split('::')
+    out.push({
+      id,
+      kind: 'connection',
+      label: `${names.get(a ?? '') ?? a ?? ''} ↔ ${names.get(b ?? '') ?? b ?? ''}`,
+      hint: `${String(count)} connection${count === 1 ? '' : 's'} recorded`,
     })
   }
   return out
@@ -132,8 +183,10 @@ export function graphCandidates(nodes: readonly SuggestNode[]): PickerCandidate[
 
 /**
  * Filter the picker's candidates by what follows the @. Prefix matches on a
- * word beat matches inside one; an empty query shows features first, then
- * conversations, then parts. Already-tagged ids are left out.
+ * word beat matches inside one; an empty query shows projects, features,
+ * connections, conversations, then parts — the order a reader narrows by.
+ * Project scope has no projects or connections, so it reads as before:
+ * features, then conversations, then parts. Already-tagged ids are left out.
  */
 export function pickerMatches(
   query: string,
@@ -141,7 +194,7 @@ export function pickerMatches(
   options: { exclude?: ReadonlySet<string>; limit?: number } = {},
 ): PickerCandidate[] {
   const q = query.trim().toLowerCase()
-  const order: Record<AskTag['kind'], number> = { feature: 0, conversation: 1, part: 2 }
+  const order: Record<AskTag['kind'], number> = { project: 0, feature: 1, connection: 2, conversation: 3, part: 4 }
   const scored: Array<{ candidate: PickerCandidate; score: number }> = []
   for (const candidate of candidates) {
     if (options.exclude?.has(candidate.id) === true) continue

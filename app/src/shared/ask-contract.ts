@@ -304,6 +304,11 @@ export interface AskBlueprintOpenDetail {
   entryId?: string
   /** Ask the text now instead of leaving it in the box (Ask again). */
   submit?: boolean
+  /**
+   * Ask the Workspace rather than the project — set by a Workspace answer's
+   * pointer on a project's brief, so its entry opens where it was saved.
+   */
+  workspace?: boolean
 }
 
 /** Read an untrusted event detail into the shape above; anything malformed is dropped, never thrown. */
@@ -317,6 +322,7 @@ export function parseAskOpenDetail(detail: unknown): AskBlueprintOpenDetail {
   if (raw['view'] === 'history') out.view = 'history'
   if (typeof raw['entryId'] === 'string' && raw['entryId'] !== '') out.entryId = raw['entryId']
   if (raw['submit'] === true) out.submit = true
+  if (raw['workspace'] === true) out.workspace = true
   if (Array.isArray(raw['tags'])) {
     const tags: AskOpenTag[] = []
     for (const item of raw['tags']) {

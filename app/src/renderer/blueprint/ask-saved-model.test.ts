@@ -54,6 +54,7 @@ describe('savedSectionView', () => {
       meta: 'Ana · just now · 2 follow-ups',
       stale: false,
       tags: ['feature:connectors'],
+      workspaceEntry: null,
     })
     expect(view?.rows[1]).toMatchObject({ chip: null, meta: 'Bo · yesterday · 1 follow-up', stale: true })
     expect(view?.rows[2].meta).toBe('Ana · 5 days ago')

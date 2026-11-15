@@ -21,6 +21,11 @@ export interface SavedRowView {
   stale: boolean
   /** The tags the question was asked with — what Ask again asks it with. */
   tags: string[]
+  /**
+   * A Workspace answer listed here through its pointer: the Workspace entry to
+   * open. The pointer itself carries only the question.
+   */
+  workspaceEntry: string | null
 }
 
 export interface SavedSectionView {
@@ -47,6 +52,7 @@ export function savedSectionView(
       thread.author,
       ageLabel(thread.ts, now),
       followUps > 0 ? `${followUps} follow-up${followUps === 1 ? '' : 's'}` : '',
+      thread.workspaceAnswer !== undefined ? 'asked across the Workspace' : '',
     ].filter((part) => part !== '')
     return {
       id: thread.id,
@@ -55,6 +61,7 @@ export function savedSectionView(
       meta: parts.join(' · '),
       stale: isStale,
       tags: thread.tags,
+      workspaceEntry: thread.workspaceAnswer?.entryId ?? null,
     }
   })
   return { heading: `Questions asked · ${threads.length}`, rows, hasMore: threads.length > rows.length }
