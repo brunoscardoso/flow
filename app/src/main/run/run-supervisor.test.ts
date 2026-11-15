@@ -574,6 +574,21 @@ describe('RunSupervisor — one-time actions', () => {
     expect(h.supervisor.state(SCOPE).once).toBeUndefined()
   })
 
+  it('adding a one-time action while Run is going only lists it — nothing starts until it is pressed', async () => {
+    const h = harness({ version: 1, steps: [MIXED.steps[0]!] })
+    await h.supervisor.start(SCOPE)
+    await flush()
+    expect(h.terminals.commands()).toEqual(['npm run dev'])
+    h.store.setup = MIXED // the Save that added Migrate and Codegen
+    await h.supervisor.apply(SCOPE)
+    await flush()
+    expect(h.terminals.commands()).toEqual(['npm run dev'])
+    expect((await h.store.resolve(SCOPE)).once?.map((step) => step.key)).toEqual([MIGRATE, `${ROOT}::gen`])
+    await h.supervisor.runOnce(SCOPE, MIGRATE)
+    await flush()
+    expect(h.terminals.commands()).toEqual(['npm run dev', 'uv run alembic upgrade head'])
+  })
+
   it('runs one once, in its own tab, in the conversation checkout, and counts nothing as a running step', async () => {
     const h = harness(MIXED, { now: 1_000 })
     const state = await h.supervisor.runOnce(SCOPE, MIGRATE)
