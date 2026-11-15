@@ -219,22 +219,15 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
   takeoverButton.className = 'fl-term-tool'
   takeoverButton.hidden = true
 
-  // #1133: split the current terminal — VS Code parity. The panel could only
-  // ever show ONE terminal, so comparing a server log against a test run meant
-  // flipping tabs back and forth.
-  const splitButton = document.createElement('button')
-  splitButton.className = 'fl-term-tool'
-  splitButton.title = 'Split terminal'
-  splitButton.setAttribute('aria-label', 'Split terminal')
-  const splitIcon = document.createElement('fl-icon')
-  splitIcon.setAttribute('name', 'split-horizontal')
-  splitIcon.setAttribute('size', '14')
-  splitButton.appendChild(splitIcon)
-
+  // ONE button for a new shell, full or split (user decision 2026-11-15). The
+  // split button (#1133) and the + sat side by side and did nearly the same
+  // thing; now the + asks which one when there is a terminal to split beside,
+  // and opens a full one straight away when there is none.
   const newButton = document.createElement('button')
   newButton.className = 'fl-term-tool'
   newButton.title = 'New terminal'
   newButton.setAttribute('aria-label', 'New terminal')
+  newButton.setAttribute('aria-haspopup', 'menu')
   const plusIcon = document.createElement('fl-icon')
   plusIcon.setAttribute('name', 'plus')
   plusIcon.setAttribute('size', '14')
@@ -258,7 +251,6 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
 
   header.appendChild(tabsEl)
   header.appendChild(takeoverButton)
-  header.appendChild(splitButton)
   header.appendChild(newButton)
   header.appendChild(collapseButton)
 
@@ -632,15 +624,6 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     tabsEl.tabs = descriptors
     tabsEl.activeId = activeId
     empty.hidden = visible.length > 0 || descriptors.length > 0
-    // #1133: Split is only offered when there is something to split and room
-    // to split it into — a disabled button with a reason beats a dead click.
-    const splittable = canSplit(layout, activeId)
-    splitButton.disabled = !splittable
-    splitButton.title = splittable
-      ? 'Split terminal'
-      : activeId === null
-        ? 'Split terminal — open a terminal first'
-        : `Split terminal — at most ${MAX_SPLIT_PANES} side by side`
     renderTakeoverToggle()
   }
 
@@ -1368,28 +1351,87 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     items: NewTerminalMenuItem[],
     options: { label: string; onPick: (rootPath: string) => void; returnFocusTo: HTMLElement },
   ): void {
+    openMenu(
+      options.label,
+      items.map(({ rootPath, name }) => ({
+        label: name,
+        title: rootPath,
+        dot: ensureAccentProperty(rootPath),
+        onPick: () => options.onPick(rootPath),
+      })),
+      options.returnFocusTo,
+    )
+  }
+
+  /** The + button's choice: a new full terminal, or one split beside this pane. */
+  function showChoiceMenu(
+    items: Array<{ label: string; icon: string; disabledReason?: string | null; onPick: () => void }>,
+    returnFocusTo: HTMLElement,
+  ): void {
+    openMenu(
+      null,
+      items.map((item) => ({
+        label: item.label,
+        icon: item.icon,
+        title: item.disabledReason ?? undefined,
+        disabled: item.disabledReason !== undefined && item.disabledReason !== null,
+        onPick: item.onPick,
+      })),
+      returnFocusTo,
+    )
+  }
+
+  interface MenuRow {
+    label: string
+    title?: string
+    dot?: string
+    icon?: string
+    disabled?: boolean
+    onPick: () => void
+  }
+
+  function openMenu(heading: string | null, entries: MenuRow[], returnFocusTo: HTMLElement): void {
     // #1150: one picker at a time. Enter used to re-fire the + button that
     // still held focus, stacking a SECOND menu on top of the first.
     closeRootMenu()
     const menu = document.createElement('div')
     menu.className = 'fl-term-root-menu'
-    const label = document.createElement('div')
-    label.className = 'fl-term-root-menu-label'
-    label.textContent = options.label
-    menu.appendChild(label)
-    for (const { rootPath, name } of items) {
+    menu.setAttribute('role', 'menu')
+    if (heading !== null) {
+      const label = document.createElement('div')
+      label.className = 'fl-term-root-menu-label'
+      label.textContent = heading
+      menu.appendChild(label)
+    }
+    for (const entry of entries) {
       const item = document.createElement('button')
       item.className = 'fl-term-root-item'
-      const dot = document.createElement('span')
-      dot.className = 'fl-term-root-dot'
-      dot.style.background = ensureAccentProperty(rootPath)
-      item.appendChild(dot)
-      item.appendChild(document.createTextNode(name))
-      item.title = rootPath
       item.type = 'button'
+      item.setAttribute('role', 'menuitem')
+      if (entry.dot !== undefined) {
+        const dot = document.createElement('span')
+        dot.className = 'fl-term-root-dot'
+        dot.style.background = entry.dot
+        item.appendChild(dot)
+      }
+      if (entry.icon !== undefined) {
+        const icon = document.createElement('fl-icon')
+        icon.setAttribute('name', entry.icon)
+        icon.setAttribute('size', '14')
+        item.appendChild(icon)
+      }
+      item.appendChild(document.createTextNode(entry.label))
+      if (entry.title !== undefined) item.title = entry.title
+      if (entry.disabled === true) {
+        // aria-disabled, not disabled: a disabled button shows no tooltip,
+        // and the reason is the point of keeping the row.
+        item.setAttribute('aria-disabled', 'true')
+        item.classList.add('disabled')
+      }
       item.addEventListener('click', () => {
+        if (entry.disabled === true) return
         closeRootMenu()
-        options.onPick(rootPath)
+        entry.onPick()
       })
       menu.appendChild(item)
     }
@@ -1416,7 +1458,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
         event.preventDefault()
         event.stopPropagation()
         closeRootMenu()
-        options.returnFocusTo.focus() // back where the user opened it from
+        returnFocusTo.focus() // back where the user opened it from
       } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         event.preventDefault()
         event.stopPropagation()
@@ -1435,7 +1477,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     document.addEventListener('mousedown', onDown, true)
     document.addEventListener('keydown', onKey, true)
     header.appendChild(menu)
-    // Focus the menu itself, not a row: Enter must not pick a root the user
+    // Focus the menu itself, not a row: Enter must not pick an entry the user
     // never chose, but ArrowDown/Escape have to reach the handler above without
     // a click first.
     menu.tabIndex = -1
@@ -1473,8 +1515,28 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
 
   // ── Wiring ─────────────────────────────────────────────────────────────
 
+  // The + opens a full terminal at once when there is nothing to split beside;
+  // otherwise it asks: a new full terminal, or one split beside the focused
+  // pane. Split stays in the menu when there is no room, disabled, with the
+  // reason on hover — a disabled row with a reason beats a missing one (#1133).
   newButton.addEventListener('click', () => {
-    void onNewTerminal(true)
+    if (activeId === null) {
+      void onNewTerminal(true)
+      return
+    }
+    const splittable = canSplit(layout, activeId)
+    showChoiceMenu(
+      [
+        { label: 'New terminal', icon: 'plus', onPick: () => void onNewTerminal(true) },
+        {
+          label: 'Split terminal',
+          icon: 'split-horizontal',
+          disabledReason: splittable ? null : `At most ${MAX_SPLIT_PANES} terminals side by side`,
+          onPick: () => splitTerminal(),
+        },
+      ],
+      newButton,
+    )
   })
 
   takeoverButton.addEventListener('click', () => {
@@ -1677,13 +1739,12 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
       showRootMenu(menuItems, {
         label: 'Split with:',
         onPick: (rootPath) => splitFrom(anchorId, rootPath),
-        returnFocusTo: splitButton,
+        returnFocusTo: newButton,
       })
       return
     }
     splitFrom(anchorId)
   }
-  splitButton.addEventListener('click', () => splitTerminal())
   /**
    * #1313: the ⌘P "Split terminal" command must REVEAL the panel first — the
    * lesson #1057 (editor), #1071 (chat), #1202 (git/review) and the palette's
@@ -2190,8 +2251,12 @@ function injectPanelStyles(): void {
       height: 8px;
       border-radius: 50%;
     }
-    .fl-term-root-item:hover {
+    .fl-term-root-item:hover:not(.disabled) {
       background: var(--fl-color-accent-muted);
+    }
+    .fl-term-root-item.disabled {
+      color: var(--fl-color-text-secondary);
+      cursor: default;
     }
   `
   document.head.appendChild(style)
