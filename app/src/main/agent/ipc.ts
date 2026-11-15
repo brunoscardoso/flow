@@ -245,7 +245,15 @@ export function registerAgentChannels(deps: AgentIpcDependencies): () => void {
    */
   handle(
     'threads:prepareWorktree',
-    async ({ threadId, carry, requested, start, branch, worktree, worktreeName }) => {
+    async ({ threadId, carry, requested, start, branch, worktree, worktreeName, firstPrompt }) => {
+      // THE FIRST MESSAGE IS ALREADY KNOWN, so its context decision starts now
+      // and runs while the checkout is cut. Before anything can refuse below:
+      // the decision does not depend on the checkout, and a thread that ends
+      // up without one still sends that message. Applied only by a first send
+      // carrying exactly this text.
+      if (typeof firstPrompt === 'string' && firstPrompt !== '') {
+        agentManager.prefetchFirstSend(threadId, firstPrompt)
+      }
       if (threadWorktree === undefined) return { status: 'disabled' as const }
       return threadWorktree.prepare(threadId, {
         // THE WORKTREE HALF, relayed like every other answer. Absent means

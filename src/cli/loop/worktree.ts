@@ -487,6 +487,50 @@ export function refreshWorktree(input: {
   }
 }
 
+/**
+ * Where a detached checkout that is about to be CREATED should start, so that
+ * it needs no refresh afterwards — and the refresh it would have reported.
+ *
+ * THE SAME QUESTIONS `refreshWorktree` ASKS, minus the two only an existing
+ * tree can answer (uncommitted edits, a branch that is not ours). The fetch
+ * honours `fetch: false` exactly as the refresh does, and it runs in the main
+ * checkout: a linked worktree shares its ref store, so `origin/<base>` is the
+ * same ref either way.
+ *
+ * SAME OUTCOMES AS BEFORE. Reachable → the tree starts at `origin/<base>` and
+ * reports `current` when that is where it would have started anyway, else
+ * `refreshed`. A fetch or a target that fails → the tree starts where it always
+ * did and reports `failed` with the first line of git's error, which is what
+ * the refresh inside the new tree reported. Never throws.
+ */
+function detachedStartAtBase(input: {
+  exec: GitExec;
+  repoRoot: string;
+  base: string;
+  startPoint?: string;
+  fetch?: boolean;
+}): { startPoint: string | undefined; refresh: WorktreeRefresh } {
+  const { exec, repoRoot, base } = input;
+  try {
+    if (input.fetch !== false) exec('git', ['fetch', 'origin', base], repoRoot);
+    const target = exec('git', ['rev-parse', `origin/${base}`], repoRoot).trim();
+    let start: string | null = null;
+    try {
+      start = exec('git', ['rev-parse', '--verify', `${input.startPoint ?? 'HEAD'}^{commit}`], repoRoot).trim();
+    } catch {
+      // Unreadable start: the tree still starts at the target, which is where
+      // the refresh would have moved it; it simply cannot say "already there".
+    }
+    return {
+      // An empty answer is not a commit; start where the tree always started.
+      startPoint: target === '' ? input.startPoint : target,
+      refresh: { state: start === target ? 'current' : 'refreshed', detail: '' },
+    };
+  } catch (error) {
+    return { startPoint: input.startPoint, refresh: refreshFailure(error) };
+  }
+}
+
 /** What `resolveWorktree` answers with. */
 export interface WorktreeResolution {
   /** `ready` — it already existed; `created` — this call made it; `absent` — it does not exist and creation was not asked for. */
@@ -689,9 +733,30 @@ function resolveCheckout(input: {
     }
   }
 
+  // A DETACHED CHECKOUT THAT IS GOING TO BE REFRESHED IS CUT WHERE THE REFRESH
+  // WOULD HAVE PUT IT. The old order — add at the start point, then refresh
+  // inside the brand-new tree — paid for a `git status` (the first one in a new
+  // worktree re-hashes every file git cannot prove clean from its stat data:
+  // measured 1.4–5.5 s on a 2.8k-file repo) and a second full checkout, only to
+  // end on `origin/<base>` anyway. A tree this call is about to create has no
+  // edits and no branch by construction, so the two guards that status and the
+  // HEAD check exist for cannot fire; the fetch and the target are asked first,
+  // and the checkout happens once. A REUSED checkout still goes through
+  // `refreshWorktree` above, guards and all.
+  const direct =
+    shouldRefresh && branch === null && input.attach !== true
+      ? detachedStartAtBase({
+          exec,
+          repoRoot: input.repoRoot,
+          base,
+          ...(input.startPoint === undefined ? {} : { startPoint: input.startPoint }),
+          ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
+        })
+      : null;
   // The start point is appended, never substituted: omitting it is `git`'s own
   // "the main checkout's HEAD", which is what every loop has always got.
-  const from = input.startPoint === undefined ? [] : [input.startPoint];
+  const startPoint = direct?.startPoint ?? input.startPoint;
+  const from = startPoint === undefined ? [] : [startPoint];
   if (input.attach === true && branch !== null) {
     // AN EXISTING BRANCH, TAKEN AS IT STANDS. No `-B` and no start point: this
     // is the "continue the work I already have" case, and the one thing it must
@@ -709,6 +774,7 @@ function resolveCheckout(input: {
   }
   input.onCheckout?.(false);
   if (!shouldRefresh) return { status: 'created', created: true };
+  if (direct !== null) return { status: 'created', created: true, refresh: direct.refresh };
   // A fresh worktree starts at the MAIN checkout's HEAD, which is only as
   // current as the last pull there — refresh closes that gap too.
   const refresh = refreshWorktree({

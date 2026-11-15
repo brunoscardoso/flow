@@ -200,6 +200,51 @@ describe('AgentManager × the context gate', () => {
     manager.dispose()
   })
 
+  it('a decision started early for the first message is the one the first send applies — one model call', async () => {
+    let asked = 0
+    const deps = gateDeps({
+      askModel: async ({ prompt }) => {
+        if (!prompt.includes('"attached"')) return null
+        asked += 1
+        return '{"primary":"api","attached":["web"]}'
+      },
+    })
+    const { manager, captured } = claudeManager(deps)
+    const thread = store.createThread({ projectRoot: projectDir })
+    manager.prefetchFirstSend(thread.id, LONG)
+    await flush()
+    // Asked early, and nothing applied on the strength of it yet.
+    expect(asked).toBe(1)
+    expect(store.getThreadRoots(thread.id)).toEqual([])
+
+    await manager.sendMessage(thread.id, LONG)
+    expect(asked).toBe(1)
+    expect(captured).toHaveLength(1)
+    expect(captured[0].additionalDirectories).toContain(webDir)
+    expect(store.getThreadRoots(thread.id)).toEqual([webDir])
+    manager.dispose()
+  })
+
+  it('a first message that differs from the early one is decided afresh', async () => {
+    const prompts: string[] = []
+    const deps = gateDeps({
+      askModel: async ({ prompt }) => {
+        if (!prompt.includes('"attached"')) return null
+        prompts.push(prompt)
+        return '{"primary":"api","attached":["web"]}'
+      },
+    })
+    const { manager } = claudeManager(deps)
+    const thread = store.createThread({ projectRoot: projectDir })
+    manager.prefetchFirstSend(thread.id, 'Something else entirely, long enough to be a real first message.')
+    await flush()
+    expect(prompts).toHaveLength(1)
+    await manager.sendMessage(thread.id, LONG)
+    expect(prompts).toHaveLength(2)
+    expect(prompts[1]).toContain(LONG)
+    manager.dispose()
+  })
+
   it('Codex: the gate\'s projects are its extra and writable folders when the runtime starts', async () => {
     const starts: Array<{ opts: RuntimeStartOptions; callbacks: RuntimeCallbacks }> = []
     const manager = new AgentManager(store, credentialsStub, broker, {

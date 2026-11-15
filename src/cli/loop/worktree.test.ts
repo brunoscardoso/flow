@@ -84,6 +84,8 @@ function refreshAnswers(
     }
     if (args[0] === 'rev-parse' && args[1] === 'origin/main') return base;
     if (args[0] === 'rev-parse' && args[1] === 'HEAD') return at;
+    // The start a fresh detached checkout would have had (`HEAD^{commit}`).
+    if (args[0] === 'rev-parse' && args[1] === '--verify' && args[2]?.endsWith('^{commit}')) return at;
     if (args[0] === 'merge') {
       if (opts.mergeFails) throw new Error('fatal: Not possible to fast-forward, aborting.');
       return '';
@@ -353,12 +355,79 @@ describe('run slots — a second beat of one loop gets a checkout of its own', (
     // loop/fix` here would fail outright — slot 1 already has that branch
     // checked out.
     expect(resolved.branch).toBeNull();
+    // CUT STRAIGHT AT `origin/main` — where the refresh would have moved it.
+    expect(git.calls).toContainEqual({
+      file: 'git',
+      args: ['worktree', 'add', '--detach', at(CONTAINER, 'fix.2'), 'abc123'],
+      cwd: REPO,
+    });
+    expect(git.calls.some((call) => call.args.includes('-B'))).toBe(false);
+  });
+
+  it('cuts a fresh detached slot once: fetch first, then add at the target, nothing run inside it', () => {
+    const git = fakeGit(
+      porcelain([{ path: at(CONTAINER, 'fix'), branch: 'loop/fix' }]),
+      refreshAnswers('HEAD', 'new111', 'old222'),
+    );
+    const resolved = resolveWorktree({ exec: git.exec, repoRoot: REPO, loop: 'fix', slot: 2 });
+
+    expect(resolved.status).toBe('created');
+    // It did not start where the target is, so it reports the move it saved.
+    expect(resolved.refresh).toEqual({ state: 'refreshed', detail: '' });
+    const verbs = git.calls.map((call) => call.args.slice(0, 2).join(' '));
+    expect(verbs.indexOf('fetch origin')).toBeGreaterThanOrEqual(0);
+    expect(verbs.indexOf('fetch origin')).toBeLessThan(verbs.indexOf('worktree add'));
+    expect(git.calls).toContainEqual({
+      file: 'git',
+      args: ['worktree', 'add', '--detach', at(CONTAINER, 'fix.2'), 'new111'],
+      cwd: REPO,
+    });
+    // A tree this call just made is clean and detached by construction: no
+    // status (the slow first one in a new worktree) and no second checkout.
+    const inside = git.calls.filter((call) => call.cwd === at(CONTAINER, 'fix.2'));
+    expect(inside.some((call) => call.args[0] === 'status')).toBe(false);
+    expect(inside.some((call) => call.args[0] === 'checkout')).toBe(false);
+  });
+
+  it('reports a fresh detached slot already at its target as current', () => {
+    const git = fakeGit(
+      porcelain([{ path: at(CONTAINER, 'fix'), branch: 'loop/fix' }]),
+      refreshAnswers('HEAD', 'same11', 'same11'),
+    );
+    const resolved = resolveWorktree({ exec: git.exec, repoRoot: REPO, loop: 'fix', slot: 2 });
+    expect(resolved.refresh).toEqual({ state: 'current', detail: '' });
+  });
+
+  it('skips the fetch for a fresh detached slot when told someone already did it', () => {
+    const git = fakeGit(
+      porcelain([{ path: at(CONTAINER, 'fix'), branch: 'loop/fix' }]),
+      refreshAnswers('HEAD', 'new111', 'old222'),
+    );
+    resolveWorktree({ exec: git.exec, repoRoot: REPO, loop: 'fix', slot: 2, fetch: false });
+    expect(git.calls.some((call) => call.args[0] === 'fetch')).toBe(false);
+    expect(git.calls).toContainEqual({
+      file: 'git',
+      args: ['worktree', 'add', '--detach', at(CONTAINER, 'fix.2'), 'new111'],
+      cwd: REPO,
+    });
+  });
+
+  it('still creates a fresh detached slot where it always started when the fetch fails, and says so', () => {
+    const git = fakeGit(
+      porcelain([{ path: at(CONTAINER, 'fix'), branch: 'loop/fix' }]),
+      refreshAnswers('HEAD', 'new111', 'old222', { fetchFails: true }),
+    );
+    const resolved = resolveWorktree({ exec: git.exec, repoRoot: REPO, loop: 'fix', slot: 2 });
+    expect(resolved.status).toBe('created');
+    expect(resolved.refresh).toEqual({
+      state: 'failed',
+      detail: 'fatal: could not resolve host: github.com',
+    });
     expect(git.calls).toContainEqual({
       file: 'git',
       args: ['worktree', 'add', '--detach', at(CONTAINER, 'fix.2')],
       cwd: REPO,
     });
-    expect(git.calls.some((call) => call.args.includes('-B'))).toBe(false);
   });
 
   it('reuses a slot checkout across beats, re-detaching it onto origin/main', () => {

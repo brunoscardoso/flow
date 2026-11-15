@@ -1146,6 +1146,14 @@ export class ThreadSidebar {
               // — which is the uuid people were reading in their shell prompt
               // while the chip above them showed a name they had typed.
               ...(draft.worktreeName === undefined ? {} : { worktreeName: draft.worktreeName }),
+              // THE FIRST MESSAGE, so main can start deciding which projects it
+              // needs while the checkout is cut. It is the exact text the first
+              // turn sends below; main adopts that decision only on a match.
+              // Not for autopilot: the chain may send its own first message,
+              // and a decision for text nobody sends is a model call wasted.
+              ...(draft.description === '' || draft.autopilot === true
+                ? {}
+                : { firstPrompt: draft.description }),
             })
             .catch((error: unknown) =>
               console.error('flow: could not take the chosen branch', error),

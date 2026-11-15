@@ -5288,6 +5288,13 @@ export interface IpcInvokeMap {
        * reply lands (`nameAfterTitle`).
        */
       branch?: string
+      /**
+       * The message this thread's first turn will send, when the caller already
+       * has it (the new-thread page). Main starts that send's context decision
+       * now, so it runs while the checkout is cut instead of after it. Only a
+       * first send with exactly this text adopts it; absent → nothing changes.
+       */
+      firstPrompt?: string
     }
     response: ThreadWorktreeResult
   }

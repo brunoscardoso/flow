@@ -63,6 +63,7 @@ import {
 export { checkoutName }
 import { BASE_REFRESH_TIMEOUT_MS, resolveWorktreeSettings } from '../flow/worktree-settings'
 import { unpreparedNote } from './unprepared-worktree'
+import { StepTimer } from '../ipc/step-timer'
 // The folder-behind notice: the decision is pure and lives beside this, the
 // row's wording is shared with the renderer that reads it back.
 import {
@@ -245,6 +246,13 @@ export interface ThreadWorktreeDeps {
   onSetupProgress?: (threadId: string, event: SetupProgressEvent) => void
   /** Injected for deterministic WIP branch names. */
   now?: () => Date
+  /**
+   * Where a slow cut's itemised timing goes — main wires `recordSlow`, so a
+   * cut over the slow-handler threshold leaves one line in slow.log naming
+   * each step. Absent → nothing is timed out loud (tests, and any caller that
+   * has no log).
+   */
+  recordTiming?: (line: string) => void
 }
 
 /** What the caller wants done with the project's uncommitted work. */
@@ -1338,31 +1346,29 @@ export class ThreadWorktreeService {
       this.deps.threadStore.getThreadRootWorktrees(threadId).map((entry) => entry.rootPath),
     )
 
-    const results: AttachedWorktreeResult[] = []
-    for (const root of roots) {
-      if (already.has(root)) {
-        results.push({ rootPath: root, status: 'ready' })
-        continue
-      }
+    // ALL AT ONCE. Each project is its own repository with its own checkout,
+    // so nothing one cut writes is read by another — and cutting them one
+    // after the other made a conversation with three projects wait for three
+    // `git worktree add`s in a row. The results keep the roots' order.
+    return Promise.all(roots.map(async (root): Promise<AttachedWorktreeResult> => {
+      if (already.has(root)) return { rootPath: root, status: 'ready' }
       try {
         // THE CONVERSATION'S OWN NAMES, read off the primary checkout it
         // already has: the branch from the thread record, the folder's name
         // from the path that record holds (its last segment IS the name —
         // storing it twice would be a second source of truth,
         // allowed-pattern #23).
-        const made = await this.#cutAttached(thread.id, root, {
+        return await this.#cutAttached(thread.id, root, {
           branch: thread.worktreeBranch ?? null,
           ...(checkoutName(thread.worktreePath) === null
             ? {}
             : { worktreeName: checkoutName(thread.worktreePath) as string }),
         })
-        results.push(made)
       } catch (error) {
         console.warn('[ThreadWorktree] could not prepare an attached worktree', { root, error })
-        results.push({ rootPath: root, status: 'failed' })
+        return { rootPath: root, status: 'failed' }
       }
-    }
-    return results
+    }))
   }
 
   /** One attached project's checkout, cut and recorded. */
@@ -1671,10 +1677,12 @@ export class ThreadWorktreeService {
     // not stop carries on in the project's tree — saying so here would be a new
     // product decision, not this one's business.
     const report: { event: SetupProgressEvent } = { event: { state: 'done' } }
+    const timer = new StepTimer('worktree cut')
     try {
-      return await this.#cut(thread, options, settings, report)
+      return await this.#cut(thread, options, settings, report, timer)
     } finally {
       this.deps.onSetupProgress?.(thread.id, report.event)
+      if (this.deps.recordTiming !== undefined) timer.recordIfSlow(this.deps.recordTiming)
     }
   }
 
@@ -1687,10 +1695,11 @@ export class ThreadWorktreeService {
     options: PrepareOptions,
     settings: ResolvedWorktreeSettings,
     report: { event: SetupProgressEvent },
+    timer: StepTimer = new StepTimer('worktree cut'),
   ): Promise<PrepareResult> {
     const root = thread.projectRoot
     const carry = options.carry ?? 'clean'
-    const carried = await this.#carry(root, carry)
+    const carried = await timer.step('carry', () => this.#carry(root, carry))
 
     // WHERE THE WORKTREE BEGINS, AS ONE ARGUMENT LIST. The parked work is not
     // a separate mechanism — it is a branch, and a branch is something the
@@ -1713,9 +1722,27 @@ export class ThreadWorktreeService {
     // and before the cut, because a base refreshed afterwards refreshed nothing
     // this worktree started from. It is bounded and abortable; the cut runs
     // whatever it reports.
-    const refresh = await this.#refreshBase(root, start, options.signal, settings)
+    //
+    // …EXCEPT WHERE THE CUT CANNOT SEE IT. A `here` or `branch` start begins at
+    // a LOCAL branch, and a fetch only moves `refs/remotes/*` — so for those two
+    // the refresh changes nothing the checkout is made from, only the
+    // `baseMayBeBehind` answer recorded with it. Waiting for it first made the
+    // person wait for the network AND the disk; running it beside the cut makes
+    // them wait for whichever is longer, with the same bound and the same
+    // answer. `trunk` starts at `origin/<base>` and `checkout` may start at
+    // `origin/<branch>`, so those two still wait: moving a just-cut checkout
+    // afterwards costs a full re-hash of the new tree (measured ~7 s), far more
+    // than the fetch it would save.
+    const refreshing = timer.step('refresh-base', () =>
+      this.#refreshBase(root, start, options.signal, settings, timer),
+    )
+    const overlapped = start.kind === 'here' || start.kind === 'branch'
+    const refreshedFirst = overlapped ? null : await refreshing
+    // A cut that is refused below never reads the overlapped answer; it must
+    // not become an unhandled rejection either (it never rejects today).
+    if (overlapped) refreshing.catch(() => undefined)
 
-    const result = await this.deps.runCli(root, [
+    const result = await timer.step('cli-create', () => this.deps.runCli(root, [
       'worktree',
       'create',
       '--thread',
@@ -1746,8 +1773,9 @@ export class ThreadWorktreeService {
       '--json',
       '--target',
       root,
-    ])
+    ]))
     if (!result.ok) return this.#refuse(thread, refusalReason(result) ?? result.error ?? 'failed')
+    const refresh = refreshedFirst ?? (await refreshing)
     const created = parseResultJson<CreateResult>(result.stdout)
     if (created === null || typeof created.path !== 'string' || created.path === '') {
       return this.#refuse(thread, 'the worktree could not be read back')
@@ -1764,7 +1792,9 @@ export class ThreadWorktreeService {
     // exactly as the CLI made it — detached, usable, and named later from the
     // title like every worktree before this one.
     const branch =
-      options.branch === undefined ? cut : await this.#applyChosenName(thread, path, options.branch, cut)
+      options.branch === undefined
+        ? cut
+        : await timer.step('name', () => this.#applyChosenName(thread, path, options.branch as string, cut))
 
     // THE BASE THE CLI RETURNED, for exactly the reason the path is. It is the
     // repository's answer at the moment the checkout was cut; reading "which
@@ -1793,7 +1823,16 @@ export class ThreadWorktreeService {
     // anything about that. The store write above already happened on purpose:
     // a setup that fails must leave a worktree that is recorded and usable,
     // not one that exists on disk and nowhere else.
-    const setup = await this.#runSetup(thread, path, settings)
+    //
+    // THE OTHER PROJECTS ARE CUT BESIDE IT. Their checkouts start where each of
+    // those projects stands and read nothing of this one but its names — the
+    // folder (on the record just written) and the branch (likewise) — so they
+    // never needed to queue behind this copy's setup command. `prepareAttached`
+    // never throws; a project it could not isolate is reported and skipped.
+    const [setup] = await Promise.all([
+      timer.step('setup', () => this.#runSetup(thread, path, settings)),
+      timer.step('attached', () => this.prepareAttached(thread.id)),
+    ])
     // THE WAIT IS OVER — one edge for the whole of it, cut and setup together.
     // A person waiting for their first reply is not waiting for two things;
     // they are waiting once, and the line that appeared has to come down.
@@ -1839,7 +1878,7 @@ export class ThreadWorktreeService {
     //
     // It never fails the primary. A project that cannot be isolated is reported
     // by `prepareAttached` and skipped; the copy just made is still a copy.
-    await this.prepareAttached(thread.id)
+    // (Already done — started beside the setup command above.)
 
     return {
       status: 'created',
@@ -1942,7 +1981,10 @@ export class ThreadWorktreeService {
     start: WorktreeStart,
     signal: AbortSignal | undefined,
     settings: ResolvedWorktreeSettings,
+    timer?: StepTimer,
   ): Promise<{ base: string | null; stale: boolean }> {
+    const step = <T>(name: string, work: () => Promise<T>): Promise<T> =>
+      timer === undefined ? work() : timer.step(name, work)
     // TURNED OFF MEANS OFF, AND SILENT WITH IT. A person who has said not to go
     // to the network before a cut has not asked to be told their copy might be
     // behind — the fetch, the flag and the sentence are one decision, and
@@ -1950,16 +1992,13 @@ export class ThreadWorktreeService {
     // stale forever. Returned before `#startBranch`, so the skip costs nothing.
     if (!settings.baseRefresh.value) return { base: null, stale: false }
 
-    const base = await this.#startBranch(root, start)
+    const base = await step('base-name', () => this.#startBranch(root, start))
     if (base === null || base === '') return { base, stale: false }
 
     const remote = settings.remote.value
-    const tracked = await this.deps.runGit(root, [
-      'rev-parse',
-      '--verify',
-      '--quiet',
-      `refs/remotes/${remote}/${base}`,
-    ])
+    const tracked = await step('base-tracked', () =>
+      this.deps.runGit(root, ['rev-parse', '--verify', '--quiet', `refs/remotes/${remote}/${base}`]),
+    )
     // A branch nothing on the remote answers to is not behind — it is simply
     // ours. `--quiet` makes an absent ref an empty answer rather than an error,
     // so both halves are asked.
@@ -1969,12 +2008,8 @@ export class ThreadWorktreeService {
     // is not waiting; the cut proceeds and the copy says what it started from.
     if (signal?.aborted === true) return { base, stale: true }
 
-    const fetched = await this.#boundedFetch(
-      root,
-      remote,
-      base,
-      signal,
-      settings.baseRefreshTimeoutMs.value,
+    const fetched = await step('fetch', () =>
+      this.#boundedFetch(root, remote, base, signal, settings.baseRefreshTimeoutMs.value),
     )
     return { base, stale: !fetched }
   }

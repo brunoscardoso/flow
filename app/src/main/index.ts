@@ -1411,6 +1411,11 @@ function bootstrapMainProcess(): void {
     // new thread. Handed over explicitly rather than reached for, because this
     // is the one dep in this list that executes a string from a repository.
     runSetup: runSetupCapturing,
+    // A cut over the slow-handler threshold leaves one itemised line in
+    // slow.log — the steps between "the CLI returned" and "the handler
+    // returned" had no clock on them, and 4–6 s of a new thread's wait could
+    // not be attributed to anything.
+    recordTiming: recordSlow,
     // One answer to "break the link", shared with the dependency promotion —
     // reached through the CLI because the app spawns that binary rather than
     // importing it, and a second implementation on this side would be the

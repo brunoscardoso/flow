@@ -356,6 +356,105 @@ describe('the first send', () => {
   })
 })
 
+describe('the first send, decided early', () => {
+  it('a prefetch decides and applies NOTHING until the matching first send adopts it', async () => {
+    let release: (value: string) => void = () => undefined
+    const answer = new Promise<string>((resolve) => {
+      release = resolve
+    })
+    const h = harness({ gateTimeoutMs: 1_000, model: async () => answer })
+    const gate = createContextGate(h.deps)
+    gate.prefetchFirstSend({ threadId: 't1', projectRoot: API, prompt: LONG })
+    await settle()
+    // The positive half first: the model WAS asked, early (allowed-pattern #28).
+    expect(h.prompts).toHaveLength(1)
+    release('{"primary":"api","attached":["web"]}')
+    await settle()
+    // …and nothing reached the thread on the strength of it.
+    expect(h.attached.get('t1')).toBeUndefined()
+    expect(h.notes).toEqual([])
+    expect(h.chosen).toEqual([])
+
+    const outcome = await gate.beforeFirstSession({ threadId: 't1', projectRoot: API, prompt: LONG })
+    expect(outcome).toEqual({ kind: 'attached', added: [{ root: WEB, name: 'Frontend' }] })
+    expect(h.attached.get('t1')).toEqual([WEB])
+    expect(h.notes).toHaveLength(1)
+    // Adopted, not asked again.
+    expect(h.prompts).toHaveLength(1)
+    expect(h.workspaceLookups).toBe(1)
+  })
+
+  it('a first send with a different prompt discards the early decision and decides afresh', async () => {
+    const h = harness({
+      model: async (prompt) =>
+        prompt.includes('docs page') ? '{"primary":"api","attached":["docs"]}' : '{"primary":"api","attached":["web"]}',
+    })
+    const gate = createContextGate(h.deps)
+    gate.prefetchFirstSend({ threadId: 't1', projectRoot: API, prompt: LONG })
+    await settle()
+    expect(h.prompts).toHaveLength(1)
+    const outcome = await gate.beforeFirstSession({
+      threadId: 't1',
+      projectRoot: API,
+      prompt: 'Rewrite the docs page about discounts so it matches the new endpoint behaviour.',
+    })
+    expect(outcome).toEqual({ kind: 'attached', added: [{ root: DOCS, name: 'Docs' }] })
+    expect(h.prompts).toHaveLength(2)
+    expect(h.attached.get('t1')).toEqual([DOCS])
+  })
+
+  it('an early decision that timed out is the same timeout the send would have had — nothing attached late', async () => {
+    let release: (value: string) => void = () => undefined
+    const late = new Promise<string>((resolve) => {
+      release = resolve
+    })
+    const h = harness({ gateTimeoutMs: 20, model: async () => late })
+    const gate = createContextGate(h.deps)
+    gate.prefetchFirstSend({ threadId: 't1', projectRoot: API, prompt: LONG })
+    expect(await gate.beforeFirstSession({ threadId: 't1', projectRoot: API, prompt: LONG })).toEqual({
+      kind: 'current-only',
+      reason: 'timeout',
+    })
+    release('{"primary":"api","attached":["web"]}')
+    await settle()
+    expect(h.attached.get('t1')).toBeUndefined()
+    expect(h.prompts).toHaveLength(1)
+  })
+
+  it('never prefetches where the send would not ask: hand-picked, chosen, or already decided', async () => {
+    const h = harness({ model: scripted('{"primary":"api","attached":["web"]}') })
+    const gate = createContextGate(h.deps)
+    // Reachable first: an ordinary thread is asked early.
+    gate.prefetchFirstSend({ threadId: 'plain', projectRoot: API, prompt: LONG })
+    await settle()
+    expect(h.prompts).toHaveLength(1)
+
+    h.attached.set('picked', [DOCS])
+    h.chosenProjects.add('chosen')
+    gate.prefetchFirstSend({ threadId: 'picked', projectRoot: API, prompt: LONG })
+    gate.prefetchFirstSend({ threadId: 'chosen', projectRoot: API, prompt: LONG })
+    gate.prefetchFirstSend({ threadId: 'skip', projectRoot: API, prompt: LONG, skip: true })
+    await gate.beforeFirstSession({ threadId: 'plain', projectRoot: API, prompt: LONG })
+    gate.prefetchFirstSend({ threadId: 'plain', projectRoot: API, prompt: LONG })
+    await settle()
+    expect(h.prompts).toHaveLength(1)
+  })
+
+  it('a send that skips the gate drops the early decision without applying it', async () => {
+    const h = harness({ model: scripted('{"primary":"api","attached":["web"]}') })
+    const gate = createContextGate(h.deps)
+    gate.prefetchFirstSend({ threadId: 't1', projectRoot: API, prompt: LONG })
+    await settle()
+    expect(h.prompts).toHaveLength(1)
+    expect(await gate.beforeFirstSession({ threadId: 't1', projectRoot: API, prompt: LONG, skip: true })).toEqual({
+      kind: 'skipped',
+      reason: 'requested',
+    })
+    await settle()
+    expect(h.attached.get('t1')).toBeUndefined()
+  })
+})
+
 describe('later sends — offers only, cheap and bounded', () => {
   const NEEDS_WEB = '{"needs":"web","reason":"It changes the checkout screen."}'
 

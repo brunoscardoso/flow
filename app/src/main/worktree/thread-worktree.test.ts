@@ -77,6 +77,8 @@ function harness(
     /** Other projects this conversation carries — none unless a test says so. */
     attachedRoots?: string[]
     cli?: (args: readonly string[]) => RunResult
+    /** An async CLI, for tests about what runs AT THE SAME TIME. Wins over `cli`. */
+    cliAsync?: (args: readonly string[]) => Promise<RunResult>
     /** Async on purpose: the refresh's ceiling is only visible to a git that
      *  can take its time (or never answer at all). */
     git?: (args: readonly string[]) => RunResult | Promise<RunResult>
@@ -156,6 +158,7 @@ function harness(
     },
     runCli: async (_cwd, args) => {
       cliCalls.push([...args])
+      if (options.cliAsync !== undefined) return options.cliAsync(args)
       return options.cli?.(args) ?? ok(JSON.stringify({ status: 'created', path: CHECKOUT, branch: null }))
     },
     runGit: async (_cwd, args, gitOpts) => {
@@ -2419,5 +2422,98 @@ describe('the setup indicator always gets its edge', () => {
     await h.service.prepare('t1', { ask: false })
     expect(h.progress.filter((event) => event.state === 'running')).toHaveLength(1)
     expect(h.progress.filter((event) => event.state !== 'running')).toHaveLength(1)
+  })
+})
+
+// ── What runs at the same time (perf/thread-start) ──────────────────────────
+
+/** A promise and the hand that settles it. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve: (value: T) => void = () => undefined
+  const promise = new Promise<T>((settle) => {
+    resolve = settle
+  })
+  return { promise, resolve }
+}
+
+const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
+
+describe('prepare — what no longer waits for what', () => {
+  const CREATED = ok(JSON.stringify({ status: 'created', path: CHECKOUT, branch: null }))
+
+  it('cuts every attached project at once, and keeps their order in the answer', async () => {
+    const OTHER = '/tmp/other-project'
+    const SECOND = '/tmp/second-project'
+    const held = deferred<RunResult>()
+    const h = harness({
+      attachedRoots: [OTHER, SECOND],
+      cliAsync: (args) => {
+        const target = args[args.indexOf('--target') + 1]
+        return target === OTHER || target === SECOND ? held.promise : Promise.resolve(CREATED)
+      },
+    })
+    const answer = h.service.prepareAttached('t1')
+    await flush()
+    // BOTH were asked for before EITHER answered.
+    const targets = h.cliCalls
+      .filter((args) => args[1] === 'create')
+      .map((args) => args[args.indexOf('--target') + 1])
+    expect(targets).toEqual([OTHER, SECOND])
+    held.resolve(CREATED)
+    expect((await answer).map((entry) => entry.rootPath)).toEqual([OTHER, SECOND])
+  })
+
+  it('a start at a LOCAL branch cuts while the base is still being fetched — and still records the answer', async () => {
+    const fetch = deferred<RunResult>()
+    const h = harness({
+      git: (args) => {
+        if (args[0] === 'fetch') return fetch.promise
+        return args[0] === 'rev-parse' ? ok('abc123\n') : ok('')
+      },
+    })
+    const prepared = h.service.prepare('t1', { ask: false, start: { kind: 'branch', branch: 'main' } })
+    await flush()
+    // The positive half: the fetch IS running (allowed-pattern #28)…
+    expect(verbs(h.gitCalls)).toContain('fetch')
+    // …and the cut did not wait for it.
+    expect(h.cliCalls.some((args) => args[1] === 'create')).toBe(true)
+    expect(h.written).toEqual([])
+    fetch.resolve(ok(''))
+    await prepared
+    expect(h.written[0]).toMatchObject({ baseMayBeBehind: false })
+  })
+
+  it('a local-branch start whose overlapped fetch fails is still marked behind', async () => {
+    const h = harness({
+      git: (args) => {
+        if (args[0] === 'fetch') return { ok: false, stdout: '', error: 'offline' }
+        return args[0] === 'rev-parse' ? ok('abc123\n') : ok('')
+      },
+    })
+    const result = await h.service.prepare('t1', { ask: false, start: { kind: 'branch', branch: 'main' } })
+    expect(h.written[0]).toMatchObject({ baseMayBeBehind: true })
+    expect(result.baseMayBeBehind).toBe(true)
+  })
+
+  it('a trunk start still waits for the fetch: it is cut FROM the ref the fetch moves', async () => {
+    const fetch = deferred<RunResult>()
+    const h = harness({
+      cliAsync: async (args) =>
+        args[1] === 'branches'
+          ? ok(JSON.stringify({ current: 'feature', branches: [{ name: 'main', trunk: true, current: false, checkedOutAt: null }] }))
+          : CREATED,
+      git: (args) => {
+        if (args[0] === 'fetch') return fetch.promise
+        return args[0] === 'rev-parse' ? ok('abc123\n') : ok('')
+      },
+    })
+    const prepared = h.service.prepare('t1', { ask: false, start: { kind: 'trunk' } })
+    await flush()
+    expect(verbs(h.gitCalls)).toContain('fetch')
+    expect(h.cliCalls.some((args) => args[1] === 'create')).toBe(false)
+    fetch.resolve(ok(''))
+    await prepared
+    expect(h.cliCalls.some((args) => args[1] === 'create')).toBe(true)
+    expect(h.written[0]).toMatchObject({ baseMayBeBehind: false })
   })
 })

@@ -92,6 +92,7 @@ import { resolveFlowLinkTargets } from './flow-link-roots'
 import { expandSlashCommand } from './runtime/slash-command'
 import { loadExternalMcpServers } from './external-mcp'
 import type { ContextGate, FastModelCall } from './context-gate'
+import { StepTimer } from '../ipc/step-timer'
 
 import type {
   UserQuestionAnswer,
@@ -802,6 +803,29 @@ export class AgentManager extends EventEmitter {
     }
   }
 
+  /**
+   * Start the context gate's first-send decision for a prompt the caller
+   * already knows — the new-thread page has it before the thread's checkout
+   * is cut, so the model call runs during the cut instead of after it.
+   *
+   * Only where the first send would ask: a gate is configured, no session
+   * exists and no reply has landed. The decision is adopted by the first send
+   * only when its prompt is exactly this one; otherwise that send decides
+   * afresh, as it always did. Never throws.
+   */
+  prefetchFirstSend(threadId: string, prompt: string): void {
+    const gate = this.options.contextGate
+    if (gate === undefined || prompt.trim() === '' || this.sessions.has(threadId)) return
+    try {
+      const thread = this.threadStore.getThread(threadId)
+      if (!thread) return
+      if (this.threadStore.listMessages(threadId).some((entry) => entry.role === 'assistant')) return
+      gate.prefetchFirstSend({ threadId, projectRoot: thread.projectRoot, prompt })
+    } catch (error) {
+      console.warn('[AgentManager] could not start the context decision early', error)
+    }
+  }
+
   /** Sends made before a thread's session exists, chained per thread (see sendMessage). */
   readonly #sessionlessSends = new Map<string, Promise<unknown>>()
 
@@ -995,15 +1019,39 @@ export class AgentManager extends EventEmitter {
     // and fail-soft: the worst it costs is its timeout, and the thread then
     // runs in its own project. Later sends only ever get an OFFER, off the
     // send path — it never attaches and never delays a turn.
+    //
+    // EVERY STEP UP TO THE SESSION IS TIMED: a turn that takes long to start
+    // leaves one itemised line in slow.log (the steps run one after another
+    // here, so the parts add up to the whole).
+    const timer = new StepTimer(isFirstTurn ? 'send first turn' : 'send turn')
+    try {
+      await this.#prepareDelivery(threadId, thread, content, attachments, sendOptions, isFirstTurn, timer)
+    } finally {
+      timer.recordIfSlow()
+    }
+  }
+
+  /** `#deliver`'s body from the gate onward, with each step on the clock. */
+  async #prepareDelivery(
+    threadId: string,
+    thread: ThreadRecord,
+    content: string,
+    attachments: readonly MessageAttachmentInput[] | undefined,
+    sendOptions: SendMessageOptions,
+    isFirstTurn: boolean,
+    timer: StepTimer,
+  ): Promise<void> {
     const gate = this.options.contextGate
     if (gate !== undefined) {
       if (isFirstTurn && !this.sessions.has(threadId)) {
-        await gate.beforeFirstSession({
-          threadId,
-          projectRoot: thread.projectRoot,
-          prompt: content,
-          skip: sendOptions.skipContextGate === true,
-        })
+        await timer.step('context-gate', () =>
+          gate.beforeFirstSession({
+            threadId,
+            projectRoot: thread.projectRoot,
+            prompt: content,
+            skip: sendOptions.skipContextGate === true,
+          }),
+        )
       } else if (!isFirstTurn) {
         void gate
           .afterLaterSend({ threadId, projectRoot: thread.projectRoot, prompt: content })
@@ -1015,8 +1063,11 @@ export class AgentManager extends EventEmitter {
     // them without basic discovery has its sweep started (or tried again —
     // sending is a person acting) and is left out of the session's folders
     // until it is learned. Its chip says "Learning…" meanwhile.
-    if (this.options.basicDiscovery !== undefined) {
-      await this.options.basicDiscovery.require(this.threadStore.getThreadRoots(threadId), { retry: true })
+    const basicDiscovery = this.options.basicDiscovery
+    if (basicDiscovery !== undefined) {
+      await timer.step('basic-discovery', () =>
+        basicDiscovery.require(this.threadStore.getThreadRoots(threadId), { retry: true }),
+      )
     }
 
     // A THREAD'S PROJECTS CHANGED SINCE ITS SESSION STARTED (an attach or a
@@ -1037,8 +1088,9 @@ export class AgentManager extends EventEmitter {
     // mid-life. A thread that never sends a message never reaches this line —
     // which is the whole of the chat-only guarantee.
     let current = this.threadStore.getThread(threadId) ?? thread
-    if (this.options.ensureThreadWorktree && !this.sessions.has(threadId)) {
-      await this.options.ensureThreadWorktree(threadId, { firstTurn: isFirstTurn })
+    const ensureThreadWorktree = this.options.ensureThreadWorktree
+    if (ensureThreadWorktree && !this.sessions.has(threadId)) {
+      await timer.step('worktree', () => ensureThreadWorktree(threadId, { firstTurn: isFirstTurn }))
       current = this.threadStore.getThread(threadId) ?? thread
     }
     // BEFORE THE NEXT ONE, and this await is what makes that a guarantee rather
@@ -1048,14 +1100,18 @@ export class AgentManager extends EventEmitter {
     // a session that is already alive is exactly the case a promotion follows.
     // Resolves immediately when nothing is owed, which is every turn but the
     // one after a lockfile changed.
-    await this.options.settleThreadDependencies?.(threadId)
+    const settleThreadDependencies = this.options.settleThreadDependencies
+    if (settleThreadDependencies !== undefined) {
+      await timer.step('dependencies', () => settleThreadDependencies(threadId))
+    }
 
     // LOG-5: session creation can fail (SDK load, spawn). Surface it — mark
     // the thread failed and emit an error stream event before rethrowing,
     // so the renderer never sits on a persisted message with no outcome.
     let session: ThreadSession
     try {
-      session = await this.ensureSession(current)
+      const ready = current
+      session = await timer.step('session', () => this.ensureSession(ready))
     } catch (error) {
       this.markThreadFailed(threadId, error instanceof Error ? error.message : String(error))
       throw error
@@ -1099,7 +1155,8 @@ export class AgentManager extends EventEmitter {
       // Non-Claude runtimes are one-shot-per-turn: cold-start the first turn with
       // this prompt, resume the rollout on later turns. Text only in v1 (no
       // vision blocks).
-      await this.startOrSendRuntimeTurn(session, thread, seededText)
+      const started = session
+      await timer.step('runtime-turn', () => this.startOrSendRuntimeTurn(started, thread, seededText))
     } else {
       session.input.push({
         type: 'user',

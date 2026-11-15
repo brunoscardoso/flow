@@ -197,6 +197,18 @@ export type OfferOutcome =
 export interface ContextGate {
   /** Runs before the first session starts. Never throws; never waits past its timeout. */
   beforeFirstSession(input: FirstSendInput): Promise<GateOutcome>
+  /**
+   * Start the first send's DECISION early — the workspace lookup and the model
+   * call — for a prompt that is already known (the new-thread page knows it
+   * before the thread's checkout is cut, which takes seconds).
+   *
+   * IT DECIDES AND NOTHING ELSE: no attach, no note, no chip, no offer state,
+   * no descriptions. `beforeFirstSession` with the SAME thread, project and
+   * prompt adopts the pending decision and does all of those itself; any other
+   * prompt discards it and decides afresh, exactly as if this had never been
+   * called. Never throws.
+   */
+  prefetchFirstSend(input: FirstSendInput): void
   /** A later send: maybe offer one project. Never throws; never attaches. Callers need not await it. */
   afterLaterSend(input: LaterSendInput): Promise<OfferOutcome>
   /** Forget a thread (deleted). */
@@ -514,18 +526,27 @@ export function createContextGate(deps: ContextGateDeps): ContextGate {
     deps.localDescriptions.set(workspace.workspace.slug, project.slug, text)
   }
 
-  async function beforeFirstSession(input: FirstSendInput): Promise<GateOutcome> {
-    if (decided.has(input.threadId)) return { kind: 'skipped', reason: 'already-decided' }
-    decided.add(input.threadId)
-    if (input.skip === true) return { kind: 'skipped', reason: 'requested' }
-    // THE HAND-PICK PATH: a person who attached projects before the first send
-    // has already answered the question this gate would ask.
-    if (deps.attachedRoots(input.threadId).length > 0 || deps.projectsChosen(input.threadId)) {
-      return { kind: 'skipped', reason: 'hand-picked' }
-    }
+  /** What one decision found, before anything is applied to the thread. */
+  interface Decision {
+    outcome: GateOutcome | GateProject[]
+    /** Candidates to describe once the decision is applied (set when the model was asked). */
+    toDescribe: { workspace: GateWorkspace; candidates: GateProject[] } | null
+    /** Whether the model was asked — the thread's first offer check counts from it. */
+    asked: boolean
+  }
 
-    /** What to describe once the decision is in (set when the model was asked). */
-    let toDescribe: { workspace: GateWorkspace; candidates: GateProject[] } | null = null
+  /** Decisions started early, by thread — adopted only by the same project and prompt. */
+  const prefetched = new Map<string, { projectRoot: string; prompt: string; decision: Promise<Decision> }>()
+
+  /**
+   * The workspace lookup and the model call, bounded by ONE timer that starts
+   * here. Applies nothing: attaching, the note, the chips and the offer state
+   * all belong to `beforeFirstSession`, so a decision nobody adopts leaves no
+   * trace. Never throws.
+   */
+  async function decide(input: FirstSendInput): Promise<Decision> {
+    let toDescribe: Decision['toDescribe'] = null
+    let asked = false
     try {
       const outcome = await bounded(gateTimeoutMs, async (signal): Promise<GateOutcome | GateProject[]> => {
         const found = await deps.workspaceOf(input.projectRoot)
@@ -534,11 +555,7 @@ export function createContextGate(deps: ContextGateDeps): ContextGate {
         const candidates = candidatesFor(workspace, deps.attachedRoots(input.threadId))
         if (candidates.length === 0) return { kind: 'skipped', reason: 'no-candidates' }
         toDescribe = { workspace, candidates }
-        // The first send's question counts as the thread's first check: the
-        // offer check waits its full interval after it.
-        const state = offerState(input.threadId)
-        state.lastCheckAt = now()
-        state.sendsSinceCheck = 0
+        asked = true
         const text = await deps.askModel({
           projectRoot: input.projectRoot,
           prompt: buildGatePrompt(workspace, candidates, input.prompt),
@@ -549,8 +566,64 @@ export function createContextGate(deps: ContextGateDeps): ContextGate {
         if (signal.aborted) throw new GateTimeout()
         return chosen
       })
+      return { outcome, toDescribe, asked }
+    } catch (error) {
+      if (error instanceof GateTimeout) {
+        log('the gate ran out of time; the thread runs in its own project', { threadId: input.threadId })
+        return { outcome: { kind: 'current-only', reason: 'timeout' }, toDescribe, asked }
+      }
+      log('the gate failed; the thread runs in its own project', { threadId: input.threadId, error: String(error) })
+      return { outcome: { kind: 'current-only', reason: 'error' }, toDescribe, asked }
+    }
+  }
+
+  function prefetchFirstSend(input: FirstSendInput): void {
+    // Only where `beforeFirstSession` would get as far as asking: a decided,
+    // skipped or hand-picked thread never reaches the model, so neither does
+    // its prefetch (a model call is tokens, not just time).
+    if (decided.has(input.threadId) || input.skip === true) return
+    if (deps.attachedRoots(input.threadId).length > 0 || deps.projectsChosen(input.threadId)) return
+    const existing = prefetched.get(input.threadId)
+    if (existing !== undefined && existing.projectRoot === input.projectRoot && existing.prompt === input.prompt) return
+    prefetched.set(input.threadId, { projectRoot: input.projectRoot, prompt: input.prompt, decision: decide(input) })
+  }
+
+  /** The early decision for exactly this send, if one was started — taken, so it is used once. */
+  function adoptPrefetched(input: FirstSendInput): Promise<Decision> | null {
+    const entry = prefetched.get(input.threadId)
+    if (entry === undefined) return null
+    prefetched.delete(input.threadId)
+    return entry.projectRoot === input.projectRoot && entry.prompt === input.prompt ? entry.decision : null
+  }
+
+  async function beforeFirstSession(input: FirstSendInput): Promise<GateOutcome> {
+    if (decided.has(input.threadId)) return { kind: 'skipped', reason: 'already-decided' }
+    decided.add(input.threadId)
+    const early = adoptPrefetched(input)
+    if (input.skip === true) return { kind: 'skipped', reason: 'requested' }
+    // THE HAND-PICK PATH: a person who attached projects before the first send
+    // has already answered the question this gate would ask.
+    if (deps.attachedRoots(input.threadId).length > 0 || deps.projectsChosen(input.threadId)) {
+      return { kind: 'skipped', reason: 'hand-picked' }
+    }
+
+    // THE SAME DECISION EITHER WAY: started now, or started early for this very
+    // prompt and still bounded by the timer it started with — so adopting one
+    // never waits longer than deciding afresh would have.
+    const decision = await (early ?? decide(input))
+    try {
+      if (decision.asked) {
+        // The first send's question counts as the thread's first check: the
+        // offer check waits its full interval after it.
+        const state = offerState(input.threadId)
+        state.lastCheckAt = now()
+        state.sendsSinceCheck = 0
+      }
+      const outcome = decision.outcome
       if (!Array.isArray(outcome)) {
-        if (outcome.kind === 'current-only') log('the model answered in a shape the gate cannot use', { threadId: input.threadId })
+        if (outcome.kind === 'current-only' && outcome.reason === 'invalid') {
+          log('the model answered in a shape the gate cannot use', { threadId: input.threadId })
+        }
         return outcome
       }
       if (outcome.length === 0) return { kind: 'current-only', reason: 'none-needed' }
@@ -561,15 +634,11 @@ export function createContextGate(deps: ContextGateDeps): ContextGate {
       deps.announceChosen({ threadId: input.threadId, added, source: 'gate' })
       return { kind: 'attached', added }
     } catch (error) {
-      if (error instanceof GateTimeout) {
-        log('the gate ran out of time; the thread runs in its own project', { threadId: input.threadId })
-        return { kind: 'current-only', reason: 'timeout' }
-      }
       log('the gate failed; the thread runs in its own project', { threadId: input.threadId, error: String(error) })
       return { kind: 'current-only', reason: 'error' }
     } finally {
       // The gate has answered (or given up): only now may descriptions run.
-      const pending = toDescribe as { workspace: GateWorkspace; candidates: GateProject[] } | null
+      const pending = decision.toDescribe
       if (pending !== null) describeMissing(pending.workspace, pending.candidates, input.projectRoot)
     }
   }
@@ -646,8 +715,9 @@ export function createContextGate(deps: ContextGateDeps): ContextGate {
 
   function forgetThread(threadId: string): void {
     decided.delete(threadId)
+    prefetched.delete(threadId)
     offers.delete(threadId)
   }
 
-  return { beforeFirstSession, afterLaterSend, forgetThread }
+  return { beforeFirstSession, prefetchFirstSend, afterLaterSend, forgetThread }
 }
