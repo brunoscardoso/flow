@@ -605,8 +605,7 @@ export class RunGroupView {
       start.title = RUN_STRINGS.setUpTitle
       start.append(document.createTextNode(RUN_STRINGS.setUp))
       start.addEventListener('click', () => this.#toggleSetup())
-      root.appendChild(start)
-      root.appendChild(separator())
+      root.append(separator(), start)
       return
     }
 
@@ -648,8 +647,7 @@ export class RunGroupView {
         iconButton('square', RUN_STRINGS.stopAll, RUN_STRINGS.stopAllTitle, () => this.#act((api, scope) => api.stop({ scope }))),
       )
     }
-    root.appendChild(pill)
-    root.appendChild(separator())
+    root.append(separator(), pill)
   }
 }
 
@@ -669,9 +667,9 @@ function injectRunStyles(): void {
   runStylesInjected = true
   const style = document.createElement('style')
   style.textContent = `
-    .fl-run-group { display: inline-flex; align-items: center; flex: none; gap: var(--fl-space-xs); padding-left: var(--fl-space-xs); }
+    .fl-run-group { display: inline-flex; align-items: center; flex: none; gap: var(--fl-space-xs); padding-right: var(--fl-space-xs); }
     .fl-run-group[hidden] { display: none; }
-    .fl-run-sep { width: var(--fl-border-width); height: 16px; background: var(--fl-color-separator); margin: 0 var(--fl-space-xxs); }
+    .fl-run-sep { width: var(--fl-border-width); height: 16px; background: var(--fl-color-separator); margin: 0 2px; }
     .fl-run-setup-entry {
       display: inline-flex; align-items: center; gap: var(--fl-space-xs);
       height: 22px; padding: 0 var(--fl-space-sm);
@@ -684,7 +682,7 @@ function injectRunStyles(): void {
     .fl-run-setup-entry:hover { color: var(--fl-color-text); border-color: var(--fl-color-accent); }
     .fl-run-pill {
       display: inline-flex; align-items: center; gap: var(--fl-space-xs);
-      height: 22px; padding: 0 var(--fl-space-xxs) 0 var(--fl-space-sm);
+      height: 22px; padding: 0 2px 0 var(--fl-space-sm);
       border: var(--fl-border-width) solid var(--fl-color-accent);
       border-radius: var(--fl-radius-sm);
       background: var(--fl-color-accent-muted);

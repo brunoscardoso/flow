@@ -1466,7 +1466,8 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
   }
 
   // ── The Run group (plan project_run, Phase 5) ───────────────────────────
-  // The pill sits before the tabs; its setup panel and first-time picker dock
+  // The pill sits on the right, after the tabs and before the header's own
+  // buttons (user decision 2026-11-15); its setup panel and first-time picker dock
   // over the terminal area. Its scope is the conversation on screen.
   const group = new RunGroupView({
     api,
@@ -1483,7 +1484,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     },
   })
   runGroup = group
-  header.insertBefore(group.element, tabsEl)
+  header.insertBefore(group.element, reloadStepButton)
   if (ownerScope !== undefined) group.setScope(ownerScope)
 
   // ── Wiring ─────────────────────────────────────────────────────────────
