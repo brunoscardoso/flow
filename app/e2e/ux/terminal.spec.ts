@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/electron'
+import { clickNewTerminal } from '../terminal-actions'
 import { sel, statusButtonByText } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import type { Page } from '@playwright/test'
@@ -93,7 +94,7 @@ test.describe('terminal flow', () => {
     await window.screenshot({ path: `${SCREEN_DIR}/terminal-02-command-output.png` })
 
     // Open a second terminal via the + button.
-    await window.locator('.fl-term-tool[aria-label="New terminal"]').click()
+    await clickNewTerminal(window)
     await expect(termTabs(window)).toHaveCount(2)
     await expect(window.locator('.fl-term-host .xterm')).toHaveCount(2)
 
@@ -133,7 +134,7 @@ test.describe('terminal flow', () => {
     // A USER gesture that opens a terminal must focus it (the boot/switch
     // auto-start deliberately does not steal focus while the activation
     // overlay is up, #683 — so drive the + button, a real user open).
-    await window.locator('.fl-term-tool[aria-label="New terminal"]').click()
+    await clickNewTerminal(window)
     await expect(window.locator('.fl-term-host:not([hidden]) .xterm-helper-textarea')).toBeFocused({
       timeout: 15000,
     })
@@ -184,7 +185,7 @@ test.describe('terminal flow', () => {
     await runCommand(window, 'echo TERM_A_ONLY', 'TERM_A_ONLY')
 
     // Open a second terminal and run a distinct command there.
-    await window.locator('.fl-term-tool[aria-label="New terminal"]').click()
+    await clickNewTerminal(window)
     await expect(termTabs(window)).toHaveCount(2)
     await expect(window.locator('.fl-term-host .xterm')).toHaveCount(2)
     await window.locator('.fl-term-host:not([hidden])').click()
@@ -223,13 +224,12 @@ test.describe('terminal flow', () => {
     await window.locator('.fl-term-host:not([hidden])').click()
     await runCommand(window, 'echo TAB_ONE', 'TAB_ONE')
 
-    const newButton = window.locator('.fl-term-tool[aria-label="New terminal"]')
-    await newButton.click()
+    await clickNewTerminal(window)
     await expect(termTabs(window)).toHaveCount(2)
     await window.locator('.fl-term-host:not([hidden])').click()
     await runCommand(window, 'echo TAB_TWO', 'TAB_TWO')
 
-    await newButton.click()
+    await clickNewTerminal(window)
     await expect(termTabs(window)).toHaveCount(3)
     await window.locator('.fl-term-host:not([hidden])').click()
     await runCommand(window, 'echo TAB_THREE', 'TAB_THREE')

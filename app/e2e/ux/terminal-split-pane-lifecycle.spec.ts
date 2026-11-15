@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '../fixtures/electron'
+import { clickNewTerminal, clickSplitTerminal } from '../terminal-actions'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { sel } from '../selectors'
 
@@ -31,8 +32,6 @@ import { sel } from '../selectors'
 
 const SCREEN_DIR = 'e2e/ux/__screens'
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
-const splitBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="Split terminal"]')
 /** The panes currently on screen — the row. */
 const panes = (win: Page) => win.locator('.fl-term-split .fl-term-host:not([hidden])')
 const rowsOf = (win: Page, i: number) => panes(win).nth(i).locator('.xterm-rows')
@@ -97,9 +96,9 @@ async function openSplitRow(win: Page): Promise<void> {
     await win.locator('.fl-editor-actions .fl-rail-item[aria-label="Terminal"]').click()
   }
   await expect(win.locator(sel.terminalRoot)).toBeVisible()
-  if ((await termTabs(win).count()) === 0) await newBtn(win).click()
+  if ((await termTabs(win).count()) === 0) await clickNewTerminal(win)
   await waitPrompt(win, 0)
-  await splitBtn(win).click()
+  await clickSplitTerminal(win)
   await expect(panes(win)).toHaveCount(2, { timeout: 20000 })
   await waitPrompt(win, 1)
   await dismissDiscoveryToast(win)
@@ -216,7 +215,7 @@ test('a tuned split ratio survives leaving and re-entering the row', async ({ wi
 
   // Leave the row: a NEW terminal opens in its own group, so the split's hosts
   // are stashed. Then come back to it — the way anyone with three terminals does.
-  await newBtn(window).click()
+  await clickNewTerminal(window)
   await expect(panes(window)).toHaveCount(1, { timeout: 20000 })
   await termTabs(window).nth(0).click()
   await expect(panes(window)).toHaveCount(2, { timeout: 20000 })

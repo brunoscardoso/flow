@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/electron'
+import { clickNewTerminal } from '../terminal-actions'
 import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import type { Page } from '@playwright/test'
@@ -39,7 +40,6 @@ const PALETTE = '.fl-settings-overlay:not([hidden]):has(.fl-palette-panel)'
 const activeHost = (win: Page) => win.locator('.fl-term-host:not([hidden])')
 const activeRows = (win: Page) => activeHost(win).locator('.xterm-rows')
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 
 async function ensureScopedShell(win: Page): Promise<void> {
   // The docked panel is no longer mounted for a fresh profile, so reveal it
@@ -50,7 +50,7 @@ async function ensureScopedShell(win: Page): Promise<void> {
   }
   await expect(win.locator(sel.terminalRoot)).toBeVisible()
   if ((await termTabs(win).count()) === 0) {
-    await newBtn(win).click()
+    await clickNewTerminal(win)
   }
   await expect(win.locator('.fl-term-host:not([hidden]) .xterm').first()).toBeVisible({
     timeout: 15000,

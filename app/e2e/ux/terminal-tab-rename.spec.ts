@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/electron'
+import { clickNewTerminal } from '../terminal-actions'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { sel } from '../selectors'
 import type { Page } from '@playwright/test'
@@ -11,13 +12,12 @@ import type { Page } from '@playwright/test'
  */
 
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 const renameInput = (win: Page) => win.locator('.fl-term-tabs .rename-input')
 
 async function ensureShellTab(win: Page): Promise<void> {
   await expect(win.locator(sel.terminalRoot)).toBeVisible()
   if ((await termTabs(win).count()) === 0) {
-    await newBtn(win).click()
+    await clickNewTerminal(win)
   }
   await expect(termTabs(win).first()).toBeVisible({ timeout: 15000 })
 }
@@ -74,7 +74,7 @@ test('right-click tab menu: Close to the Right, then Close All (#735)', async ({
 
   // Three tabs total.
   while ((await termTabs(window).count()) < 3) {
-    await newBtn(window).click()
+    await clickNewTerminal(window)
     await window.waitForTimeout(200)
   }
   await expect(termTabs(window)).toHaveCount(3)

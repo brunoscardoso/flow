@@ -1,4 +1,5 @@
 import { test, expect, dismissOnboarding } from '../fixtures/electron'
+import { clickNewTerminal, clickSplitTerminal } from '../terminal-actions'
 import { sel } from '../selectors'
 import { seedProject, activateProject, dismissFlowOverlay, cleanupSeeds } from './fixtures/seed'
 import type { ElectronApplication, Page } from '@playwright/test'
@@ -47,8 +48,6 @@ const activeRows = (win: Page) => activeHost(win).first().locator('.xterm-rows')
 const helperTextarea = (win: Page) =>
   win.locator('.fl-term-host:not([hidden]) .xterm-helper-textarea').first()
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
-const splitBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="Split terminal"]')
 /** Panes currently on screen together — the split row. */
 const panes = (win: Page) => win.locator('.fl-term-split .fl-term-host:not([hidden])')
 const renameInput = (win: Page) => win.locator('.fl-term-tabs .rename-input')
@@ -73,7 +72,7 @@ async function waitPrompt(win: Page): Promise<void> {
  *  HIDES the docked-by-default panel — #674) and wait for its first prompt. */
 async function ensureScopedShell(win: Page): Promise<void> {
   await expect(win.locator(sel.terminalRoot)).toBeVisible()
-  if ((await termTabs(win).count()) === 0) await newBtn(win).click()
+  if ((await termTabs(win).count()) === 0) await clickNewTerminal(win)
   await waitPrompt(win)
 }
 
@@ -165,7 +164,7 @@ test('a renderer reload (View ▸ Reload / ⌘R) hands back the same live shell,
  *  apart. Returns the tab count that must survive the reload. */
 async function arrangeSplitAndRename(window: Page, name: string): Promise<number> {
   await expect(panes(window)).toHaveCount(1)
-  await splitBtn(window).click()
+  await clickSplitTerminal(window)
   await expect(panes(window)).toHaveCount(2, { timeout: 20000 })
   await expect(panes(window).nth(1).locator('.xterm')).toBeVisible({ timeout: 15000 })
 

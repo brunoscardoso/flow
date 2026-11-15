@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { clickNewTerminal } from '../terminal-actions'
 import { test, expect, type Page } from '../fixtures/electron'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { sel } from '../selectors'
@@ -18,7 +19,6 @@ import { sel } from '../selectors'
  */
 
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 const activeRows = (win: Page) => win.locator('.fl-term-host:not([hidden]) .xterm-rows')
 
 const MARK_A = 'TABSWITCH_ALPHA_71'
@@ -27,7 +27,7 @@ const SCREEN_DIR = join(__dirname, "__screens/terminal-tab-switch")
 
 async function ensureShell(win: Page): Promise<void> {
   await expect(win.locator(sel.terminalRoot)).toBeVisible()
-  if ((await termTabs(win).count()) === 0) await newBtn(win).click()
+  if ((await termTabs(win).count()) === 0) await clickNewTerminal(win)
   await expect(win.locator('.fl-term-host:not([hidden]) .xterm').first()).toBeVisible({
     timeout: 15000,
   })
@@ -76,7 +76,7 @@ test('switching between two live terminal tabs isolates scrollback and keeps bot
   await runCommand(window, `echo ${MARK_A}`, MARK_A)
 
   // Tab B (index 1): a second live shell, now active, with a marker unique to B.
-  await newBtn(window).click()
+  await clickNewTerminal(window)
   await expect(termTabs(window)).toHaveCount(2)
   await expect.poll(() => activeTabIndex(window)).toBe(1)
   await runCommand(window, `echo ${MARK_B}`, MARK_B)

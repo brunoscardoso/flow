@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/electron'
+import { clickNewTerminal } from '../terminal-actions'
 import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import type { Page } from '@playwright/test'
@@ -38,7 +39,6 @@ const TAB_COUNT = 8
 const activeHost = (win: Page) => win.locator('.fl-term-host:not([hidden])')
 const activeRows = (win: Page) => activeHost(win).locator('.xterm-rows')
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 
 /** One atomic read of the strip's scroll geometry (it lives in fl-tabs' open shadow root). */
 const stripState = (win: Page) =>
@@ -81,13 +81,13 @@ const stripState = (win: Page) =>
 async function openTerminals(win: Page, total: number): Promise<void> {
   await expect(win.locator(sel.terminalRoot)).toBeVisible()
   if ((await termTabs(win).count()) === 0) {
-    await newBtn(win).click()
+    await clickNewTerminal(win)
   }
   await expect(win.locator('.fl-term-host:not([hidden]) .xterm').first()).toBeVisible({
     timeout: 15000,
   })
   while ((await termTabs(win).count()) < total) {
-    await newBtn(win).click()
+    await clickNewTerminal(win)
     await win.waitForTimeout(400)
   }
   await expect(termTabs(win)).toHaveCount(total)

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '../fixtures/electron'
+import { clickNewTerminal } from '../terminal-actions'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { sel } from '../selectors'
 
@@ -10,12 +11,11 @@ import { sel } from '../selectors'
  * close-active → auto-switch path had no e2e guard.
  */
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 const activeRows = (win: Page) => win.locator('.fl-term-host:not([hidden]) .xterm-rows')
 
 async function ensureShell(win: Page): Promise<void> {
   await expect(win.locator(sel.terminalRoot)).toBeVisible()
-  if ((await termTabs(win).count()) === 0) await newBtn(win).click()
+  if ((await termTabs(win).count()) === 0) await clickNewTerminal(win)
   await expect(win.locator('.fl-term-host:not([hidden]) .xterm').first()).toBeVisible({
     timeout: 15000,
   })
@@ -61,7 +61,7 @@ test('closing the active terminal tab auto-activates the live neighbor (no blank
   await runCommand(window, 'echo SHELL_A_LIVE', 'SHELL_A_LIVE')
 
   // Terminal B (tab 1) — a second live shell, now the active tab.
-  await newBtn(window).click()
+  await clickNewTerminal(window)
   await expect(termTabs(window)).toHaveCount(2)
   await expect.poll(() => activeTabIndex(window)).toBe(1)
 

@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/electron'
+import { clickNewTerminal } from '../terminal-actions'
 import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import type { Page } from '@playwright/test'
@@ -36,7 +37,6 @@ import type { Page } from '@playwright/test'
 const SCREEN_DIR = 'e2e/ux/__screens'
 
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const newBtn = (win: Page) => win.locator('.fl-term-tool[aria-label="New terminal"]')
 const activeHost = (win: Page) => win.locator('.fl-term-host:not([hidden])')
 const activeRows = (win: Page) => activeHost(win).locator('.xterm-rows')
 
@@ -53,7 +53,7 @@ const mainTerminals = (win: Page) =>
 async function waitForLiveShell(win: Page): Promise<void> {
   await expect(win.locator(sel.terminalRoot)).toBeVisible()
   if ((await termTabs(win).count()) === 0) {
-    await newBtn(win).click()
+    await clickNewTerminal(win)
   }
   await expect(win.locator('.fl-term-host:not([hidden]) .xterm').first()).toBeVisible({
     timeout: 15000,
@@ -133,7 +133,7 @@ test.describe('terminal — the unscoped boot shell', () => {
     expect(list.every((t) => t.projectRoot != null)).toBe(true)
 
     // `+` still opens an ADDITIONAL project-scoped shell.
-    await newBtn(window).click()
+    await clickNewTerminal(window)
     await expect(termTabs(window)).toHaveCount(2, { timeout: 15000 })
 
     expect(errors, `uncaught errors opening a project shell:\n${errors.join('\n')}`).toEqual([])
