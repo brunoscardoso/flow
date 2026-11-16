@@ -16,6 +16,7 @@ import {
   linkTagId,
   projectWorkspaceDecoration,
   reduceAsk,
+  factsSentence,
   savedSentence,
   tagFromId,
   tagsFromOpen,
@@ -315,21 +316,22 @@ describe('askStatusLine', () => {
   it('says what is happening while it works', () => {
     expect(askStatusLine(turn({ phase: 'fast', answer: null }), 0)).toEqual({ tone: 'busy', text: 'Looking at what Flow already knows…' })
     expect(askStatusLine(turn({ phase: 'fast', answer: null, stopping: true }), 0)?.text).toBe('Stopping…')
-    expect(askStatusLine(turn({ phase: 'digging', reads: 1, digElapsedMs: 12_000 }), 0)).toEqual({ tone: 'busy', text: 'Digging into the code · 1 file read · 12 s' })
-    expect(askStatusLine(turn({ phase: 'digging', reads: 14 }), 0)?.text).toBe('Digging into the code · 14 files read')
+    expect(askStatusLine(turn({ phase: 'digging', reads: 1, digElapsedMs: 12_000 }), 0)).toEqual({ tone: 'busy', text: 'Reading the code · 1 file · 12 s' })
+    expect(askStatusLine(turn({ phase: 'digging', reads: 14 }), 0)?.text).toBe('Reading the code · 14 files')
   })
 
   it('a checked Workspace answer says which projects were read; a partial one warns', () => {
-    expect(askStatusLine(turn({ answer: answer({ projectsRead: ['backend'] }) }), 0)).toEqual({ tone: 'good', text: 'Answered · read code in backend · 4 s' })
+    expect(askStatusLine(turn({ answer: answer({ projectsRead: ['backend'] }) }), 0)).toEqual({ tone: 'good', text: 'Checked against the code in backend · 4 s' })
     expect(askStatusLine(turn({ answer: answer({ projectsRead: ['backend', 'frontend'] }), changedFromFirst: true }), 0)?.text).toBe(
-      'Answered · read code in 2 projects · changed from the first answer · 4 s',
+      'Checked against the code in 2 projects · 4 s · changed from the first answer',
     )
-    expect(askStatusLine(turn({ answer: answer() }), 0)?.text).toBe('Answered · checked against the code · 4 s')
+    expect(askStatusLine(turn({ answer: answer() }), 0)?.text).toBe('Checked against the code · 4 s')
+    expect(askStatusLine(turn({ answer: answer(), reads: 6 }), 0)?.text).toBe('Checked against the code · 4 s · 6 files read')
     expect(askStatusLine(turn({ phase: 'partial', answer: answer({ partial: true, projectsRead: ['backend'] }) }), 0)).toEqual({
       tone: 'warn',
-      text: 'Partial · the code check did not finish · read code in backend · 4 s',
+      text: 'Partial · the code check did not finish · 4 s',
     })
-    expect(askStatusLine(turn({ answer: answer({ confidence: 'first' }) }), 0)).toMatchObject({ tone: 'warn', text: 'Answered · from what Flow already knows · 4 s' })
+    expect(askStatusLine(turn({ answer: answer({ confidence: 'first' }) }), 0)).toMatchObject({ tone: 'warn', text: 'From what Flow already knows · 4 s' })
   })
 
   it('a saved answer says who and when; an error and an empty turn say nothing', () => {
@@ -362,18 +364,18 @@ describe('savedSentence', () => {
   })
 
   it('a Workspace answer is saved for the Workspace and the projects it names', () => {
-    expect(savedSentence(fresh([]), WORKSPACE, nameOf)).toBe('Saved for the Workspace, where your team can find it.')
-    expect(savedSentence(fresh([CHATS_FRONT]), WORKSPACE, nameOf)).toBe('Saved for the Workspace and Frontend, where your team can find it.')
-    expect(savedSentence(fresh([CHATS_FRONT, CHATS_MOBILE]), WORKSPACE, nameOf)).toBe('Saved for the Workspace and both projects, where your team can find it.')
-    expect(savedSentence(fresh([CHATS_FRONT, CHATS_MOBILE, PROJECT_BACKEND]), WORKSPACE, nameOf)).toBe('Saved for the Workspace and 3 projects, where your team can find it.')
+    expect(savedSentence(fresh([]), WORKSPACE, nameOf)).toBe('Saved to your questions across the Workspace. Only you see it.')
+    expect(savedSentence(fresh([CHATS_FRONT]), WORKSPACE, nameOf)).toBe('Saved to your questions across the Workspace and on Frontend. Only you see it.')
+    expect(savedSentence(fresh([CHATS_FRONT, CHATS_MOBILE]), WORKSPACE, nameOf)).toBe('Saved to your questions across the Workspace and on both projects. Only you see it.')
+    expect(savedSentence(fresh([CHATS_FRONT, CHATS_MOBILE, PROJECT_BACKEND]), WORKSPACE, nameOf)).toBe('Saved to your questions across the Workspace and on 3 projects. Only you see it.')
     // A project named only by a source or a connection tag counts too.
     expect(citedProjects(fresh([{ id: linkTagId('backend', 'mobile'), kind: 'connection', label: 'x' }], [{ n: 1, label: 'S', project: 'frontend' }])).sort()).toEqual(['backend', 'frontend', 'mobile'])
   })
 
   it('a project answer keeps its own sentence, and a conversation adds the privacy note', () => {
     const project: AskScope = { kind: 'project', name: null }
-    expect(savedSentence(fresh([{ id: 'feature:chats', kind: 'feature', label: 'Chats' }]), project, nameOf)).toBe('Saved on Chats, where your team can find it.')
-    expect(savedSentence(fresh([]), project, nameOf)).toBe('Saved, where your team can find it.')
+    expect(savedSentence(fresh([{ id: 'feature:chats', kind: 'feature', label: 'Chats' }]), project, nameOf)).toBe('Saved to your questions about Chats. Only you see it.')
+    expect(savedSentence(fresh([]), project, nameOf)).toBe('Saved to your questions. Only you see it.')
     expect(savedSentence(fresh([{ id: 't', kind: 'conversation', label: 'Work' }]), WORKSPACE, nameOf)).toMatch(/Used one of your conversations \(its content stays private\)\.$/)
   })
 })
@@ -449,5 +451,19 @@ describe('savedSectionView with a Workspace pointer', () => {
     expect(view?.rows[0]).toMatchObject({ id: 'wqa-1', workspaceEntry: 'wqa-1', meta: 'Ana · just now · asked across the Workspace' })
     // The plain row beside it is untouched.
     expect(view?.rows[1]).toMatchObject({ id: 'qa-2', workspaceEntry: null, meta: 'Ana · yesterday' })
+  })
+})
+
+describe('factsSentence', () => {
+  it('names the tagged feature, else the first cited one, else the project; nothing learned says nothing', () => {
+    const label = (id: string): string | null => (id === 'feature:auth' ? 'Auth' : null)
+    expect(factsSentence(turn({ answer: answer({ factsLearned: 0 }) }), label)).toBeNull()
+    expect(factsSentence(turn({ tags: [{ id: 'feature:tenant', kind: 'feature', label: 'Tenant' }], answer: answer({ factsLearned: 2 }) }), label)).toBe(
+      '2 facts added to Tenant’s knowledge, shared with the team',
+    )
+    expect(factsSentence(turn({ answer: answer({ factsLearned: 1, sources: [{ n: 1, label: 'x', featureId: 'feature:auth' }] }) }), label)).toBe(
+      '1 fact added to Auth’s knowledge, shared with the team',
+    )
+    expect(factsSentence(turn({ answer: answer({ factsLearned: 3 }) }), label)).toBe('3 facts added to the project’s knowledge, shared with the team')
   })
 })

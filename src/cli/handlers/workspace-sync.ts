@@ -124,13 +124,13 @@ import {
   splitWorkspaceBlock,
   workspaceGitattributes,
 } from './knowledge-classes.js';
-import { type HeldKnowledge, heldKnowledgePaths } from './knowledge-landing.js';
 import { WORKSPACE_FALLBACK_BRANCH, switchWorkspaceBranch } from './workspace-branch.js';
 import { parseGitRemote, redactRemote } from './knowledge-migration.js';
 import {
   applyDecisions,
   applyResolutions,
   inspectMerge,
+  isIntentPath,
   MAX_DECISION_CONTENT,
   readDecisions,
   readMergeFacts,
@@ -240,13 +240,6 @@ export interface SyncResult {
   /** Projects whose knowledge stays in their own repository — not part of this sync. */
   skipped: SkippedProject[];
   indexes: { rebuilt: string[]; failed: { project: string; detail: string }[] };
-  /**
-   * Documents this run kept out of the commit, and why. Reported, never
-   * silent: a gate that quietly stops publishing is indistinguishable from a
-   * gate that is broken, and the person holding the draft is the only one who
-   * can finish it.
-   */
-  held: HeldKnowledge[];
   /** Team rules mirrored into checkouts after a pull (empty when nothing was pulled). */
   rules: TeamRulesReport;
   /** `full` — commit, fetch, merge, push; `commit-only` — step 1 alone. */
@@ -277,6 +270,8 @@ export interface SyncResult {
   rejection?: SyncRejection;
   /** One sentence for `offline` / `no-access` / `behind` / `ask` / `review`. */
   detail?: string;
+  /** `--put-back`: the intent document this run put back to the text it was given. */
+  putBack?: { path: string };
 }
 
 /**
@@ -327,6 +322,23 @@ export interface SyncResolve {
   take: string;
 }
 
+/**
+ * Put ONE intent document (a decision, plan or discovery) back to a given text —
+ * the app's Undo of an agent's merge, and its "keep yours / theirs" — as an
+ * ordinary new commit, which the same run then syncs. Never a force push.
+ */
+export interface SyncPutBack {
+  /** Workspace-relative path of the document. Only intent documents may be put back. */
+  path: string;
+  /**
+   * sha256 (hex) of the text the document holds NOW, as the caller last saw it.
+   * Anything else there — a teammate changed it since — refuses `stale-decision`.
+   */
+  expect: string;
+  /** `file:<path to the text>` — the only take a put-back accepts. */
+  take: string;
+}
+
 export interface SyncOptions {
   /** REQUIRED — there is no default Flow folder here (forbidden-pattern #15). */
   flowFolder: string;
@@ -336,46 +348,13 @@ export interface SyncOptions {
   workspace?: string;
   message?: string;
   resolve?: SyncResolve;
+  /** Put one intent document back to a chosen text before committing (see SyncPutBack). */
+  putBack?: SyncPutBack;
   /** Commit only: no fetch, no merge, no push. */
   commitOnly?: boolean;
   /** Where a relative `file:` path is read from. Default: the process's cwd. */
   cwd?: string;
   deps?: Partial<WorkspaceDeps>;
-}
-
-/**
- * The held documents among `staged`, with everything the selector needs read
- * off `repo` itself: a Workspace directory knows its own project list
- * (`workspace.json`) and sits two levels under the Flow folder that holds
- * `projects.local.json`. No new plumbing through the sync's call chain, and no
- * second place that derives a Workspace path (allowed-pattern #14).
- *
- * Any failure here answers "nothing is held". The gate exists to stop a draft
- * reaching a team, not to stop a sync: a Workspace whose local map is
- * unreadable must still publish the documents nobody marked.
- */
-function holdUnlandedKnowledge(git: WorkspaceGit, repo: string, staged: readonly string[]): HeldKnowledge[] {
-  try {
-    const file = JSON.parse(readFileSync(join(repo, 'workspace.json'), 'utf-8')) as {
-      projects?: { slug?: unknown; id?: unknown }[];
-    };
-    const projects = (file.projects ?? [])
-      .filter((entry) => typeof entry.slug === 'string' && typeof entry.id === 'string')
-      .map((entry) => ({ slug: entry.slug as string, id: entry.id as string }));
-    return heldKnowledgePaths(git, staged, (path) => classifyKnowledgePath(path, { root: 'workspace' }), {
-      readText: (relPath) => {
-        try {
-          return readFileSync(join(repo, relPath), 'utf-8');
-        } catch {
-          return null;
-        }
-      },
-      localProjects: readLocalProjects(dirname(dirname(repo))),
-      projects,
-    });
-  } catch {
-    return [];
-  }
 }
 
 // ─── Small helpers ──────────────────────────────────────────────────────────
@@ -802,24 +781,18 @@ function commitLocal(
   repo: string,
   message: string,
   tracking: string | null,
-  untracked: string[] = [],
-  held: HeldKnowledge[] = []
+  untracked: string[] = []
 ): SyncCommit | null {
   summarizeRoundsRecords(repo);
   git(['add', '-A', '--', '.'], repo);
   let staged: string[];
   try {
     untracked.push(...untrackLocalOnly(git, repo));
+    // Drafts are committed like any knowledge (discovery
+    // `workspace_knowledge_draft_solid`, FR-3): the team sees work in progress,
+    // tagged with its branch by its provenance, and promotion — not this
+    // commit — decides when it is solid. Nothing authored is held back here.
     staged = splitZ(git(['diff', '--cached', '--name-only', '--no-renames', '-z'], repo));
-    // A document that says it is not ready, or whose work has not reached its
-    // project's default branch, is UNSTAGED rather than excluded earlier: the
-    // file keeps its place in the working tree untouched, and a version the
-    // team already has stays as it was until the new one lands. Held, not lost.
-    held.push(...holdUnlandedKnowledge(git, repo, staged));
-    if (held.length > 0) {
-      git(['restore', '--staged', '--', ...held.map((entry) => entry.path)], repo);
-      staged = splitZ(git(['diff', '--cached', '--name-only', '--no-renames', '-z'], repo));
-    }
     // A removal publishes nothing of the file; everything else is judged.
     const published = splitZ(git(['diff', '--cached', '--name-only', '--no-renames', '--diff-filter=AMTC', '-z'], repo));
     guardPersonal([...published, ...outgoingPaths(git, repo, tracking)], {});
@@ -1359,6 +1332,66 @@ function parseResolve(resolveOption: SyncResolve, repo: string, cwd: string): Re
   });
 }
 
+// ─── The put-back flag ──────────────────────────────────────────────────────
+
+interface PutBackRequest {
+  path: string;
+  expect: string;
+  content: string;
+}
+
+function parsePutBack(option: SyncPutBack, repo: string, cwd: string): PutBackRequest {
+  const raw = option.path.trim();
+  const absolute = isAbsolute(raw) ? raw : null;
+  const path = (absolute === null ? raw : relative(repo, absolute)).replace(/\\/g, '/').replace(/^\.\//, '');
+  if (path === '' || path.startsWith('../') || path === '..' || isAbsolute(path)) {
+    throw new WorkspaceRefusal('invalid-resolution', 'the path to put back must be a file inside the Workspace', { path: raw });
+  }
+  if (!isIntentPath(path)) {
+    throw new WorkspaceRefusal('invalid-resolution', 'only a decision, plan or discovery can be put back', { path });
+  }
+  const expect = option.expect.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(expect)) {
+    throw new WorkspaceRefusal('invalid-resolution', 'say what the document holds now — the sha256 of its text', { path });
+  }
+  const take = option.take.trim();
+  if (!take.startsWith('file:')) {
+    throw new WorkspaceRefusal('invalid-resolution', 'a put-back takes file:<path> — the text to put back', { path });
+  }
+  const source = resolve(cwd, take.slice('file:'.length));
+  let content: string;
+  try {
+    if (statSync(source).size > MAX_DECISION_CONTENT) {
+      throw new WorkspaceRefusal('invalid-resolution', 'that text is too large to record', { path });
+    }
+    content = readFileSync(source, 'utf-8');
+  } catch (error) {
+    if (error instanceof WorkspaceRefusal) throw error;
+    throw new WorkspaceRefusal('invalid-resolution', `the text to put back could not be read: ${errorText(error)}`, { path });
+  }
+  return { path, expect, content };
+}
+
+/** Write the put-back text, only over exactly the text the caller saw. */
+function applyPutBack(repo: string, request: PutBackRequest): void {
+  const full = join(repo, ...request.path.split('/'));
+  if (crossesLink(repo, full) || isLink(full)) {
+    throw new WorkspaceRefusal('invalid-resolution', 'that document is not a plain file inside the Workspace', { path: request.path });
+  }
+  let current: Buffer;
+  try {
+    current = readFileSync(full);
+  } catch {
+    throw new WorkspaceRefusal('stale-decision', 'that document is no longer there, so nothing was put back', { path: request.path });
+  }
+  if (createHash('sha256').update(current).digest('hex') !== request.expect) {
+    throw new WorkspaceRefusal('stale-decision', 'that document changed since it was shown, so nothing was put back — look at it again', {
+      path: request.path,
+    });
+  }
+  atomicWriteFile(full, request.content);
+}
+
 // ─── Identity ───────────────────────────────────────────────────────────────
 
 /**
@@ -1403,6 +1436,13 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     throw new WorkspaceRefusal('not-a-git-repo', `the ${workspace.file.name} Workspace folder is not a git repository`, { workspace: workspace.slug });
   }
   const resolveRequest = options.resolve === undefined ? undefined : parseResolve(options.resolve, repo, options.cwd ?? process.cwd());
+
+  const putBackRequest = options.putBack === undefined ? undefined : parsePutBack(options.putBack, repo, options.cwd ?? process.cwd());
+  if (putBackRequest !== undefined && (resolveRequest !== undefined || options.commitOnly === true)) {
+    throw new WorkspaceRefusal('invalid-resolution', 'a put-back is its own sync — it takes neither a decision nor --commit-only', {
+      path: putBackRequest.path,
+    });
+  }
 
   if (options.commitOnly === true && resolveRequest !== undefined) {
     throw new WorkspaceRefusal('invalid-resolution', 'a decision needs the merge it answers, so it cannot be made by a commit-only run', {
@@ -1449,21 +1489,23 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
       mode: options.commitOnly === true ? 'commit-only' : 'full',
       recovered: { lock: lock.recovered, merge: recoveredMerge },
       untracked: [],
-      held: [],
     };
 
     // ── 1. Commit ──
     const adopted = adoptProjectIdentity(git, repo, flowFolder, workspace);
     if (adopted !== null) result.identity = { email: adopted, source: 'projects' };
     writeWorkspaceRepoFiles(repo);
+    if (putBackRequest !== undefined) {
+      applyPutBack(repo, putBackRequest);
+      result.putBack = { path: putBackRequest.path };
+    }
     const message = (options.message?.trim() || defaultMessage(workspace)).replace(/\s+/g, ' ').slice(0, MAX_MESSAGE_LENGTH);
     result.committed = commitLocal(
       git,
       repo,
       message,
       remote === null ? null : revParse(git, repo, trackingRef),
-      result.untracked,
-      result.held
+      result.untracked
     );
 
     if (options.commitOnly === true) {

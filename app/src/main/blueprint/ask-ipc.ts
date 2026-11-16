@@ -48,13 +48,15 @@ import type { ThreadStore } from '../store/thread-store'
 import { runGitCapturing } from '../worktree/thread-worktree-runners'
 import {
   gatherAskContext,
+  notesWithStatus,
   type AskKnowledgeHit,
   type AskNote,
   type AskResolvedScope,
   type AskScopeProject,
 } from './ask-context'
 import { refusalSentence, runAsk, type AskDeps } from './ask-orchestrator'
-import { foldActiveInvestigations } from './blueprint-observer'
+import { foldActiveInvestigations, investigationFingerprint } from './blueprint-observer'
+import { readKnowledgeStatusReader } from './knowledge-status-read'
 import type { BundledCli } from './derive-runner'
 import { runFeatures } from './feature-runner'
 import { alignLocalPaths, recentWorkspaceGraph, rememberWorkspaceGraph, runWorkspaceGraph } from './workspace-graph-runner'
@@ -305,14 +307,11 @@ export function createAskDeps(deps: AskChannelDependencies): AskDeps {
   }
 
   const readNotes = async (flowDir: string): Promise<AskNote[]> => {
-    const content = await fs
-      .readFile(join(flowDir, 'brain', '.structure', 'investigations.jsonl'), 'utf8')
-      .catch(() => '')
-    return foldActiveInvestigations(content).map((note) => ({
-      ts: note.ts,
-      text: note.text,
-      anchors: note.anchors.map((anchor) => anchor.ref),
-    }))
+    const [content, status] = await Promise.all([
+      fs.readFile(join(flowDir, 'brain', '.structure', 'investigations.jsonl'), 'utf8').catch(() => ''),
+      readKnowledgeStatusReader(flowDir),
+    ])
+    return notesWithStatus(foldActiveInvestigations(content), status, investigationFingerprint)
   }
 
   return {
@@ -473,6 +472,16 @@ export function registerAskChannels(deps: AskChannelDependencies): () => void {
         ['blueprint', 'qa', 'list', '--workspace', scope.workspace, '--target', request.rootId, ...scope.tags.flatMap((tag) => [`--tag=${tag}`]), '--json'],
         { timeoutMs: QA_READ_TIMEOUT_MS },
       )
+      const parsed = result.ok ? lastJsonObject(result.stdout) : null
+      if (parsed === null || !Array.isArray(parsed.threads)) {
+        return { ok: false, detail: withoutCommandHint(refusalSentence(result) ?? LIST_FAILED) }
+      }
+      const threads = parsed.threads.map(toSavedThread).filter((thread): thread is AskSavedThread => thread !== null)
+      return { ok: true, threads: threads.sort((a, b) => b.ts.localeCompare(a.ts)) }
+    }
+    if (request.all === true) {
+      // ONE read of every saved question — never one spawn per feature.
+      const result = await askDeps.runCli(request.rootId, ['blueprint', 'qa', 'list', '--all', '--json'], { timeoutMs: QA_READ_TIMEOUT_MS })
       const parsed = result.ok ? lastJsonObject(result.stdout) : null
       if (parsed === null || !Array.isArray(parsed.threads)) {
         return { ok: false, detail: withoutCommandHint(refusalSentence(result) ?? LIST_FAILED) }

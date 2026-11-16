@@ -151,6 +151,13 @@ test('a feature with no curated view can be drawn — and says so when it cannot
   /** Open one feature's view BY NAME — the sheet's order is not this test's business. */
   const openLevel = async (name: string): Promise<void> => {
     await openFeatureViewByName(window, name)
+    // ON A DEEP LEVEL the action lives in the Learning panel, opened from the
+    // bottom island's Knowledge (user, 2026-11-15) — open it when it is shut.
+    const slot = window.locator('.flow-board-root .fb-learn-understand')
+    if (!(await slot.isVisible().catch(() => false))) {
+      const knowledge = window.locator('.flow-board-root .fb-deep-knowledge')
+      if (await knowledge.isVisible().catch(() => false)) await knowledge.click()
+    }
     await expect(window.locator('.fb-brief-draw').first()).toBeVisible({ timeout: 60_000 })
     await window.waitForTimeout(600)
   }
@@ -170,7 +177,7 @@ test('a feature with no curated view can be drawn — and says so when it cannot
     'Understand this feature',
   )
   const barButtons = await window.evaluate(() =>
-    [...(document.querySelector('.fb-brief-headactions')?.querySelectorAll('button') ?? [])].map(
+    [...(document.querySelectorAll('.fb-brief-headactions button, .fb-learn-understand button'))].map(
       (b) => b.textContent ?? '',
     ),
   )
@@ -214,7 +221,7 @@ test('a feature with no curated view can be drawn — and says so when it cannot
   // AND STILL EXACTLY ONE slow-pass control — the pair does not come back in
   // through the door that was just reopened.
   const curatedBar = await window.evaluate(() =>
-    [...(document.querySelector('.fb-brief-headactions')?.querySelectorAll('button') ?? [])].map(
+    [...(document.querySelectorAll('.fb-brief-headactions button, .fb-learn-understand button'))].map(
       (b) => b.textContent ?? '',
     ),
   )

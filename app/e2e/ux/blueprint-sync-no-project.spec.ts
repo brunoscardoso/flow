@@ -33,14 +33,14 @@ test('the #676 fix still hides Refresh + offers Open Project… in the no-projec
   window.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`))
   await openBlueprint(window)
   const primary = window
-    .locator('.flow-board-root .fb-header fl-button')
+    .locator('.flow-board-root .fb-head-island fl-button')
     .filter({ hasText: 'Open Project…' })
   await expect(primary).toBeVisible()
   // Refresh is not offered at all: the header's Refresh was retired for every
   // state (the Learning panel's ⟳ is the board's one manual re-derive —
   // blueprint-recheck-feedback.spec.ts), so it is not even in the DOM.
   const refresh = window
-    .locator('.flow-board-root .fb-header fl-button')
+    .locator('.flow-board-root .fb-head-island fl-button')
     .filter({ hasText: 'Refresh' })
   await expect(refresh).toHaveCount(0)
   expect(errors, `uncaught errors:\n${errors.join('\n')}`).toEqual([])
@@ -58,7 +58,7 @@ test('the Sync status header button is gone — no sync claim exists in the no-p
   await openBlueprint(window)
 
   const sync = window
-    .locator('.flow-board-root .fb-header fl-button')
+    .locator('.flow-board-root .fb-head-island fl-button')
     .filter({ hasText: 'Sync status' })
   await expect(sync).toHaveCount(0)
 
@@ -68,7 +68,7 @@ test('the Sync status header button is gone — no sync claim exists in the no-p
   await expect(window.locator('.flow-board-root .fb-learn-chip')).toBeHidden()
   // The tile IS in the DOM (positive: the guard cannot pass because the selector
   // matches nothing) and has no way to be pressed.
-  const learning = window.locator('.flow-board-root .fb-header button.fb-learn-tile[aria-label="Learn"]')
+  const learning = window.locator('.flow-board-root .fb-head-island button.fb-learn-tile[aria-label="Learn"]')
   await expect(learning).toHaveCount(1)
   await expect(learning).toBeHidden()
 

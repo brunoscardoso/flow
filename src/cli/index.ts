@@ -235,7 +235,7 @@ program
   )
   .option(
     '--all',
-    'Apply to every staged candidate rather than one slug (features confirm)'
+    'Apply to every staged candidate rather than one slug (features confirm), or read every saved question (qa list)'
   )
   .option(
     '--feature <id>',
@@ -317,7 +317,7 @@ program
 const planCommand = program
   .command('plan')
   .description(
-    'Work with implementation plans (compile <plan>, archive <plan>, notes <plan>, note <plan>)'
+    'Work with implementation plans (compile <plan>, archive <plan>, notes <plan>, note <plan>, stamp <doc>)'
   );
 
 planCommand
@@ -389,6 +389,22 @@ planCommand
   .action(async (plan: string, options: import('./commands/plan.js').PlanNoteRequest & { json?: boolean }) => {
     const { runPlanNote } = await import('./commands/plan.js');
     await runPlanNote(plan, options);
+  });
+
+planCommand
+  .command('stamp <doc>')
+  .description(
+    "Record the branch and commit a discovery or plan document was written on, read off the current checkout — the one writer of its branch: and commit: keys"
+  )
+  .option('--json', 'Output JSON')
+  .option(
+    '--target <dir>',
+    'The checkout to read the branch and commit from (defaults to current directory)',
+    process.cwd()
+  )
+  .action(async (doc: string, options: { target: string; json?: boolean }) => {
+    const { runPlanStamp } = await import('./commands/plan.js');
+    await runPlanStamp(doc, options);
   });
 
 const guardCommand = program
@@ -535,12 +551,12 @@ program
 program
   .command('workspace <action>')
   .description(
-    'Workspaces — groups of projects that own their knowledge (create — a new Workspace; link — add a repo as a project and link its flow/ there; join — clone a Workspace and link the projects this machine has; status — the Workspaces here, or which Workspace and project a repo is; link-knowledge — record how two projects of the Workspace touch; links — the recorded cross-project links; describe — set a project\'s description; sync — commit, merge and push a Workspace\'s knowledge; move-flow-folder — move the Workspaces to another folder and re-point every flow link; migrate — put many repos into the Default Workspace, their knowledge copied in; rename — change a Workspace\'s name; move-project — move a project to another Workspace; delete — delete a Workspace, its projects moving to the Default; set-default — choose this machine\'s Default Workspace; set-remote — connect a Workspace to a shared repository, published by the next sync; unset-remote — disconnect it, keeping everything on this machine; branches — the branches of its shared repository, with the one to choose; set-branch — choose the branch it syncs on; learn-connections — learn how the Workspace\'s projects talk, one pair at a time)'
+    'Workspaces — groups of projects that own their knowledge (create — a new Workspace; link — add a repo as a project and link its flow/ there; join — clone a Workspace and link the projects this machine has; status — the Workspaces here, or which Workspace and project a repo is; link-knowledge — record how two projects of the Workspace touch; links — the recorded cross-project links; describe — set a project\'s description; sync — commit, merge and push a Workspace\'s knowledge; move-flow-folder — move the Workspaces to another folder and re-point every flow link; migrate — put many repos into the Default Workspace, their knowledge copied in; rename — change a Workspace\'s name; move-project — move a project to another Workspace; delete — delete a Workspace, its projects moving to the Default; set-default — choose this machine\'s Default Workspace; set-remote — connect a Workspace to a shared repository, published by the next sync; unset-remote — disconnect it, keeping everything on this machine; branches — the branches of its shared repository, with the one to choose; set-branch — choose the branch it syncs on; learn-connections — learn how the Workspace\'s projects talk, one pair at a time; promote — promote the drafts of every project checked out here whose code reached its default branch)'
   )
   .option('--name <name>', "The Workspace's name (create, rename; migrate: the Default's name when it has to be created, default Default), or its folder name on this machine (join)")
   .option('--remote <url>', "The Workspace's repository (create and set-remote record it; join clones it) — https://<host>/<owner>/<repo>, ssh://[user@]<host>/<owner>/<repo> or [user@]<host>:<owner>/<repo>, never with credentials in it")
-  .option('--target <dir>', 'The code repository (link, status, link-knowledge, links — default: the current folder for the last two)')
-  .option('--workspace <slug>', 'Which Workspace (link, status, link-knowledge, links, migrate — default: this machine\'s Default; rename, delete, set-default, set-remote, unset-remote — required) — optional when only one could be meant')
+  .option('--target <dir>', 'The code repository (link, status, link-knowledge, links — default: the current folder for the last two; promote: the Workspace this repository belongs to, instead of --workspace)')
+  .option('--workspace <slug>', 'Which Workspace (link, status, link-knowledge, links, migrate — default: this machine\'s Default; rename, delete, set-default, set-remote, unset-remote, promote — required unless promote has --target) — optional when only one could be meant')
   .option('--project <id>', "Map the repo onto this existing project, by id or folder name (link) — for forks, mirrors and repos with no remote; only this project's links (links); the project to move, by folder name or id (move-project)")
   .option('--from <address>', 'One end of a cross-project link: <project>/<feature-or-anchor>, e.g. backend/endpoint:POST /api/orders (link-knowledge); the Workspace the project moves from, when more than one has it (move-project)')
   .option('--to <address>', 'The other end: <project>/<feature-or-anchor>, e.g. app/file:src/screens/Orders.tsx (link-knowledge); the new folder, absent or empty (move-flow-folder); the Workspace the project moves to (move-project)')
@@ -562,7 +578,9 @@ program
   .option('--commit-only', 'Commit this machine\'s changes and nothing else — no fetch, merge or push (sync)')
   .option('--resolve <path>', 'Decide one waiting collision or merge, by its Workspace path (sync) — with --take')
   .option('--id <id>', 'Decide one waiting collision or merge by its id, exactly as it was shown (sync) — with --take; refused as stale-decision when its content changed since')
-  .option('--take <how>', 'What the path holds afterwards: ours | theirs | merged | file:<path to the merged text> (sync --resolve / --id)')
+  .option('--take <how>', 'What the path holds afterwards: ours | theirs | merged | file:<path to the merged text> (sync --resolve / --id); file:<path> (sync --put-back)')
+  .option('--put-back <path>', 'Put one decision, plan or discovery back to the text in --take, as a new commit, then sync (sync) — with --expect')
+  .option('--expect <sha256>', 'The sha256 of the text the document holds now, as last seen (sync --put-back) — refused as stale-decision when it changed since')
   .option('--pair <a,b>', 'Check this pair of projects, by folder name (learn-connections) — without it, the plan for every pair')
   .option('--answer <file>', "A file holding the fast model's raw answer for the pair (learn-connections --pair)")
   .option('--model <outcome>', 'How the model pass ended when there is no answer: no-signal | unavailable | failed (learn-connections --pair)')

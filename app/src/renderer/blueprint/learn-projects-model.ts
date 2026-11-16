@@ -13,7 +13,7 @@
  * (`learn:status`), which reports which project its pass belongs to, how much
  * each project has queued, and which projects are paused on their own.
  */
-import type { LearnModuleRow, LearnProgress } from './learn-progress-model'
+import type { LearnLogLine, LearnModuleRow, LearnProgress } from './learn-progress-model'
 
 /** One project as the panel is handed it. */
 export interface ProjectLearnInput {
@@ -167,7 +167,7 @@ export interface ModuleFolder {
   modules: string[]
 }
 
-export type ModuleGroupKey = 'now' | 'drift' | 'todo' | 'done' | 'ignored'
+export type ModuleGroupKey = 'updating' | 'now' | 'drift' | 'todo' | 'done' | 'ignored'
 
 export interface ModuleGroup {
   key: ModuleGroupKey
@@ -180,6 +180,7 @@ export interface ModuleGroup {
 }
 
 const GROUP_TITLES: Record<ModuleGroupKey, string> = {
+  updating: 'Updating',
   now: 'Learning now',
   drift: 'Drifted',
   todo: 'Not learned',
@@ -202,10 +203,17 @@ export function moduleGroups(
   progress: LearnProgress,
   filter = '',
   userIgnored: (module: string) => boolean = () => false,
+  /** Modules of a drifted batch being updated: they form their own first
+   *  group (`Updating`) and leave every other group while it runs. */
+  updating: readonly string[] = [],
 ): ModuleGroup[] {
   const needle = filter.trim().toLowerCase()
   const matching = progress.rows.filter((row) => needle === '' || row.module.toLowerCase().includes(needle))
-  const rows = matching.filter((row) => row.status !== 'ignored')
+  const batch = new Set(updating)
+  const batchRows = updating
+    .map((module) => matching.find((row) => row.module === module))
+    .filter((row): row is LearnModuleRow => row !== undefined && row.status !== 'ignored')
+  const rows = matching.filter((row) => row.status !== 'ignored' && !batch.has(row.module))
   const ignored = matching
     .filter((row) => row.status === 'ignored' && userIgnored(row.module))
     .sort((a, b) => a.module.localeCompare(b.module))
@@ -227,6 +235,7 @@ export function moduleGroups(
     const count = key === 'todo' ? fold.reduce((sum, entry) => sum + entry.modules.length, 0) : list.length
     if (count > 0) groups.push({ key, title: GROUP_TITLES[key], count, rows: list, folders: fold })
   }
+  add('updating', batchRows)
   add('now', now)
   add('drift', drift)
   add('todo', [], folders)
@@ -238,4 +247,246 @@ export function moduleGroups(
 /** Whether a group starts open: the work in hand is shown, what is done is folded. */
 export function groupOpenByDefault(key: ModuleGroupKey): boolean {
   return key !== 'done' && key !== 'ignored'
+}
+
+// ─── The Drifted group (mockup "Drifted, easier to update", 2026-11-16) ─────
+//
+// A summary with Update all, folders each with their own Update, checkboxes
+// for a selection, the reason on every row and a sort. Once a batch starts,
+// it becomes a progress line over the batch's rows. Reasons come from the
+// project's staleness check (main's `learn:driftReasons`): a module with no
+// known count shows no reason, never a guess.
+
+export type DriftSort = 'folder' | 'changed' | 'oldest'
+
+export const DRIFT_SORTS: ReadonlyArray<{ key: DriftSort; label: string }> = [
+  { key: 'folder', label: 'Folder' },
+  { key: 'changed', label: 'Most changed' },
+  { key: 'oldest', label: 'Oldest' },
+]
+
+export function isDriftSort(value: unknown): value is DriftSort {
+  return value === 'folder' || value === 'changed' || value === 'oldest'
+}
+
+/** Changed files per module, as main answered (module → repo-relative files). */
+export type DriftFiles = Readonly<Record<string, readonly string[]>>
+
+/** How many files changed under a module, or null when nobody knows. */
+export function driftCount(files: DriftFiles | null, module: string): number | null {
+  const list = files?.[module]
+  return list === undefined ? null : list.length
+}
+
+/** "24 files changed" — or null, so a row without a known count says nothing. */
+export function driftReason(count: number | null): string | null {
+  if (count === null || count <= 0) return null
+  return `${plural(count, 'file')} changed`
+}
+
+/** Distinct files across some modules (a parent and its child share files). */
+export function distinctFiles(files: DriftFiles | null, modules: readonly string[]): number | null {
+  if (files === null) return null
+  const set = new Set<string>()
+  let known = false
+  for (const module of modules) {
+    const list = files[module]
+    if (list === undefined) continue
+    known = true
+    for (const file of list) set.add(file)
+  }
+  return known ? set.size : null
+}
+
+/** The drifted rows in the chosen order. */
+export function sortDriftRows(rows: readonly LearnModuleRow[], files: DriftFiles | null, sort: DriftSort): LearnModuleRow[] {
+  const byName = (a: LearnModuleRow, b: LearnModuleRow): number => a.module.localeCompare(b.module)
+  const list = [...rows]
+  if (sort === 'changed') {
+    return list.sort((a, b) => (driftCount(files, b.module) ?? -1) - (driftCount(files, a.module) ?? -1) || byName(a, b))
+  }
+  if (sort === 'oldest') {
+    // A row with no time sorts last: nothing says it is old.
+    return list.sort((a, b) => {
+      if (a.notedAt === undefined || b.notedAt === undefined) {
+        return (a.notedAt === undefined ? 1 : 0) - (b.notedAt === undefined ? 1 : 0) || byName(a, b)
+      }
+      return a.notedAt.localeCompare(b.notedAt) || byName(a, b)
+    })
+  }
+  return list.sort(byName)
+}
+
+export interface DriftFolderView {
+  folder: string
+  rows: LearnModuleRow[]
+  modules: string[]
+  files: number | null
+  /** "11 modules · 96 files" — files left out when unknown. */
+  facts: string
+}
+
+/** The drifted rows by folder: largest first, rows inside by name. */
+export function driftFolders(rows: readonly LearnModuleRow[], files: DriftFiles | null): DriftFolderView[] {
+  const byFolder = new Map<string, LearnModuleRow[]>()
+  for (const row of sortDriftRows(rows, files, 'folder')) {
+    const key = folderOf(row.module)
+    byFolder.set(key, [...(byFolder.get(key) ?? []), row])
+  }
+  return [...byFolder.entries()]
+    .map(([folder, list]) => {
+      const modules = list.map((row) => row.module)
+      const count = distinctFiles(files, modules)
+      const facts = plural(modules.length, 'module') + (count === null || count === 0 ? '' : ` · ${plural(count, 'file')}`)
+      return { folder, rows: list, modules, files: count, facts }
+    })
+    .sort((a, b) => b.modules.length - a.modules.length || a.folder.localeCompare(b.folder))
+}
+
+/** The summary bar: "31 modules changed since Flow last read them · 214 files changed". */
+export function driftSummary(rows: readonly LearnModuleRow[], files: DriftFiles | null): { modules: number; files: number | null; text: string } {
+  const modules = rows.map((row) => row.module)
+  const count = distinctFiles(files, modules)
+  const lead = `${plural(modules.length, 'module')} changed since Flow last read ${modules.length === 1 ? 'it' : 'them'}`
+  return { modules: modules.length, files: count, text: count === null || count === 0 ? lead : `${lead} · ${plural(count, 'file')} changed` }
+}
+
+export type TriState = 'none' | 'some' | 'all'
+
+/** A checkbox over some modules: none, some or all of them selected. */
+export function selectionState(modules: readonly string[], selected: ReadonlySet<string>): TriState {
+  if (modules.length === 0) return 'none'
+  const picked = modules.filter((module) => selected.has(module)).length
+  if (picked === 0) return 'none'
+  return picked === modules.length ? 'all' : 'some'
+}
+
+/** Pressing a group checkbox: all selected → clear them; otherwise select all. */
+export function toggleSelection(modules: readonly string[], selected: ReadonlySet<string>): Set<string> {
+  const next = new Set(selected)
+  if (selectionState(modules, selected) === 'all') for (const module of modules) next.delete(module)
+  else for (const module of modules) next.add(module)
+  return next
+}
+
+/** Keep only what can still be selected (a module that stopped drifting drops out). */
+export function pruneSelection(selected: ReadonlySet<string>, modules: readonly string[]): Set<string> {
+  const live = new Set(modules)
+  return new Set([...selected].filter((module) => live.has(module)))
+}
+
+/**
+ * How long finished passes took this session, from the learner's own log: a
+ * `start` followed by `learned` for the same module. The only duration source
+ * there is — with no finished pass yet, there is no estimate.
+ */
+export function passDurations(log: readonly LearnLogLine[]): number[] {
+  const started = new Map<string, number>()
+  const out: number[] = []
+  for (const entry of log) {
+    if (entry.kind === 'start') started.set(entry.module, entry.at)
+    else if (entry.kind === 'learned') {
+      const at = started.get(entry.module)
+      if (at !== undefined && entry.at >= at) out.push(entry.at - at)
+      started.delete(entry.module)
+    } else if (entry.kind === 'failed' || entry.kind === 'stopped') started.delete(entry.module)
+  }
+  return out
+}
+
+/** Minutes for `count` passes at the observed mean (passes run one at a time), or null. */
+export function estimateMinutes(durations: readonly number[], count: number): number | null {
+  if (durations.length === 0 || count <= 0) return null
+  const mean = durations.reduce((sum, ms) => sum + ms, 0) / durations.length
+  return Math.max(1, Math.round((mean * count) / 60_000))
+}
+
+export function aboutMinutes(minutes: number): string {
+  return minutes < 60 ? `about ${String(minutes)} min` : `about ${(minutes / 60).toFixed(minutes < 600 ? 1 : 0)} h`
+}
+
+/** "11 selected · about 15 min" — the estimate only when there is data for it. */
+export function selectionLine(count: number, durations: readonly number[]): string {
+  const minutes = estimateMinutes(durations, count)
+  return `${String(count)} selected` + (minutes === null ? '' : ` · ${aboutMinutes(minutes)}`)
+}
+
+/** A drifted batch the reader started from the panel (kept in memory only). */
+export interface DriftBatch {
+  root: string
+  modules: string[]
+  startedAt: number
+}
+
+export type DriftBatchState = 'reading' | 'next' | 'waiting' | 'updated' | 'not-updated'
+
+export interface DriftBatchItem {
+  module: string
+  state: DriftBatchState
+  /** "reading now", "next", "waiting · 3rd", "updated", "not updated". */
+  label: string
+  notedAt?: string
+}
+
+export interface DriftBatchView {
+  total: number
+  done: number
+  outstanding: number
+  /** Nothing of the batch is reading or waiting any more. */
+  finished: boolean
+  /** "10 of 31 updated · about 25 min left". */
+  line: string
+  percent: number
+  items: DriftBatchItem[]
+}
+
+function ordinal(n: number): string {
+  const tens = n % 100
+  if (tens >= 11 && tens <= 13) return `${String(n)}th`
+  const suffix = n % 10 === 1 ? 'st' : n % 10 === 2 ? 'nd' : n % 10 === 3 ? 'rd' : 'th'
+  return `${String(n)}${suffix}`
+}
+
+/**
+ * Where a batch stands, from the learning-state rows and whether the learner
+ * still has work for the project (`busy`). A module still marked drifted
+ * while the learner is busy is waiting (its queued mark may not be written
+ * yet); once the learner is idle it was not updated (failed or stopped).
+ * Waiting order is the order the batch was queued in — the learner runs one
+ * pass at a time, first in first out.
+ */
+export function driftBatchView(batch: DriftBatch, rows: readonly LearnModuleRow[], busy: boolean, durations: readonly number[] = []): DriftBatchView {
+  const status = new Map(rows.map((row) => [row.module, row]))
+  const reading: DriftBatchItem[] = []
+  const waiting: string[] = []
+  const updated: DriftBatchItem[] = []
+  const missed: DriftBatchItem[] = []
+  for (const module of batch.modules) {
+    const row = status.get(module)
+    const state = row?.status
+    if (state === 'learning') reading.push({ module, state: 'reading', label: 'reading now' })
+    else if (state === 'queued' || ((state === 'stale' || state === 'none') && busy)) waiting.push(module)
+    else if (state === 'learned') updated.push({ module, state: 'updated', label: 'updated', notedAt: row?.notedAt })
+    else missed.push({ module, state: 'not-updated', label: 'not updated', notedAt: row?.notedAt })
+  }
+  const waitingItems = waiting.map((module, index): DriftBatchItem => {
+    const place = reading.length + index + 1
+    if (index === 0) return { module, state: 'next', label: 'next' }
+    return { module, state: 'waiting', label: `waiting · ${ordinal(place)}` }
+  })
+  updated.sort((a, b) => (b.notedAt ?? '').localeCompare(a.notedAt ?? ''))
+  const total = batch.modules.length
+  const done = updated.length
+  const outstanding = reading.length + waiting.length
+  const minutes = estimateMinutes(durations, outstanding)
+  const line = `${String(done)} of ${String(total)} updated` + (outstanding > 0 && minutes !== null ? ` · ${aboutMinutes(minutes)} left` : '')
+  return {
+    total,
+    done,
+    outstanding,
+    finished: outstanding === 0,
+    line,
+    percent: total === 0 ? 0 : (done / total) * 100,
+    items: [...reading, ...waitingItems, ...updated, ...missed],
+  }
 }

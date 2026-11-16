@@ -237,6 +237,11 @@ export function narrowFeatureNodes(rawNodes: unknown): BlueprintFeatureNode[] {
       // off-list role from a newer or a broken bundle is dropped, so the board
       // draws no icon rather than one it cannot name.
       ...withRole(n.role, n.roleSource),
+      // DRAFT OR SOLID — only the CLI's two words pass; a branch only on a draft.
+      ...(n.status === 'solid' || n.status === 'draft' ? { status: n.status } : {}),
+      ...(n.status === 'draft' && typeof n.draftBranch === 'string' && n.draftBranch.trim().length > 0
+        ? { draftBranch: n.draftBranch }
+        : {}),
     })
   }
   return nodes
@@ -298,6 +303,9 @@ function parseFeaturesJson(stdout: string): BlueprintFeatureGraph {
     // (an older CLI) stays absent; only the CLI's own words pass.
     ...(obj.importIndex === 'complete' || obj.importIndex === 'partial' || obj.importIndex === 'none'
       ? { importIndex: obj.importIndex }
+      : {}),
+    ...(typeof obj.defaultBranch === 'string' && obj.defaultBranch.trim().length > 0
+      ? { defaultBranch: obj.defaultBranch }
       : {}),
   }
 }

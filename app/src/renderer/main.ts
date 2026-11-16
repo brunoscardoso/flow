@@ -15,6 +15,7 @@ import { startProjectAccentSlots } from './project-accent-workspaces'
 import { initSettings } from './settings/settings-view'
 import { initWorkspaceDialogs } from './settings/workspace-dialogs-view'
 import { initCollisionCard } from './threads/collision-card'
+import { initIntentMergeCard } from './threads/intent-merge-card'
 import { initWorkspaceSettingsLink } from './settings/workspace-settings-link'
 import { initLsp } from './editor/lsp-bindings'
 import { initConflictCodeLens } from './editor/conflict-codelens'
@@ -241,6 +242,7 @@ if (appRoot) {
   // newly opened project, and the paused-sync collision card.
   initWorkspaceDialogs()
   initCollisionCard()
+  initIntentMergeCard()
   // A Workspace's no-access / error toast opens Settings → Workspaces.
   initWorkspaceSettingsLink(document)
   initIntegrationsSettings() // Jira / GitHub / Azure token management overlay

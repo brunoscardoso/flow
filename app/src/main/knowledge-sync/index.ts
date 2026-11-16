@@ -20,7 +20,8 @@ import {
   type WorkspaceSyncCliRunner,
   type WorkspaceSyncEngine,
 } from './workspace-sync-engine'
-import type { WorkspaceSyncStatus } from '../../shared/workspaces-contract'
+import type { IntentMergeDeps } from './intent-merge'
+import type { WorkspaceIntentMergeSet, WorkspaceSyncStatus } from '../../shared/workspaces-contract'
 
 /** Node's timers, unref'd: a pending sync never holds the process open. */
 export const realEngineTimers: EngineTimers = {
@@ -57,6 +58,12 @@ export interface WorkspaceSyncWiringDeps {
   nameOf: (slug: string) => Promise<string | null>
   /** A Workspace's status changed (broadcast it; raise the one notification a pause deserves). */
   onStatus: (slug: string, name: string | null, status: WorkspaceSyncStatus) => void
+  /** The bundled CLI for `workspace promote`, spawned with the person's PATH so the CLI reaches `gh`. */
+  runPromotionCli: WorkspaceSyncCliRunner
+  /** REQUIRED: the one-shot agent that merges two edits of an intent document. */
+  mergeIntent: IntentMergeDeps['merge']
+  /** An agent merged a pause away: raise its one notification. */
+  onIntentMerged: (slug: string, name: string | null, set: WorkspaceIntentMergeSet) => void
 }
 
 export function createWorkspaceSync(deps: WorkspaceSyncWiringDeps): WorkspaceSyncEngine {
@@ -69,6 +76,9 @@ export function createWorkspaceSync(deps: WorkspaceSyncWiringDeps): WorkspaceSyn
     timers: realEngineTimers,
     nameOf: deps.nameOf,
     onStatus: deps.onStatus,
+    runPromotionCli: deps.runPromotionCli,
+    mergeIntent: deps.mergeIntent,
+    onIntentMerged: deps.onIntentMerged,
     log: (message, detail) => console.warn(`[WorkspaceSync] ${message}`, detail ?? {}),
   })
 }

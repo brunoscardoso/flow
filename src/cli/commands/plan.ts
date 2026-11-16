@@ -1,6 +1,7 @@
 /**
- * Plan CLI commands — `planflow-ai plan compile <plan>` and
- * `planflow-ai plan archive <plan>`.
+ * Plan CLI commands — `planflow-ai plan compile <plan>`,
+ * `planflow-ai plan archive <plan>` and `planflow-ai plan stamp <doc>` (the
+ * one writer of a discovery or plan document's `branch:` / `commit:`).
  *
  * `compile` compiles a plan into its deterministic run-script artifact
  * (`flow/plans/<plan>.run.json`) via the pure compiler
@@ -29,7 +30,10 @@
  */
 
 import { existsSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path';
+import { atomicWriteFile } from '../utils/atomic-write.js';
+import { stampProvenance } from '../state/knowledge-provenance.js';
+import { writeKnowledgeStamp } from '../state/knowledge-status.js';
 import { error as logError } from '../utils/logger.js';
 import { compileRunScript } from '../state/run-compiler.js';
 import { parseFlowConfig } from '../state/flowconfig-parser.js';
@@ -355,47 +359,129 @@ export async function runPlanArchive(
   const flowDir = join(options.target, 'flow');
 
   try {
-    const planName = resolveArchivePlanName(planArg);
-
     if (!existsSync(flowDir)) {
+      resolveArchivePlanName(planArg);
       throw new Error(
         `${ARCHIVE_REFUSED_PREFIX} no flow/ directory at ${options.target}`,
       );
     }
-
-    // Capture what is actually there BEFORE the move, so the report names the
-    // artifacts that moved rather than restating the request.
-    const moved = [runScriptPath(flowDir, planName), runScriptPrevPath(flowDir, planName)]
-      .filter((filePath) => existsSync(filePath))
-      .map((filePath) => basename(filePath));
-
-    archiveRunScript(flowDir, planName);
-
-    // The LIVE rounds record is archived with its plan through the one
-    // writer (`archiveRounds`): in a Workspace the archive is shared with a
-    // team, so the archived copy is a summary with file:line references and
-    // the full record stays on this machine (FR-17).
-    const inWorkspace = locateWorkspaceProject(flowDir) !== null;
-    const roundsArchived = archiveRounds(flowDir, planFileFor(flowDir, planArg, planName), { summarize: inWorkspace });
-    if (roundsArchived !== null) {
-      process.stdout.write(`archived: ${join('flow', ARCHIVE_DIRNAME, basename(roundsArchived))}\n`);
+    const archived = archivePlanArtifacts(flowDir, planArg);
+    if (archived.rounds !== null) {
+      process.stdout.write(`archived: ${join('flow', ARCHIVE_DIRNAME, basename(archived.rounds))}\n`);
     }
-
-    // Idempotent, so every archive re-checks every archived record.
-    if (inWorkspace) {
-      for (const filePath of summarizeArchivedRounds(flowDir, { keepFull: true })) {
-        process.stdout.write(`summarized: ${join('flow', ARCHIVE_DIRNAME, basename(filePath))}\n`);
-      }
+    for (const filePath of archived.summarized) {
+      process.stdout.write(`summarized: ${join('flow', ARCHIVE_DIRNAME, basename(filePath))}\n`);
     }
-
-    if (moved.length === 0) {
-      process.stdout.write(`archive: no run-script artifacts for ${planName} — nothing to move\n`);
+    if (archived.moved.length === 0) {
+      process.stdout.write(`archive: no run-script artifacts for ${archived.planName} — nothing to move\n`);
       return;
     }
-    const destinations = moved.map((name) => join('flow', ARCHIVE_DIRNAME, name)).join(', ');
+    const destinations = archived.moved.map((name) => join('flow', ARCHIVE_DIRNAME, name)).join(', ');
     process.stdout.write(`archived: ${destinations}\n`);
   } catch (error) {
     logError(toArchiveRefusalLine(error));
+    process.exitCode = 1;
+  }
+}
+
+/** What `archivePlanArtifacts` moved. */
+export interface PlanArchiveResult {
+  planName: string;
+  /** Run-script artifact file names moved into `archive/`. */
+  moved: string[];
+  /** The archived rounds record, when there was one. */
+  rounds: string | null;
+  /** Archived rounds records summarized in this pass (Workspace only). */
+  summarized: string[];
+}
+
+/**
+ * The `plan archive` code path, callable: move a plan's run-script artifacts
+ * and its live rounds record into `flow/archive/`. `runPlanArchive` prints
+ * this; abandoned-draft promotion (`workspace promote`) calls it after
+ * archiving the plan document itself. Throws an `archive refused:` error.
+ */
+export function archivePlanArtifacts(flowDir: string, planArg: string): PlanArchiveResult {
+  const planName = resolveArchivePlanName(planArg);
+
+  // Capture what is actually there BEFORE the move, so the report names the
+  // artifacts that moved rather than restating the request.
+  const moved = [runScriptPath(flowDir, planName), runScriptPrevPath(flowDir, planName)]
+    .filter((filePath) => existsSync(filePath))
+    .map((filePath) => basename(filePath));
+
+  archiveRunScript(flowDir, planName);
+
+  // The LIVE rounds record is archived with its plan through the one
+  // writer (`archiveRounds`): in a Workspace the archive is shared with a
+  // team, so the archived copy is a summary with file:line references and
+  // the full record stays on this machine (FR-17).
+  const inWorkspace = locateWorkspaceProject(flowDir) !== null;
+  const rounds = archiveRounds(flowDir, planFileFor(flowDir, planArg, planName), { summarize: inWorkspace });
+
+  // Idempotent, so every archive re-checks every archived record.
+  const summarized = inWorkspace ? summarizeArchivedRounds(flowDir, { keepFull: true }) : [];
+  return { planName, moved, rounds, summarized };
+}
+
+// ── Stamping a document with where it was written ───────────────────────
+
+/** Prefix every `plan stamp` refusal carries. */
+const STAMP_REFUSED_PREFIX = 'stamp refused:';
+
+export interface PlanStampResult {
+  action: 'stamp';
+  /** The document, relative to the target. */
+  document: string;
+  branch: string | null;
+  commit: string;
+  /** False when the document already carried exactly this stamp. */
+  changed: boolean;
+}
+
+/**
+ * Write `branch:` and `commit:` into a discovery or plan document's
+ * frontmatter, read off the checkout at `target` — the ONE writer of those
+ * keys (discovery `workspace_knowledge_draft_solid`, FR-1). There is no flag
+ * for either value: a caller never supplies them. Throws a `stamp refused:`
+ * error, writing nothing, when the path is not such a document or the target
+ * is not a checkout with a commit.
+ */
+export function stampDocument(target: string, docArg: string): PlanStampResult {
+  const root = resolvePath(target);
+  const full = isAbsolute(docArg) ? resolvePath(docArg) : resolvePath(root, docArg);
+  const rel = relative(join(root, 'flow'), full).replace(/\\/g, '/');
+  if (!/^(discovery|plans)\/[^/]+\.md$/.test(rel)) {
+    throw new Error(`${STAMP_REFUSED_PREFIX} only a document in flow/discovery or flow/plans can be stamped, not ${docArg}`);
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(full, 'utf-8');
+  } catch {
+    throw new Error(`${STAMP_REFUSED_PREFIX} cannot read ${docArg}`);
+  }
+  const provenance = stampProvenance(root, []);
+  if (provenance.commit === null) {
+    throw new Error(`${STAMP_REFUSED_PREFIX} ${target} is not a git checkout with a commit, so there is nothing to stamp`);
+  }
+  const next = writeKnowledgeStamp(raw, { branch: provenance.branch, commit: provenance.commit });
+  const changed = next !== raw;
+  if (changed) atomicWriteFile(full, next);
+  return { action: 'stamp', document: join('flow', rel), branch: provenance.branch, commit: provenance.commit, changed };
+}
+
+/** `plan stamp <doc>` — one line (or JSON), or one `stamp refused:` line and exit 1. */
+export async function runPlanStamp(docArg: string, options: { target: string; json?: boolean }): Promise<void> {
+  try {
+    const result = stampDocument(options.target, docArg);
+    process.stdout.write(
+      options.json === true
+        ? `${JSON.stringify(result)}\n`
+        : `stamped: ${result.document} — ${result.branch ?? 'detached HEAD'} @ ${result.commit.slice(0, 12)}${result.changed ? '' : ' (unchanged)'}\n`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logError(message.startsWith(STAMP_REFUSED_PREFIX) ? message : `${STAMP_REFUSED_PREFIX} ${message}`);
     process.exitCode = 1;
   }
 }

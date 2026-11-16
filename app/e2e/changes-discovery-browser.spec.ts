@@ -211,17 +211,17 @@ function writeCorpusDocs(root: string): void {
 }
 
 /** The persisted index fixture — what the CLI's discover pass would have written. */
-function writeCorpusIndexFixture(root: string): void {
+function writeCorpusIndexFixture(root: string, entries: readonly unknown[] = INDEX_ENTRIES): void {
   const dir = join(root, 'flow', 'brain', '.derived')
   mkdirSync(dir, { recursive: true })
   writeFileSync(
     join(dir, 'corpus-index.json'),
-    `${JSON.stringify({ indexedAt: '2026-08-12T00:00:00.000Z', entries: INDEX_ENTRIES }, null, 2)}\n`,
+    `${JSON.stringify({ indexedAt: '2026-08-12T00:00:00.000Z', entries }, null, 2)}\n`,
   )
 }
 
 /** Seed everything and open the Blueprint on the root ring. */
-async function openBoard(window: Page, prefix: string): Promise<void> {
+async function openBoard(window: Page, prefix: string, entries: readonly unknown[] = INDEX_ENTRIES): Promise<void> {
   const root = await seedProject(window, prefix, (dir) => {
     writeCore(dir, AGENTS.slug, AGENTS.name)
     writeCore(dir, CHATS.slug, CHATS.name, PARTS)
@@ -235,7 +235,7 @@ async function openBoard(window: Page, prefix: string): Promise<void> {
   // re-indexed from the doc FILENAMES — which parent the discovery to no
   // feature. Seed the fixture once the project sits in its Workspace.
   await waitForLinkedStructure(window, root)
-  writeCorpusIndexFixture(root)
+  writeCorpusIndexFixture(root, entries)
   // Give the board the editor's full height: the docked terminal is visible by
   // default (#674) and, at the spec window's 900px, leaves the corpus drawer's
   // list a sliver too small to hold a row.
@@ -266,7 +266,7 @@ test('1 — drilled-node entry: pre-filter chip, clear to full list, search, arc
 
   // The top-edge control opens the browser scoped to this feature.
   // (It is a plain button on the drilled level's strip, named for what it opens.)
-  await window.getByRole('button', { name: `Open ${CHATS.name}'s changes & discoveries` }).click()
+  await window.locator('.flow-board-root .fb-float-tl').getByRole('button', { name: 'Changes & discoveries' }).click()
   await expect(window.locator(DRAWER), 'the corpus drawer did not open').toBeVisible({
     timeout: 30_000,
   })
@@ -356,7 +356,7 @@ test('2 — feature-view entry: browser button, change click-through to its brie
 
   // The header's "Changes & discoveries" button is the second entrance —
   // same browser, same pre-filter.
-  await window.locator('.flow-board-root .fb-brief-time', { hasText: 'discoveries' }).click()
+  await window.locator('.flow-board-root .fb-float-tl').getByRole('button', { name: 'Changes & discoveries' }).click()
   await expect(window.locator(DRAWER)).toBeVisible({ timeout: 30_000 })
   await expect(window.locator('.fb-corpus-chip-slug')).toHaveText(CHATS.slug)
 
@@ -372,4 +372,42 @@ test('2 — feature-view entry: browser button, change click-through to its brie
   ).toHaveText(CHANGE.name, { timeout: 60_000 })
   await expect(window.locator(DRAWER)).toHaveCount(0)
   await window.screenshot({ path: 'e2e/__screens/changes-discovery-clickthrough.png' })
+})
+
+test('3 — a feature nothing is linked to: zero badges, the board\'s sentence, and Show all lists the docs', async ({
+  window,
+}) => {
+  test.setTimeout(240_000)
+  // The shape that read as broken on a real project: the opening feature has
+  // no docs, and most of the index is linked to no feature at all.
+  const unlinkedChats = INDEX_ENTRIES.map((entry) =>
+    entry.featureSlug === CHATS.slug ? { ...entry, featureSlug: null } : entry,
+  )
+  await openBoard(window, 'flow-ux-corpus-unlinked-', unlinkedChats)
+  await diveIntoCell(window, CHATS.name)
+  await window.waitForTimeout(1200)
+  await window.locator('.flow-board-root .fb-float-tl').getByRole('button', { name: 'Changes & discoveries' }).click()
+  await expect(window.locator(DRAWER)).toBeVisible({ timeout: 30_000 })
+  await expect(window.locator('.fb-corpus-chip-slug')).toHaveText(CHATS.slug)
+
+  // THE BADGES COUNT THE FEATURE, not the project.
+  await expect(window.locator(`${DRAWER} .fb-learn-tab[data-tab="changes"]`)).toHaveText('Changes (0)')
+  await expect(window.locator(`${DRAWER} .fb-learn-tab[data-tab="discoveries"]`)).toHaveText('Discoveries (0)')
+  await expect(window.locator(`${DRAWER} .fb-corpus-row`)).toHaveCount(0)
+
+  // The empty says what is true, in the board's words, with the way out.
+  await expect(window.locator(`${DRAWER} .fb-corpus-empty .fb-corpus-notice`)).toHaveText(
+    `Nothing is linked to ${CHATS.name} yet.`,
+  )
+  await expect(window.locator(`${DRAWER} .fb-corpus-empty-note`)).toHaveText('4 of them are not linked to any feature.')
+  await expect(window.locator(`${DRAWER}`)).not.toContainText('No docs match the current filters')
+  const showAll = window.locator(`${DRAWER} .fb-corpus-showall`)
+  await expect(showAll).toHaveText('Show all 5')
+
+  await showAll.click()
+  await expect(window.locator('.fb-corpus-chip')).toHaveCount(0)
+  await expect(window.locator(`${DRAWER} .fb-learn-tab[data-tab="changes"]`)).toHaveText('Changes (4)')
+  await expect(window.locator(`${DRAWER} .fb-corpus-row`).first()).toBeVisible()
+  await expect(window.locator('.fb-corpus-nofeature summary')).toContainText('No feature · 3')
+  await expect(window.locator(`${DRAWER} .fb-corpus-empty`)).toHaveCount(0)
 })

@@ -12,7 +12,7 @@
  */
 
 import type { FlowNotification } from '../../shared/ipc-contract'
-import type { WorkspaceSyncStatus } from '../../shared/workspaces-contract'
+import type { WorkspaceIntentMergeSet, WorkspaceSyncStatus } from '../../shared/workspaces-contract'
 
 // ── Workspace sync ──────────────────────────────────────────────────────────
 
@@ -90,6 +90,54 @@ export function workspacePauseNotification(
     }
   }
   return null
+}
+
+// ── Flow merged two edits (FR-12) ──────────────────────────────────────────
+
+/** The renderer event "Undo" dispatches — puts back this computer's versions. */
+export const WORKSPACE_INTENT_UNDO_EVENT = 'flow:workspace-intent-undo'
+/** The renderer event "See both" dispatches — opens the three-pane view. */
+export const WORKSPACE_INTENT_SEE_BOTH_EVENT = 'flow:workspace-intent-see-both'
+
+/** What a sentence calls the teammate when git did not name them. */
+export const UNNAMED_TEAMMATE = 'a teammate'
+
+/**
+ * The ONE notification for one sync's agent merges, in place of the pause it
+ * replaced. Words: the documents' own titles and the teammate's git name —
+ * never a path, a command or a setting (forbidden-pattern #12).
+ */
+export function workspaceIntentMergeNotification(
+  set: WorkspaceIntentMergeSet,
+  timestamp: string,
+  name: string | null = null,
+): FlowNotification | null {
+  const documents = set.documents
+  if (documents.length === 0) return null
+  const label = name !== null && name.trim() !== '' ? name : UNNAMED_WORKSPACE_LABEL
+  const names = [...new Set(documents.map((document) => document.theirName ?? UNNAMED_TEAMMATE))]
+  const who = names.length === 1 ? names[0] : 'your teammates'
+  const detail = { slug: set.slug, mergeId: set.mergeId }
+  const [only] = documents
+  const single = documents.length === 1 && only !== undefined
+  const title = single ? `Flow merged two edits to "${only.title}"` : `Flow merged edits to ${documents.length} documents`
+  const body = single
+    ? `You and ${who} both changed this ${only.kind}. Flow combined them into one version and kept both originals.`
+    : [
+        `You and ${who} both changed these. Flow combined each into one version and kept both originals.`,
+        ...documents.map((document) => `- "${document.title}" (${document.kind})`),
+      ].join('\n')
+  return {
+    kind: 'state-change',
+    rootId: workspaceNotificationRoot(set.slug),
+    label,
+    title,
+    body,
+    timestamp,
+    level: 'info',
+    action: { label: 'Undo', event: WORKSPACE_INTENT_UNDO_EVENT, detail },
+    secondaryAction: { label: 'See both', event: WORKSPACE_INTENT_SEE_BOTH_EVENT, detail },
+  }
 }
 
 export interface WorkspacePauseNotifier {

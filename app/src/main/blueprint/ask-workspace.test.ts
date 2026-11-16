@@ -181,12 +181,13 @@ describe('resolveSources in Workspace scope', () => {
       fileExists,
     )
     expect(sources).toEqual([
-      { n: null, label: 'abs', file: 'src/chats.tsx', project: 'frontend' },
-      { n: 1, label: 'prefixed', featureId: 'feature:frontend::chats', file: 'src/chats.tsx', project: 'frontend' },
-      { n: null, label: 'bare', file: 'src/engine.ts', project: 'backend' },
-      { n: null, label: 'missing', project: 'backend' },
-      { n: 2, label: 'remote', featureId: 'feature:mobile::login', project: 'mobile' },
-      { n: null, label: 'outside' },
+      // Numbered by position, so the answer's [n] lands on the nth source.
+      { n: 1, label: 'abs', file: 'src/chats.tsx', project: 'frontend' },
+      { n: 2, label: 'prefixed', featureId: 'feature:frontend::chats', file: 'src/chats.tsx', project: 'frontend' },
+      { n: 3, label: 'bare', file: 'src/engine.ts', project: 'backend' },
+      { n: 4, label: 'missing', project: 'backend' },
+      { n: 5, label: 'remote', featureId: 'feature:mobile::login', project: 'mobile' },
+      { n: 6, label: 'outside' },
     ])
   })
 })

@@ -74,6 +74,12 @@ export interface FeatureViewPassParams {
   /** Repo-relative plan/discovery docs describing this feature. */
   planDocs?: readonly string[]
   /**
+   * Documents that live in the feature's OWN folders, passed only when those
+   * folders hold no code (a feature anchored on `docs/architecture`). Tier-2
+   * claims: the prompt says so, and the code they describe is elsewhere.
+   */
+  ownDocs?: readonly string[]
+  /**
    * The OTHER features in this project — the vocabulary a relationship may use.
    *
    * This is the pass that actually learns a feature in the IDE, so it is the
@@ -149,9 +155,11 @@ export function buildFeatureViewPrompt(input: {
   featureName: string
   rankedFiles: readonly ModuleFile[]
   planDocs?: readonly string[]
+  ownDocs?: readonly string[]
   roster?: readonly FeatureRosterEntry[]
 }): string {
   const docs = input.planDocs ?? []
+  const ownDocs = input.ownDocs ?? []
   const hasRoster = (input.roster ?? []).length > 0
   return [
     `You are drawing the architecture of the feature "${input.featureName}" for an engineer who has never seen it.`,
@@ -181,9 +189,21 @@ export function buildFeatureViewPrompt(input: {
           '',
         ]
       : []),
-    'Code (ranked; read what you need):',
-    input.rankedFiles.map((file) => `- ${file.path}`).join('\n'),
-    '',
+    ...(ownDocs.length > 0
+      ? [
+          'THIS FEATURE IS DOCUMENTATION: its folders hold no code, only the documents',
+          'below. Read them and draw what they describe. They are claims about the',
+          'code, not the code: where a document names a file, symbol or route, check',
+          'it in the repository before drawing it, and give a component an excerpt',
+          'only from a file you actually read. Say in the prose what you could not',
+          'confirm in the code.',
+          ownDocs.map((doc) => `- ${doc}`).join('\n'),
+          '',
+        ]
+      : []),
+    ...(input.rankedFiles.length > 0
+      ? ['Code (ranked; read what you need):', input.rankedFiles.map((file) => `- ${file.path}`).join('\n'), '']
+      : []),
     'RULES',
     `- At most ${String(VIEW_NODE_MAX)} components. This is a diagram, not an inventory.`,
     '- Title components the way an engineer would say them out loud: "Gateway BFF",',
@@ -500,7 +520,7 @@ export async function runFeatureViewPass(
   deps: { runSession?: typeof runCagedSession; runCli?: typeof runBundledCliCapturing } = {},
 ): Promise<FeatureViewPassResult> {
   const ranked = rankModuleFiles(params.files, params.caps)
-  if (ranked.length === 0 && (params.planDocs ?? []).length === 0) {
+  if (ranked.length === 0 && (params.planDocs ?? []).length === 0 && (params.ownDocs ?? []).length === 0) {
     return { ok: false, reason: 'this feature claims no readable files or documents' }
   }
   // A feature cannot relate to itself, so it is never handed its own name.
@@ -513,6 +533,7 @@ export async function runFeatureViewPass(
     featureName: params.featureName,
     rankedFiles: ranked,
     ...(params.planDocs !== undefined ? { planDocs: params.planDocs } : {}),
+    ...(params.ownDocs !== undefined ? { ownDocs: params.ownDocs } : {}),
     ...(roster.length > 0 ? { roster } : {}),
   })
   const runSession = deps.runSession ?? runCagedSession

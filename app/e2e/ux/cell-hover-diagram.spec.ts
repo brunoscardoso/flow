@@ -1578,13 +1578,16 @@ test('a double-click zooms while there is a level below, and opens the code stor
   test.setTimeout(600_000)
   await boot(page, app, 'flow-ux-press-')
 
-  const header = page.locator('.flow-board-root .fb-header')
+  // The level's actions ride the trail under the Ask field (mockup J3); the
+  // header is not drawn on a territory, and the Knowledge pill opens Learning.
+  const header = page.locator('.flow-board-root .fb-float-trail')
   const storyButton = header.locator('[data-feature-story]')
   const crumbOn = page.locator('.fb-story-head .fb-story-crumb.on')
 
-  // ── THE PROJECT LEVEL: the header is up (Learn in it), and carries no story. ──
+  // ── THE PROJECT LEVEL: the trail is up (Knowledge beside the map), and carries no story. ──
   await expect(header).toBeVisible()
-  await expect(header.locator('button.fb-learn-tile[aria-label="Learn"]')).toBeVisible()
+  await expect(page.locator('.flow-board-root .fb-header')).toBeHidden()
+  await expect(page.locator('.flow-board-root .fb-knowledge-pill')).toBeVisible()
   await expect(terrCell(page, FEATURE)).toBeVisible()
   await expect(storyButton).toHaveCount(0)
   // No diagram door anywhere — Learn door first (positive).
@@ -1602,11 +1605,11 @@ test('a double-click zooms while there is a level below, and opens the code stor
   await expect(page.locator('.fb-story')).toHaveCount(0)
   await expect(page.locator('[data-open-level]')).toHaveCount(0)
 
-  // ── THE FEATURE LEVEL'S HEADER: Read as a story, for the whole feature. ──
+  // ── THE FEATURE LEVEL'S HEADER: Follow the code, for the whole feature. ──
   await expect(storyButton).toHaveCount(1)
   await expect(storyButton).toBeVisible()
   await expect(storyButton).toHaveAttribute('data-feature-story', FEATURE_ID)
-  await expect(storyButton).toContainText('Read as a story')
+  await expect(storyButton).toContainText('Follow the code')
   await page.mouse.move(2, 2)
   await page.waitForTimeout(300)
   mkdirSync(SCREENS, { recursive: true })
@@ -1947,7 +1950,8 @@ test('pin & explore: Space opens a focused cell, the X closes, the title of an o
   await expect(page.locator('.fb-story')).toHaveCount(0)
   await expect(terrCell(page, PART)).toBeVisible()
 
-  // ── OPEN above the last level dives. ──
+  // ── OPEN above the last level opens the SAME feature's diagram — the one
+  //    the card showed — never its blocks (user 2026-11-15). Back is the map. ──
   await expect(async () => {
     if (!(await cell.isVisible().catch(() => false))) await page.locator('.fb-nav-btn[aria-label^="Back"]').click({ timeout: 2_000 })
     await expect(cell).toBeVisible({ timeout: 3_000 })
@@ -1955,8 +1959,51 @@ test('pin & explore: Space opens a focused cell, the X closes, the title of an o
   await page.waitForTimeout(800)
   await openCell(page, cell, true)
   await cell.locator('.fb-terr-pin-bar').getByRole('button', { name: `Open ${FEATURE}` }).click()
-  await expect(terrCell(page, PART)).toBeVisible({ timeout: 10_000 })
+  const diagramOn = page.locator('.flow-board-root .fb-deep-chrome .fb-view-switch[data-view-switch="diagram"] .fb-view-switch-btn[data-view="diagram"][aria-pressed="true"]')
+  await expect(diagramOn).toBeVisible({ timeout: 30_000 })
+  await expect(page.locator('.flow-board-root .fb-territory')).toHaveCount(0)
+  await expect(terrCell(page, PART)).toHaveCount(0)
   await expect(page.locator('.fb-story')).toHaveCount(0)
+  await page.locator('.flow-board-root .fb-nav-btn[aria-label^="Back"]').first().click()
+  await expect(cell).toBeVisible({ timeout: 30_000 })
+  await expect(terrCell(page, PART)).toHaveCount(0)
+  await expect(diagramOn).toHaveCount(0)
+})
+
+test('Blocks · Diagram: one switch on both views of a feature; a swap is not a step Back takes', async ({ window: page, app }) => {
+  test.setTimeout(600_000)
+  await boot(page, app, 'flow-ux-viewswitch-')
+  const trailSwitch = page.locator('.flow-board-root .fb-float-trail .fb-view-switch')
+  const headerSwitch = page.locator('.flow-board-root .fb-deep-chrome .fb-view-switch')
+
+  // ── THE PROJECT LEVEL is no feature: no switch, never a dead button. ──
+  await expect(terrCell(page, FEATURE)).toBeVisible()
+  await expect(page.locator('.flow-board-root .fb-view-switch')).toHaveCount(0)
+
+  // ── ON BLOCKS: the feature's parts, Blocks pressed. ──
+  await diveIntoLearning(page)
+  await expect(terrCell(page, PART)).toBeVisible()
+  await expect(trailSwitch.locator('[data-view="blocks"]')).toHaveAttribute('aria-pressed', 'true')
+  await expect(trailSwitch.locator('[data-view="diagram"]')).toHaveAttribute('aria-pressed', 'false')
+
+  // ── DIAGRAM: the same feature as its diagram, Diagram pressed. ──
+  await page.mouse.move(2, 2)
+  await trailSwitch.locator('[data-view="diagram"]').click()
+  await expect(headerSwitch.locator('[data-view="diagram"]')).toHaveAttribute('aria-pressed', 'true', { timeout: 30_000 })
+  await expect(page.locator('.flow-board-root .fb-territory')).toHaveCount(0)
+
+  // ── BLOCKS again: back on its parts, Blocks pressed. ──
+  await headerSwitch.locator('[data-view="blocks"]').click()
+  await expect(terrCell(page, PART)).toBeVisible({ timeout: 30_000 })
+  await expect(trailSwitch.locator('[data-view="blocks"]')).toHaveAttribute('aria-pressed', 'true')
+  await expect(headerSwitch).toHaveCount(0)
+
+  // ── BACK leaves the feature — it does not toggle to the diagram. ──
+  await page.locator('.flow-board-root .fb-float-trail .fb-nav-btn[aria-label^="Back"]').click()
+  await expect(terrCell(page, FEATURE)).toBeVisible({ timeout: 30_000 })
+  await expect(terrCell(page, PART)).toHaveCount(0)
+  await expect(page.locator('.flow-board-root .fb-view-switch')).toHaveCount(0)
+  await expect(page.locator('.flow-board-root .fb-territory')).toHaveCount(1)
 })
 
 test('pin & explore: the Workspace map opens its clicked feature pinned; reduced motion moves the camera without gliding', async ({ window: page, app }) => {

@@ -3,7 +3,7 @@
 
 import type { FlowNotification } from '../../shared/ipc-contract'
 
-type NotificationAction = NonNullable<FlowNotification['action']>
+type NotificationAction = NonNullable<FlowNotification['action']> | NonNullable<FlowNotification['secondaryAction']>
 
 export interface ActionEventSpec {
   type: string
@@ -15,6 +15,6 @@ export function notificationActionEvents(action: NotificationAction): ActionEven
   const events: ActionEventSpec[] = [
     action.detail === undefined ? { type: action.event } : { type: action.event, detail: { ...action.detail } },
   ]
-  if (action.openLearning === true) events.push({ type: 'flow:open-learning-panel' })
+  if ('openLearning' in action && action.openLearning === true) events.push({ type: 'flow:open-learning-panel' })
   return events
 }

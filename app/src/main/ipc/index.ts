@@ -340,6 +340,8 @@ export interface IpcDependencies {
    * Optional so tests/headless harnesses can omit it.
    */
   learnCancel?: (rootPath: string) => Promise<void>
+  /** Per-module changed files from the project's staleness check (learn:driftReasons). */
+  learnDriftReasons?: (rootPath: string, modules: readonly string[]) => Promise<Record<string, string[]> | null>
   /**
    * Wipe a root's learning-state (the Learning panel's Reset button) — every
    * module reads never-learned again; docs and investigation notes untouched.
@@ -595,6 +597,7 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
     basicDiscoveryState,
     learnLog,
     learnCancel,
+    learnDriftReasons,
     learnReset,
     brainUsage,
     classifyRoles,
@@ -1516,6 +1519,11 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
   handle('learn:pauseRoot', ({ rootId, paused }) => {
     if (typeof rootId === 'string' && rootId !== '') learnPauseRoot?.(rootId, paused === true)
     return { ok: true as const }
+  })
+  handle('learn:driftReasons', async ({ rootId, modules }) => {
+    if (!learnDriftReasons || typeof rootId !== 'string' || rootId === '' || !Array.isArray(modules)) return { ok: false, files: {} }
+    const files = await learnDriftReasons(rootId, modules.filter((module): module is string => typeof module === 'string'))
+    return files === null ? { ok: false, files: {} } : { ok: true, files }
   })
   handle('learn:cancel', async ({ rootId }) => {
     if (!learnCancel) return { ok: false }

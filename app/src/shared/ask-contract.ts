@@ -86,7 +86,11 @@ export type AskPhase =
   | { kind: 'partial' }
   | { kind: 'error'; sentence: string }
 
-/** One source an answer leans on. `n` is its number on the map, present only when it resolved to a feature or part. */
+/**
+ * One source an answer leans on. `n` is its position in the answer's list
+ * (1-based) — what the answer's `[n]` citations name; null only on records
+ * written before sources were numbered by position.
+ */
 export interface AskSource {
   n: number | null
   label: string
@@ -222,6 +226,11 @@ export interface AskListRequest {
   rootId: string
   /** Project scope. Ignored in Workspace scope. */
   featureIds: string[]
+  /**
+   * Project scope: every saved question of the project in ONE read, whatever
+   * `featureIds` says — the board's per-feature markers, read once per load.
+   */
+  all?: boolean
   /** Present = the Workspace's saved answers; absent or null = the project's. */
   workspace?: AskWorkspaceListScope | null
 }

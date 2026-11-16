@@ -53,7 +53,7 @@ import {
 import { withoutCommandHint } from '../../shared/command-hint'
 import { resolveAutoModel, type ModelRouting } from '../../shared/model-routing'
 import { extractJsonObject, type CagedSessionParams, type CliRunResult } from '../agent/learn-session'
-import type { AskContext, AskGit, AskResolvedScope, AskScopeProject, CondensedThread } from './ask-context'
+import type { AskContext, AskGit, AskNote, AskResolvedScope, AskScopeProject, CondensedThread } from './ask-context'
 
 // ── Budget ──────────────────────────────────────────────────────────────────
 
@@ -398,7 +398,8 @@ async function resolveWorkspaceSources(
     if (seen.has(key)) continue
     seen.add(key)
     resolved.push({
-      n: featureId !== undefined ? ++n : null,
+      // POSITIONAL: the answer's [n] cites the nth source it listed.
+      n: ++n,
       label: source.label,
       ...(featureId ? { featureId } : {}),
       ...(file ? { file: file.rel } : {}),
@@ -410,8 +411,9 @@ async function resolveWorkspaceSources(
 
 /**
  * Resolve sources to feature or part ids the Blueprint knows. A featureId the
- * graph does not have is dropped (the source keeps its label, without a map
- * number); a bare slug resolves when `feature:<slug>` exists. Files are kept
+ * graph does not have is dropped (the source keeps its label); a bare slug
+ * resolves when `feature:<slug>` exists. Every source is numbered by its
+ * position, so the answer's `[n]` citations land on the nth source. Files are kept
  * only when they exist here — the saved log refuses citing code that is not.
  *
  * Workspace scope (`target` is the in-scope checkouts): each file resolves to
@@ -447,7 +449,8 @@ export async function resolveSources(
     if (seen.has(key)) continue
     seen.add(key)
     resolved.push({
-      n: featureId !== undefined ? ++n : null,
+      // POSITIONAL: the answer's [n] cites the nth source it listed.
+      n: ++n,
       label: source.label,
       ...(featureId ? { featureId } : {}),
       ...(file ? { file } : {}),
@@ -480,7 +483,10 @@ function renderContext(question: string, tags: readonly string[], context: AskCo
     for (const feature of context.features) {
       const mark = feature.tagged ? ' [tagged]' : ''
       const owner = feature.partOf !== undefined ? ` (part of ${feature.partOf})` : ''
-      lines.push(`- ${feature.id}${mark}${owner} — ${feature.name} — ${feature.summary || '(no summary yet)'}`)
+      // A DRAFT IS LABELLED WHERE IT IS READ: what the agent quotes from it
+      // must say it is work in progress on that branch, never how the code works.
+      const draft = feature.draftBranch !== undefined ? ` [work in progress on ${feature.draftBranch}, not merged]` : ''
+      lines.push(`- ${feature.id}${mark}${owner}${draft} — ${feature.name} — ${feature.summary || '(no summary yet)'}`)
     }
     for (const relation of context.relations) lines.push(`- relation: ${relation.from} → ${relation.to}`)
     lines.push('')
@@ -495,10 +501,12 @@ function renderContext(question: string, tags: readonly string[], context: AskCo
   }
   if (context.notes.length > 0) {
     lines.push('## Recorded notes about the code')
-    for (const note of context.notes) {
-      const project = note.project !== undefined ? `[${note.project}] ` : ''
-      lines.push(`- ${project}${note.text.split('\n')[0]} (${note.anchors.slice(0, 3).join(', ')})`)
+    if (context.notes.some((note) => note.status === 'draft')) {
+      lines.push(
+        'A note that starts "Work in progress on <branch>" was learned on a branch that is not merged. If you use it, say "Work in progress on <branch>" and that it may change. Never present it as how the code works.',
+      )
     }
+    for (const note of context.notes) lines.push(askNoteLine(note))
     lines.push('')
   }
   for (const thread of context.threads) {
@@ -515,10 +523,38 @@ function renderContext(question: string, tags: readonly string[], context: AskCo
   return lines
 }
 
+/**
+ * THE ANSWER IS STRUCTURED MARKDOWN, so the panel formats it from structure
+ * rather than guessing from prose: a one-sentence lead on the first line,
+ * short headed sections with real lists, backticked code names, positional
+ * [n] citations and an optional "Not covered:" line. The panel's renderer
+ * (`ask-answer-model`) reads exactly this grammar and still shows plain prose.
+ */
+const EXPLANATION_RULES = [
+  'markdown for a product manager or an engineer:',
+  'line 1 is the answer in ONE sentence;',
+  'then 1 to 4 short sections, each a line starting with "### " (a heading of a few words) followed by "- " bullet lines or one short paragraph;',
+  'wrap code names (functions, types, routes, settings) and file paths in backticks;',
+  'cite a source as [n], n being its position in "sources" (1 is the first);',
+  'when part of the question could not be checked, end with one line starting "Not covered: ".',
+]
+
+const EXPLANATION_SHAPE = JSON.stringify(
+  [...EXPLANATION_RULES.slice(0, 4), 'name a feature from the list above as `feature:<slug>` in backticks;', ...EXPLANATION_RULES.slice(4)].join(' '),
+)
+
+const WORKSPACE_EXPLANATION_SHAPE = JSON.stringify(
+  [
+    ...EXPLANATION_RULES.slice(0, 4),
+    'name the project each part of it is about, and a feature from the list above as `feature:<project>::<slug>` in backticks;',
+    ...EXPLANATION_RULES.slice(4),
+  ].join(' '),
+)
+
 const RETURN_SHAPE = [
   'Return ONLY one JSON object, no prose around it:',
   '{',
-  '  "explanation": "the answer in plain words, short paragraphs, for a product manager or an engineer",',
+  `  "explanation": ${EXPLANATION_SHAPE},`,
   '  "knowledge": "enough" or "thin",',
   '  "sources": [{"label": "what the reader sees", "featureId": "feature:<slug> or feature:<slug>/<part> from the list above", "file": "repo-relative path"}],',
   '  "verdict": {"label": "e.g. Yes · medium effort", "risk": "the main risk in one sentence"} — only for a can-we-build question, else null,',
@@ -529,7 +565,7 @@ const RETURN_SHAPE = [
 const WORKSPACE_RETURN_SHAPE = [
   'Return ONLY one JSON object, no prose around it:',
   '{',
-  '  "explanation": "the answer in plain words, short paragraphs, for a product manager or an engineer; name the project each part of it is about",',
+  `  "explanation": ${WORKSPACE_EXPLANATION_SHAPE},`,
   '  "knowledge": "enough" or "thin",',
   '  "sources": [{"label": "what the reader sees", "project": "<project slug>", "featureId": "feature:<project>::<slug> or feature:<project>::<slug>/<part> from the list above", "file": "path relative to that project\'s folder"}],',
   '  "verdict": {"label": "e.g. Yes · medium effort", "risk": "the main risk in one sentence"} — only for a can-we-build question, else null,',
@@ -606,7 +642,8 @@ export function buildDigPrompt(
     '',
     ...renderContext(question, tags, context),
     ...(first !== null ? ['## A first answer from knowledge (may be wrong or thin)', first.explanation, ''] : []),
-    ...RETURN_SHAPE,
+    ...RETURN_SHAPE.slice(0, -1),
+    `${RETURN_SHAPE[RETURN_SHAPE.length - 1]},`,
     '  "facts": [{"text": "one sentence that is true of the code you read", "file": "repo-relative path you read", "symbol": "the function or type, if one"}],',
     '  "couldNotFind": "what you could not find, in one sentence" or null',
     '}',
@@ -1197,4 +1234,18 @@ async function runAskUnguarded(input: AskRunInput, deps: AskDeps): Promise<AskRe
   const outcome: AskResult['outcome'] = best.partial ? 'partial' : 'done'
   emit({ kind: outcome }, best)
   return { askId: input.askId, outcome, answer: best }
+}
+
+/**
+ * One recorded note as the prompt carries it. A draft is labelled with its
+ * branch — "Work in progress on <branch>: … Not merged yet, so this may
+ * change." — so the answer that quotes it says so (FR-9).
+ */
+export function askNoteLine(note: AskNote): string {
+  const project = note.project !== undefined ? `[${note.project}] ` : ''
+  const text = note.text.split('\n')[0]
+  const anchors = ` (${note.anchors.slice(0, 3).join(', ')})`
+  if (note.status !== 'draft') return `- ${project}${text}${anchors}`
+  const branch = note.branch ?? 'another branch'
+  return `- ${project}Work in progress on ${branch}: ${text} Not merged yet, so this may change.${anchors}`
 }

@@ -35,6 +35,7 @@ import {
   isValidAnchor,
   readJsonlLines,
 } from './store.js';
+import { LEARNED_AT_RE, repoRootOfFlowDir, stampLearnedAt } from '../state/knowledge-provenance.js';
 import type {
   Anchor,
   AnchorHashStamp,
@@ -144,8 +145,21 @@ function appendStoreLine(flowDir: string, record: Record<string, unknown>): void
  * Takes the store write lock (shared with compaction); throws the one-line
  * busy notice when the lock stays contended — nothing is written.
  */
-export function appendInvestigationNote(flowDir: string, entry: InvestigationEntry): void {
-  appendStoreLine(flowDir, { kind: 'note', ...entry });
+export function appendInvestigationNote(
+  flowDir: string,
+  entry: InvestigationEntry,
+  options: { repoRoot?: string } = {},
+): void {
+  // The writer stamps where the note was learned, from the checkout this
+  // process runs in and the files the note anchors; a caller's own
+  // `learnedAt` is dropped (discovery `workspace_knowledge_draft_solid`, FR-1).
+  const record: InvestigationEntry = { ...entry };
+  delete record.learnedAt;
+  const cited = entry.anchors.flatMap((anchor) =>
+    anchor.kind === 'file' ? [anchor.ref] : typeof anchor.file === 'string' ? [anchor.file] : [],
+  );
+  const learnedAt = stampLearnedAt(flowDir, options.repoRoot ?? repoRootOfFlowDir(flowDir), cited);
+  appendStoreLine(flowDir, { kind: 'note', ...record, ...(learnedAt === null ? {} : { learnedAt }) });
 }
 
 /**
@@ -202,6 +216,11 @@ function parseNoteRecord(record: Record<string, unknown>): InvestigationEntry | 
   }
   if (typeof record.supersedes === 'string') {
     entry.supersedes = record.supersedes;
+  }
+  // Kept through fold and compaction: a compacted note must still say where
+  // it was learned.
+  if (typeof record.learnedAt === 'string' && LEARNED_AT_RE.test(record.learnedAt)) {
+    entry.learnedAt = record.learnedAt;
   }
   return entry;
 }

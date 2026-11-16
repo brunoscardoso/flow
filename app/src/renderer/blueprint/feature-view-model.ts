@@ -72,6 +72,10 @@ export interface FeatureGraphNodeInput {
   role?: FeatureRole
   /** Who answered `role`. Present exactly when `role` is. */
   roleSource?: FeatureRoleSource
+  /** `draft` when its knowledge is not merged yet. Mirrors `BlueprintFeatureNode.status`. */
+  status?: 'solid' | 'draft'
+  /** The branch a draft was learned on. Mirrors `BlueprintFeatureNode.draftBranch`. */
+  draftBranch?: string
 }
 
 /** A `relates` edge between two features. */

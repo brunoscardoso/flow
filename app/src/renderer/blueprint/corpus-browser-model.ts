@@ -78,7 +78,24 @@ export interface CorpusBrowserView {
   /** Entries on the active tab before search/date/feature filters — lets the
    *  board render "N of M" and tell "empty index" from "filters hid it all". */
   totalInTab: number
+  /** Entries on the active tab under the FEATURE filter only (search and
+   *  dates ignored) — the M of "N of M", so a feature-scoped list never quotes
+   *  the project's total as if it were the feature's. Equals `totalInTab`
+   *  when no feature filter is on. */
+  inFeatureInTab: number
+  /** Why the list is empty, or null when it is not:
+   *  - `index`   — nothing of this kind is indexed at all;
+   *  - `feature` — the feature filter alone leaves nothing (nothing linked);
+   *  - `filters` — search or dates hid what the feature scope holds. */
+  emptyReason: CorpusEmptyReason | null
+  /** Every entry in the index, both kinds — the "Show all N" count. */
+  totalEntries: number
+  /** Entries linked to no feature, both kinds. */
+  unparented: number
 }
+
+/** See `CorpusBrowserView.emptyReason`. */
+export type CorpusEmptyReason = 'index' | 'feature' | 'filters'
 
 /** Fresh state — newest first by created date, optionally pre-filtered to the
  *  feature node the browser was opened from. */
@@ -104,16 +121,22 @@ const TAB_KIND: Record<CorpusBrowserTab, BlueprintCorpusIndexEntry['kind']> = {
   discoveries: 'discovery',
 }
 
-/** Per-tab totals over the whole index, for the tab badges. Both kinds are
- *  counted EXPLICITLY — never one derived by subtracting the other from a
- *  total, so an unknown `kind` inflates neither badge. */
-export function countCorpusTabs(entries: BlueprintCorpusIndexEntry[]): {
+/** Per-tab totals for the tab badges, under the feature filter when one is on
+ *  — a badge beside a "feature auth" chip that counts the whole project reads
+ *  as "Auth has 28 changes". Both kinds are counted EXPLICITLY — never one
+ *  derived by subtracting the other from a total, so an unknown `kind`
+ *  inflates neither badge. */
+export function countCorpusTabs(
+  entries: BlueprintCorpusIndexEntry[],
+  featureSlug: string | null = null,
+): {
   changes: number
   discoveries: number
 } {
   let changes = 0
   let discoveries = 0
   for (const entry of entries) {
+    if (featureSlug !== null && entry.featureSlug !== featureSlug) continue
     if (entry.kind === 'change') changes += 1
     else if (entry.kind === 'discovery') discoveries += 1
   }
@@ -237,9 +260,21 @@ export function deriveCorpusBrowserView(
     return a.entry.path.localeCompare(b.entry.path)
   })
 
+  const inFeatureInTab =
+    state.featureSlug === null ? inTab.length : inTab.filter((entry) => entry.featureSlug === state.featureSlug).length
+  let emptyReason: CorpusEmptyReason | null = null
+  if (visible.length === 0) {
+    if (inTab.length === 0) emptyReason = 'index'
+    else if (inFeatureInTab === 0) emptyReason = 'feature'
+    else emptyReason = 'filters'
+  }
   return {
     rows: sorted.filter((row) => row.entry.featureSlug !== null),
     noFeatureRows: sorted.filter((row) => row.entry.featureSlug === null),
     totalInTab: inTab.length,
+    inFeatureInTab,
+    emptyReason,
+    totalEntries: entries.length,
+    unparented: entries.filter((entry) => entry.featureSlug === null).length,
   }
 }

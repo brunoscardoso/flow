@@ -15,6 +15,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
@@ -314,40 +315,32 @@ describeWithGit('workspace sync against real git, two machines', () => {
   });
 
   it(
-    'holds a draft and an unlanded document out of the push, and publishes each the moment it is ready',
+    'commits and pushes a draft like any knowledge — the hold gate is retired (FR-3)',
     () => {
-      const code = join(sandbox, 'code', 'backend');
       const doc = 'projects/backend/discovery/discovery_orders_v1.md';
+      const plan = 'projects/backend/plans/plan_orders_v1.md';
       const remoteHas = (): string => git(bare, 'ls-tree', '-r', '--name-only', 'main');
+      const commit = 'b'.repeat(40);
 
-      // POSITIVE CONTROL. An ordinary unstamped document still publishes, so a
-      // missing path below is evidence of the gate and not of a broken sync (#28).
-      write(wsA, 'projects/backend/discovery/discovery_plain_v1.md', '# Plain\n');
-      expect(sync(flowA)).toMatchObject({ pushed: true });
-      expect(remoteHas()).toContain('discovery_plain_v1.md');
-
-      // 1. A DRAFT never leaves the machine, whatever its work did.
+      // A hand-written older draft, and a document stamped on a feature branch.
       write(wsA, doc, '---\nstatus: draft\n---\n# Orders\n\nStill thinking.\n');
-      const drafted = sync(flowA);
-      expect(drafted.held).toEqual([{ path: doc, project: 'backend', why: 'draft' }]);
-      expect(remoteHas()).not.toContain('discovery_orders_v1.md');
-      // Held, not lost: the file is untouched on disk.
-      expect(read(wsA, doc)).toContain('Still thinking.');
+      write(wsA, plan, `---\nbranch: feat/orders\ncommit: ${commit}\n---\n# Plan\n\nPhases.\n`);
+      const synced = sync(flowA);
 
-      // 2. Finished, but its work has not reached the default branch yet.
-      write(wsA, doc, '---\nlanded_by: run_orders\n---\n# Orders\n\nWhat it does.\n');
-      const pending = sync(flowA);
-      expect(pending.held).toEqual([{ path: doc, project: 'backend', why: 'pending' }]);
-      expect(remoteHas()).not.toContain('discovery_orders_v1.md');
-
-      // 3. The work lands on the code repo's default branch, carrying the token.
-      writeFileSync(join(code, 'orders.ts'), 'export const orders = 1\n');
-      git(code, 'add', '-A');
-      git(code, 'commit', '-q', '-m', 'feat(phase-1.task-1): orders — orders\n\nFlow-Run: run_orders');
-      const landed = sync(flowA);
-      expect(landed.held).toEqual([]);
+      // POSITIVE FIRST (#28): both ARE committed and pushed, with their text.
+      expect(synced).toMatchObject({ pushed: true });
+      expect(synced.committed?.files).toBeGreaterThanOrEqual(2);
       expect(remoteHas()).toContain('discovery_orders_v1.md');
-      expect(git(bare, 'show', `main:${doc}`)).toContain('What it does.');
+      expect(remoteHas()).toContain('plan_orders_v1.md');
+      expect(git(bare, 'show', `main:${doc}`)).toContain('Still thinking.');
+      expect(git(bare, 'show', `main:${plan}`)).toContain('branch: feat/orders');
+      // …and the result carries no hold report any more.
+      expect('held' in synced).toBe(false);
+
+      // Machine B receives them as they are — drafts the readers will tag.
+      sync(flowB);
+      expect(read(wsB, doc)).toContain('status: draft');
+      expect(read(wsB, plan)).toContain(`commit: ${commit}`);
     },
     TEST_TIMEOUT_MS
   );
@@ -523,6 +516,9 @@ describeWithGit('workspace sync against real git, two machines', () => {
         existingPath: decision,
         existing: '# Use Postgres\n\nBecause of JSONB.\n',
         incoming: '# Use Postgres\n\nBecause of the team.\n',
+        // Intent: an agent may merge it, from both sides and the base (FR-12).
+        agentMergeable: true,
+        base: '# Use Postgres\n\nBecause.\n',
         options: ['ours', 'theirs', 'file'],
       });
       // Restored: on the local commit, no merge in progress, nothing changed, nothing published.
@@ -556,12 +552,38 @@ describeWithGit('workspace sync against real git, two machines', () => {
 
       expect(sync(flowA)).toMatchObject({ state: 'synced' });
       expect(read(wsA, decision)).toBe('# Use Postgres\n\nBecause of JSONB and the team.\n');
+      // Whose edit it was: git's author of the Workspace side, for the app's sentence.
+      expect(typeof asked.asks[0].theirAuthor).toBe('string');
+
+      // PUT BACK (the app's Undo): over exactly the text last seen, as a new commit, synced.
+      const sha = (text: string): string => createHash('sha256').update(text).digest('hex');
+      const ours = join(sandbox, 'ours.md');
+      writeFileSync(ours, '# Use Postgres\n\nBecause of the team.\n');
+      const remoteBefore = remoteRefs();
+      refusalOf(
+        () => sync(flowB, { putBack: { path: decision, expect: sha('something else'), take: `file:${ours}` } }),
+        'stale-decision'
+      );
+      refusalOf(
+        () => sync(flowB, { putBack: { path: 'projects/backend/brain/features/x.md', expect: sha('x'), take: `file:${ours}` } }),
+        'invalid-resolution'
+      );
+      expect(remoteRefs()).toBe(remoteBefore);
+      expect(read(wsB, decision)).toBe('# Use Postgres\n\nBecause of JSONB and the team.\n');
+      const putBack = sync(flowB, {
+        putBack: { path: decision, expect: sha('# Use Postgres\n\nBecause of JSONB and the team.\n'), take: `file:${ours}` },
+      });
+      expect(putBack).toMatchObject({ state: 'synced', pushed: true, putBack: { path: decision } });
+      expect(putBack.committed).not.toBeNull();
+      expect(read(wsB, decision)).toBe('# Use Postgres\n\nBecause of the team.\n');
+      expect(sync(flowA)).toMatchObject({ state: 'synced' });
+      expect(read(wsA, decision)).toBe('# Use Postgres\n\nBecause of the team.\n');
     },
     TEST_TIMEOUT_MS
   );
 
   it(
-    'asks when the same feature is edited on both sides — even when git could merge it — and takes the clean merge on request',
+    'accepts a clean git merge of a feature edited on both sides, records it, and asks only when the prose conflicts (FR-11)',
     () => {
       const feature = 'projects/backend/brain/features/auth.md';
       const note = (summary: string, tail: string): string =>
@@ -572,19 +594,24 @@ describeWithGit('workspace sync against real git, two machines', () => {
       write(wsA, feature, note('Signs people in with SSO.', 'End.'));
       sync(flowA);
       write(wsB, feature, note('Signs people in.', 'End, with tokens.'));
-      const refsBefore = remoteRefs();
 
+      const merged = sync(flowB);
+      expect(merged).toMatchObject({ state: 'synced', pushed: true, asks: [] });
+      expect(merged.resolutions).toContainEqual({ kind: 'feature-rules', path: feature, rule: 'clean', dropped: 0, stale: 0 });
+      expect(read(wsB, feature)).toBe(note('Signs people in with SSO.', 'End, with tokens.'));
+      expect(read(wsB, merged.merge?.log as string)).toContain('git merged the two without a conflict, and Flow accepted it');
+
+      // The same sentence of prose changed differently on both sides: the rules cannot settle prose.
+      sync(flowA);
+      write(wsA, feature, note('Signs people in with SAML.', 'End, with tokens.'));
+      sync(flowA);
+      write(wsB, feature, note('Signs people in with OIDC.', 'End, with tokens.'));
+      const refsBefore = remoteRefs();
       const asked = sync(flowB);
       expect(asked.state).toBe('ask');
-      expect(asked.asks).toHaveLength(1);
-      expect(asked.asks[0]).toMatchObject({ kind: 'same-feature', topic: 'backend/auth', path: feature, options: ['ours', 'theirs', 'merged', 'file'] });
-      expect(asked.asks[0].merged).toContain('with SSO');
-      expect(asked.asks[0].merged).toContain('with tokens');
+      expect(asked.asks).toEqual([expect.objectContaining({ kind: 'same-feature', topic: 'backend/auth', path: feature })]);
+      expect(asked.asks[0].agentMergeable).toBeUndefined();
       expect(remoteRefs()).toBe(refsBefore);
-
-      const resolved = sync(flowB, { resolve: { path: feature, take: 'merged' } });
-      expect(resolved).toMatchObject({ state: 'synced', pushed: true });
-      expect(read(wsB, feature)).toBe(note('Signs people in with SSO.', 'End, with tokens.'));
     },
     TEST_TIMEOUT_MS
   );

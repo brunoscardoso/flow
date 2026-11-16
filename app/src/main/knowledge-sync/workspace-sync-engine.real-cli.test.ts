@@ -150,6 +150,10 @@ class ManualTimers implements EngineTimers {
         now: () => Date.now(),
         timers,
         onStatus: (_slug, _name, status) => statuses.push(status),
+        // The REAL promote verb too: a Workspace with no drafts costs no fetch and decides nothing.
+        runPromotionCli: runCli,
+        mergeIntent: async () => null,
+        onIntentMerged: () => undefined,
         // Kept so a failure says what the CLI answered.
         log: (message, detail) => logs.push({ message, detail }),
       })

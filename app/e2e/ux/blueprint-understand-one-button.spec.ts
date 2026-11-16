@@ -195,13 +195,21 @@ test('one control, and a curated view that lights the dot it earned', async ({ w
 
   // ── ONE CONTROL, where two used to stand ─────────────────────────────────
   await openFeatureViewByName(window, 'Nothing Known')
+  {
+    // ON A DEEP LEVEL the action lives in the Learning panel, opened from the
+    // bottom island's Knowledge (user, 2026-11-15) — open it when it is shut.
+    const slot = window.locator('.flow-board-root .fb-learn-understand')
+    if (!(await slot.isVisible().catch(() => false))) {
+      const knowledge = window.locator('.flow-board-root .fb-deep-knowledge')
+      if (await knowledge.isVisible().catch(() => false)) await knowledge.click()
+    }
+  }
   await expect(window.locator('.fb-brief-draw').first()).toBeVisible({ timeout: 60_000 })
   await window.waitForTimeout(800)
 
   const bar = await window.evaluate(() => {
     const buttons = [
-      ...(document.querySelector('.fb-brief-headactions')?.querySelectorAll<HTMLButtonElement>('button') ??
-        []),
+      ...(document.querySelectorAll<HTMLButtonElement>('.fb-brief-headactions button, .fb-learn-understand button')),
     ]
     const slow = document.querySelector<HTMLButtonElement>('.fb-brief-draw')
     return {
@@ -234,6 +242,15 @@ test('one control, and a curated view that lights the dot it earned', async ({ w
   // press. What must NOT happen is the first-read wording on a level that
   // already shows a picture, which reads as a button that does nothing.
   await openFeatureViewByName(window, 'Drawn Only')
+  {
+    // ON A DEEP LEVEL the action lives in the Learning panel, opened from the
+    // bottom island's Knowledge (user, 2026-11-15) — open it when it is shut.
+    const slot = window.locator('.flow-board-root .fb-learn-understand')
+    if (!(await slot.isVisible().catch(() => false))) {
+      const knowledge = window.locator('.flow-board-root .fb-deep-knowledge')
+      if (await knowledge.isVisible().catch(() => false)) await knowledge.click()
+    }
+  }
   await expect(window.locator('.fb-brief-draw').first()).toBeVisible({ timeout: 60_000 })
   await window.waitForTimeout(800)
   await window.screenshot({ path: `${SHOT}/one-button-curated.png` })
@@ -246,7 +263,7 @@ test('one control, and a curated view that lights the dot it earned', async ({ w
       title: slow?.title ?? null,
       disabled: slow?.disabled ?? null,
       labels: [
-        ...(document.querySelector('.fb-brief-headactions')?.querySelectorAll('button') ?? []),
+        ...(document.querySelectorAll('.fb-brief-headactions button, .fb-learn-understand button')),
       ].map((b) => b.textContent ?? ''),
     }
   })
@@ -274,6 +291,15 @@ test('one control, and a curated view that lights the dot it earned', async ({ w
   // reader guessing whether a re-run is worth ten minutes — and it is the only
   // argument this control will ever have.
   await openFeatureViewByName(window, 'Drifted Drawing')
+  {
+    // ON A DEEP LEVEL the action lives in the Learning panel, opened from the
+    // bottom island's Knowledge (user, 2026-11-15) — open it when it is shut.
+    const slot = window.locator('.flow-board-root .fb-learn-understand')
+    if (!(await slot.isVisible().catch(() => false))) {
+      const knowledge = window.locator('.flow-board-root .fb-deep-knowledge')
+      if (await knowledge.isVisible().catch(() => false)) await knowledge.click()
+    }
+  }
   await expect(window.locator('.fb-brief-draw').first()).toBeVisible({ timeout: 60_000 })
   await window.waitForTimeout(800)
   await window.screenshot({ path: `${SHOT}/one-button-rerun-stale.png` })

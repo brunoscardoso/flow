@@ -20,17 +20,32 @@
  *                  line-merge   any other file both sides edited that git merged
  *                               without a conflict
  *                Each one is written to `merges/<date>-<id>.md` with both sides.
- *   asks         a person decides — the merge is aborted until they have:
- *                  decision             a decision note touched on both sides — ALWAYS
- *                  same-feature         the same namespaced feature id edited on both
- *                                       sides (one file, or two files claiming one id)
+ *                  feature-rules  a feature note edited on both sides, settled by
+ *                               the draft/solid rules (discovery
+ *                               `workspace_knowledge_draft_solid`, FR-11): a
+ *                               clean git merge is accepted; conflicting
+ *                               `## Learned` / part learnings are merged as a set
+ *                               of independent lines; the same learning changed
+ *                               differently on both sides keeps both when either
+ *                               is a draft, takes the one proved by the newer
+ *                               default-branch commit when both are solid, and
+ *                               keeps both marked stale when that cannot be told
+ *   asks         a person (or, for intent, an agent) decides — the merge is aborted
+ *                until they have:
+ *                  decision             a decision note touched on both sides — ALWAYS;
+ *                                       `agentMergeable`, with the base text
+ *                  same-feature         a feature note the rules cannot settle (both
+ *                                       sides changed its prose in the same place, a
+ *                                       part's fields, hand-written lines in a machine
+ *                                       section), or two files claiming one id
  *                  overlapping-anchors  two features newly claiming the same anchor
  *                  same-discovery       one discovery slug changed on both sides where
  *                                       at least one side EDITED an existing version
- *                                       (or both edited one version and git conflicted)
+ *                                       (or both edited one version and git conflicted);
+ *                                       `agentMergeable`, with the base text
  *   reviews      any other authored file git could not merge (conflict markers,
  *                modify/delete) — both versions and the base are handed back so an
- *                agent can draft the merge.
+ *                agent can draft the merge; a plan's is flagged `agentMergeable`.
  *
  * DECIDING. Every ask and review is about ONE path of the Workspace repo and
  * is answered by what that path holds afterwards:
@@ -50,13 +65,45 @@
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
-import { featureAddress, featureExclusion, mintFeatureId, parseFeatureFile, parseFeatureId } from '../blueprint/feature-store.js';
+import {
+  LEARNED_HEADING,
+  PARTS_HEADING,
+  featureAddress,
+  featureExclusion,
+  hasUnparsedContent,
+  mintFeatureId,
+  parseFeatureFile,
+  parseFeatureId,
+  parseLearnings,
+  parseParts,
+  serializeLearnings,
+  serializeParts,
+  slugifyFeatureName,
+  splitParts,
+  type FeaturePart,
+  type Learning,
+} from '../blueprint/feature-store.js';
+import { BLUEPRINT_DIRNAME, hashFileContent } from '../blueprint/store.js';
+import { KNOWLEDGE_PROVENANCE_FILENAME, type KnowledgeProvenance } from '../state/knowledge-provenance.js';
+import {
+  KNOWLEDGE_STATUS_FILENAME,
+  appendKnowledgeStatus,
+  foldKnowledgeStatus,
+  itemStampOf,
+  knowledgeItemId,
+  resolveItemStatus,
+  type FoldedKnowledgeStatus,
+  type KnowledgeStatusEntry,
+} from '../state/knowledge-status-log.js';
+import { parseProvenanceRecords } from '../state/knowledge-status-fold.js';
 import { atomicWriteFile } from '../utils/atomic-write.js';
 import { classifyKnowledgePath } from './knowledge-classes.js';
-import { workspaceFileProblem, type WorkspaceGit } from './workspace-model.js';
+import { projectCheckout } from './knowledge-landing.js';
+import { readLocalProjects, workspaceFileProblem, type WorkspaceGit } from './workspace-model.js';
 
 // ─── Names ──────────────────────────────────────────────────────────────────
 
@@ -94,6 +141,16 @@ export interface SyncAsk {
   merged: string | null;
   /** overlapping-anchors: the anchors both sides newly claimed. */
   anchors?: string[];
+  /**
+   * An intent document (decision, discovery) an agent may merge: the app hands
+   * `base`, `existing` and `incoming` to an agent and resolves with its text.
+   * Additive — a consumer that ignores it sees the ask it always saw.
+   */
+  agentMergeable?: true;
+  /** agentMergeable only: the common ancestor's text at `path` (null when new on both sides). */
+  base?: string | null;
+  /** agentMergeable only: git's author name of the Workspace side's last change to `existingPath`. */
+  theirAuthor?: string | null;
   truncated: boolean;
   /** Every `take` this item accepts (`file` always). */
   options: Take[];
@@ -111,6 +168,10 @@ export interface SyncReview {
   incoming: string | null;
   /** The working copy with git's conflict markers, when there is one. */
   conflicted: string | null;
+  /** An intent document (a plan, a discovery, a decision) an agent may merge. Additive. */
+  agentMergeable?: true;
+  /** agentMergeable only: git's author name of the Workspace side's last change to `path`. */
+  theirAuthor?: string | null;
   truncated: boolean;
   options: Take[];
 }
@@ -128,7 +189,26 @@ export type MergeResolution =
     }
   | { kind: 'workspace-file'; path: string }
   | { kind: 'line-merge'; path: string }
+  | {
+      kind: 'feature-rules';
+      path: string;
+      /** Which rule settled it. */
+      rule: FeatureRule;
+      /** Learning lines left out because the newer default-branch commit's version won. */
+      dropped: number;
+      /** Items marked stale (kept both; to be re-learned). */
+      stale: number;
+    }
   | { kind: 'decision'; path: string; take: Take; item: string };
+
+/**
+ * `clean` — git merged the file without a conflict; `union` — the conflict was
+ * only in learning lines, and every line of both sides was kept (drafts, or
+ * different learnings); `newer-wins` — at least one solid learning was settled
+ * by the newer default-branch commit; `kept-both-stale` — at least one solid
+ * learning could not be ordered, so both were kept and marked stale.
+ */
+export type FeatureRule = 'clean' | 'union' | 'newer-wins' | 'kept-both-stale';
 
 export interface StoredDecision {
   id: string;
@@ -151,7 +231,17 @@ export type PlannedResolution =
   | { kind: 'union'; path: string; attribute: boolean; content: string | null; lines: number }
   | { kind: 'renumber'; path: string; ours: string; theirs: string; family: VersionedName; walkthrough: string | null }
   | { kind: 'workspace-file'; path: string; content: string }
-  | { kind: 'line-merge'; path: string };
+  | { kind: 'line-merge'; path: string }
+  | {
+      kind: 'feature-rules';
+      path: string;
+      /** The settled text; null = keep git's clean merge in the working tree. */
+      content: string | null;
+      rule: FeatureRule;
+      dropped: number;
+      /** Status lines to append (through `appendKnowledgeStatus`), with the knowledge folder they belong to. */
+      stale: { projectDir: string; entry: KnowledgeStatusEntry }[];
+    };
 
 /** `dir/stem_v<N>.md`. */
 interface VersionedName {
@@ -193,6 +283,16 @@ export function blobAt(git: WorkspaceGit, repo: string, rev: string, path: strin
   const out = attempt(git, ['rev-parse', '--verify', '-q', `${rev}:${path}`], repo);
   const id = out?.trim() ?? '';
   return id === '' ? null : id;
+}
+
+/**
+ * Who last changed `path` on `rev`'s side (git's author name), or null. Only
+ * asked for intent documents, so the app can say whose edit it merged.
+ */
+function authorAt(git: WorkspaceGit, repo: string, rev: string, path: string): string | null {
+  const out = attempt(git, ['log', '-1', '--format=%an', rev, '--', path], repo);
+  const name = out?.trim() ?? '';
+  return name === '' ? null : name.slice(0, 120);
 }
 
 /** `<rev>:<path>`'s text, or null when the path is absent there. */
@@ -262,6 +362,13 @@ const REFERENCE_EXTENSIONS = /\.(md|html)$/;
 
 export function isDecisionPath(path: string): boolean {
   return DECISION_PATH.test(path);
+}
+
+const PLAN_PATH = /^projects\/[^/]+\/plans\/[^/]+\.md$/;
+
+/** A decision, plan or discovery document — intent, which an agent may merge (FR-12). */
+export function isIntentPath(path: string): boolean {
+  return DECISION_PATH.test(path) || DISCOVERY_PATH.test(path) || PLAN_PATH.test(path);
 }
 
 function versionedName(path: string): VersionedName | null {
@@ -411,6 +518,325 @@ function mergeProjects(base: unknown, ours: unknown, theirs: unknown): unknown[]
   return out;
 }
 
+// ─── Feature notes: the draft/solid rules (FR-11) ──────────────────────────
+
+/** What proved a solid learning: the default-branch commit and its time, when known. */
+interface Evidence {
+  commit: string | null;
+  ts: string | null;
+}
+
+/** One learning line, with what the status store says about it. */
+interface LineInfo {
+  item: string;
+  status: 'solid' | 'draft' | 'abandoned';
+  stamped: boolean;
+  provenance: KnowledgeProvenance | null;
+  folded: FoldedKnowledgeStatus | undefined;
+  evidence: Evidence;
+}
+
+const COMMIT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+const STRUCTURE_DIR = BLUEPRINT_DIRNAME.replace(/\\/g, '/');
+
+/**
+ * Answers "draft or solid, and proved by which commit?" for a learning line
+ * during a merge, from BOTH sides' status logs and provenance records — the
+ * union a finished merge will hold. Read once per project, lazily. Read-only.
+ */
+class StatusOracle {
+  readonly #facts: MergeFacts;
+  readonly #stores = new Map<string, { folded: Map<string, FoldedKnowledgeStatus>; records: Map<string, KnowledgeProvenance> }>();
+  readonly #checkouts = new Map<string, string | null>();
+  #fallback: string | null | undefined;
+
+  constructor(facts: MergeFacts) {
+    this.#facts = facts;
+  }
+
+  #store(project: string): { folded: Map<string, FoldedKnowledgeStatus>; records: Map<string, KnowledgeProvenance> } {
+    const cached = this.#stores.get(project);
+    if (cached !== undefined) return cached;
+    const { git, repo } = this.#facts;
+    const both = (name: string): string =>
+      [this.#facts.ours, this.#facts.theirs].map((rev) => textAt(git, repo, rev, `projects/${project}/${STRUCTURE_DIR}/${name}`) ?? '').join('\n');
+    const store = {
+      folded: foldKnowledgeStatus(both(KNOWLEDGE_STATUS_FILENAME).split('\n')),
+      records: parseProvenanceRecords(both(KNOWLEDGE_PROVENANCE_FILENAME), (text) => hashFileContent(text)),
+    };
+    this.#stores.set(project, store);
+    return store;
+  }
+
+  info(project: string, kind: 'learning' | 'part-learning', scope: string, entry: Learning): LineInfo {
+    const { folded, records } = this.#store(project);
+    const stamp = itemStampOf(entry.learnedAt, records);
+    const item = knowledgeItemId({ kind, scope, text: entry.text, learnedAt: entry.learnedAt ?? null });
+    const decided = stamp.kind === 'stamped' ? folded.get(item) : undefined;
+    const resolved = resolveItemStatus(stamp, decided);
+    const provenance = stamp.kind === 'stamped' ? stamp.provenance : null;
+    let evidence: Evidence = { commit: null, ts: null };
+    if (decided !== undefined && decided.status !== 'draft') evidence = { commit: decided.entry.commit, ts: decided.entry.ts };
+    else if (provenance?.onDefault === true) evidence = { commit: provenance.commit, ts: null };
+    return { item, status: resolved.status, stamped: stamp.kind === 'stamped', provenance, folded: decided, evidence };
+  }
+
+  /** The project's code checkout on this machine, or null. */
+  #checkout(project: string): string | null {
+    if (this.#checkouts.has(project)) return this.#checkouts.get(project) ?? null;
+    let checkout: string | null = null;
+    try {
+      const file = JSON.parse(readFileSync(join(this.#facts.repo, 'workspace.json'), 'utf-8')) as { projects?: { slug?: unknown; id?: unknown }[] };
+      const projects = (file.projects ?? [])
+        .filter((entry) => typeof entry.slug === 'string' && typeof entry.id === 'string')
+        .map((entry) => ({ slug: entry.slug as string, id: entry.id as string }));
+      checkout = projectCheckout(readLocalProjects(dirname(dirname(this.#facts.repo))), projects, project);
+      if (checkout !== null && !existsSync(checkout)) checkout = null;
+    } catch {
+      checkout = null;
+    }
+    this.#checkouts.set(project, checkout);
+    return checkout;
+  }
+
+  /**
+   * Which evidence is newer on the default branch: commit order in the
+   * project's checkout when this machine has it, else the evidence times.
+   * `same` for one commit; null when it cannot be told.
+   */
+  order(project: string, a: Evidence, b: Evidence): 'a' | 'b' | 'same' | null {
+    if (a.commit !== null && a.commit === b.commit) return 'same';
+    const checkout = this.#checkout(project);
+    if (checkout !== null && a.commit !== null && b.commit !== null && COMMIT_ID.test(a.commit) && COMMIT_ID.test(b.commit)) {
+      const isAncestor = (x: string, y: string): boolean =>
+        attempt(this.#facts.git, ['merge-base', '--is-ancestor', x, y], checkout) !== null;
+      if (isAncestor(a.commit, b.commit)) return 'b';
+      if (isAncestor(b.commit, a.commit)) return 'a';
+    }
+    if (a.ts !== null && b.ts !== null && a.ts !== b.ts) return a.ts > b.ts ? 'a' : 'b';
+    return null;
+  }
+
+  /**
+   * The time a stale line carries when its item has no decided line to take
+   * one from: the merge base's committer date — the same on both machines of
+   * a symmetric merge, so their lines agree.
+   */
+  fallbackTs(): string | null {
+    if (this.#fallback === undefined) {
+      const out = attempt(this.#facts.git, ['show', '-s', '--format=%cI', this.#facts.base], this.#facts.repo)?.trim() ?? '';
+      this.#fallback = Number.isNaN(Date.parse(out)) ? null : out;
+    }
+    return this.#fallback;
+  }
+}
+
+/** What one feature settlement collected on the way. */
+interface Settling {
+  project: string;
+  oracle: StatusOracle;
+  rules: Set<FeatureRule>;
+  dropped: number;
+  stale: { projectDir: string; entry: KnowledgeStatusEntry }[];
+}
+
+function learningKey(entry: Learning): string {
+  return serializeLearnings([entry]).trim();
+}
+
+/**
+ * Merge three versions of a list of learnings. Every line is an independent
+ * entry: a line either side added is kept, a line either side removed since
+ * the base stays removed. The SAME learning — one sentence whose line each
+ * side changed differently — is settled by status: a draft on either side
+ * keeps both; two solid lines take the one proved by the newer default-branch
+ * commit; one that cannot be ordered keeps both and marks them stale.
+ */
+function mergeLearnings(
+  settling: Settling,
+  kind: 'learning' | 'part-learning',
+  scope: string,
+  base: readonly Learning[],
+  ours: readonly Learning[],
+  theirs: readonly Learning[]
+): Learning[] {
+  const toMap = (list: readonly Learning[]): Map<string, Learning> => new Map(list.map((entry) => [learningKey(entry), entry]));
+  const [b, o, t] = [toMap(base), toMap(ours), toMap(theirs)];
+  const kept = new Map<string, Learning>();
+  for (const [key, entry] of [...o, ...t]) {
+    if (kept.has(key)) continue;
+    if (b.has(key) && (!o.has(key) || !t.has(key))) continue; // removed since the base by one side
+    kept.set(key, entry);
+  }
+
+  const byText = new Map<string, string[]>();
+  for (const [key, entry] of kept) byText.set(entry.text, [...(byText.get(entry.text) ?? []), key]);
+  for (const keys of byText.values()) {
+    const oursOnly = keys.filter((key) => o.has(key) && !t.has(key));
+    const theirsOnly = keys.filter((key) => t.has(key) && !o.has(key));
+    if (oursOnly.length === 0 || theirsOnly.length === 0) continue;
+    const info = (key: string): LineInfo => settling.oracle.info(settling.project, kind, scope, kept.get(key) as Learning);
+    const oursInfo = oursOnly.map(info);
+    const theirsInfo = theirsOnly.map(info);
+    if ([...oursInfo, ...theirsInfo].some((line) => line.status !== 'solid')) {
+      settling.rules.add('union'); // draft vs draft, draft vs solid: both kept
+      continue;
+    }
+    const verdict =
+      oursInfo.length === 1 && theirsInfo.length === 1
+        ? settling.oracle.order(settling.project, oursInfo[0].evidence, theirsInfo[0].evidence)
+        : null;
+    if (verdict === 'a' || verdict === 'b') {
+      for (const key of verdict === 'a' ? theirsOnly : oursOnly) kept.delete(key);
+      settling.dropped += verdict === 'a' ? theirsOnly.length : oursOnly.length;
+      settling.rules.add('newer-wins');
+      continue;
+    }
+    settling.rules.add('kept-both-stale');
+    const reason = verdict === 'same' ? 'merge-same-commit' : 'merge-undecidable';
+    for (const line of [...oursInfo, ...theirsInfo]) {
+      // An unstamped learning resolves as solid whatever the log says; a line for it would change nothing.
+      if (!line.stamped) continue;
+      const ts = line.folded?.entry.ts ?? settling.oracle.fallbackTs();
+      if (ts === null) continue;
+      const commit = line.evidence.commit !== null && COMMIT_ID.test(line.evidence.commit) ? line.evidence.commit : null;
+      settling.stale.push({
+        projectDir: `projects/${settling.project}`,
+        entry: { item: line.item, status: 'stale', branch: line.provenance?.branch ?? null, commit, reason, ts },
+      });
+    }
+  }
+  return [...kept.values()];
+}
+
+/** Three-way pick of a value by its JSON; `undefined` = changed differently on both sides. */
+function pickSame<T>(base: T, ours: T, theirs: T): { value: T } | undefined {
+  return pick3(base, ours, theirs) as { value: T } | undefined;
+}
+
+/** A region as lines that carry content, so a re-serialization compares equal to the file. */
+function regionShape(text: string | null): string {
+  return (text ?? '')
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+    .join('\n');
+}
+
+const PART_FIELDS = ['summary', 'anchors', 'home', 'role', 'learnedRole'] as const;
+
+/** Merge three `## Parts` regions part by part, by name. Null when a part's own fields conflict. */
+function mergePartLists(settling: Settling, slug: string, base: FeaturePart[], ours: FeaturePart[], theirs: FeaturePart[]): FeaturePart[] | null {
+  const byName = (list: FeaturePart[]): Map<string, FeaturePart> => new Map(list.map((part) => [part.name, part]));
+  const [b, o, t] = [byName(base), byName(ours), byName(theirs)];
+  const names = [...new Set([...t.keys(), ...o.keys()])];
+  const out: FeaturePart[] = [];
+  for (const name of names) {
+    const [bp, op, tp] = [b.get(name), o.get(name), t.get(name)];
+    if (op === undefined || tp === undefined) {
+      const present = (op ?? tp) as FeaturePart;
+      if (bp === undefined) {
+        out.push(present); // added on one side
+        continue;
+      }
+      // Removed on one side: fine when the other left it as it was; a person decides otherwise.
+      if (JSON.stringify(present) === JSON.stringify(bp)) continue;
+      return null;
+    }
+    const merged: FeaturePart = { name, summary: '', anchors: [], learnings: [] };
+    for (const field of PART_FIELDS) {
+      const picked = pickSame<unknown>(bp?.[field], op[field], tp[field]);
+      if (picked === undefined) return null;
+      if (picked.value !== undefined) (merged as unknown as Record<string, unknown>)[field] = picked.value;
+    }
+    merged.learnings = mergeLearnings(settling, 'part-learning', `${slug}/${slugifyFeatureName(name)}`, bp?.learnings ?? [], op.learnings, tp.learnings);
+    out.push(merged);
+  }
+  return out;
+}
+
+/**
+ * git's own three-way merge of one region of text (`git merge-file`), run on
+ * temporary copies outside the repository. Null when it conflicts.
+ */
+function mergeText3(git: WorkspaceGit, base: string, ours: string, theirs: string): string | null {
+  if (ours === theirs || theirs === base) return ours;
+  if (ours === base) return theirs;
+  const dir = mkdtempSync(join(tmpdir(), 'pf-merge-'));
+  try {
+    const [o, b, t] = [join(dir, 'ours'), join(dir, 'base'), join(dir, 'theirs')];
+    writeFileSync(o, ours);
+    writeFileSync(b, base);
+    writeFileSync(t, theirs);
+    return attempt(git, ['merge-file', '-p', '--quiet', o, b, t], dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Settle a feature note edited on both sides by the rules, or return null for
+ * a person: a clean git merge is accepted as it is; a conflict is settled when
+ * it lies only in learning lines (`## Learned`, part learnings) — the prose
+ * above the heading, a part's own fields, a machine section holding
+ * hand-written lines, or a file deleted on one side are not the rules' to
+ * decide. READ-ONLY: the text and the status lines are applied later.
+ */
+function settleFeatureFile(facts: MergeFacts, path: string, sides: Sides, isConflict: boolean, oracle: StatusOracle): PlannedResolution | null {
+  if (!isConflict) return { kind: 'feature-rules', path, content: null, rule: 'clean', dropped: 0, stale: [] };
+  if (sides.ours === null || sides.theirs === null) return null;
+  const match = FEATURE_PATH.exec(path);
+  if (match === null) return null;
+  const [, project, slug] = match;
+  type Regions = ReturnType<typeof splitParts>;
+  let regions: [Regions, Regions, Regions];
+  try {
+    const split = (text: string | null): Regions => (text === null ? { human: '', learned: null, parts: null } : splitParts(text.replace(/\r\n/g, '\n')));
+    regions = [split(sides.base), split(sides.ours), split(sides.theirs)];
+  } catch {
+    return null; // an ambiguous section boundary is never guessed at
+  }
+  const [base, ours, theirs] = regions;
+  if ([base.learned, ours.learned, theirs.learned].some((section) => hasUnparsedContent(section))) return null;
+
+  const human = mergeText3(facts.git, base.human, ours.human, theirs.human);
+  if (human === null) return null; // prose changed in the same place on both sides
+
+  const settling: Settling = { project, oracle, rules: new Set(), dropped: 0, stale: [] };
+
+  let learned: string | null;
+  if (ours.learned === theirs.learned || theirs.learned === base.learned) learned = ours.learned;
+  else if (ours.learned === base.learned) learned = theirs.learned;
+  else {
+    learned = serializeLearnings(
+      mergeLearnings(settling, 'learning', slug, parseLearnings(base.learned), parseLearnings(ours.learned), parseLearnings(theirs.learned))
+    );
+  }
+
+  let parts: string | null;
+  if (ours.parts === theirs.parts || theirs.parts === base.parts) parts = ours.parts;
+  else if (ours.parts === base.parts) parts = theirs.parts;
+  else {
+    // Only a region this module can read back exactly is rewritten from what it read.
+    for (const region of [base.parts, ours.parts, theirs.parts]) {
+      if (region !== null && regionShape(serializeParts(parseParts(region))) !== regionShape(region)) return null;
+    }
+    const merged = mergePartLists(settling, slug, parseParts(base.parts), parseParts(ours.parts), parseParts(theirs.parts));
+    if (merged === null) return null;
+    parts = `\n${serializeParts(merged)}`;
+  }
+
+  const above = learned === null ? human : `${human}\n${LEARNED_HEADING}\n${learned}`;
+  // The exact inverse of `splitParts` / `splitLearned`: a region nobody changed keeps its bytes.
+  const content = parts === null ? above : `${above}\n${PARTS_HEADING}\n${parts}`;
+  const rule: FeatureRule = settling.rules.has('kept-both-stale')
+    ? 'kept-both-stale'
+    : settling.rules.has('newer-wins')
+      ? 'newer-wins'
+      : 'union';
+  return { kind: 'feature-rules', path, content, rule, dropped: settling.dropped, stale: settling.stale };
+}
+
 // ─── Inspection ─────────────────────────────────────────────────────────────
 
 interface Sides {
@@ -440,7 +866,7 @@ function askOf(
   topic: string,
   path: string,
   existingPath: string,
-  extra: { anchors?: string[] } = {}
+  extra: { anchors?: string[]; agentMergeable?: boolean } = {}
 ): SyncAsk {
   const { git, repo } = facts;
   const oursBlob = blobAt(git, repo, facts.ours, path);
@@ -451,6 +877,7 @@ function askOf(
   const clean = !facts.conflicted.has(path);
   const merged = clean ? cut(workingText(repo, path)) : { text: null, truncated: false };
   const options: Take[] = clean ? ['ours', 'theirs', 'merged', 'file'] : ['ours', 'theirs', 'file'];
+  const base = extra.agentMergeable === true ? cut(textAt(git, repo, facts.base, path)) : { text: null, truncated: false };
   return {
     id: hashId([kind, path, existingPath, oursBlob, theirsBlob, existingBlob]),
     kind,
@@ -461,7 +888,10 @@ function askOf(
     incoming: incoming.text,
     merged: clean ? merged.text : null,
     ...(extra.anchors === undefined ? {} : { anchors: extra.anchors }),
-    truncated: existing.truncated || incoming.truncated || merged.truncated,
+    ...(extra.agentMergeable === true
+      ? { agentMergeable: true as const, base: base.text, theirAuthor: authorAt(git, repo, facts.theirs, existingPath) }
+      : {}),
+    truncated: existing.truncated || incoming.truncated || merged.truncated || base.truncated,
     options,
   };
 }
@@ -484,6 +914,7 @@ function reviewOf(facts: MergeFacts, path: string, sides: Sides): SyncReview {
     existing: existing.text,
     incoming: incoming.text,
     conflicted: conflicted.text,
+    ...(isIntentPath(path) ? { agentMergeable: true as const, theirAuthor: authorAt(facts.git, facts.repo, facts.theirs, path) } : {}),
     truncated: base.truncated || existing.truncated || incoming.truncated || conflicted.truncated,
     options: ['ours', 'theirs', 'file'],
   };
@@ -510,6 +941,7 @@ export function inspectMerge(facts: MergeFacts): MergeInspection {
   const inspection: MergeInspection = { resolutions: [], asks: [], reviews: [] };
   const both = [...new Set([...[...oursChanged.keys()].filter((path) => theirsChanged.has(path)), ...conflicted])].sort();
   const handled = new Set<string>();
+  const oracle = new StatusOracle(facts);
 
   // ── Pass 1: the same new versioned document on both sides → renumber ours. ──
   for (const path of both) {
@@ -535,10 +967,15 @@ export function inspectMerge(facts: MergeFacts): MergeInspection {
     const isConflict = conflicted.has(path);
 
     if (isDecisionPath(path)) {
-      inspection.asks.push(askOf(facts, 'decision', decisionTopic(path), path, path));
+      inspection.asks.push(askOf(facts, 'decision', decisionTopic(path), path, path, { agentMergeable: true }));
       continue;
     }
     if (isFeaturePath(path, [sides.ours, sides.theirs, sides.base])) {
+      const settled = settleFeatureFile(facts, path, sides, isConflict, oracle);
+      if (settled !== null) {
+        inspection.resolutions.push(settled);
+        continue;
+      }
       const feature = featureOf(path, sides.ours) ?? featureOf(path, sides.theirs) ?? featureOf(path, sides.base);
       const topic = feature === null ? path : featureAddress(feature.id);
       inspection.asks.push(askOf(facts, 'same-feature', topic, path, path));
@@ -567,7 +1004,7 @@ export function inspectMerge(facts: MergeFacts): MergeInspection {
     }
     const discovery = DISCOVERY_PATH.exec(path);
     if (isConflict && discovery !== null) {
-      inspection.asks.push(askOf(facts, 'same-discovery', `${discovery[1]}/discovery ${discovery[2]}`, path, path));
+      inspection.asks.push(askOf(facts, 'same-discovery', `${discovery[1]}/discovery ${discovery[2]}`, path, path, { agentMergeable: true }));
       continue;
     }
     if (isConflict) {
@@ -579,7 +1016,13 @@ export function inspectMerge(facts: MergeFacts): MergeInspection {
 
   // ── Pass 3: collisions across two different files. ──
   const asked = new Set(inspection.asks.map((ask) => `${ask.path}\0${ask.existingPath}`));
-  const pushAsk = (kind: AskKind, topic: string, path: string, existingPath: string, extra: { anchors?: string[] } = {}): void => {
+  const pushAsk = (
+    kind: AskKind,
+    topic: string,
+    path: string,
+    existingPath: string,
+    extra: { anchors?: string[]; agentMergeable?: boolean } = {}
+  ): void => {
     const key = `${path}\0${existingPath}`;
     if (asked.has(key)) return;
     asked.add(key);
@@ -629,7 +1072,7 @@ export function inspectMerge(facts: MergeFacts): MergeInspection {
       if (theirs.key !== ours.key || theirs.path === ours.path || handled.has(theirs.path)) continue;
       if (ours.status === 'A' && theirs.status === 'A') continue; // two new versions — both kept
       const [project, slug] = ours.key.split('\0');
-      pushAsk('same-discovery', `${project}/discovery ${slug}`, ours.path, theirs.path);
+      pushAsk('same-discovery', `${project}/discovery ${slug}`, ours.path, theirs.path, { agentMergeable: true });
     }
   }
 
@@ -797,7 +1240,25 @@ export function applyResolutions(facts: MergeFacts, planned: readonly PlannedRes
       case 'line-merge':
         done.push({ kind: 'line-merge', path: resolution.path });
         break;
+      case 'feature-rules':
+        break; // after every other resolution — see below
     }
+  }
+  // Feature settlements last: their stale lines append to a status log a
+  // union resolution above may just have written.
+  for (const resolution of planned) {
+    if (resolution.kind !== 'feature-rules') continue;
+    if (resolution.content !== null) {
+      writeOrRemove(repo, resolution.path, resolution.content);
+      stage(git, repo, [resolution.path]);
+    }
+    const logs = new Set<string>();
+    for (const { projectDir, entry } of resolution.stale) {
+      appendKnowledgeStatus(join(repo, projectDir), entry);
+      logs.add(`${projectDir}/${STRUCTURE_DIR}/${KNOWLEDGE_STATUS_FILENAME}`);
+    }
+    stage(git, repo, [...logs]);
+    done.push({ kind: 'feature-rules', path: resolution.path, rule: resolution.rule, dropped: resolution.dropped, stale: resolution.stale.length });
   }
   return done;
 }
@@ -900,6 +1361,18 @@ function describeResolution(resolution: MergeResolution): string {
       return 'The Workspace description changed on both sides in different fields or projects — both changes kept.';
     case 'line-merge':
       return 'Edited on both sides in different places — git merged the two without a conflict.';
+    case 'feature-rules':
+      switch (resolution.rule) {
+        case 'clean':
+          return 'A feature note edited on both sides in different places — git merged the two without a conflict, and Flow accepted it.';
+        case 'union':
+          return 'A feature note whose learnings were edited on both sides — every learning of both kept (a draft is never dropped).';
+        case 'newer-wins':
+          return `A feature note whose learnings were edited on both sides — where both versions of one learning were on the default branch, the one learned from the newer commit was kept (${resolution.dropped} older line(s) left out).`;
+        case 'kept-both-stale':
+          return `A feature note whose learnings were edited on both sides — two versions of one learning could not be ordered, so both were kept and ${resolution.stale} marked to be learned again.`;
+      }
+      return '';
     case 'decision':
       return `Decided by a person: ${resolution.take === 'file' ? 'a merged text they gave' : resolution.take === 'merged' ? "git's clean merge" : resolution.take === 'ours' ? "this machine's version" : "the Workspace's version"}.`;
   }

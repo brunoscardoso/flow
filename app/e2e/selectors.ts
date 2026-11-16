@@ -81,7 +81,7 @@ export const sel = {
   // The board's header chrome, appended unconditionally in the constructor
   // (blueprint-board.ts:1258/1421) — proof the view mounted, not just that a
   // div exists. Replaces the retired `.bpv-title`.
-  blueprintHeader: '.fb-header',
+  blueprintHeader: '.fb-float-tl.fb-island',
   // STILL THE OVERLAY FAMILY, and it still has two members: Flow settings and
   // Integrations. The app's own Settings left it — it is a tabbed PAGE in the
   // editor area now (`settingsPage`), so a spec driving accounts, worktree

@@ -190,3 +190,38 @@ export function archiveRunScript(flowDir: string, planName: string): void {
     }
   }
 }
+
+/**
+ * Move a knowledge document — `discovery/<name>.md` or `plans/<name>.md`,
+ * relative to `flowDir` — into `<flowDir>/archive/`, filename unchanged, with
+ * its `.walkthrough.html` page when it has one. The one code path that
+ * archives a document (allowed-pattern #14); `plan archive` and abandoned-draft
+ * promotion both use it.
+ *
+ * Returns the archived paths (relative to `flowDir`). Refuses — moving nothing —
+ * when the path is not a document of those two folders, or an archived file of
+ * the same name already exists: an archive is never overwritten. A missing
+ * document returns [] (already archived, or never here).
+ */
+export function archiveDocument(flowDir: string, relPath: string): string[] {
+  const normalized = relPath.replace(/\\/g, '/');
+  const match = /^(discovery|plans)\/([^/]+\.md)$/.exec(normalized);
+  if (match === null || match[2].startsWith('.')) {
+    throw new Error(`only a discovery or plan document can be archived, not ${relPath}`);
+  }
+  const fileName = match[2];
+  const from = join(flowDir, match[1], fileName);
+  if (!existsSync(from)) return [];
+  const page = `${fileName.slice(0, -'.md'.length)}.walkthrough.html`;
+  const moves = [{ from, name: fileName }];
+  if (existsSync(join(flowDir, match[1], page))) moves.push({ from: join(flowDir, match[1], page), name: page });
+  const archiveDir = join(flowDir, ARCHIVE_DIRNAME);
+  for (const move of moves) {
+    if (existsSync(join(archiveDir, move.name))) {
+      throw new Error(`${ARCHIVE_DIRNAME}/${move.name} already exists, so ${match[1]}/${move.name} was not archived`);
+    }
+  }
+  mkdirSync(archiveDir, { recursive: true });
+  for (const move of moves) moveFileSync(move.from, join(archiveDir, move.name));
+  return moves.map((move) => `${ARCHIVE_DIRNAME}/${move.name}`);
+}

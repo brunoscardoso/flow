@@ -189,10 +189,10 @@ async function readNav(win: Page): Promise<NavState> {
       currentCrumb: crumbs.find((c) => c.classList.contains('on'))?.textContent ?? '',
       currentCrumbDisabled: crumbs.find((c) => c.classList.contains('on'))?.disabled ?? false,
       disabledCrumbs: crumbs.filter((c) => c.disabled).map((c) => c.textContent ?? ''),
-      titleName: document.querySelector('.fb-terr-title-name')?.textContent ?? '',
-      titleKicker: document.querySelector('.fb-terr-title-kicker')?.textContent ?? '',
+      titleName: document.querySelector<HTMLElement>('.fb-float-trail')?.dataset['where'] ?? '',
+      titleKicker: document.querySelector<HTMLElement>('.fb-float-trail')?.dataset['kicker'] ?? '',
       hasBrainField: document.querySelector('[data-ask="field"]') !== null,
-      hasTitleControl: document.querySelector('.fb-terr-title .fb-terr-control') !== null,
+      hasTitleControl: document.querySelector('.fb-float-trail .fb-view-switch') !== null,
       cellCount: cells.length,
       cellIds: cells.map((c) => c.dataset['featureId'] ?? ''),
       groupIds: q<HTMLElement>('.fb-terr-group').map((g) => g.dataset['featureId'] ?? ''),
@@ -889,8 +889,13 @@ test('readability at every awkward shape: how many provinces keep their names', 
   test.setTimeout(240_000)
   await openBoard(window, 'flow-navstress-read-')
 
-  const measure = async (): Promise<Record<string, unknown>> =>
-    window.evaluate(() => {
+  const measure = async (): Promise<Record<string, unknown>> => {
+    // A cell under the resting pointer GROWS IN PLACE and its neighbours make
+    // room (plan cell-hover-diagram) — move off the sheet so the reading is of
+    // the resting layout, not of one hovered cell.
+    await window.mouse.move(0, 0)
+    await window.waitForTimeout(500)
+    return window.evaluate(() => {
       const cells = [...document.querySelectorAll<HTMLElement>('.fb-terr-cell')]
       const sheet = document.querySelector('.fb-terr-sheet')!.getBoundingClientRect()
       const classOf = (cell: HTMLElement): string => {
@@ -926,6 +931,7 @@ test('readability at every awkward shape: how many provinces keep their names', 
         sheetHeight: Math.round(sheet.height),
       }
     })
+  }
 
   const readings: Record<string, unknown> = {}
   readings['root(4 countries)'] = await measure()
@@ -967,7 +973,7 @@ test('readability at every awkward shape: how many provinces keep their names', 
     const box = (sel: string): DOMRect | null =>
       document.querySelector(sel)?.getBoundingClientRect() ?? null
     const sheet = box('.fb-terr-sheet')
-    const strip = box('.fb-terr-title')
+    const strip = box('.fb-float-tl') // the floating top row (mockup J3)
     const block = box('.fb-terr-block')
     const crumbs = box('.fb-terr-crumbs')
     const cells = [...document.querySelectorAll<HTMLElement>('.fb-terr-cell')].map((c) =>

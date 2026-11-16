@@ -195,6 +195,28 @@ describe('runFeatureViewPass', () => {
     },
   })
 
+  it('learns a feature that is only documentation from its own documents, and still refuses one with nothing', async () => {
+    // Positive first: given its folder's documents, a docs-only feature is drawn.
+    let prompt = ''
+    const result = await runFeatureViewPass(
+      { ...base, files: [], ownDocs: ['docs/architecture/retention-purge-engine-adr.md'] },
+      {
+        runSession: (input: { prompt: string }) => {
+          prompt = input.prompt
+          return Promise.resolve(good)
+        },
+        runCli: () => Promise.resolve({ ok: true, stdout: 'features: Chats — view written' }),
+      } as never,
+    )
+    expect(result.ok).toBe(true)
+    expect(prompt).toContain('THIS FEATURE IS DOCUMENTATION')
+    expect(prompt).toContain('- docs/architecture/retention-purge-engine-adr.md')
+    expect(prompt).not.toContain('Code (ranked')
+    // …and with no code, no documents and no plan there is still nothing to read.
+    const empty = await runFeatureViewPass({ ...base, files: [] }, { runSession: () => Promise.resolve(good) })
+    expect(empty).toEqual({ ok: false, reason: 'this feature claims no readable files or documents' })
+  })
+
   it('writes the view through the CLI, stamping provenance and date', async () => {
     const calls: string[][] = []
     const result = await runFeatureViewPass(

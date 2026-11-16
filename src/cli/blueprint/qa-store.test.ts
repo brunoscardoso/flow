@@ -311,4 +311,26 @@ describe('blueprint qa — the shipped verb (subprocess)', () => {
     expect(existsSync(qaFile(root))).toBe(true);
     expect(readQaEntries(root)).toHaveLength(1);
   }, 120_000);
+
+  it('list --all reads every saved question in one call; list without --feature or --all is still refused', () => {
+    const root = seedRepo({ features: false });
+    appendQaEntry(root, { ...base(), question: 'First?' });
+    appendQaEntry(root, { ...base(), question: 'Second?' });
+    const list = (args: string[]): { status: number | null; out: string } => {
+      const result = spawnSync(process.execPath, [CLI_PATH, 'blueprint', 'qa', 'list', ...args, '--json'], {
+        cwd: root,
+        encoding: 'utf-8',
+        env: { ...process.env, NO_COLOR: '1' },
+        timeout: 60_000,
+      });
+      return { status: result.status, out: `${result.stdout}\n${result.stderr}` };
+    };
+    const all = list(['--all']);
+    expect(all.status).toBe(0);
+    const payload = JSON.parse(all.out.split('\n').find((line) => line.trim().startsWith('{')) as string) as { threads: Array<{ question: string }> };
+    expect(payload.threads.map((thread) => thread.question).sort()).toEqual(['First?', 'Second?']);
+    const refused = list([]);
+    expect(refused.status).toBe(1);
+    expect(refused.out).toContain('qa refused: missing-feature');
+  }, 120_000);
 });

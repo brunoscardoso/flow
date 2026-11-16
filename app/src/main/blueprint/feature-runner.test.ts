@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events'
 
-import { runFeatureIndexing, runFeatures } from './feature-runner'
+import { narrowFeatureNodes, runFeatureIndexing, runFeatures } from './feature-runner'
 import type { BundledCli } from './derive-runner'
 
 const cli: BundledCli = { execPath: '/bin/electron', cliPath: '/app/cli.js' } as BundledCli
@@ -360,5 +360,24 @@ describe('role — what kind of thing a node is (feature-type-icons Phase 2)', (
       [undefined, undefined],
     ])
     expect(nodes[2]).not.toHaveProperty('role')
+  })
+})
+
+describe('narrowFeatureNodes — draft status (workspace_knowledge_draft_solid)', () => {
+  const base = { slug: 'orders', name: 'Orders', kind: 'core', understanding: 'learned', active: false, anchorCount: 1 }
+
+  it('passes the CLI status words and a draft branch, drops anything else', () => {
+    const nodes = narrowFeatureNodes([
+      { ...base, id: 'feature:a', status: 'draft', draftBranch: 'feat/x' },
+      { ...base, id: 'feature:b', status: 'solid', draftBranch: 'feat/ignored' },
+      { ...base, id: 'feature:c', status: 'archived' },
+      { ...base, id: 'feature:d' },
+    ])
+    expect(nodes.map((node) => node.id)).toEqual(['feature:a', 'feature:b', 'feature:c', 'feature:d'])
+    expect(nodes[0]).toMatchObject({ status: 'draft', draftBranch: 'feat/x' })
+    expect(nodes[1].status).toBe('solid')
+    expect(nodes[1].draftBranch).toBeUndefined()
+    expect(nodes[2].status).toBeUndefined()
+    expect(nodes[3].status).toBeUndefined()
   })
 })

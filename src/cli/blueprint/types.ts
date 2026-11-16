@@ -227,6 +227,12 @@ export interface InvestigationEntry {
   hashStamps: AnchorHashStamp[];
   /** Fingerprint of the entry this one replaces (supersede chain). */
   supersedes?: string;
+  /**
+   * Where the note was learned — a reference into the provenance records
+   * (`state/knowledge-provenance.ts`). Stamped only by `appendInvestigationNote`;
+   * absent on notes written before stamping existed.
+   */
+  learnedAt?: string;
 }
 
 /**

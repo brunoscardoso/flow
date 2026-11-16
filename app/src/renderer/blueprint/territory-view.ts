@@ -90,11 +90,15 @@ import { roleIconShownAt } from './role-icon-model'
  */
 
 /** The title strip's band across the top of the stage. */
-// The title strip lives in the board's header now (2026-10-06); the sheet
-// keeps only a little air above its first row.
-export const TITLE_STRIP_H = 8
-/** The title block's band across the foot of it. */
-export const TITLE_BLOCK_H = 32
+// No header rows over a territory: the top glass island (user pick B,
+// 2026-11-15) sits 10px down and is 48px tall, so it ends at 58. The first
+// band or card lands 12px below it (user, 2026-11-15: "reduce it to 12px") —
+// the sheet's own top margin supplies the rest, and nothing sits under the
+// island at scroll 0.
+export const TITLE_STRIP_H = 63
+/** The band across the foot: the bottom glass island (44px, 10px up) and a
+ *  12px gap, so the last cards sit clear of it. */
+export const TITLE_BLOCK_H = 66
 /** Breathing room between the sheet and the stage's left/right edges. */
 export const SHEET_MARGIN = 6
 /** How far a domain group is drawn inside the rectangle it was given. */
@@ -260,6 +264,14 @@ export interface TerritoryCell {
   controlTitle: string | null
   /** This cell's knowledge has drifted past the code it describes. */
   stale: boolean
+  /**
+   * WORK IN PROGRESS (discovery `workspace_knowledge_draft_solid`, FR-10): the
+   * branch this feature's or part's knowledge was learned on when ALL of it is
+   * a draft — not merged to the default branch yet. Null when its knowledge is
+   * solid, and for a domain, a change and a ghost. The board draws a dashed
+   * outline and a `draft · <branch>` tag (`draftTagLabel`, `draftTagTitle`).
+   */
+  draftBranch: string | null
   /**
    * WHAT KIND OF THING IT IS (plan feature-type-icons) — the node's role and
    * who answered it, copied as the CLI resolved them. Null for a domain, a
@@ -633,6 +645,33 @@ export function summaryParts(raw: string | undefined): { about: string | null; p
   return { about: null, path: module === null ? null : (module[1] ?? null) }
 }
 
+/** What a draft tag names when the CLI could not say which branch. */
+export const UNKNOWN_DRAFT_BRANCH = 'another branch'
+
+/** A typed node's draft branch, or null when its knowledge is solid (or unsaid). */
+export function draftBranchOf(typed: boolean, source: Pick<FeatureGraphNodeInput, 'status' | 'draftBranch'> | undefined): string | null {
+  if (!typed || source?.status !== 'draft') return null
+  const branch = source.draftBranch?.trim() ?? ''
+  return branch === '' ? UNKNOWN_DRAFT_BRANCH : branch
+}
+
+/** The tag's words: `draft · <branch>` (the branch is drawn in monospace). */
+export function draftTagLabel(branch: string): { lead: string; branch: string } {
+  return { lead: 'draft · ', branch }
+}
+
+/**
+ * The tag's hover text — what a draft means, in the reader's terms. The
+ * default branch comes from the graph payload; without it, "the main branch".
+ */
+export function draftTagTitle(branch: string, defaultBranch: string | null | undefined): string {
+  const target = typeof defaultBranch === 'string' && defaultBranch.trim() !== '' ? defaultBranch.trim() : 'the main branch'
+  return (
+    `Learned on ${branch}, not merged yet. This becomes part of the map once the branch is merged to ${target}. ` +
+    'Until then agents and Ask treat it as work in progress.'
+  )
+}
+
 /** Build one cell from a placed rectangle. The single place a cell's grammar
  *  lives — the board never assembles one itself. */
 function cellFor(
@@ -696,6 +735,7 @@ function cellFor(
     hasControl,
     controlTitle: hasControl ? controlTitle(node.name, anchorCount > 0) : null,
     stale: understanding === 'stale',
+    draftBranch: draftBranchOf(typed, source),
     role,
     roleSource,
     showRoleIcon: role !== null && roleIconShownAt(labelClass),

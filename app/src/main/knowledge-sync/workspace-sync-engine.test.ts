@@ -5,12 +5,17 @@
  * asked, not just the answer it got.
  */
 
-import type { WorkspaceSyncStatus } from '../../shared/workspaces-contract'
+import { createHash } from 'node:crypto'
+
+import type { WorkspaceIntentMergeSet, WorkspaceSyncStatus } from '../../shared/workspaces-contract'
 import { createWorkspacePauseNotifier } from './pause-notice'
 import { OPEN_SYNC_COOLDOWN_MS, RETRY_BASE_MS, type EngineTimers } from './sync-timing'
 import {
   COMMIT_ONLY_TIMEOUT_MS,
   ONE_RETRY_MS,
+  PROMOTE_COOLDOWN_MS,
+  PROMOTE_INTERVAL_MS,
+  PROMOTE_TIMEOUT_MS,
   QUIT_SYNC_TIMEOUT_MS,
   TURN_SYNC_DELAY_MS,
   WORKSPACE_SYNC_SENTENCES,
@@ -38,8 +43,14 @@ class FakeTimers implements EngineTimers {
     this.tasks.delete(handle as number)
   }
 
+  /** Sync timers only: the promotion interval is armed for as long as a Workspace is open (its own tests below). */
   delays(): number[] {
-    return [...this.tasks.values()].map((task) => task.ms)
+    return [...this.tasks.values()].filter((task) => task.ms !== PROMOTE_INTERVAL_MS).map((task) => task.ms)
+  }
+
+  /** How many sync timers are armed (the promotion interval aside). */
+  syncTimers(): number {
+    return this.delays().length
   }
 
   async advance(ms: number): Promise<void> {
@@ -126,8 +137,24 @@ function keyOf(args: readonly string[]): string {
   return args.filter((arg) => !arg.startsWith('--message=')).join(' ')
 }
 
+/** `workspace promote`'s answer with these totals. */
+function promoted(totals: Partial<Record<'checked' | 'solid' | 'stale' | 'abandoned' | 'unknown', number>> = {}): WorkspaceSyncCliRun {
+  const payload = {
+    action: 'promote',
+    workspace: { name: 'Acme', slug: SLUG },
+    projects: [],
+    totals: { checked: 0, solid: 0, stale: 0, abandoned: 0, unknown: 0, ...totals },
+  }
+  return { ok: true, stdout: `${JSON.stringify(payload)}\n` }
+}
+
 function harness(
-  options: { rows?: Map<string, number>; nameOf?: (slug: string) => Promise<string | null> } = {},
+  options: {
+    rows?: Map<string, number>
+    nameOf?: (slug: string) => Promise<string | null>
+    /** The agent; default answers nothing (a pause stays a pause). */
+    mergeIntent?: (input: { title: string; ours: string; theirs: string; base: string | null }) => Promise<string | null>
+  } = {},
 ) {
   const timers = new FakeTimers()
   const table = new Map<string, Array<WorkspaceSyncCliRun | (() => Promise<WorkspaceSyncCliRun>)>>()
@@ -139,7 +166,22 @@ function harness(
   const rows = options.rows ?? new Map<string, number>()
   const temps: string[] = []
   const disposed: string[] = []
+  /** Every `workspace promote` the engine started, and the answers it gets (no change by default). */
+  const promotions: Array<{ key: string; timeoutMs: number }> = []
+  const promoteAnswers: Array<WorkspaceSyncCliRun | (() => Promise<WorkspaceSyncCliRun>)> = []
+  const merges: WorkspaceIntentMergeSet[] = []
+  const agentCalls: string[] = []
   const engine = createWorkspaceSyncEngine({
+    runPromotionCli: async (_cwd, args, runOptions) => {
+      promotions.push({ key: args.join(' '), timeoutMs: runOptions.timeoutMs })
+      const next = promoteAnswers.shift() ?? promoted()
+      return typeof next === 'function' ? next() : next
+    },
+    mergeIntent: async (input) => {
+      agentCalls.push(input.title)
+      return options.mergeIntent === undefined ? null : options.mergeIntent(input)
+    },
+    onIntentMerged: (_slug, _name, set) => void merges.push(set),
     nameOf: options.nameOf ?? (async () => null),
     runCli: async (cwd, args, runOptions) => {
       const key = keyOf(args)
@@ -175,7 +217,23 @@ function harness(
   const answer = (key: string, ...replies: Array<WorkspaceSyncCliRun | (() => Promise<WorkspaceSyncCliRun>)>): void => {
     table.set(key, [...(table.get(key) ?? []), ...replies])
   }
-  return { engine, timers, calls, statuses, names, notices, rows, temps, disposed, answer, last: () => statuses[statuses.length - 1] }
+  return {
+    engine,
+    timers,
+    calls,
+    statuses,
+    names,
+    notices,
+    rows,
+    temps,
+    disposed,
+    answer,
+    promotions,
+    promoteAnswers,
+    merges,
+    agentCalls,
+    last: () => statuses[statuses.length - 1],
+  }
 }
 
 describe('workspace sync engine — the CLI door', () => {
@@ -243,7 +301,7 @@ describe('workspace sync engine — turns', () => {
     expect(h.calls).toHaveLength(1)
     expect(h.calls[0]?.message).toBe('Flow: turn in api; /execute-plan in web')
     // Nothing left armed after the sync.
-    expect(h.timers.tasks.size).toBe(0)
+    expect(h.timers.syncTimers()).toBe(0)
   })
 
   it('many distinct turns are counted, not listed', () => {
@@ -253,7 +311,7 @@ describe('workspace sync engine — turns', () => {
   it('a turn timer re-checks before it acts: a Workspace forgotten meanwhile (deleted) → no CLI call', async () => {
     const h = harness()
     h.engine.commitAfterTurn(SLUG, 'turn in api')
-    expect(h.timers.tasks.size).toBe(1)
+    expect(h.timers.syncTimers()).toBe(1)
     h.engine.forget(SLUG)
     await h.timers.advance(TURN_SYNC_DELAY_MS)
     expect(h.calls).toEqual([])
@@ -270,7 +328,7 @@ describe('workspace sync engine — a pause waits for a person', () => {
     expect(paused?.asks).toEqual([ASK])
     expect(h.notices).toEqual(['Two people changed the same decision in Acme. Flow needs you to choose which one to keep.'])
     // Nothing armed; a turn, an open and time all leave it alone.
-    expect(h.timers.tasks.size).toBe(0)
+    expect(h.timers.syncTimers()).toBe(0)
     h.engine.commitAfterTurn(SLUG, 'turn in api')
     await h.engine.open(SLUG)
     await h.timers.advance(RETRY_BASE_MS * 100)
@@ -302,7 +360,7 @@ describe('workspace sync engine — a pause waits for a person', () => {
     expect(h.last()?.state).toBe('paused')
     // A turn while paused arms nothing; the run that settles the pause carries it.
     h.engine.commitAfterTurn(SLUG, 'turn in api')
-    expect(h.timers.tasks.size).toBe(0)
+    expect(h.timers.syncTimers()).toBe(0)
     h.answer(`workspace sync --workspace ${SLUG} --resolve=${DECISION} --id=ask-1 --take=theirs --json`, result('synced', { decided: ['ask-1'], pushed: true }))
     const answer = await h.engine.resolve({ slug: SLUG, path: DECISION, take: 'theirs' })
     expect(answer).toMatchObject({ ok: true, status: { state: 'synced', asks: [], reviews: [] } })
@@ -444,7 +502,7 @@ describe('workspace sync engine — offline, behind, refusals', () => {
     expect(h.timers.delays()).toEqual([ONE_RETRY_MS])
     await h.timers.advance(ONE_RETRY_MS)
     expect(h.calls).toHaveLength(2)
-    expect(h.timers.tasks.size).toBe(0)
+    expect(h.timers.syncTimers()).toBe(0)
   })
 
   it('a refusal is an error with a plain sentence — never the CLI words — and one notification', async () => {
@@ -454,7 +512,7 @@ describe('workspace sync engine — offline, behind, refusals', () => {
     expect(h.last()).toMatchObject({ state: 'error', detail: 'Some of the changes in the Workspace are personal files that are never shared, so nothing was sent.' })
     expect(JSON.stringify(h.last())).not.toMatch(/secret|STATE\.md|planflow|--/)
     expect(h.notices).toHaveLength(1)
-    expect(h.timers.tasks.size).toBe(0)
+    expect(h.timers.syncTimers()).toBe(0)
   })
 
   it('a refusal names the Workspace by its name, not its slug — a refusal carries no name of its own', async () => {
@@ -520,9 +578,9 @@ describe('workspace sync engine — offline, behind, refusals', () => {
     expect(JSON.stringify(h.last())).not.toMatch(/github\.com|Repository not found/)
     expect(h.notices).toEqual(["Flow can't reach Acme's shared repository with your access."])
     // No back-off, no timer: a turn, an open and time all leave it alone.
-    expect(h.timers.tasks.size).toBe(0)
+    expect(h.timers.syncTimers()).toBe(0)
     h.engine.commitAfterTurn(SLUG, 'turn in api')
-    expect(h.timers.tasks.size).toBe(0)
+    expect(h.timers.syncTimers()).toBe(0)
     await h.engine.open(SLUG)
     await h.timers.advance(RETRY_BASE_MS * 100)
     expect(h.calls).toHaveLength(1)
@@ -555,7 +613,7 @@ describe('workspace sync engine — quit and restarts', () => {
     // POSITIVE: the one run happened, carrying the turn — and it was the commit-only one.
     expect(h.calls).toEqual([{ key: COMMIT_ONLY_ARGV, message: 'Flow: turn in api', cwd: HOME, timeoutMs: COMMIT_ONLY_TIMEOUT_MS }])
     expect(h.calls.some((call) => call.key === SYNC_ARGV)).toBe(false)
-    expect(h.timers.tasks.size).toBe(0)
+    expect(h.timers.syncTimers()).toBe(0)
     const seen = h.statuses.length
     h.engine.commitAfterTurn(SLUG, 'late')
     await h.timers.advance(TURN_SYNC_DELAY_MS)
@@ -624,5 +682,217 @@ describe('workspace sync engine — quit and restarts', () => {
       reviews: [],
     })
     expect(second.calls).toEqual([])
+  })
+})
+
+// ── Promotion before sync (FR-7, change note 7) ──
+
+const PROMOTE_ARGV = `workspace promote --workspace ${SLUG} --json`
+
+describe('workspace sync engine — promotion', () => {
+  it('open runs `workspace promote` BEFORE the sync, bounded, through its own runner', async () => {
+    const h = harness()
+    let callsWhenPromoted = -1
+    h.promoteAnswers.push(async () => {
+      callsWhenPromoted = h.calls.length
+      return promoted()
+    })
+    h.answer(SYNC_ARGV, result('synced'))
+    await h.engine.open(SLUG)
+    expect(h.promotions).toEqual([{ key: PROMOTE_ARGV, timeoutMs: PROMOTE_TIMEOUT_MS }])
+    // Positive first: the sync ran — and the promotion came before it.
+    expect(h.calls.map((call) => call.key)).toEqual([SYNC_ARGV])
+    expect(callsWhenPromoted).toBe(0)
+  })
+
+  it('"Sync now" runs it too, whatever its cooldown; a failed promotion never stops the sync', async () => {
+    const h = harness()
+    h.answer(SYNC_ARGV, result('synced'), result('synced'))
+    await h.engine.open(SLUG)
+    h.promoteAnswers.push({ ok: false, stdout: '', error: 'timed out' })
+    expect(await h.engine.syncNow(SLUG)).toMatchObject({ state: 'synced' })
+    expect(h.promotions).toHaveLength(2)
+    expect(h.calls).toHaveLength(2)
+  })
+
+  it('a promotion that decided something is carried by a sync even inside the open cooldown', async () => {
+    const h = harness()
+    h.answer(SYNC_ARGV, result('synced'), result('synced'))
+    await h.engine.open(SLUG)
+    expect(h.calls).toHaveLength(1)
+    // The timer: ten minutes on, a PR merged outside Flow is promoted, and its status lines are synced.
+    h.promoteAnswers.push(promoted({ checked: 2, solid: 1, stale: 1 }))
+    await h.timers.advance(PROMOTE_INTERVAL_MS)
+    expect(h.promotions).toHaveLength(2)
+    expect(h.calls).toHaveLength(2)
+    expect(h.calls[1]?.message).toBe('Flow: knowledge status checked')
+    // A promotion that decided nothing costs no sync.
+    await h.timers.advance(PROMOTE_INTERVAL_MS)
+    expect(h.promotions).toHaveLength(3)
+    expect(h.calls).toHaveLength(2)
+  })
+
+  it('the cooldown keeps open and the timer from running it twice', async () => {
+    const h = harness()
+    h.answer(SYNC_ARGV, result('synced'), result('synced'))
+    await h.engine.open(SLUG)
+    await h.timers.advance(OPEN_SYNC_COOLDOWN_MS)
+    await h.engine.open(SLUG)
+    // Positive first: the second open did sync…
+    expect(h.calls).toHaveLength(2)
+    // …but did not promote again inside the cooldown.
+    expect(h.promotions).toHaveLength(1)
+    await h.timers.advance(PROMOTE_COOLDOWN_MS)
+    await h.engine.syncNow(SLUG).catch(() => undefined)
+    expect(h.promotions).toHaveLength(2)
+  })
+
+  it('never while the sync waits for a person: not on open, not on "Sync now", not on the timer', async () => {
+    const h = harness()
+    h.answer(SYNC_ARGV, result('ask', { asks: [ASK] }), result('ask', { asks: [ASK] }))
+    await h.engine.open(SLUG)
+    expect(h.last()).toMatchObject({ state: 'paused' })
+    // Positive first: the open before the pause did promote.
+    expect(h.promotions).toHaveLength(1)
+    await h.timers.advance(PROMOTE_INTERVAL_MS * 3)
+    await h.engine.open(SLUG)
+    await h.engine.syncNow(SLUG)
+    expect(h.calls).toHaveLength(2) // "Sync now" itself still ran
+    expect(h.promotions).toHaveLength(1)
+  })
+
+  it('one promotion in flight: a slow one is never joined by a second', async () => {
+    const h = harness()
+    let finish: (run: WorkspaceSyncCliRun) => void = () => undefined
+    h.promoteAnswers.push(() => new Promise<WorkspaceSyncCliRun>((resolveRun) => (finish = resolveRun)))
+    h.answer(SYNC_ARGV, result('synced'), result('synced'))
+    const opening = h.engine.open(SLUG)
+    await settled()
+    const syncing = h.engine.syncNow(SLUG)
+    await h.timers.advance(PROMOTE_INTERVAL_MS)
+    // Positive first: the first promotion IS running…
+    expect(h.promotions).toHaveLength(1)
+    expect(h.calls).toHaveLength(0)
+    finish(promoted())
+    await opening
+    await syncing
+    await settled()
+    // …and the open's sync, then "Sync now" (a person: its own promotion) ran after it, one at a time.
+    expect(h.calls).toHaveLength(2)
+    expect(h.promotions).toHaveLength(2) // the timer's turn found the cooldown
+  })
+
+  it('forget and quit stop the timer', async () => {
+    const h = harness()
+    h.answer(SYNC_ARGV, result('synced'))
+    await h.engine.open(SLUG)
+    h.engine.forget(SLUG)
+    await h.timers.advance(PROMOTE_INTERVAL_MS * 2)
+    expect(h.promotions).toHaveLength(1)
+    expect(h.timers.tasks.size).toBe(0)
+  })
+})
+
+// ── A pause made only of intent documents (FR-12, change note 8) ──
+
+const MERGEABLE = { ...ASK, agentMergeable: true, base: '# Queue\n\nNone.\n', theirAuthor: 'Bea' }
+const MERGED_TEXT = '# Queue\n\nSQS for jobs, Kafka for events.\n'
+
+function sha(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex')
+}
+
+describe('workspace sync engine — intent merges', () => {
+  it('an agent merges the pause away: resolved through the CLI with its text, no pause notice, ONE merge set', async () => {
+    const h = harness({ nameOf: async () => 'Acme', mergeIntent: async () => MERGED_TEXT })
+    h.answer(SYNC_ARGV, result('ask', { asks: [MERGEABLE] }))
+    h.answer(
+      `workspace sync --workspace ${SLUG} --resolve=${DECISION} --id=ask-1 --take=file:/tmp/decision-0.md --json`,
+      result('synced', { decided: ['ask-1'], pushed: true }),
+    )
+    await h.engine.open(SLUG)
+    // Positive first: the agent was asked, and the CLI resolved with its text.
+    expect(h.agentCalls).toEqual(['Queue'])
+    expect(h.temps).toEqual([MERGED_TEXT])
+    expect(h.disposed).toEqual(['/tmp/decision-0.md'])
+    expect(h.last()).toMatchObject({ state: 'synced', asks: [] })
+    expect(h.statuses.some((status) => status.state === 'paused')).toBe(false)
+    expect(h.notices).toEqual([])
+    expect(h.merges).toHaveLength(1)
+    expect(h.merges[0]?.documents).toEqual([
+      expect.objectContaining({ id: 'ask-1', kind: 'decision', title: 'Queue', theirName: 'Bea', ours: ASK.incoming, theirs: ASK.existing, merged: MERGED_TEXT, current: 'merged' }),
+    ])
+  })
+
+  it('an agent that cannot merge leaves the pause — and the collision card — exactly as before', async () => {
+    const h = harness({ nameOf: async () => 'Acme', mergeIntent: async () => 'CANNOT_MERGE' })
+    h.answer(SYNC_ARGV, result('ask', { asks: [MERGEABLE] }))
+    await h.engine.open(SLUG)
+    expect(h.agentCalls).toEqual(['Queue'])
+    expect(h.last()).toMatchObject({ state: 'paused', asks: [expect.objectContaining({ id: 'ask-1' })] })
+    expect(h.notices).toEqual(['Two people changed the same decision in Acme. Flow needs you to choose which one to keep.'])
+    expect(h.calls.map((call) => call.key)).toEqual([SYNC_ARGV])
+    expect(h.merges).toEqual([])
+  })
+
+  it('a pause with anything that is not intent never reaches the agent', async () => {
+    const h = harness({ mergeIntent: async () => MERGED_TEXT })
+    h.answer(SYNC_ARGV, result('ask', { asks: [MERGEABLE, { ...ASK, id: 'ask-2', kind: 'same-feature', path: 'projects/api/brain/features/q.md', existingPath: 'projects/api/brain/features/q.md' }] }))
+    await h.engine.open(SLUG)
+    // Positive first: the pause is shown.
+    expect(h.last()).toMatchObject({ state: 'paused' })
+    expect(h.agentCalls).toEqual([])
+    expect(h.temps).toEqual([])
+  })
+
+  it('Undo puts back this computer\'s version: a put-back over exactly the merged text, then the set says so', async () => {
+    const h = harness({ mergeIntent: async () => MERGED_TEXT })
+    h.answer(SYNC_ARGV, result('ask', { asks: [MERGEABLE] }))
+    h.answer(
+      `workspace sync --workspace ${SLUG} --resolve=${DECISION} --id=ask-1 --take=file:/tmp/decision-0.md --json`,
+      result('synced', { decided: ['ask-1'] }),
+    )
+    await h.engine.open(SLUG)
+    const set = h.merges[0] as WorkspaceIntentMergeSet
+    h.answer(
+      `workspace sync --workspace ${SLUG} --put-back=${DECISION} --expect=${sha(MERGED_TEXT)} --take=file:/tmp/decision-1.md --json`,
+      result('synced', { putBack: { path: DECISION } }),
+    )
+    const undone = await h.engine.keepIntent({ slug: SLUG, mergeId: set.mergeId, keep: 'ours' })
+    expect(undone).toMatchObject({ ok: true, detail: 'Flow put back your version of "Queue".' })
+    // The text put back is this computer's own version.
+    expect(h.temps[1]).toBe(ASK.incoming)
+    expect(h.calls[h.calls.length - 1]?.message).toBe('Flow: a merged document put back')
+    expect(h.engine.intentMerges({ slug: SLUG, mergeId: set.mergeId })?.documents[0]?.current).toBe('ours')
+    // Keep merged from See both now puts the merge back over YOUR text.
+    h.answer(
+      `workspace sync --workspace ${SLUG} --put-back=${DECISION} --expect=${sha(ASK.incoming)} --take=file:/tmp/decision-2.md --json`,
+      result('synced'),
+    )
+    expect(await h.engine.keepIntent({ slug: SLUG, mergeId: set.mergeId, documentId: 'ask-1', keep: 'merged' })).toMatchObject({ ok: true })
+    expect(h.temps[2]).toBe(MERGED_TEXT)
+  })
+
+  it('a document a teammate changed since is never overwritten: stale, and the status is read again', async () => {
+    const h = harness({ mergeIntent: async () => MERGED_TEXT })
+    h.answer(SYNC_ARGV, result('ask', { asks: [MERGEABLE] }))
+    h.answer(
+      `workspace sync --workspace ${SLUG} --resolve=${DECISION} --id=ask-1 --take=file:/tmp/decision-0.md --json`,
+      result('synced'),
+    )
+    await h.engine.open(SLUG)
+    const set = h.merges[0] as WorkspaceIntentMergeSet
+    h.answer(
+      `workspace sync --workspace ${SLUG} --put-back=${DECISION} --expect=${sha(MERGED_TEXT)} --take=file:/tmp/decision-1.md --json`,
+      refused('stale-decision'),
+    )
+    h.answer(SYNC_ARGV, result('synced'))
+    expect(await h.engine.keepIntent({ slug: SLUG, mergeId: set.mergeId, keep: 'ours' })).toMatchObject({
+      ok: false,
+      reason: 'stale',
+      detail: 'Someone changed "Queue" since Flow merged it, so Flow left it as it is.',
+    })
+    expect(h.last()).toMatchObject({ state: 'synced' })
+    expect(await h.engine.keepIntent({ slug: SLUG, mergeId: 'nope', keep: 'ours' })).toMatchObject({ ok: false, reason: 'not-found' })
   })
 })

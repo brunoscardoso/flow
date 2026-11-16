@@ -13,4 +13,10 @@ describe('notificationActionEvents', () => {
       { type: 'flow:open-learning-panel' },
     ])
   })
+
+  it('a secondary action ("See both") follows the same rule: its detail rides on its event', () => {
+    expect(notificationActionEvents({ label: 'See both', event: 'flow:workspace-intent-see-both', detail: { slug: 'acme', mergeId: 'm1' } })).toEqual([
+      { type: 'flow:workspace-intent-see-both', detail: { slug: 'acme', mergeId: 'm1' } },
+    ])
+  })
 })

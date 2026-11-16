@@ -168,6 +168,15 @@ describe('ask:list and ask:stale in Workspace scope', () => {
     ask.dispose()
   })
 
+  it('list with all reads every saved question of the project in ONE call, whatever featureIds says', async () => {
+    cliReply = () => ({ ok: true, stdout: `${JSON.stringify({ action: 'qa-list', all: true, threads: [] })}\n` })
+    const ask = register()
+    const result = await ask.call('ask:list', { rootId: ROOT, featureIds: ['feature:a', 'feature:b', 'feature:c'], all: true })
+    expect(result).toEqual({ ok: true, threads: [] })
+    expect(cliCalls.map((call) => call.args)).toEqual([['blueprint', 'qa', 'list', '--all', '--json']])
+    ask.dispose()
+  })
+
   it('stale carries each result\'s not-checked projects only in Workspace scope', async () => {
     cliReply = () => ({
       ok: true,

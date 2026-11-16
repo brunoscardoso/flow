@@ -15,6 +15,8 @@ decided_by: {git config user.name of the person who approved the plan}
 
 **Project**: [[{project-name}]]
 
+**Feature**: [slug of the existing feature this changes — `none` for a new capability]
+
 ## Overview
 
 [Brief description of the feature and its purpose]

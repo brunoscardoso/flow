@@ -136,6 +136,24 @@ See: `.claude/resources/skills/create-plan-skill.md`
 
 ---
 
+### Step 4d: Name the Feature This Changes (REQUIRED)
+
+Put a `**Feature**:` line under `**Project**:` in the document. It names the
+**existing** feature the work changes, by its slug — the `feature:<slug>` headings
+in `flow/brain/.derived/INDEX.md` (`kind: core` only). Write `none` when the work
+is a new capability. Several touched → the one most of the work is in.
+
+```markdown
+**Feature**: auth
+```
+
+The board files every plan and discovery under a feature's **Changes &
+discoveries** from this line first. Without it, the link is guessed from the file
+name and the files the document names, and a document named after a ticket is
+often left unlinked.
+
+---
+
 ### Step 4a: Record What This Plan Will Touch (REQUIRED — not optional)
 
 Each phase that predicts a concrete node — a new integration, endpoint, datastore,
@@ -272,6 +290,7 @@ Workspace links: N recorded    # or: Workspace links: 0 recorded — <why no pro
 After the skill completes:
 
 1. **Save the plan document** to `flow/plans/plan_<feature>_v<version>.md`
+   Then run `planflow-ai plan stamp flow/plans/plan_<feature>_v<version>.md` once — it records the branch and commit the document was written on (never write those keys by hand).
 2. **Report only the file path and the verification lines** — do NOT display the full plan content in chat
 3. **STOP** — do NOT execute the plan, do NOT offer to build
 

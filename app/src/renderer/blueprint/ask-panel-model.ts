@@ -429,10 +429,9 @@ function savedTurns(thread: AskSavedThread, stale: boolean): AskTurn[] {
   })
 }
 
-/** A saved entry's sources carry no map numbers; number the ones that name a feature or part. */
+/** A saved entry's sources carry no numbers; number them by position, as a fresh answer's are — what its [n] names. */
 function numberSources(answer: AskAnswer): void {
-  let n = 0
-  answer.sources = answer.sources.map((source) => ({ ...source, n: source.featureId !== undefined ? ++n : null }))
+  answer.sources = answer.sources.map((source, index) => ({ ...source, n: index + 1 }))
 }
 
 function updateNewest(state: AskPanelState, update: (turn: AskTurn) => AskTurn): AskPanelState {
@@ -901,26 +900,29 @@ export function askStatusLine(turn: AskTurn, now: number): AskStatusLine | null 
     const who = [turn.saved.author, ageLabel(turn.saved.ts, now)].filter((part) => part !== '')
     return { tone: 'plain', text: ['Saved answer', ...who].join(' · ') }
   }
-  const took = turn.answeredAfterMs !== null ? durationLabel(turn.answeredAfterMs) : null
+  // The longer of the wall clock and the dig's own clock: never less than the dig reported.
+  const took = turn.answeredAfterMs !== null ? durationLabel(Math.max(turn.answeredAfterMs, turn.digElapsedMs)) : null
   const read = answer?.projectsRead ?? []
-  const readWords = read.length === 0 ? null : `read code in ${read.length === 1 ? read[0] : `${String(read.length)} projects`}`
+  const where = read.length === 0 ? '' : ` in ${read.length === 1 ? read[0] : `${String(read.length)} projects`}`
+  const files = turn.reads > 0 ? `${String(turn.reads)} file${turn.reads === 1 ? '' : 's'} read` : null
   if (turn.phase === 'fast' && answer === null) return { tone: 'busy', text: turn.stopping ? 'Stopping…' : 'Looking at what Flow already knows…' }
   if (turn.phase === 'digging') {
-    const facts = [turn.stopping ? 'Stopping…' : 'Digging into the code']
-    if (turn.reads > 0) facts.push(`${String(turn.reads)} file${turn.reads === 1 ? '' : 's'} read`)
+    // ONE status row while it digs: what, how many files, how long.
+    const facts = [turn.stopping ? 'Stopping…' : 'Reading the code']
+    if (turn.reads > 0) facts.push(`${String(turn.reads)} file${turn.reads === 1 ? '' : 's'}`)
     if (turn.digElapsedMs > 0) facts.push(durationLabel(turn.digElapsedMs))
     return { tone: 'busy', text: facts.join(' · ') }
   }
   if (turn.phase === 'partial' || answer?.partial === true) {
-    return { tone: 'warn', text: ['Partial · the code check did not finish', readWords, took].filter((part): part is string => part !== null).join(' · ') }
+    return { tone: 'warn', text: ['Partial · the code check did not finish', took, files].filter((part): part is string => part !== null).join(' · ') }
   }
   if (answer === null) return null
   if (answer.confidence === 'checked') {
-    const parts = ['Answered', readWords ?? 'checked against the code', turn.changedFromFirst ? 'changed from the first answer' : null, took]
+    const parts = [`Checked against the code${where}`, took, files, turn.changedFromFirst ? 'changed from the first answer' : null]
     return { tone: 'good', text: parts.filter((part): part is string => part !== null).join(' · ') }
   }
-  const first = turn.phase === 'fast' ? 'First answer' : 'Answered'
-  return { tone: 'warn', text: [first, 'from what Flow already knows', took].filter((part): part is string => part !== null).join(' · ') }
+  const first = turn.phase === 'fast' ? 'First answer, from what Flow already knows' : 'From what Flow already knows'
+  return { tone: 'warn', text: [first, took].filter((part): part is string => part !== null).join(' · ') }
 }
 
 /**
@@ -949,7 +951,11 @@ export function citedProjects(turn: AskTurn): string[] {
   return [...out]
 }
 
-/** Where a fresh answer was saved, in one sentence; null when it was not (yet). */
+/**
+ * Where a fresh answer was saved, in one sentence; null when it was not (yet).
+ * QUESTIONS ARE PRIVATE (2026-11-16): the saved log no longer syncs, so the
+ * sentence says it is the person's own — the facts it taught are what is shared.
+ */
 export function savedSentence(turn: AskTurn, scope: AskScope, name: (slug: string) => string): string | null {
   if (turn.saved !== null || turn.answer?.savedId === undefined) return null
   const conversation = turn.tags.some((tag) => tag.kind === 'conversation')
@@ -957,15 +963,31 @@ export function savedSentence(turn: AskTurn, scope: AskScope, name: (slug: strin
     : ''
   if (scope.kind === 'workspace') {
     const projects = citedProjects(turn)
-    let where = 'Saved for the Workspace'
-    if (projects.length === 1) where = `Saved for the Workspace and ${name(projects[0])}`
-    else if (projects.length === 2) where = 'Saved for the Workspace and both projects'
-    else if (projects.length > 2) where = `Saved for the Workspace and ${String(projects.length)} projects`
-    return `${where}, where your team can find it.${conversation}`
+    let where = 'across the Workspace'
+    if (projects.length === 1) where = `across the Workspace and on ${name(projects[0])}`
+    else if (projects.length === 2) where = 'across the Workspace and on both projects'
+    else if (projects.length > 2) where = `across the Workspace and on ${String(projects.length)} projects`
+    return `Saved to your questions ${where}. Only you see it.${conversation}`
   }
   const labels = turn.tags.filter((tag) => tag.kind !== 'conversation').map((tag) => tag.label)
-  const text = labels.length > 0 ? `Saved on ${listLabel(labels)}, where your team can find it.` : 'Saved, where your team can find it.'
+  const text = labels.length > 0 ? `Saved to your questions about ${listLabel(labels)}. Only you see it.` : 'Saved to your questions. Only you see it.'
   return `${text}${conversation}`
+}
+
+/**
+ * "2 facts added to Tenant's knowledge, shared with the team" — what an answer
+ * taught, on the feature it is most about: the first tagged feature, else the
+ * first cited one, else the project's knowledge. Null when it taught nothing.
+ */
+export function factsSentence(turn: AskTurn, featureLabel: (id: string) => string | null): string | null {
+  const answer = turn.answer
+  if (answer === null || answer.factsLearned <= 0) return null
+  const tagged = turn.tags.find((tag) => tag.kind === 'feature' || tag.kind === 'part')
+  const cited = answer.sources.find((source) => source.featureId !== undefined)
+  const name = tagged?.label ?? (cited?.featureId !== undefined ? (featureLabel(cited.featureId) ?? shortLabel(cited.label)) : null)
+  const n = answer.factsLearned
+  const facts = `${String(n)} fact${n === 1 ? '' : 's'} added to`
+  return name !== null ? `${facts} ${name}’s knowledge, shared with the team` : `${facts} the project’s knowledge, shared with the team`
 }
 
 const CONNECTION_VERBS: Record<AskConnectionKind, string> = {

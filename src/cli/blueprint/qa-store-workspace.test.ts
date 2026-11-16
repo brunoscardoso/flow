@@ -291,10 +291,12 @@ describeWithGit('Workspace Q&A store', () => {
     expect(readWorkspaceQaEntries(workspaceRoot())).toHaveLength(1);
   });
 
-  it('the Workspace root file is an append-only member of the closed root', () => {
+  it('the Workspace root file is a personal member of the closed root — questions never sync', () => {
     // Named by its own row — not merely caught by the generic `*.jsonl` rule.
+    // Personal since 2026-11-16: the knowledge an answer produced is shared,
+    // the person's questions are not.
     const detailed = classifyKnowledgePathDetailed('qa.jsonl', { root: 'workspace' });
-    expect(detailed.class).toBe('append-only');
+    expect(detailed.class).toBe('personal');
     expect(detailed.row?.pattern).toBe('/qa.jsonl');
   });
 

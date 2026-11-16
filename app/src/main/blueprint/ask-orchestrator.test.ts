@@ -6,7 +6,7 @@
 import type { AskStateEvent } from '../../shared/ask-contract'
 import type { CagedSessionParams, CliRunResult } from '../agent/learn-session'
 import type { AskContext, CondensedThread } from './ask-context'
-import { runAsk, type AskDeps, type AskRunInput } from './ask-orchestrator'
+import { buildDigPrompt, buildFastPrompt, parseAskReturn, runAsk, type AskDeps, type AskRunInput } from './ask-orchestrator'
 
 const ROOT = '/repo'
 
@@ -192,7 +192,7 @@ describe('runAsk — the dig', () => {
     const result = await runAsk(request(), h.deps)
     expect(result.outcome).toBe('done')
     expect(result.answer).toMatchObject({ explanation: 'In the vault service, checked.', confidence: 'checked', partial: false })
-    expect(result.answer?.sources).toEqual([{ n: null, label: 'vault', file: 'src/vault.ts' }])
+    expect(result.answer?.sources).toEqual([{ n: 1, label: 'vault', file: 'src/vault.ts' }])
   })
 
   it('a malformed return still shows its explanation', async () => {
@@ -338,5 +338,29 @@ describe('runAsk — state events', () => {
     expect(h.emitted[h.emitted.length - 1].phase.kind).toBe('error')
     expect(h.cli).toEqual([])
     warn.mockRestore()
+  })
+})
+
+describe('the answer is asked for as structured markdown', () => {
+  it('both prompts ask for a one-sentence lead, ### sections, - lists, backticks, positional [n] and "Not covered:"', () => {
+    for (const prompt of [buildFastPrompt('How?', [], context()), buildDigPrompt('How?', [], context(), null, 10)]) {
+      expect(prompt).toContain('line 1 is the answer in ONE sentence')
+      expect(prompt).toContain('### ')
+      expect(prompt).toContain('\\"- \\" bullet lines')
+      expect(prompt).toContain('backticks')
+      expect(prompt).toContain('cite a source as [n], n being its position in \\"sources\\"')
+      expect(prompt).toContain('Not covered: ')
+      expect(prompt).toContain('`feature:<slug>`')
+    }
+  })
+
+  it('the dig prompt is still one valid JSON shape: a comma before the facts', () => {
+    const prompt = buildDigPrompt('How?', [], context(), null, 10)
+    expect(prompt).toMatch(/or null,\n {2}"facts"/)
+  })
+
+  it('a structured explanation survives the parse with its line breaks', () => {
+    const parsed = parseAskReturn(JSON.stringify({ explanation: 'Lead.\n\n### Part\n- a [1]', knowledge: 'enough', sources: [] }))
+    expect(parsed?.explanation).toBe('Lead.\n\n### Part\n- a [1]')
   })
 })

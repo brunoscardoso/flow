@@ -46,8 +46,10 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFile
 import { basename, join } from 'node:path';
 
 import type { CorpusDocRecord } from './corpus-index.js';
-import { mintFeatureId, sameFeatureId, slugifyFeatureName, type FeatureNode } from './feature-store.js';
-import { canonicalKey, mineSurfaces, parentKeyFor } from './feature-surfaces.js';
+import { corpusLinkStats, linkCorpusDoc, type CorpusLink, type CorpusLinkStats, type CorpusOwner } from './corpus-parent.js';
+import { mintFeatureId, readParts, sameFeatureId, slugifyFeatureName, type FeatureNode } from './feature-store.js';
+import { canonicalKey, mineSurfaces } from './feature-surfaces.js';
+import { readEffectiveProposals } from './proposal-store.js';
 import type { BlueprintGraph } from './types.js';
 
 /** Anchor-overlap threshold for identity recovery. Named, never inlined. */
@@ -90,6 +92,8 @@ export interface DiscoverResult {
    * builder resolves `created`/`indexed`.
    */
   corpusDocs: CorpusDocRecord[];
+  /** How the corpus docs were linked to a capability — the derive line reports it. */
+  corpusLinks: CorpusLinkStats;
 }
 
 /** `- anchors: a, b, c` lines inside a doc's `## Story` section. */
@@ -165,6 +169,8 @@ interface CorpusWalkDoc {
   /** The doc's `# ` heading, when it has one. */
   heading: string | null;
   anchors: string[];
+  /** The doc's text — the corpus parenting reads its declared feature and its paths. */
+  markdown: string;
 }
 
 /**
@@ -193,6 +199,7 @@ function walkCorpus(flowDir: string): CorpusWalkDoc[] {
         slug: slugifyFeatureName(match[1]),
         heading: DOC_HEADING.exec(markdown)?.[1] ?? null,
         anchors: anchorsFromDoc(markdown),
+        markdown,
       });
     }
   }
@@ -231,14 +238,11 @@ export function mineCorpus(flowDir: string): FeatureCandidate[] {
  * archived docs are changes, discovery docs are discovery. `featureSlug` is
  * the parenting the caller computed for the doc's slug (null = unparented).
  */
-function corpusDocRecords(
-  docs: readonly CorpusWalkDoc[],
-  parentBySlug: ReadonlyMap<string, string>,
-): CorpusDocRecord[] {
-  return docs.map((doc) => ({
+function corpusDocRecords(docs: readonly CorpusWalkDoc[], links: readonly CorpusLink[]): CorpusDocRecord[] {
+  return docs.map((doc, index) => ({
     path: `flow/${doc.dirName}/${doc.fileName}`,
     kind: doc.dirName === 'discovery' ? ('discovery' as const) : ('change' as const),
-    featureSlug: parentBySlug.get(doc.slug) ?? null,
+    featureSlug: links[index]?.featureSlug ?? null,
     name: doc.heading ?? nameFromSlug(doc.slug),
     archived: doc.dirName === 'archive',
   }));
@@ -368,18 +372,33 @@ export function discoverFeatures(
   // already the documented last resort, already fires exactly when no surface
   // named anything, and names only things that exist in the repo.
   const walkedDocs = walkCorpus(flowDir);
+  // ONE DECISION PER DOC (corpus-parent.ts): declared → name → code. The
+  // candidate a slug produces takes the decision of its first doc (a live plan
+  // beats its archived copy, as `corpusCandidates` already orders them), so the
+  // board's change records and the corpus index can never disagree.
+  const owners = corpusOwners(flowDir, existing, surfaces);
+  const proposalPaths = proposalPathsByPlan(flowDir);
+  const links = walkedDocs.map((doc) =>
+    linkCorpusDoc({
+      slug: doc.slug,
+      markdown: doc.markdown,
+      proposalPaths: proposalPaths.get(canonicalKey(doc.slug)) ?? [],
+      anchors: doc.anchors,
+      coreKeys,
+      coreSlugByKey,
+      owners,
+    }),
+  );
+  const parentBySlug = new Map<string, string>();
+  walkedDocs.forEach((doc, index) => {
+    const parent = links[index].featureSlug;
+    if (parent !== null && !parentBySlug.has(doc.slug)) parentBySlug.set(doc.slug, parent);
+  });
   const corpus = corpusCandidates(walkedDocs).map((candidate) => {
-    const parentKey = parentKeyFor(candidate.slug, coreKeys);
-    const parentSlug = parentKey === null ? undefined : coreSlugByKey.get(parentKey);
+    const parentSlug = parentBySlug.get(candidate.slug);
     return parentSlug === undefined ? candidate : { ...candidate, parentSlug };
   });
-
-  // The index reuses the SAME parenting the candidates got — per doc file.
-  const parentBySlug = new Map<string, string>();
-  for (const candidate of corpus) {
-    if (candidate.parentSlug !== undefined) parentBySlug.set(candidate.slug, candidate.parentSlug);
-  }
-  const corpusDocs = corpusDocRecords(walkedDocs, parentBySlug);
+  const corpusDocs = corpusDocRecords(walkedDocs, links);
 
   // 3. Code fallback ONLY where neither found anything — a repo with no route,
   //    test or plan conventions still gets a board, just a coarser one.
@@ -405,7 +424,67 @@ export function discoverFeatures(
       updated.push({ feature: match.feature, anchors: merged, matchedBy: match.matchedBy });
     }
   }
-  return { updated, candidates: candidates.sort((a, b) => a.slug.localeCompare(b.slug)), corpusDocs };
+  return {
+    updated,
+    candidates: candidates.sort((a, b) => a.slug.localeCompare(b.slug)),
+    corpusDocs,
+    corpusLinks: corpusLinkStats(links),
+  };
+}
+
+/**
+ * Every core and the repo paths it owns — its own anchors plus its PARTS'
+ * anchors (a core usually anchors only its routes; the code a change touches
+ * lives in its parts). Surfaces not yet in the store own their mined anchors.
+ * A part file that cannot be read just contributes nothing.
+ */
+function corpusOwners(
+  flowDir: string,
+  existing: readonly FeatureNode[],
+  surfaces: readonly FeatureCandidate[],
+): CorpusOwner[] {
+  const strip = (anchor: string): string => anchor.replace(/^(?:module|file):/, '');
+  const owners: CorpusOwner[] = [];
+  const seen = new Set<string>();
+  for (const feature of existing) {
+    if (feature.kind !== 'core') continue;
+    let partPaths: string[] = [];
+    try {
+      partPaths = readParts(flowDir, feature.slug).flatMap((part) => part.anchors);
+    } catch {
+      partPaths = [];
+    }
+    owners.push({ slug: feature.slug, paths: [...feature.anchors, ...partPaths].map(strip) });
+    seen.add(canonicalKey(feature.slug));
+  }
+  for (const surface of surfaces) {
+    if (seen.has(canonicalKey(surface.slug))) continue;
+    owners.push({ slug: surface.slug, paths: surface.anchors.map(strip) });
+  }
+  return owners;
+}
+
+/**
+ * The files each plan's blueprint proposals predicted, keyed like a doc slug.
+ * Proposals are recorded at discovery and planning time with real anchors —
+ * the most structured statement of what a change touches. Fail-soft: no file
+ * or an unreadable one means no proposal paths, never a failed discover.
+ */
+function proposalPathsByPlan(flowDir: string): Map<string, string[]> {
+  const byPlan = new Map<string, string[]>();
+  let proposals: ReturnType<typeof readEffectiveProposals> = [];
+  try {
+    proposals = readEffectiveProposals(flowDir);
+  } catch {
+    return byPlan;
+  }
+  for (const proposal of proposals) {
+    const key = canonicalKey(slugifyFeatureName(proposal.plan));
+    const list = byPlan.get(key) ?? [];
+    for (const anchor of proposal.anchors) list.push(anchor.file ?? anchor.ref);
+    byPlan.set(key, list);
+  }
+  return byPlan;
 }
 
 /** Write the staged candidate list. Derived + disposable: a full rewrite. */

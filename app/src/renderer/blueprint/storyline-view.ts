@@ -1345,7 +1345,7 @@ export class StorylineView {
       button.type = 'button'
       button.className = 'fb-story-chip'
       button.textContent = `↗ ${chip.label}`
-      button.title = chip.name === '' ? `Read ${chip.label} as a story` : `Read ${chip.label} as a story, from ${chip.name}`
+      button.title = chip.name === '' ? `Follow ${chip.label}'s code` : `Follow ${chip.label}'s code from ${chip.name}`
       button.addEventListener('click', (event) => {
         event.stopPropagation()
         this.#callbacks.onOpenFile(chip.file, chip.name === '' ? undefined : chip.name)

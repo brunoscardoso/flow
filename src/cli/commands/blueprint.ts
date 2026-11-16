@@ -135,6 +135,7 @@ import { resolveStoryAnchors } from '../blueprint/anchors.js';
 import { readRoundsEntries } from '../state/rounds-reader.js';
 import { hashPlanContent } from '../state/run-compiler.js';
 import { parsePlan } from '../state/plan-parser.js';
+import { LEARNED_AT_FIELD } from '../state/knowledge-provenance.js';
 import {
   appendProposalEvent,
   attachProposals,
@@ -1197,6 +1198,9 @@ function requestFromJson(payload: string, options: BlueprintCommandOptions): Obs
   if (typeof record.text !== 'string' || record.text.length === 0) {
     return 'invalid --json payload — a non-empty "text" is required';
   }
+  if (Object.prototype.hasOwnProperty.call(record, LEARNED_AT_FIELD)) {
+    return 'invalid --json payload — "learnedAt" is stamped by the writer from this checkout — a caller cannot supply it';
+  }
 
   const anchors: Anchor[] = [];
   const rawAnchors = Array.isArray(record.anchors) ? record.anchors : [];
@@ -1542,7 +1546,7 @@ function runObserve(repoRoot: string, options: BlueprintCommandOptions): number 
   if (supersedes !== undefined) {
     entry.supersedes = supersedes;
   }
-  appendInvestigationNote(flowDir, entry);
+  appendInvestigationNote(flowDir, entry, { repoRoot });
   for (const anchor of request.anchors) {
     appendHeatTick(flowDir, { ts, anchorRef: anchor.ref, visitor: 'agent' });
   }
@@ -2058,6 +2062,14 @@ function runFeaturesDiscover(repoRoot: string, options: BlueprintCommandOptions)
       `${existing.length} · ${result.candidates.length} new candidate(s) ` +
       `(${cores.length} core, ${children.length} child)\n`,
   );
+  const links = result.corpusLinks;
+  if (links.docs > 0) {
+    // Said every run, so a project whose docs stop linking shows it here first.
+    process.stdout.write(
+      `features: ${links.docs - links.unlinked} of ${links.docs} plan/discovery doc(s) linked to a feature ` +
+        `(${links.declared} declared, ${links.name} by name, ${links.code} by files) · ${links.unlinked} unlinked\n`,
+    );
+  }
   if (cores.length > 0) {
     process.stdout.write(`features: core candidates — ${cores.map((c) => c.slug).join(', ')}\n`);
   }
@@ -2188,6 +2200,12 @@ function runFeaturesLearned(repoRoot: string, options: BlueprintCommandOptions):
     if (typeof candidate.text !== 'string' || candidate.text.trim().length === 0) {
       return refuseFeatures('every --entry needs a non-empty "text"');
     }
+    // Where a learning was learned is the writer's to say (FR-1 of
+    // `workspace_knowledge_draft_solid`): a stamp a caller chooses is a stamp
+    // a caller can forge.
+    if (Object.prototype.hasOwnProperty.call(candidate, LEARNED_AT_FIELD)) {
+      return refuseFeatures('"learnedAt" is stamped by the writer from this checkout — a caller cannot supply it');
+    }
     if (typeof candidate.provenance !== 'string' || candidate.provenance.length === 0) {
       return refuseFeatures('every --entry needs a "provenance" (code | human | plan:<name>)');
     }
@@ -2210,7 +2228,7 @@ function runFeaturesLearned(repoRoot: string, options: BlueprintCommandOptions):
 
   if (entries.length > 0) {
     try {
-      writeLearned(flowDir, feature.slug, entries);
+      writeLearned(flowDir, feature.slug, entries, { repoRoot });
     } catch (error) {
       // The refusal text already explains itself (see AmbiguousLearnedSectionError).
       return refuseFeatures(error instanceof Error ? error.message : String(error));
@@ -2498,6 +2516,10 @@ function runFeaturesParts(repoRoot: string, options: BlueprintCommandOptions): n
       ? (record['learnings'] as unknown[]).flatMap((raw) => {
           if (typeof raw !== 'object' || raw === null) return [];
           const item = raw as Record<string, unknown>;
+          if (Object.prototype.hasOwnProperty.call(item, LEARNED_AT_FIELD)) {
+            errors.push(`part '${name}': ${'"learnedAt" is stamped by the writer from this checkout — a caller cannot supply it'}`);
+            return [];
+          }
           const text = typeof item['text'] === 'string' ? item['text'].trim() : '';
           if (text.length === 0) return [];
           return [
@@ -2538,7 +2560,7 @@ function runFeaturesParts(repoRoot: string, options: BlueprintCommandOptions): n
   }
 
   try {
-    writeParts(flowDir, feature.slug, parts);
+    writeParts(flowDir, feature.slug, parts, { repoRoot });
   } catch (error) {
     return refuseFeatures(error instanceof Error ? error.message : String(error));
   }
@@ -2565,6 +2587,13 @@ function runFeaturesView(repoRoot: string, options: BlueprintCommandOptions): nu
       parsed = JSON.parse(write);
     } catch {
       return refuseFeatures('--write is not valid JSON');
+    }
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      Object.prototype.hasOwnProperty.call(parsed, LEARNED_AT_FIELD)
+    ) {
+      return refuseFeatures('"learnedAt" is stamped by the writer from this checkout — a caller cannot supply it');
     }
     const candidate = { ...(parsed as Record<string, unknown>), feature: feature.slug } as FeatureView;
     const result = writeFeatureView(flowDir, candidate, repoRoot);
@@ -4473,8 +4502,18 @@ function runQa(repoRoot: string, sub: string | undefined, options: BlueprintComm
         return 0;
       }
       case 'list': {
+        // `--all`: every saved question of this checkout in ONE read — the
+        // board's per-feature question markers, read once per board load
+        // rather than one spawn per feature.
+        if (options.all === true) {
+          const all = readQaThreads(repoRoot);
+          if (json) process.stdout.write(`${JSON.stringify({ action: 'qa-list', all: true, threads: all })}\n`);
+          else if (all.length === 0) process.stdout.write('qa: no saved answers\n');
+          else process.stdout.write(`${all.map((thread) => `${thread.id}  ${thread.ts}  ${thread.question}`).join('\n')}\n`);
+          return 0;
+        }
         if (typeof options.feature !== 'string' || options.feature.trim() === '') {
-          throw new QaRefusal('missing-feature', '--feature', 'list needs --feature <id> — the feature or part whose saved answers to read');
+          throw new QaRefusal('missing-feature', '--feature', 'list needs --feature <id> (or --all) — the feature or part whose saved answers to read');
         }
         const threads = listQaForFeature(repoRoot, options.feature);
         if (json) {

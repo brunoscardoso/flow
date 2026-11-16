@@ -46,6 +46,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { CORPUS_ROOTS, fileSearchLegs, queryStems } from './brain-file-search.js';
+import { chunkKnowledgeWeigher } from './brain-search-status.js';
 import { describeLink, linkFromSide, type WorkspaceLinkRecord } from '../handlers/workspace-links.js';
 
 // ---------------------------------------------------------------------------
@@ -690,7 +691,11 @@ export function namespaceHit(hit: LayeredHit, project: string): LayeredHit {
 
 function siblingSearch(project: WorkspaceSearchProject, query: string, limit: number): LayeredHit[] {
   const roots = project.repoRoot === null ? SIBLING_FLOW_ROOTS : [...SIBLING_FLOW_ROOTS, 'CLAUDE.md'];
-  const chunks = fileSearchLegs(project.repoRoot ?? project.flowDir, query, [], { flowDir: project.flowDir, roots }).chunks;
+  const chunks = fileSearchLegs(project.repoRoot ?? project.flowDir, query, [], {
+    flowDir: project.flowDir,
+    roots,
+    weightOf: chunkKnowledgeWeigher(project.flowDir),
+  }).chunks;
   // Symbols point at code; without a checkout here there is no code to open.
   const symbols = project.repoRoot === null ? [] : searchSymbols(project.flowDir, query);
   return mergeLayers(chunks, [], symbols, limit, ['files', 'unused']);
@@ -789,7 +794,11 @@ function fileBrainSearch(
   const wantsChunks = scope !== 'symbols';
   const wantsSymbols = scope === 'all' || scope === 'code' || scope === 'symbols';
 
-  const chunks = wantsChunks ? fileSearchLegs(projectRoot, query, scopeDirs).chunks : [];
+  // Solid knowledge outranks drafts; abandoned knowledge is not found at all
+  // (`brain-search-status.ts`, FR-9).
+  const chunks = wantsChunks
+    ? fileSearchLegs(projectRoot, query, scopeDirs, { weightOf: chunkKnowledgeWeigher(flowDir) }).chunks
+    : [];
 
   // The archive exclusion is applied here rather than inside the corpus walk
   // because it is a CALLER's rule ("archived plans are historical noise") — the

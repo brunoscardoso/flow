@@ -2,6 +2,7 @@ import { test, expect } from '../fixtures/electron'
 import type { Page } from '@playwright/test'
 import { statusButtonByText } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
+import { chooseLayer, KNOWLEDGE, LAYERS_BUTTON } from './fixtures/board-chrome'
 import { waitForLinkedStructure } from './fixtures/linked-structure'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -126,7 +127,8 @@ async function openBoard(window: Page): Promise<void> {
  * through the same `#toggleLearnPanel`.
  */
 async function toggleLearnPanel(window: Page): Promise<void> {
-  const entry = window.locator(`${boardRoot} button.fb-learn-tile[aria-label="Learn"]`)
+  // On a territory the panel's door is the Knowledge pill (mockup J3).
+  const entry = window.locator(`${boardRoot} .fb-knowledge-pill`)
   await expect(entry).toBeVisible({ timeout: 60_000 })
   await entry.click()
 }
@@ -243,7 +245,7 @@ async function reportParts(
 test.describe('blueprint learning lens (Phase 8)', () => {
   test.afterAll(() => cleanupSeeds())
 
-  test('the panel puts the map in the lens: lines at the foot, a two-way hover, a clearable filter', async ({
+  test('the Learning layer puts the map in the lens with the panel closed; the panel adds a two-way hover and a clearable filter', async ({
     window,
   }) => {
     const errors: string[] = []
@@ -261,11 +263,11 @@ test.describe('blueprint learning lens (Phase 8)', () => {
       expect(state, `${name} drew a coverage line with the panel closed`).toBe('(none)')
     }
 
-    await toggleLearnPanel(window)
-    await expect(window.locator('.fb-learn-panel')).toBeVisible({ timeout: 30_000 })
-
-    // …AND WITH THE PANEL OPEN, ONE LINE PER CELL THAT STANDS ON GROUND. The
-    // ground comes from a live `blueprint:featureMap` spawn, so this also
+    // …AND WITH THE LEARNING LAYER CHOSEN — the panel still CLOSED (mockup J3:
+    // Layers decides the colouring, never the panel) — ONE LINE PER CELL THAT STANDS ON GROUND.
+    await chooseLayer(window, 'learning')
+    await expect(window.locator('.fb-learn-panel')).toHaveCount(0)
+    // The ground comes from a live `blueprint:featureMap` spawn, so this also
     // proves the fetch is wired rather than the class.
     await expect
       .poll(async () => (await coverageLines(window))['Billing'], { timeout: 60_000 })
@@ -276,14 +278,19 @@ test.describe('blueprint learning lens (Phase 8)', () => {
     expect(open['Billing'], `Billing line: ${open['Billing']}`).toMatch(/^100(\.0)?% · 1 of 1/)
     expect(open['Shipping'], `Shipping line: ${open['Shipping']}`).toMatch(/^0(\.0)?% · 0 of 1/)
 
-    // The strip says what the line MEANS. A mark nobody can name is decoration.
-    await expect(window.locator('.fb-terr-title-kicker')).toContainText('learning lens')
+    // The Layers button says what the line MEANS, with its key beside it.
+    await expect(window.locator(LAYERS_BUTTON)).toHaveAttribute('data-layer', 'learning')
+    await expect(window.locator(`${boardRoot} .fb-layers-key`)).toBeVisible()
 
-    // THE LEVEL'S OWN FIGURE — the ring centre's number, counting what the
-    // sheet holds (features), not what the panel counts (modules).
-    const understood = window.locator('.fb-terr-title-understood')
-    await expect(understood).toHaveText(/^1 of 2 features · /)
-    await expect(understood).toHaveAttribute('title', /stale not counted/)
+    // THE LEVEL'S OWN FIGURE — counting what the sheet holds (features), not
+    // what the panel counts (modules) — on the Knowledge pill.
+    await expect(window.locator(KNOWLEDGE)).toContainText('50% understood')
+    await expect(window.locator(KNOWLEDGE)).toHaveAttribute('title', /1 of 2 understood/)
+
+    // OPENING THE PANEL CHANGES NOTHING ON THE MAP.
+    await toggleLearnPanel(window)
+    await expect(window.locator('.fb-learn-panel')).toBeVisible({ timeout: 30_000 })
+    expect(await coverageLines(window)).toEqual(open)
 
     // THE FEATURES COUNT — the second population, named, so it cannot be read
     // as the modules count disagreeing with itself. (A bar of its own until
@@ -320,15 +327,19 @@ test.describe('blueprint learning lens (Phase 8)', () => {
       .poll(() => moduleRows(window), { timeout: 15_000 })
       .toEqual(expect.arrayContaining(['src/billing', 'src/shipping']))
 
-    // CLOSING TAKES THE LENS WITH IT.
+    // CLOSING THE PANEL LEAVES THE LENS — it belongs to the layer now.
     await toggleLearnPanel(window)
     await expect(window.locator('.fb-learn-panel')).toHaveCount(0)
+    await expect.poll(async () => (await coverageLines(window))['Billing'], { timeout: 15_000 }).toContain('%')
+
+    // JUST THE MAP TAKES IT OFF.
+    await chooseLayer(window, 'map')
     await expect
       .poll(async () => (await coverageLines(window))['Billing'], { timeout: 15_000 })
       // Back to the AT-REST answer above: no line element at all (it used to
       // stay in the markup, hidden — now the sheet stops drawing it).
       .toBe('(none)')
-    await expect(window.locator('.fb-terr-title-kicker')).not.toContainText('learning lens')
+    await expect(window.locator(`${boardRoot} .fb-layers-key`)).toHaveCount(0)
 
     expect(errors, `uncaught errors:\n${errors.join('\n')}`).toEqual([])
   })

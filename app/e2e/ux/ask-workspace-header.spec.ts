@@ -98,7 +98,7 @@ async function expectInsideWindow(page: Page, locator: Locator, what: string): P
   expect(box!.y + box!.height, `${what} runs past the bottom edge (${String(viewport.height)} high)`).toBeLessThanOrEqual(viewport.height + 0.5)
 }
 
-test('Ask from the header on the Workspace sheet: tag a project and a feature, see them lit, close restores the sheet, and the @ list stays on screen in a short window', async ({ app, window: page }) => {
+test('Ask from the header on the Workspace sheet: the centered sheet opens over a dim, tags a project and a feature with @, leaves the map alone, Esc closes, and the @ list stays on screen in a short window', async ({ app, window: page }) => {
   test.setTimeout(360_000)
 
   const roots: Record<string, string> = {}
@@ -136,7 +136,10 @@ test('Ask from the header on the Workspace sheet: tag a project and a feature, s
 
   const field = page.locator('.flow-board-root [data-ask="field"]')
   const input = field.locator('textarea')
+  // The centered sheet (option B) and its own question box; the island field is only the entry.
   const panel = page.locator('.flow-board-root .fb-ask')
+  const dim = page.locator('.flow-board-root .fb-ask-dim')
+  const sheetInput = panel.locator('.fb-ask-input')
   const sheet = page.locator('.fb-ws-sheet, .fb-ws-root').first()
   // The positive first: the field is in the header, on screen, and the sheet is the Workspace's.
   await expect(field).toBeVisible()
@@ -152,12 +155,14 @@ test('Ask from the header on the Workspace sheet: tag a project and a feature, s
   // ── OPEN: a press on the field opens a Workspace question. ──
   await input.click()
   await expect(panel).toBeVisible()
+  await expect(dim).toBeVisible()
+  await expect(sheetInput).toBeFocused()
   await expect(panel).toHaveAttribute('aria-label', 'Ask about this Workspace')
   await expect(panel.locator('.fb-ask-scope')).toContainText('All 3 projects')
   await expectInsideWindow(page, panel, 'the Ask panel')
 
   // ── @ IN A SHORT WINDOW: the list's rows are inside the window, not clipped by the panel. ──
-  await input.pressSequentially('@')
+  await sheetInput.pressSequentially('@')
   const pick = panel.locator('.fb-ask-pick')
   await expect(pick).toBeVisible()
   const rows = panel.locator('.fb-ask-picker-row')
@@ -194,7 +199,7 @@ test('Ask from the header on the Workspace sheet: tag a project and a feature, s
   mkdirSync(join(__dirname, '__screens'), { recursive: true })
   await page.screenshot({ path: join(__dirname, '__screens', 'ask-workspace-header-picker.png') })
   // Arrowing down to the last row keeps it in the window (the active row scrolls into view).
-  for (let i = 0; i < rowCount; i += 1) await input.press('ArrowDown')
+  for (let i = 0; i < rowCount; i += 1) await sheetInput.press('ArrowDown')
   const active = panel.locator('.fb-ask-picker-row.on')
   await expect(active).toHaveCount(1)
   await expectInsideWindow(page, active, 'the active picker row after arrowing to the end')
@@ -202,12 +207,12 @@ test('Ask from the header on the Workspace sheet: tag a project and a feature, s
 
   // ── TAG A PROJECT: the first row. ──
   await rows.first().click()
-  const chips = field.locator('.fb-ask-chip')
+  const chips = panel.locator('.fb-ask-scope .fb-ask-chip')
   await expect(chips).toHaveCount(1)
   await expect(pick).toBeHidden()
 
   // ── TAG A FEATURE of ANOTHER project, qualified: type @chat, pick the app's. ──
-  await input.pressSequentially('@Chat')
+  await sheetInput.pressSequentially('@Chat')
   await expect(pick).toBeVisible()
   const featureRows = panel.locator('.fb-ask-picker-row', { has: page.locator('.fb-ask-picker-kind', { hasText: /^feature$/ }) })
   // The same slug in two projects is two rows (the collision), each carrying its project.
@@ -215,21 +220,17 @@ test('Ask from the header on the Workspace sheet: tag a project and a feature, s
   await featureRows.filter({ hasText: /Chat Engine/ }).first().click()
   await expect(chips).toHaveCount(2)
   // The typed "@…" is cut out of the question when its row is picked.
-  await expect(input).toHaveValue('')
+  await expect(sheetInput).toHaveValue('')
 
-  // ── LIT: the tagged project's country and the tagged feature's cell, everything else dimmed. ──
-  const taggedCountries = page.locator('.fb-ws-country.fb-ws-ask-tagged')
-  await expect(taggedCountries).toHaveCount(1)
-  const taggedCells = page.locator('.fb-ws-cell.fb-terr-ask-tagged')
-  await expect(taggedCells).toHaveCount(1)
-  await expect(taggedCells.first()).toContainText('Chat Engine')
-  await expect(page.locator('.fb-ws-cell.fb-ws-ask-dim').first()).toBeVisible()
-  // Not everything is dimmed: what is named is lit.
-  expect(await page.locator('.fb-ws-cell.fb-ws-ask-dim').count()).toBeLessThan(cellsBefore)
-  // …and the lit cell's project is not a dimmed country.
-  const dimCountries = await page.locator('.fb-ws-country.fb-ws-ask-dim').count()
-  expect(dimCountries).toBeLessThan(3)
-  await expect(page.locator('.fb-ws-sheet.fb-ws-ask-open, .fb-ws-ask-open').first()).toBeAttached()
+  // ── THE MAP DOES NOT REACT while the sheet is open (option B): the dim layer
+  // covers it, and nothing on it is outlined or dimmed by the question.
+  await expect(page.locator('.fb-ws-country.fb-ws-ask-tagged')).toHaveCount(0)
+  await expect(page.locator('.fb-ws-cell.fb-terr-ask-tagged')).toHaveCount(0)
+  await expect(page.locator('.fb-ws-ask-dim')).toHaveCount(0)
+  const dimBox = (await dim.boundingBox())!
+  const boardBox = (await page.locator('.flow-board-root').boundingBox())!
+  expect(Math.abs(dimBox.width - boardBox.width), 'the dim layer does not cover the board').toBeLessThanOrEqual(1)
+  expect(Math.abs(dimBox.height - boardBox.height), 'the dim layer does not cover the board').toBeLessThanOrEqual(1)
   // The panel says what the question is about now.
   await expect(panel.locator('.fb-ask-scope')).not.toContainText('All 3 projects')
   expect(slugs.core).toBeTruthy()
@@ -238,7 +239,12 @@ test('Ask from the header on the Workspace sheet: tag a project and a feature, s
   await page.screenshot({ path: join(__dirname, '__screens', 'ask-workspace-header-tagged.png') })
 
   // ── CLOSE RESTORES THE SHEET: nothing outlined, nothing dimmed, no open marker, same cells. ──
-  await input.press('Escape')
+  await sheetInput.press('Escape')
+  await expect(panel).toBeHidden()
+  await expect(dim).toBeHidden()
+  // Focus goes back to the island field — and that does not open the sheet again.
+  await expect(input).toBeFocused()
+  await page.waitForTimeout(200)
   await expect(panel).toBeHidden()
   await expect(page.locator('.fb-ws-country.fb-ws-ask-tagged')).toHaveCount(0)
   await expect(page.locator('.fb-ws-cell.fb-terr-ask-tagged')).toHaveCount(0)

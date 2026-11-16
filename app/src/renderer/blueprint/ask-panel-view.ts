@@ -1,31 +1,46 @@
-// Ask the Blueprint — the header field and the panel under it (plans
-// `ask_the_blueprint`, Phase 3, and `ask_the_blueprint_workspace`, Phase 3).
+// Ask the Blueprint — the island's entry field and the centered sheet (plans
+// `ask_the_blueprint` and `ask_the_blueprint_workspace`; redesigned as a
+// sheet on 2026-11-16, "option B").
 //
-// ONE FIELD, ONE PANEL. The question is typed in a search-style field on the
-// board's header (mockup G + D). Focusing it — a press, or "/" — widens it and
-// opens the panel attached under it, at its width (mockup board 5). The panel
-// is no longer a floating window: it grows down from the field, and the map
-// stays visible and pressable under a light dim, so a press tags.
+// ONE SMALL FIELD, ONE SHEET. The island keeps a small entry — a placeholder
+// and the "/" key. Pressing or focusing it (or "/") opens a 760px sheet in the
+// middle of the board over a dim layer, and EVERYTHING about asking happens in
+// that sheet: the question, what it is about, suggested and recent questions,
+// the working status, the answer, follow-ups. Esc or a press on the dim layer
+// closes it and puts focus back on the island field. The map does not react
+// while the sheet is open — the dim layer covers it.
 //
-// THIN ON PURPOSE. Everything this panel decides — what each state says, what
-// a follow-up waits for, what the map shows — is `ask-panel-model`'s pure
-// reducer and its text helpers; matching pasted text and the @ picker are
-// `ask-tag-suggest`'s. This file turns DOM events into model events, model
-// state into DOM, and talks to main through `window.flow.ask`.
+// THIN ON PURPOSE. What each state says and what a follow-up waits for is
+// `ask-panel-model`'s pure reducer; what an answer's text IS (lead, sections,
+// lists, code/file/feature chips, citations, "Not covered") is
+// `ask-answer-model`'s parser, and the suggested and recent questions are its
+// helpers; matching pasted text and the @ picker are `ask-tag-suggest`'s. This
+// file turns DOM events into model events, model state into DOM, and talks to
+// main through `window.flow.ask`. Model text only ever reaches the page as text
+// nodes — never through innerHTML.
 //
 // THE FIELD OUTLIVES THE STRIP. The board rebuilds its header strip on every
 // render, so the field is built once here and MOVED into each new strip
-// (`mountField`) — the caret, the text and the focus survive a repaint.
+// (`mountField`).
 //
 // PAY ONLY WHILE OPEN (allowed-pattern #17). The `ask:state` subscription, the
-// outside-press and resize listeners are taken when the panel opens and
-// dropped when it closes; saved-question reads run only for the view on
-// screen, and a read nobody is waiting for is dropped.
+// outside-press listener and the elapsed-time tick are taken when the sheet
+// opens (the tick only while an answer runs) and dropped when it closes.
 //
-// No commands, paths or settings in its words (forbidden #12): a source shows
-// a file NAME as a reference, and every error is main's plain sentence.
+// No commands, paths or settings in its words (forbidden #12): a file chip
+// shows a repo path the answer itself named, and every error is main's plain
+// sentence.
 
 import type { AskSavedThread, AskSource, AskSuggestedConnection } from '../../shared/ask-contract'
+import { markModalOverlay } from '../modal-overlay'
+import {
+  parseAnswer,
+  recentRows,
+  suggestedQuestions,
+  type AnswerBlock,
+  type AnswerInline,
+  type SuggestInput,
+} from './ask-answer-model'
 import {
   ageLabel,
   askScopeLine,
@@ -37,6 +52,7 @@ import {
   continuePrompt,
   conversationTagIds,
   currentTurn,
+  factsSentence,
   followUpTarget,
   initialAskState,
   isRunning,
@@ -64,9 +80,9 @@ import {
   type SuggestNode,
 } from './ask-tag-suggest'
 
-/** What the board lends the panel. */
+/** What the board lends the sheet. */
 export interface AskPanelHost {
-  /** The project the panel asks from (the Workspace is resolved from it), or null when none is open. */
+  /** The project the sheet asks from (the Workspace is resolved from it), or null when none is open. */
   rootId: () => string | null
   /** The scope a fresh open asks: the sheet on screen decides. */
   scope: () => AskScope
@@ -76,23 +92,38 @@ export interface AskPanelHost {
   graphNodes: (scope: AskScope) => readonly SuggestNode[]
   /** Workspace scope: projects and connections for the @ picker. */
   extraCandidates: (scope: AskScope) => readonly PickerCandidate[]
-  /** Project scope: which features "Saved questions" reads when nothing is tagged. */
+  /** Project scope: which features "Your questions" reads when nothing is tagged. */
   historyScope: () => string[]
   /** A project's name and colour (a CSS colour value), for chips and sources. */
   project: (slug: string) => { name: string; color: string | null } | null
   /** A feature's name in a project, when the board holds it. */
   featureName: (project: string, featureId: string) => string | null
-  /** A press on this target tags, so it does not close the panel. */
-  isMapTarget: (target: EventTarget | null) => boolean
-  /** The state changed — the board redraws the map if what it shows changed. */
+  /** A feature or part id (either grammar)'s name, when the board holds it. */
+  featureLabel: (id: string) => string | null
+  /** What "Try asking" is built from, for this scope and these tags. */
+  suggestInput: (scope: AskScope, tags: readonly AskTag[]) => SuggestInput
+  /**
+   * Project scope: every saved question, read ONCE per board load (not per
+   * broadcast); null until read. "Your recent questions" reads it when
+   * nothing is tagged.
+   */
+  savedAll: () => readonly AskSavedThread[] | null
+  /** An answer was saved — the board reads its saved list again (its markers too). */
+  onSaved: () => void
+  /** The state changed. */
   onChange: (state: AskPanelState) => void
-  /** Whether a source's file can be opened here: its project is the board's own. */
-  canPeek: (project: string | undefined) => boolean
-  /** Open a source's file in the board's read-only drawer. */
-  peekFile: (relPath: string) => void
+  /** Whether a file of this project can be opened here (a checkout on this computer). */
+  canOpenFile: (project: string | undefined) => boolean
+  /** Open a repo file in the app's editor. */
+  openFile: (relPath: string, project: string | undefined) => void
+  /**
+   * What pressing a feature chip does — the board's navigation to it — or null
+   * when that feature cannot be opened from here (another project's).
+   */
+  featureTarget: (id: string) => (() => void) | null
   /** A connection was recorded — the Workspace map is read again. */
   onConnectionSaved: () => void
-  /** The panel closed from the keyboard — focus goes back to the board. */
+  /** The sheet closed and the island field is not on screen — the board takes focus back. */
   onClosed: () => void
 }
 
@@ -100,10 +131,10 @@ const ASK_TIMEOUT_SENTENCE = "Flow couldn't start that question."
 const SAVE_FAILED_SENTENCE = "Flow couldn't save that connection."
 const LIST_DEBOUNCE_MS = 250
 const THREAD_PICKER_LIMIT = 30
-/** The panel is never narrower than this, even under a narrow field. */
-const PANEL_MIN_WIDTH = 380
+const RECENT_SHOWN = 4
 
 export const ASK_FIELD_PLACEHOLDER = 'Ask how something works…'
+export const ASK_SHEET_PLACEHOLDER = 'What do you want to know?'
 
 /* ── Tiny DOM helpers ─────────────────────────────────────────────────── */
 
@@ -154,11 +185,6 @@ const ICON_SPIN = ['M21 12a9 9 0 1 1-9-9']
 const ICON_CHAT = ['M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z']
 const ICON_BRANCH = ['M6 4v12', 'M18 6a2 2 0 1 0 0 .01', 'M6 18a2 2 0 1 0 0 .01', 'M18 8c0 4-6 3-10 6']
 
-function baseName(path: string): string {
-  const parts = path.split('/')
-  return parts[parts.length - 1] ?? path
-}
-
 /** A key hint: the key cap, then what it does. */
 function keyHint(key: string, what: string): HTMLElement {
   const hint = el('span', 'fb-ask-keyhint')
@@ -166,30 +192,35 @@ function keyHint(key: string, what: string): HTMLElement {
   return hint
 }
 
-/* ── The field and the panel ──────────────────────────────────────────── */
+/* ── The field and the sheet ──────────────────────────────────────────── */
 
 export class AskPanelView {
-  /** The panel — placed on the board root, under the field. */
+  /** The dim layer with the sheet in it — placed on the board root, over everything. */
   readonly element: HTMLElement
-  /** The header field — moved into each header strip the board builds. */
+  /** The island's entry field — moved into each header strip the board builds. */
   readonly field: HTMLElement
   readonly #host: AskPanelHost
   #state: AskPanelState = initialAskState()
 
-  // Persistent pieces — rebuilt never, so focus and the caret survive a repaint.
-  readonly #fieldChips: HTMLElement
-  readonly #fieldCount: HTMLElement
-  readonly #textarea: HTMLTextAreaElement
-  readonly #clearBtn: HTMLButtonElement
+  // The island field.
+  readonly #fieldInput: HTMLTextAreaElement
   readonly #fieldKey: HTMLElement
+
+  // The sheet — built once, so focus and the caret survive a repaint.
+  readonly #sheet: HTMLElement
+  readonly #big: HTMLElement
+  readonly #textarea: HTMLTextAreaElement
+  readonly #scopeLine: HTMLElement
+  readonly #qhead: HTMLElement
+  readonly #qtitle: HTMLElement
+  readonly #meta: HTMLElement
   readonly #body: HTMLElement
   readonly #pick: HTMLElement
   readonly #pickHead: HTMLElement
   readonly #pickList: HTMLElement
   readonly #compose: HTMLElement
-  readonly #scopeLine: HTMLElement
   readonly #suggestions: HTMLElement
-  readonly #askedBefore: HTMLElement
+  readonly #columns: HTMLElement
   readonly #answer: HTMLElement
   readonly #history: HTMLElement
   readonly #hints: HTMLElement
@@ -210,112 +241,152 @@ export class AskPanelView {
   #listedKey = ''
   #staleRead = false
   #copyTimer: number | null = null
-  #placeFrame: number | null = null
+  #tickTimer: number | null = null
+  /** "Show steps" is open. Reset with every new question. */
+  #stepsOpen = false
+  /** Turns whose folded reply is shown, by index. */
+  #repliesOpen = new Set<number>()
+  /** A saved id already reported to the board, so `onSaved` fires once per answer. */
+  #reportedSaved = new Set<string>()
+  /** Focus being put back on the island field — its focus event must not reopen the sheet. */
+  #returningFocus = false
 
   constructor(host: AskPanelHost) {
     this.#host = host
     injectAskStyles()
 
-    // ── THE FIELD ──────────────────────────────────────────────────────────
+    // ── THE ISLAND FIELD — a small entry: a placeholder and the "/" key. ──
     this.field = el('div', 'fb-askf')
     this.field.dataset['ask'] = 'field'
     this.field.setAttribute('role', 'search')
     this.field.appendChild(icon(ICON_SPARK, 14, 16)).classList.add('fb-askf-spark')
-    this.#fieldChips = el('span', 'fb-askf-chips')
-    this.#fieldCount = el('span', 'fb-askf-count')
-    this.#textarea = el('textarea', 'fb-askf-input')
-    this.#textarea.rows = 1
-    // One line, scrolling sideways: the field is a search field, not a page.
-    this.#textarea.wrap = 'off'
-    this.#textarea.placeholder = ASK_FIELD_PLACEHOLDER
-    this.#textarea.setAttribute('aria-label', 'Ask how something works, or whether it can be built')
-    this.#textarea.spellcheck = false
-    this.#textarea.addEventListener('focus', () => {
-      if (!this.#state.open) this.open({})
+    this.#fieldInput = el('textarea', 'fb-askf-input')
+    this.#fieldInput.rows = 1
+    this.#fieldInput.wrap = 'off'
+    this.#fieldInput.readOnly = true
+    this.#fieldInput.placeholder = ASK_FIELD_PLACEHOLDER
+    this.#fieldInput.setAttribute('aria-label', 'Ask how something works, or whether it can be built')
+    this.#fieldInput.setAttribute('aria-haspopup', 'dialog')
+    this.#fieldInput.spellcheck = false
+    this.#fieldInput.addEventListener('focus', () => {
+      if (this.#returningFocus) return
+      if (!this.#state.open) this.#openFromField()
     })
     // A press on a field already focused (focus fires no event) opens it too.
-    this.#textarea.addEventListener('mousedown', () => {
-      if (!this.#state.open && document.activeElement === this.#textarea) this.open({})
+    this.#fieldInput.addEventListener('mousedown', () => {
+      if (!this.#state.open && document.activeElement === this.#fieldInput) this.#openFromField()
     })
+    this.#fieldInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault()
+        if (!this.#state.open) this.#openFromField()
+      }
+    })
+    this.#fieldKey = el('kbd', 'fb-askf-key', '/')
+    this.#fieldKey.title = 'Press / to ask'
+    this.field.append(this.#fieldInput, this.#fieldKey)
+    this.field.addEventListener('mousedown', (event) => {
+      if (event.target === this.#fieldInput) return
+      event.preventDefault()
+      if (!this.#state.open) this.#openFromField()
+    })
+    this.field.addEventListener('click', (event) => event.stopPropagation())
+
+    // ── THE DIM LAYER and the sheet in it ──────────────────────────────────
+    this.element = el('div', 'fb-ask-dim')
+    this.element.hidden = true
+    this.element.dataset['ask'] = 'dim'
+    // A MODAL while open: the app's panel shortcuts are inert, the terminal
+    // does not take focus, and Tab stays inside the sheet.
+    markModalOverlay(this.element)
+    // A press on the dim layer itself (not the sheet) closes.
+    this.element.addEventListener('mousedown', (event) => {
+      if (event.target !== this.element) return
+      event.preventDefault()
+      this.#closeFromKeyboard()
+    })
+    this.element.addEventListener('click', (event) => event.stopPropagation())
+    this.element.addEventListener('dblclick', (event) => event.stopPropagation())
+
+    this.#sheet = el('div', 'fb-ask')
+    this.#sheet.setAttribute('role', 'dialog')
+    this.#sheet.setAttribute('aria-modal', 'true')
+    this.#sheet.setAttribute('aria-label', 'Ask the Blueprint')
+    this.#sheet.tabIndex = -1
+    this.#sheet.addEventListener('keydown', (event) => this.#onKeydown(event))
+    this.element.appendChild(this.#sheet)
+
+    // HEAD — the big field and the scope (compose), or the question and its status (answer).
+    const head = el('div', 'fb-ask-head')
+    this.#big = el('div', 'fb-ask-big')
+    this.#big.appendChild(icon(ICON_SPARK, 15, 16)).classList.add('fb-ask-big-spark')
+    this.#textarea = el('textarea', 'fb-ask-input')
+    this.#textarea.rows = 1
+    this.#textarea.wrap = 'off'
+    this.#textarea.placeholder = ASK_SHEET_PLACEHOLDER
+    this.#textarea.setAttribute('aria-label', 'Your question')
+    this.#textarea.spellcheck = false
     this.#textarea.addEventListener('input', (event) => this.#onInput(event as InputEvent))
     this.#textarea.addEventListener('blur', () =>
       window.setTimeout(() => {
         if (document.activeElement !== this.#textarea) this.#closePicker()
       }, 150),
     )
-    this.#textarea.addEventListener('keydown', (event) => this.#onKeydown(event))
-    this.#clearBtn = button('fb-askf-clear', '×', () => this.#clear(), 'Clear the question')
-    this.#clearBtn.title = 'Clear the question'
-    this.#fieldKey = el('kbd', 'fb-askf-key', '/')
-    this.#fieldKey.addEventListener('mousedown', (event) => {
-      if (!this.#state.open) return
+    const esc = el('kbd', 'fb-ask-esc', 'esc')
+    esc.title = 'Close'
+    esc.addEventListener('mousedown', (event) => {
       event.preventDefault()
-      event.stopPropagation()
       this.#closeFromKeyboard()
     })
-    this.field.append(this.#fieldChips, this.#fieldCount, this.#textarea, this.#clearBtn, this.#fieldKey)
-    // A press anywhere on the field puts the cursor in the question.
-    this.field.addEventListener('mousedown', (event) => {
-      const target = event.target as Element
-      if (target === this.#textarea || target.closest('button') !== null) return
-      if (target === this.#fieldKey && this.#state.open) return
+    this.#big.append(this.#textarea, esc)
+    this.#big.addEventListener('mousedown', (event) => {
+      if (event.target === this.#textarea || (event.target as Element).closest('kbd') !== null) return
       event.preventDefault()
-      this.#focusField()
+      this.#focusInput()
     })
-    this.field.addEventListener('click', (event) => event.stopPropagation())
+    this.#scopeLine = el('div', 'fb-ask-scope')
 
-    // ── THE PANEL ──────────────────────────────────────────────────────────
-    this.element = el('div', 'fb-ask')
-    this.element.setAttribute('role', 'dialog')
-    this.element.setAttribute('aria-label', 'Ask the Blueprint')
-    this.element.hidden = true
-    // Clicks and keys inside the panel are the panel's, never the sheet's.
-    this.element.addEventListener('click', (event) => event.stopPropagation())
-    this.element.addEventListener('dblclick', (event) => event.stopPropagation())
-    this.element.addEventListener('keydown', (event) => this.#onKeydown(event))
+    this.#qhead = el('div', 'fb-ask-qhead')
+    this.#qtitle = el('div', 'fb-ask-qtitle')
+    const newQuestion = button('fb-ask-quiet fb-ask-newq', 'New question', () => this.#newQuestion())
+    const closeBtn = button('fb-ask-icon-btn', '', () => this.#closeFromKeyboard(), 'Close')
+    closeBtn.title = 'Close'
+    closeBtn.appendChild(el('kbd', 'fb-ask-esc', 'esc'))
+    this.#qhead.append(this.#qtitle, newQuestion, closeBtn)
+    this.#meta = el('div', 'fb-ask-meta')
+    head.append(this.#big, this.#qhead, this.#meta, this.#scopeLine)
 
     this.#body = el('div', 'fb-ask-body')
 
-    // THE @ LIST — the panel's whole body while a tag is being typed, so it
-    // is never clipped by a scroll box it sits inside (user report, 2026-11-15).
+    // THE @ LIST — the body while a tag is being typed.
     this.#pick = el('div', 'fb-ask-pick')
     this.#pickHead = el('div', 'fb-ask-caps fb-ask-pick-head')
     this.#pickList = el('div', 'fb-ask-pick-list')
     this.#pickList.setAttribute('role', 'listbox')
-    this.#pickList.setAttribute('aria-label', 'Tags')
+    this.#pickList.setAttribute('aria-label', 'Features to add')
     this.#pick.append(this.#pickHead, this.#pickList)
 
-    // COMPOSE — what is asked about, suggestions, asked before.
+    // COMPOSE — tags the pasted text names, then Try asking | Your recent questions.
     this.#compose = el('div', 'fb-ask-compose')
-    this.#scopeLine = el('div', 'fb-ask-scope')
     this.#suggestions = el('div', 'fb-ask-card fb-ask-suggest')
-    this.#askedBefore = el('div', 'fb-ask-before')
-    this.#compose.append(this.#scopeLine, this.#suggestions, this.#askedBefore)
+    this.#columns = el('div', 'fb-ask-cols')
+    this.#compose.append(this.#suggestions, this.#columns)
 
     this.#answer = el('div', 'fb-ask-answer')
     this.#history = el('div', 'fb-ask-history')
     this.#body.append(this.#pick, this.#compose, this.#answer, this.#history)
 
-    // KEY HINTS — the question box's, and the @ list's.
+    // FOOTERS — compose's key hints, the @ list's, and the answer's follow-up.
     this.#hints = el('div', 'fb-ask-hints')
-    this.#hints.append(
-      keyHint('↵', 'ask'),
-      keyHint('@', 'tag'),
-      keyHint('esc', 'close'),
-      el('span', 'fb-ask-spacer'),
-      button('fb-ask-quiet', 'Saved questions', () => this.#showHistory()),
-    )
+    this.#hints.append(keyHint('↵', 'ask'), keyHint('@', 'add a feature'), el('span', 'fb-ask-spacer'), el('span', 'fb-ask-private', 'Only you see your questions'))
     this.#pickHints = el('div', 'fb-ask-hints')
-    this.#pickHints.append(keyHint('↑↓', 'move'), keyHint('↵', 'add tag'), keyHint('esc', 'back to the question'))
+    this.#pickHints.append(keyHint('↑↓', 'move'), keyHint('↵', 'add'), keyHint('esc', 'back to the question'))
 
-    // FOOTER — the follow-up box and Continue in a conversation.
     this.#footer = el('div', 'fb-ask-foot')
-    const followLabel = el('label', 'fb-ask-caps', 'Follow-up')
     this.#followInput = el('input', 'fb-ask-follow')
     this.#followInput.type = 'text'
-    this.#followInput.id = `fb-ask-follow-${String(Math.random()).slice(2, 8)}`
-    followLabel.htmlFor = this.#followInput.id
-    this.#followInput.placeholder = 'Ask more about this answer…'
+    this.#followInput.placeholder = 'Ask a follow-up…'
+    this.#followInput.setAttribute('aria-label', 'Ask a follow-up')
     this.#followInput.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter') return
       event.preventDefault()
@@ -323,11 +394,9 @@ export class AskPanelView {
       this.#submit(true)
     })
     this.#continueBtn = button('fb-ask-secondary', 'Continue in a conversation', () => this.#continueInConversation())
-    const followRow = el('div', 'fb-ask-follow-row')
-    followRow.append(this.#followInput, this.#continueBtn)
-    this.#footer.append(followLabel, followRow)
+    this.#footer.append(this.#followInput, this.#continueBtn)
 
-    this.element.append(this.#body, this.#hints, this.#pickHints, this.#footer)
+    this.#sheet.append(head, this.#body, this.#hints, this.#pickHints, this.#footer)
     this.#render()
   }
 
@@ -339,19 +408,9 @@ export class AskPanelView {
     return this.#state.open
   }
 
-  /**
-   * Put the field in a header strip. The strip is rebuilt on every render, so
-   * this MOVES the one field: a question being typed keeps its caret, and the
-   * panel is placed again once the strip is on screen.
-   */
+  /** Put the field in a header strip. The strip is rebuilt on every render, so this MOVES the one field. */
   mountField(parent: HTMLElement): void {
-    const focused = this.field.contains(document.activeElement)
     parent.appendChild(this.field)
-    if (!focused && !this.#state.open) return
-    window.requestAnimationFrame(() => {
-      if (focused && this.field.isConnected) this.#textarea.focus({ preventScroll: true })
-      this.#place()
-    })
   }
 
   /** Open — with text or tags, a fresh question; with neither, where it was left. */
@@ -366,6 +425,7 @@ export class AskPanelView {
       this.#threadCandidates = null
       this.#listedKey = ''
     }
+    if (fresh.text !== undefined || (fresh.tags !== undefined && fresh.tags.length > 0)) this.#resetAnswerChrome()
     this.#subscribe()
     this.#dispatch({ type: 'open', ...fresh, scope: nextScope })
     if (entryId !== undefined) {
@@ -373,13 +433,19 @@ export class AskPanelView {
       // entry opens in place of a question.
       this.#dispatch({ type: 'show-history' })
       void this.#readHistory(entryId)
-      this.#focusField()
+      this.#focusSheet()
       return
     }
     if (view === 'history') {
       this.#showHistory()
-      this.#focusField()
+      this.#focusSheet()
       return
+    }
+    // A SAVED LIST IS NOT A PLACE TO RETURN TO: a bare open after one starts a question.
+    if (wasOpen === false && fresh.text === undefined && fresh.tags === undefined && this.#state.view === 'history') {
+      this.#dispatch({ type: 'new-question' })
+      for (const tag of this.#state.tags) this.#dispatch({ type: 'remove-tag', id: tag.id })
+      this.#textarea.value = ''
     }
     if (submit === true && input.text !== undefined) {
       this.#textarea.value = input.text
@@ -387,23 +453,24 @@ export class AskPanelView {
       return
     }
     if (input.text !== undefined) this.#suggestFrom(input.text)
-    this.#focusField()
+    this.#focusSheet()
   }
 
   close(): void {
     this.#unsubscribeState()
     this.#closePicker()
     this.#clearListTimer()
+    this.#stopTick()
     this.#listSeq += 1
     this.#historySeq += 1
     this.#dispatch({ type: 'close' })
   }
 
   /**
-   * A map piece pressed while the panel is open. In the question box it
-   * becomes a chip; on an answer it starts a new question with that answer's
-   * tags plus this one, keeping the question. While an answer is still coming
-   * nothing changes, and false says so — the board then leaves the press alone.
+   * A map piece named while the sheet is open (an opener, not a map press —
+   * the dim layer covers the map). In the question box it becomes a chip; on
+   * a finished answer it starts a new question with that answer's tags plus
+   * this one. While an answer is still coming nothing changes.
    */
   addTagFromMap(tag: AskTag): boolean {
     const turn = currentTurn(this.#state)
@@ -412,27 +479,31 @@ export class AskPanelView {
       const tags = [...turn.tags]
       if (!tags.some((existing) => existing.id === tag.id)) tags.push(tag)
       const question = turn.question
-      this.#dispatch({ type: 'new-question' })
+      this.#newQuestion()
       for (const existing of tags) this.#dispatch({ type: 'add-tag', tag: existing })
       this.#dispatch({ type: 'draft', text: question })
-      this.#focusField()
+      this.#focusInput()
       return true
     }
     if (this.#state.view === 'history') this.#dispatch({ type: 'new-question' })
     this.#dispatch({ type: 'add-tag', tag })
-    this.#focusField()
+    this.#focusInput()
     return true
   }
 
-  /** Place the panel under the field again — the board resized or re-laid its header. */
+  /** Kept for the board's resize path: the sheet is centred by CSS, so there is nothing to place. */
   reposition(): void {
-    this.#place()
+    // Nothing: the sheet is laid out by CSS against the board.
+  }
+
+  /** The board's saved list changed: "Your recent questions" reads it again. */
+  refreshSaved(): void {
+    if (this.#state.open && this.#state.view === 'compose') this.#render()
   }
 
   dispose(): void {
     this.close()
     if (this.#copyTimer !== null) window.clearTimeout(this.#copyTimer)
-    if (this.#placeFrame !== null) window.cancelAnimationFrame(this.#placeFrame)
     this.element.remove()
     this.field.remove()
   }
@@ -446,6 +517,18 @@ export class AskPanelView {
     this.#render()
     this.#host.onChange(next)
     this.#scheduleAskedBefore()
+    this.#reportSaved()
+    this.#syncTick()
+  }
+
+  /** A fresh answer that just landed in the saved log: the board re-reads its list, once. */
+  #reportSaved(): void {
+    for (const turn of this.#state.turns) {
+      const id = turn.saved === null ? turn.answer?.savedId : undefined
+      if (id === undefined || isRunning(turn) || this.#reportedSaved.has(id)) continue
+      this.#reportedSaved.add(id)
+      this.#host.onSaved()
+    }
   }
 
   #subscribe(): void {
@@ -456,13 +539,11 @@ export class AskPanelView {
         if (!this.#state.turns.some((turn) => turn.askId === event.askId)) return
         this.#dispatch({ type: 'state', event, at: Date.now() })
       }) ?? null
-    // WHILE OPEN ONLY: an outside press closes, a resize re-places.
+    // WHILE OPEN ONLY: a press outside the board's sheet and field closes.
     document.addEventListener('pointerdown', this.#onOutsidePress, true)
-    window.addEventListener('resize', this.#onResize)
     this.#unsubscribe = () => {
       off?.()
       document.removeEventListener('pointerdown', this.#onOutsidePress, true)
-      window.removeEventListener('resize', this.#onResize)
     }
   }
 
@@ -474,34 +555,68 @@ export class AskPanelView {
   readonly #onOutsidePress = (event: PointerEvent): void => {
     if (!this.#state.open) return
     const target = event.target
+    // The dim layer is the sheet's own (its press closes it and returns focus).
     if (target instanceof Node && (this.element.contains(target) || this.field.contains(target))) return
-    // THE MAP STAYS PRESSABLE: a press on it tags, it does not dismiss.
-    if (this.#host.isMapTarget(target)) return
     this.close()
   }
 
-  readonly #onResize = (): void => {
-    this.#place()
+  /** The elapsed seconds tick once a second, only while an answer runs and the sheet is open. */
+  #syncTick(): void {
+    const turn = currentTurn(this.#state)
+    const running = this.#state.open && turn !== null && isRunning(turn)
+    if (!running) {
+      this.#stopTick()
+      return
+    }
+    if (this.#tickTimer !== null) return
+    this.#tickTimer = window.setInterval(() => this.#renderMeta(), 1000)
   }
 
-  #focusField(): void {
+  #stopTick(): void {
+    if (this.#tickTimer !== null) window.clearInterval(this.#tickTimer)
+    this.#tickTimer = null
+  }
+
+  #focusInput(): void {
     this.#textarea.focus({ preventScroll: true })
     const end = this.#textarea.value.length
     this.#textarea.setSelectionRange(end, end)
   }
 
+  /** Focus what the sheet's state is about: the question box, else the follow-up, else the sheet. */
+  #focusSheet(): void {
+    window.requestAnimationFrame(() => {
+      if (!this.#state.open) return
+      if (this.#state.view === 'compose') this.#focusInput()
+      else if (this.#state.view === 'answer' && !this.#followInput.disabled) this.#followInput.focus({ preventScroll: true })
+      else this.#sheet.focus({ preventScroll: true })
+    })
+    if (this.#state.view === 'compose') this.#focusInput()
+  }
+
+  /** Esc, the dim layer, or the esc key cap: close, and focus goes back to the island field. */
   #closeFromKeyboard(): void {
     this.close()
-    this.#textarea.blur()
+    if (this.field.isConnected) {
+      this.#returningFocus = true
+      this.#fieldInput.focus({ preventScroll: true })
+      this.#returningFocus = false
+      return
+    }
     this.#host.onClosed()
   }
 
-  /** The field's ×: the question goes, the tags stay. */
-  #clear(): void {
+  #resetAnswerChrome(): void {
+    this.#stepsOpen = false
+    this.#repliesOpen.clear()
+  }
+
+  #newQuestion(): void {
     this.#closePicker()
+    this.#resetAnswerChrome()
     this.#dispatch({ type: 'new-question' })
     this.#textarea.value = ''
-    if (this.#state.open) this.#focusField()
+    this.#focusInput()
   }
 
   /* ── Asking ─────────────────────────────────────────────────────────── */
@@ -515,6 +630,8 @@ export class AskPanelView {
     const followUpOf = followUp ? followUpTarget(this.#state) : null
     const at = Date.now()
     const before = this.#state
+    if (!followUp) this.#resetAnswerChrome()
+    else this.#stepsOpen = false
     this.#dispatch({ type: 'submit', question, followUp, at })
     // The reducer refused (an empty question, a follow-up while one runs).
     if (this.#state === before) return
@@ -523,6 +640,7 @@ export class AskPanelView {
     if (followUp) this.#followInput.value = ''
     this.#closePicker()
     void this.#start(rootId, turn, followUpOf)
+    this.#sheet.focus({ preventScroll: true })
   }
 
   async #start(rootId: string, turn: AskTurn, followUpOf: string | null): Promise<void> {
@@ -563,6 +681,12 @@ export class AskPanelView {
     this.#submit(false)
   }
 
+  #askSuggested(question: string): void {
+    this.#textarea.value = question
+    this.#dispatch({ type: 'draft', text: question })
+    this.#submit(false)
+  }
+
   #continueInConversation(): void {
     const turn = currentTurn(this.#state)
     if (turn === null) return
@@ -595,9 +719,10 @@ export class AskPanelView {
   /* ── Saved questions ────────────────────────────────────────────────── */
 
   /**
-   * Re-read "asked before" when the tags change, in the question box only. On
-   * the Workspace, nothing tagged reads the whole Workspace; in a project it
-   * reads nothing until a feature is tagged.
+   * Re-read the saved questions about the tags when they change, in the
+   * question box only. On the Workspace, nothing tagged reads the whole
+   * Workspace; in a project, nothing tagged reads nothing here — the board's
+   * once-per-load list answers it.
    */
   #scheduleAskedBefore(): void {
     if (!this.#state.open || this.#state.view !== 'compose') return
@@ -623,7 +748,7 @@ export class AskPanelView {
     this.#listTimer = null
   }
 
-  /** One read of saved answers in the panel's scope, with the stale marks when not read yet. */
+  /** One read of saved answers in the sheet's scope, with the stale marks when not read yet. */
   async #readSaved(ids: string[], withStale: boolean) {
     const rootId = this.#host.rootId()
     const api = window.flow.ask
@@ -663,9 +788,19 @@ export class AskPanelView {
   async #readHistory(openId?: string): Promise<void> {
     const tagged = mapTagIds(this.#state.tags)
     const workspace = this.#state.scope.kind === 'workspace'
+    const seq = ++this.#historySeq
+    // PROJECT, NOTHING TAGGED: the board's once-per-load list is the whole history.
+    if (!workspace && tagged.length === 0) {
+      const all = this.#host.savedAll()
+      if (all !== null) {
+        this.#dispatch({ type: 'history', threads: [...all], stale: [] })
+        const wanted = openId === undefined ? undefined : all.find((thread) => thread.id === openId)
+        if (wanted !== undefined) this.#dispatch({ type: 'open-saved', thread: wanted })
+        if (openId === undefined || wanted !== undefined) return
+      }
+    }
     // A saved entry asked for by id is looked for in the whole scope.
     const ids = workspace ? (openId !== undefined ? [] : tagged) : tagged.length > 0 ? tagged : this.#host.historyScope()
-    const seq = ++this.#historySeq
     if (!workspace && ids.length === 0) {
       this.#dispatch({ type: 'history', threads: [], stale: [] })
       return
@@ -674,7 +809,7 @@ export class AskPanelView {
     if (read === null || seq !== this.#historySeq || !this.#state.open) return
     const { list, stale } = read
     if (list === null || !list.ok) {
-      this.#dispatch({ type: 'history-failed', sentence: list?.detail ?? "Saved questions couldn't be read." })
+      this.#dispatch({ type: 'history-failed', sentence: list?.detail ?? "Your questions couldn't be read." })
       return
     }
     this.#dispatch({ type: 'history', threads: list.threads, stale: stale !== null && stale.ok ? stale.results : [] })
@@ -684,6 +819,7 @@ export class AskPanelView {
 
   /** A saved row pressed: a pointer to a Workspace answer opens it in the Workspace. */
   #openSavedRow(thread: AskSavedThread): void {
+    this.#resetAnswerChrome()
     const pointer = thread.workspaceAnswer
     if (pointer !== undefined && this.#state.scope.kind !== 'workspace') {
       const workspace = this.#host.workspaceScope()
@@ -693,6 +829,7 @@ export class AskPanelView {
       }
     }
     this.#dispatch({ type: 'open-saved', thread })
+    this.#focusSheet()
   }
 
   /* ── Typing, pasting and the @ picker ───────────────────────────────── */
@@ -702,13 +839,26 @@ export class AskPanelView {
     this.#dispatch({ type: 'draft', text })
     if (event.inputType === 'insertFromPaste') this.#suggestFrom(text)
     this.#updatePicker()
-    this.#fitField()
   }
 
   #suggestFrom(text: string): void {
     const exclude = new Set(this.#state.tags.map((tag) => tag.id))
     const suggestions = suggestTags(text, this.#host.graphNodes(this.#state.scope), { exclude })
     this.#dispatch({ type: 'suggest', suggestions })
+  }
+
+  /** "+ add a feature with @": an @ at the caret, and the list opens. */
+  #startMention(): void {
+    const text = this.#textarea.value
+    const caret = this.#textarea.selectionStart ?? text.length
+    const before = text.slice(0, caret)
+    const insert = before === '' || before.endsWith(' ') ? '@' : ' @'
+    this.#textarea.value = `${before}${insert}${text.slice(caret)}`
+    const at = before.length + insert.length
+    this.#textarea.focus({ preventScroll: true })
+    this.#textarea.setSelectionRange(at, at)
+    this.#dispatch({ type: 'draft', text: this.#textarea.value })
+    this.#updatePicker()
   }
 
   #updatePicker(): void {
@@ -812,6 +962,11 @@ export class AskPanelView {
       else this.#closeFromKeyboard()
       return
     }
+    if (event.key === 'Tab') {
+      // THE SHEET HOLDS FOCUS while it is open: Tab cycles inside it.
+      this.#trapTab(event)
+      return
+    }
     if (inField && event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       event.stopPropagation()
@@ -826,46 +981,50 @@ export class AskPanelView {
         this.#dispatch({ type: 'remove-tag', id: last.id })
       }
     }
-    // Typing in the panel never reaches the board's own shortcuts; the app's
+    // Typing in the sheet never reaches the board's own shortcuts; the app's
     // modifier shortcuts (the palette and the like) still do.
     if (!event.metaKey && !event.ctrlKey) event.stopPropagation()
   }
 
-  /* ── Placing the panel under the field ──────────────────────────────── */
-
-  #place(): void {
-    if (!this.#state.open || this.element.hidden) return
-    const parent = (this.element.offsetParent as HTMLElement | null) ?? this.element.parentElement
-    const style = this.element.style
-    if (parent === null || !this.field.isConnected) {
-      // No field on this sheet: the panel keeps its resting corner.
-      style.left = ''
-      style.top = ''
-      style.width = ''
-      style.maxHeight = ''
-      this.element.classList.add('fb-ask-floating')
+  #trapTab(event: KeyboardEvent): void {
+    const focusable = [...this.#sheet.querySelectorAll<HTMLElement>('button, input, textarea, [tabindex="0"]')].filter(
+      (node) => !(node as HTMLButtonElement).disabled && node.offsetParent !== null,
+    )
+    event.stopPropagation()
+    if (focusable.length === 0) {
+      event.preventDefault()
       return
     }
-    const fieldRect = this.field.getBoundingClientRect()
-    const box = parent.getBoundingClientRect()
-    if (fieldRect.width === 0 || box.width === 0) return
-    this.element.classList.remove('fb-ask-floating')
-    const gutter = 8
-    const width = Math.min(Math.max(fieldRect.width, PANEL_MIN_WIDTH), box.width - gutter * 2)
-    // Right edges line up, so a field near the edge never pushes the panel off it.
-    let left = fieldRect.right - box.left - width
-    left = Math.max(gutter, Math.min(left, box.width - width - gutter))
-    const top = fieldRect.bottom - box.top + 6
-    style.left = `${String(Math.round(left))}px`
-    style.top = `${String(Math.round(top))}px`
-    style.right = 'auto'
-    style.width = `${String(Math.round(width))}px`
-    style.maxHeight = `${String(Math.max(160, Math.round(box.height - top - 12)))}px`
+    const first = focusable[0]
+    const last = focusable[focusable.length - 1]
+    const active = document.activeElement
+    if (event.shiftKey && (active === first || !this.#sheet.contains(active))) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && (active === last || !this.#sheet.contains(active))) {
+      event.preventDefault()
+      first.focus()
+    }
   }
 
-  /** The field is one line in every state; keep the newest chip and the caret in view. */
-  #fitField(): void {
-    this.#fieldChips.scrollLeft = this.#fieldChips.scrollWidth
+  /* ── The island field's scope ───────────────────────────────────────── */
+
+  /**
+   * THE FIELD ASKS ABOUT ONE THING (a feature's deep view): its placeholder
+   * names it and opening the field opens the question already scoped to it.
+   * Null is the plain field.
+   */
+  #fieldScope: { placeholder: string; open: () => void } | null = null
+
+  setFieldScope(scope: { placeholder: string; open: () => void } | null): void {
+    this.#fieldScope = scope
+    this.#renderField()
+  }
+
+  /** Open from the field — scoped when a scope is set, otherwise where it was left. */
+  #openFromField(): void {
+    if (this.#fieldScope !== null) this.#fieldScope.open()
+    else this.open({})
   }
 
   /* ── Rendering ──────────────────────────────────────────────────────── */
@@ -875,50 +1034,40 @@ export class AskPanelView {
     this.#renderField()
     this.element.hidden = !state.open
     if (!state.open) return
-    this.element.setAttribute('aria-label', askTitle(state.scope))
+    this.#sheet.setAttribute('aria-label', askTitle(state.scope))
     const picking = this.#pickerOpen() && state.view === 'compose'
+    const answering = state.view === 'answer'
+    this.#sheet.dataset['view'] = state.view
+    this.#big.hidden = state.view !== 'compose'
+    this.#qhead.hidden = !answering
+    this.#meta.hidden = !answering
+    this.#scopeLine.hidden = state.view !== 'compose'
     this.#pick.hidden = !picking
     this.#compose.hidden = picking || state.view !== 'compose'
-    this.#answer.hidden = state.view !== 'answer'
+    this.#answer.hidden = !answering
     this.#history.hidden = state.view !== 'history'
     this.#hints.hidden = picking || state.view !== 'compose'
     this.#pickHints.hidden = !picking
-    this.#footer.hidden = state.view !== 'answer'
+    this.#footer.hidden = !answering
+    if (this.#textarea.value !== state.draft && state.view !== 'answer') this.#textarea.value = state.draft
+    this.#textarea.placeholder = state.tags.length > 0 ? 'Ask about these…' : ASK_SHEET_PLACEHOLDER
+    if (state.view === 'compose') this.#renderScope()
     if (picking) this.#renderPicker()
     else if (state.view === 'compose') this.#renderCompose()
-    if (state.view === 'answer') this.#renderAnswer()
+    if (answering) {
+      this.#renderQuestionHead()
+      this.#renderMeta()
+      this.#renderAnswer()
+    }
     if (state.view === 'history') this.#renderHistory()
-    this.#schedulePlace()
-  }
-
-  #schedulePlace(): void {
-    this.#place()
-    // Once more after layout settles: the field widens with the open class.
-    if (this.#placeFrame !== null) return
-    this.#placeFrame = window.requestAnimationFrame(() => {
-      this.#placeFrame = null
-      this.#place()
-    })
   }
 
   #renderField(): void {
-    const state = this.#state
-    const composing = state.open && state.view === 'compose'
-    this.field.classList.toggle('is-open', state.open)
-    this.field.classList.toggle('is-answer', state.open && state.view !== 'compose')
-    if (this.#textarea.value !== state.draft) this.#textarea.value = state.draft
-    // CHIPS IN THE FIELD while composing; a count once the question is asked.
-    this.#fieldChips.replaceChildren()
-    if (composing) for (const tag of state.tags) this.#fieldChips.appendChild(this.#chip(tag, true))
-    this.#fieldChips.hidden = !composing || state.tags.length === 0
-    const count = state.tags.length
-    this.#fieldCount.textContent = `${String(count)} tag${count === 1 ? '' : 's'} ·`
-    this.#fieldCount.hidden = composing || count === 0
-    this.#clearBtn.hidden = state.draft === '' && state.turns.length === 0
-    this.#fieldKey.textContent = state.open ? 'esc' : '/'
-    this.#fieldKey.title = state.open ? 'Close' : 'Press / to ask'
-    this.#textarea.placeholder = composing && count > 0 ? 'Ask about these…' : ASK_FIELD_PLACEHOLDER
-    this.#fitField()
+    // Not 'is-open': the island folds its actions for an open field, and the
+    // field no longer grows — the sheet is where the question is typed.
+    this.field.classList.toggle('is-asking', this.#state.open)
+    this.#fieldInput.placeholder = this.#fieldScope?.placeholder ?? ASK_FIELD_PLACEHOLDER
+    this.#fieldInput.setAttribute('aria-expanded', String(this.#state.open))
   }
 
   /** A project's name and colour, as the board knows it. */
@@ -946,7 +1095,7 @@ export class AskPanelView {
     return swatch
   }
 
-  /** What a tag looks like anywhere: swatch or prefix, then its label. */
+  /** What a tag looks like anywhere: dot, swatch or prefix, then its label. */
   #tagContent(target: HTMLElement, tag: { label: string; kind: AskTagKind | 'scope'; project?: string }): void {
     const workspace = this.#state.scope.kind === 'workspace'
     if (tag.kind === 'conversation') {
@@ -958,7 +1107,7 @@ export class AskPanelView {
       return
     }
     if ((tag.kind === 'feature' || tag.kind === 'part') && workspace && tag.project !== undefined) {
-      target.append(this.#projectPrefix(tag.project), document.createTextNode(` ${tag.label}`))
+      target.append(el('span', 'fb-ask-chip-dot'), this.#projectPrefix(tag.project), document.createTextNode(` ${tag.label}`))
       return
     }
     if (tag.kind === 'feature' || tag.kind === 'part') target.appendChild(el('span', 'fb-ask-chip-dot'))
@@ -975,15 +1124,35 @@ export class AskPanelView {
     return chip
   }
 
+  /** "Asking about" — the whole scope as one chip, or the tags as removable chips; then "+ add". */
+  #renderScope(): void {
+    const state = this.#state
+    this.#scopeLine.replaceChildren()
+    this.#scopeLine.appendChild(el('span', 'fb-ask-scope-label', 'Asking about'))
+    if (state.tags.length > 0) {
+      for (const tag of state.tags) this.#scopeLine.appendChild(this.#chip(tag, true))
+    } else {
+      const line = askScopeLine(state)
+      for (const item of line.items) {
+        const pill = el('span', 'fb-ask-chip fb-ask-chip-scope')
+        this.#tagContent(pill, item)
+        this.#scopeLine.appendChild(pill)
+      }
+    }
+    const add = button('fb-ask-add', '+ add a feature with @', () => this.#startMention())
+    add.addEventListener('mousedown', (event) => event.preventDefault())
+    this.#scopeLine.appendChild(add)
+  }
+
   #renderPicker(): void {
     const query = this.#pickerQuery ?? ''
     const workspace = this.#state.scope.kind === 'workspace'
     this.#pickHead.textContent =
       query !== ''
-        ? `Tag “${query}”`
+        ? `Add “${query}”`
         : workspace
-          ? 'Tag a project, feature, part, connection or conversation'
-          : 'Tag a feature, part or conversation'
+          ? 'Add a project, feature, part, connection or conversation'
+          : 'Add a feature, part or conversation'
     this.#pickList.replaceChildren()
     if (this.#pickerRows.length === 0) {
       this.#pickList.appendChild(el('div', 'fb-ask-picker-empty', 'Nothing by that name.'))
@@ -1015,19 +1184,6 @@ export class AskPanelView {
   #renderCompose(): void {
     const state = this.#state
 
-    // WHAT IS ASKED ABOUT — the whole scope, or the tags.
-    const line = askScopeLine(state)
-    this.#scopeLine.replaceChildren()
-    this.#scopeLine.appendChild(el('div', 'fb-ask-caps', 'Asking about'))
-    const row = el('div', 'fb-ask-scope-row')
-    for (const item of line.items) {
-      const pill = el('span', 'fb-ask-scope-pill')
-      this.#tagContent(pill, item)
-      row.appendChild(pill)
-    }
-    row.appendChild(el('span', 'fb-ask-muted', line.hint))
-    this.#scopeLine.appendChild(row)
-
     this.#suggestions.replaceChildren()
     this.#suggestions.hidden = state.suggestions.length === 0
     if (state.suggestions.length > 0) {
@@ -1047,24 +1203,66 @@ export class AskPanelView {
       this.#suggestions.append(chips, actions)
     }
 
-    this.#askedBefore.replaceChildren()
-    this.#askedBefore.hidden = state.askedBefore.length === 0
-    if (state.askedBefore.length > 0) {
-      this.#askedBefore.appendChild(el('div', 'fb-ask-caps', 'Asked before'))
-      for (const thread of state.askedBefore.slice(0, 5)) this.#askedBefore.appendChild(this.#savedRow(thread))
+    // TRY ASKING | YOUR RECENT QUESTIONS.
+    this.#columns.replaceChildren()
+    const tryCol = el('div', 'fb-ask-col')
+    tryCol.dataset['ask'] = 'try'
+    const focusTag = state.tags.find((tag) => tag.kind === 'feature' || tag.kind === 'part')
+    tryCol.appendChild(el('div', 'fb-ask-caps', focusTag !== undefined && state.tags.length === 1 ? `Try asking about ${focusTag.label}` : 'Try asking'))
+    for (const question of suggestedQuestions(this.#host.suggestInput(state.scope, state.tags))) {
+      const row = button('fb-ask-row fb-ask-try', '', () => this.#askSuggested(question))
+      row.append(icon(ICON_SPARK, 13, 16), el('span', 'fb-ask-row-q', question))
+      tryCol.appendChild(row)
     }
+
+    const recentCol = el('div', 'fb-ask-col')
+    recentCol.dataset['ask'] = 'recent'
+    const recentHead = el('div', 'fb-ask-col-head')
+    recentHead.appendChild(el('span', 'fb-ask-caps', 'Your recent questions'))
+    const threads = this.#recentThreads()
+    if (threads.length > RECENT_SHOWN) {
+      recentHead.append(el('span', 'fb-ask-spacer'), button('fb-ask-link', 'See all', () => this.#showHistory()))
+    }
+    recentCol.appendChild(recentHead)
+    const rows = recentRows(threads, Date.now(), (id) => this.#tagName(id), RECENT_SHOWN)
+    if (rows.length === 0) {
+      recentCol.appendChild(el('p', 'fb-ask-muted', 'The questions you ask are kept here, for you only.'))
+    }
+    for (const recent of rows) {
+      const row = button('fb-ask-row fb-ask-recent', '', () => this.#openSavedRow(recent.thread))
+      row.appendChild(el('span', 'fb-ask-row-q', recent.question))
+      const stale = state.staleIds.includes(recent.id)
+      row.appendChild(el('em', stale ? 'fb-ask-warn-text' : '', stale ? 'code changed since' : recent.meta))
+      recentCol.appendChild(row)
+    }
+    this.#columns.append(tryCol, recentCol)
+  }
+
+  /** The saved questions "Your recent questions" lists: about the tags, else the whole scope. */
+  #recentThreads(): readonly AskSavedThread[] {
+    const state = this.#state
+    if (mapTagIds(state.tags).length > 0 || state.scope.kind === 'workspace') return state.askedBefore
+    return this.#host.savedAll() ?? []
+  }
+
+  #tagName(id: string): string | null {
+    if (id.startsWith('project:')) {
+      const look = this.#host.project(id.slice('project:'.length))
+      return look?.name ?? null
+    }
+    return this.#host.featureLabel(id)
   }
 
   #savedRow(thread: AskSavedThread): HTMLElement {
-    const row = button('fb-ask-saved-row', '', () => this.#openSavedRow(thread))
-    row.appendChild(el('span', 'fb-ask-saved-q', thread.question))
+    const row = button('fb-ask-row fb-ask-saved-row', '', () => this.#openSavedRow(thread))
+    row.appendChild(el('span', 'fb-ask-row-q', thread.question))
     const stale = this.#state.staleIds.includes(thread.id)
     const meta = stale
-      ? el('span', 'fb-ask-saved-meta fb-ask-warn-text', 'code changed since')
+      ? el('em', 'fb-ask-warn-text', 'code changed since')
       : el(
-          'span',
-          'fb-ask-saved-meta',
-          [thread.workspaceAnswer !== undefined ? 'Workspace' : '', thread.author, ageLabel(thread.ts, Date.now())]
+          'em',
+          '',
+          [thread.workspaceAnswer !== undefined ? 'Workspace' : '', ageLabel(thread.ts, Date.now()), thread.followUps.length > 0 ? `${String(thread.followUps.length)} follow-up${thread.followUps.length === 1 ? '' : 's'}` : '']
             .filter((part) => part !== '')
             .join(' · '),
         )
@@ -1076,32 +1274,89 @@ export class AskPanelView {
     const state = this.#state
     this.#history.replaceChildren()
     const head = el('div', 'fb-ask-history-head')
-    const back = button('fb-ask-icon-btn', '', () => this.#dispatch({ type: 'new-question' }), 'Back to the question')
+    const back = button('fb-ask-icon-btn', '', () => this.#newQuestion(), 'Back to the question')
     back.title = 'Back to the question'
     back.appendChild(icon(ICON_BACK))
-    head.append(back, el('span', 'fb-ask-caps', 'Saved questions'))
+    const about = state.tags.filter((tag) => tag.kind !== 'conversation').map((tag) => tag.label)
+    head.append(back, el('span', 'fb-ask-history-title', about.length === 1 ? `Your questions about ${about[0]}` : 'Your questions'))
+    const close = button('fb-ask-icon-btn', '', () => this.#closeFromKeyboard(), 'Close')
+    close.title = 'Close'
+    close.appendChild(el('kbd', 'fb-ask-esc', 'esc'))
+    head.append(el('span', 'fb-ask-spacer'), close)
     this.#history.appendChild(head)
     if (state.historyError !== null) {
       this.#history.appendChild(el('p', 'fb-ask-error', state.historyError))
       return
     }
     if (state.history === null) {
-      this.#history.appendChild(el('p', 'fb-ask-muted', 'Reading saved questions…'))
+      this.#history.appendChild(el('p', 'fb-ask-muted', 'Reading your questions…'))
       return
     }
     if (state.history.length === 0) {
-      const empty =
-        state.scope.kind === 'workspace' && state.tags.length === 0
-          ? 'Nobody has asked this Workspace a question yet.'
-          : 'Nobody has asked about these yet.'
-      this.#history.appendChild(el('p', 'fb-ask-muted', empty))
+      this.#history.appendChild(el('p', 'fb-ask-muted', about.length > 0 ? 'You have not asked about this yet.' : 'You have not asked a question yet.'))
       return
     }
-    for (const thread of state.history) this.#history.appendChild(this.#savedRow(thread))
+    const list = el('div', 'fb-ask-rows')
+    for (const thread of state.history) list.appendChild(this.#savedRow(thread))
+    this.#history.appendChild(list)
+  }
+
+  /* ── The answer ─────────────────────────────────────────────────────── */
+
+  /** The header: the question (the first turn's), then New question and close. */
+  #renderQuestionHead(): void {
+    const first = this.#state.turns[0]
+    this.#qtitle.textContent = first?.question ?? this.#state.draft
+  }
+
+  /** The one status row: chips, a dot or a spinner, the words, Show steps, Stop. */
+  #renderMeta(): void {
+    const state = this.#state
+    const turn = currentTurn(state)
+    this.#meta.replaceChildren()
+    if (turn === null) return
+    for (const tag of state.turns[0]?.tags ?? []) this.#meta.appendChild(this.#chip(tag, false))
+    const now = Date.now()
+    const running = isRunning(turn)
+    const live = running && turn.startedAt > 0 ? { ...turn, digElapsedMs: Math.max(turn.digElapsedMs, now - turn.startedAt) } : turn
+    const status = askStatusLine(live, now)
+    const line = el('span', `fb-ask-status fb-ask-status-${status?.tone ?? 'plain'}`)
+    line.dataset['ask'] = 'status'
+    if (status !== null) {
+      if (status.tone === 'busy') {
+        const spin = icon(ICON_SPIN, 12)
+        spin.classList.add('fb-ask-spin')
+        line.appendChild(spin)
+      } else {
+        line.appendChild(el('span', 'fb-ask-status-dot'))
+      }
+      line.appendChild(el('span', 'fb-ask-status-text', status.text))
+    } else if (turn.phase === 'error') {
+      line.appendChild(el('span', 'fb-ask-status-dot'))
+      line.appendChild(el('span', 'fb-ask-status-text', 'Not answered'))
+      line.classList.add('fb-ask-status-error')
+    }
+    this.#meta.appendChild(line)
+    this.#meta.appendChild(el('span', 'fb-ask-spacer'))
+    if (turn.steps.length > 0) {
+      const toggle = button('fb-ask-link', this.#stepsOpen ? 'Hide steps' : 'Show steps', () => {
+        this.#stepsOpen = !this.#stepsOpen
+        this.#renderMeta()
+        this.#renderAnswer()
+      })
+      toggle.setAttribute('aria-expanded', String(this.#stepsOpen))
+      this.#meta.appendChild(toggle)
+    }
+    if (running && turn.askId !== null) {
+      const stop = button('fb-ask-secondary fb-ask-small', turn.stopping ? 'Stopping…' : 'Stop', () => this.#stop(turn))
+      stop.disabled = turn.stopping
+      this.#meta.appendChild(stop)
+    }
   }
 
   #renderAnswer(): void {
     const state = this.#state
+    const scrollTop = this.#body.scrollTop
     this.#answer.replaceChildren()
     state.turns.forEach((turn, index) => {
       this.#answer.appendChild(this.#turnView(turn, index, index === state.turns.length - 1))
@@ -1109,57 +1364,68 @@ export class AskPanelView {
     const last = currentTurn(state)
     this.#followInput.disabled = !canFollowUp(state)
     this.#followInput.placeholder =
-      last !== null && isRunning(last) ? 'You can follow up when this answer is ready' : 'Ask more about this answer…'
+      last !== null && isRunning(last) ? 'You can follow up when this answer is ready' : 'Ask a follow-up…'
     this.#continueBtn.disabled = last === null || last.answer === null
+    // A state event re-renders the answer; the reader's place stays where it was.
+    this.#body.scrollTop = scrollTop
   }
 
   #turnView(turn: AskTurn, index: number, newest: boolean): HTMLElement {
     const wrap = el('div', 'fb-ask-turn')
+    wrap.dataset['turn'] = String(index)
 
-    // A FOLLOW-UP shows its question; the first one is in the field above.
+    // A FOLLOW-UP shows its question; the first one is the sheet's header.
     if (index > 0) {
       const bubble = el('div', 'fb-ask-bubble')
       bubble.appendChild(el('div', 'fb-ask-bubble-text', turn.question))
       wrap.appendChild(bubble)
-    }
-
-    const status = askStatusLine(turn, Date.now())
-    if (status !== null) {
-      const line = el('div', `fb-ask-status fb-ask-status-${status.tone}`)
-      if (status.tone === 'busy') {
-        const spin = icon(ICON_SPIN, 11)
-        spin.classList.add('fb-ask-spin')
-        line.appendChild(spin)
-      } else {
-        line.appendChild(el('span', 'fb-ask-status-dot'))
+      if (!newest || !isRunning(turn)) {
+        const status = askStatusLine(turn, Date.now())
+        if (status !== null && turn.saved === null) wrap.appendChild(el('div', `fb-ask-turn-status fb-ask-status-${status.tone}`, status.text))
       }
-      line.appendChild(el('span', 'fb-ask-status-text', status.text))
-      if (newest && isRunning(turn) && turn.askId !== null) {
-        line.appendChild(el('span', 'fb-ask-spacer'))
-        const stop = button('fb-ask-secondary fb-ask-small', turn.stopping ? 'Stopping…' : 'Stop here', () => this.#stop(turn))
-        stop.disabled = turn.stopping
-        line.appendChild(stop)
-      }
-      wrap.appendChild(line)
     }
-    if (newest && turn.phase === 'digging' && turn.steps.length > 0) wrap.appendChild(this.#steps(turn))
+    if (newest && this.#stepsOpen && turn.steps.length > 0) wrap.appendChild(this.#steps(turn))
+    if (newest && isRunning(turn) && turn.answer === null) {
+      wrap.appendChild(el('p', 'fb-ask-muted fb-ask-waiting', 'The answer appears here as soon as there is one.'))
+    }
 
     const answer = turn.answer
     if (answer !== null) {
+      const running = isRunning(turn)
       if (turn.saved !== null && turn.saved.stale) {
         const stale = el('div', 'fb-ask-stale')
         stale.appendChild(el('span', '', 'The code under this answer changed since.'))
         stale.appendChild(button('fb-ask-secondary fb-ask-small', 'Ask again', () => this.#askAgain(turn)))
         wrap.appendChild(stale)
       }
-      wrap.appendChild(this.#explanation(answer.explanation, answer.thin && answer.confidence === 'first' && isRunning(turn)))
-      if (answer.couldNotFind !== undefined && !isRunning(turn)) wrap.appendChild(el('p', 'fb-ask-muted', answer.couldNotFind))
-      if (answer.verdict !== undefined || answer.branchInProgress !== undefined) wrap.appendChild(this.#verdictCard(answer.verdict, answer.branchInProgress))
-      if (answer.reply !== undefined && answer.reply.trim() !== '') wrap.appendChild(this.#replyCard(answer.reply))
-      if (answer.sources.length > 0) wrap.appendChild(this.#sourcesList(answer.sources))
-      if (!isRunning(turn)) {
+      const doc = parseAnswer(answer.explanation, {
+        sources: answer.sources,
+        featureName: (id) => this.#host.featureLabel(id),
+      })
+      const docEl = el('div', 'fb-ask-doc')
+      if (doc.lead !== null) docEl.appendChild(this.#inlineInto(el('div', 'fb-ask-lead'), doc.lead))
+      for (const block of doc.blocks) docEl.appendChild(this.#block(block))
+      wrap.appendChild(docEl)
+
+      // NOT COVERED — everything the answer says it could not check, in one place.
+      const gaps: string[] = []
+      if (doc.notCovered !== null) gaps.push(doc.notCovered)
+      if (!running && answer.couldNotFind !== undefined && answer.couldNotFind.trim() !== '') gaps.push(answer.couldNotFind)
+      if (!running && answer.confidence === 'first' && answer.thin) gaps.push('What Flow knows about this is thin, and the code was not checked.')
+      if (!running) {
         const knowledge = knowledgeOnlySentence(answer.knowledgeOnly ?? [], (slug) => this.#projectName(slug))
-        if (knowledge !== null) wrap.appendChild(el('div', 'fb-ask-knowledge', knowledge))
+        if (knowledge !== null) gaps.push(knowledge)
+      }
+      if (gaps.length > 0) {
+        const gap = el('div', 'fb-ask-gap')
+        gap.append(el('strong', '', 'Not covered: '), document.createTextNode(gaps.join(' ')))
+        wrap.appendChild(gap)
+      }
+
+      if (answer.verdict !== undefined || answer.branchInProgress !== undefined) wrap.appendChild(this.#verdictCard(answer.verdict, answer.branchInProgress))
+      if (answer.sources.length > 0) wrap.appendChild(this.#sourcesList(answer.sources))
+      if (answer.reply !== undefined && answer.reply.trim() !== '') wrap.appendChild(this.#replyCard(answer.reply, index))
+      if (!running) {
         const suggested = answer.suggestedConnections ?? []
         if (suggested.length > 0 && this.#state.scope.kind === 'workspace') wrap.appendChild(this.#connectionsCard(suggested))
         const foot = this.#answerFoot(turn)
@@ -1171,47 +1437,105 @@ export class AskPanelView {
     return wrap
   }
 
+  #block(block: AnswerBlock): HTMLElement {
+    switch (block.kind) {
+      case 'heading':
+        return this.#inlineInto(el('h4', 'fb-ask-h'), block.inline)
+      case 'paragraph':
+        return this.#inlineInto(el('p', 'fb-ask-p'), block.inline)
+      case 'list': {
+        const list = el('ul', 'fb-ask-ul')
+        for (const item of block.items) list.appendChild(this.#inlineInto(el('li'), item))
+        return list
+      }
+    }
+  }
+
+  /** Inline pieces as DOM — text nodes and chips; model text never becomes markup. */
+  #inlineInto<T extends HTMLElement>(target: T, inline: readonly AnswerInline[]): T {
+    for (const piece of inline) {
+      switch (piece.kind) {
+        case 'text':
+          target.appendChild(document.createTextNode(piece.text))
+          break
+        case 'strong':
+          target.appendChild(el('strong', '', piece.text))
+          break
+        case 'code':
+          target.appendChild(el('code', 'fb-ask-code', piece.text))
+          break
+        case 'file':
+          target.appendChild(this.#fileChip(piece.text, piece.path, piece.project))
+          break
+        case 'feature':
+          target.appendChild(this.#featureChip(piece.id, piece.label))
+          break
+        case 'cite':
+          target.appendChild(this.#citeMarker(piece.n))
+          break
+      }
+    }
+    return target
+  }
+
+  /** A file chip: pressing it opens the file in the editor, when it can be found here. */
+  #fileChip(text: string, path: string | null, project: string | undefined): HTMLElement {
+    if (path === null || !this.#host.canOpenFile(project)) {
+      const chip = el('span', 'fb-ask-file', text)
+      chip.dataset['ask'] = 'file'
+      return chip
+    }
+    const chip = button('fb-ask-file', text, () => {
+      this.close()
+      this.#host.openFile(path, project)
+    })
+    chip.dataset['ask'] = 'file'
+    chip.title = `Open ${path}`
+    return chip
+  }
+
+  /** A feature chip: pressing it closes the sheet and opens that feature on the board. */
+  #featureChip(id: string, label: string): HTMLElement {
+    const go = this.#host.featureTarget(id)
+    const chip = go === null ? el('span', 'fb-ask-feat') : button('fb-ask-feat', '', () => {
+      this.close()
+      go()
+    })
+    chip.dataset['ask'] = 'feature'
+    chip.dataset['featureId'] = id
+    chip.append(el('span', 'fb-ask-feat-dot'), document.createTextNode(label))
+    if (go !== null) chip.title = `Open ${label} on the Blueprint`
+    return chip
+  }
+
+  /** [n] — pressing it scrolls to source n of the same answer. */
+  #citeMarker(n: number): HTMLElement {
+    const marker = button('fb-ask-cite', String(n), () => this.#focusSource(marker, n), `Source ${String(n)}`)
+    marker.dataset['ask'] = 'cite'
+    return marker
+  }
+
+  #focusSource(from: HTMLElement, n: number): void {
+    const turn = from.closest('.fb-ask-turn') ?? this.#answer
+    const row = turn.querySelector<HTMLElement>(`[data-source-n="${String(n)}"]`)
+    if (row === null) return
+    row.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    row.classList.add('is-flash')
+    window.setTimeout(() => row.classList.remove('is-flash'), 1200)
+    row.focus({ preventScroll: true })
+  }
+
   #steps(turn: AskTurn): HTMLElement {
     const steps = el('div', 'fb-ask-steps')
+    steps.dataset['ask'] = 'steps'
     for (const step of turn.steps) {
       const line = el('div', `fb-ask-step fb-ask-step-${step.state}`)
       if (step.state === 'done') line.appendChild(icon(ICON_CHECK, 11))
+      else line.appendChild(el('span', 'fb-ask-step-dot'))
       line.appendChild(document.createTextNode(step.label))
       steps.appendChild(line)
     }
-    steps.appendChild(
-      el('div', 'fb-ask-dig-note', turn.answer !== null ? 'The answer below updates when this finishes.' : 'The answer appears here when this finishes.'),
-    )
     return steps
-  }
-
-  /** The explanation, with each [n] a link to source n. */
-  #explanation(text: string, thin: boolean): HTMLElement {
-    const box = el('div', 'fb-ask-explain')
-    const paragraphs = text.split(/\n{2,}/).map((part) => part.trim()).filter((part) => part !== '')
-    for (const paragraph of paragraphs) {
-      const p = el('p')
-      for (const piece of paragraph.split(/(\[\d+\])/)) {
-        const ref = /^\[(\d+)\]$/.exec(piece)
-        if (ref === null) {
-          p.appendChild(document.createTextNode(piece))
-          continue
-        }
-        const n = ref[1] ?? ''
-        const link = button('fb-ask-ref', `[${n}]`, () => this.#focusSource(n), `Source ${n}`)
-        p.appendChild(link)
-      }
-      box.appendChild(p)
-    }
-    if (thin) box.appendChild(el('p', 'fb-ask-muted', 'What Flow knows about this is thin, so this answer may change.'))
-    return box
-  }
-
-  #focusSource(n: string): void {
-    const row = this.#answer.querySelector<HTMLElement>(`[data-source-n="${CSS.escape(n)}"]`)
-    if (row === null) return
-    row.scrollIntoView({ block: 'nearest' })
-    row.focus()
   }
 
   #verdictCard(verdict: { label: string; risk?: string } | undefined, branch: string | undefined): HTMLElement {
@@ -1230,9 +1554,18 @@ export class AskPanelView {
     return card
   }
 
-  #replyCard(reply: string): HTMLElement {
-    const card = el('div', 'fb-ask-card fb-ask-reply')
+  /** The reply, folded to one row with Show and Copy. */
+  #replyCard(reply: string, index: number): HTMLElement {
+    const card = el('div', 'fb-ask-reply')
+    card.dataset['ask'] = 'reply'
     const head = el('div', 'fb-ask-reply-head')
+    const open = this.#repliesOpen.has(index)
+    const show = button('fb-ask-secondary fb-ask-small', open ? 'Hide' : 'Show', () => {
+      if (this.#repliesOpen.has(index)) this.#repliesOpen.delete(index)
+      else this.#repliesOpen.add(index)
+      this.#renderAnswer()
+    })
+    show.setAttribute('aria-expanded', String(open))
     const copy = button('fb-ask-secondary fb-ask-small', 'Copy', () => {
       void navigator.clipboard
         .writeText(reply)
@@ -1247,39 +1580,32 @@ export class AskPanelView {
           copy.textContent = "Couldn't copy"
         })
     })
-    head.append(el('span', 'fb-ask-caps', 'Reply ready to send'), el('span', 'fb-ask-spacer'), copy)
-    card.append(head, el('div', 'fb-ask-reply-text', reply))
+    head.append(el('span', 'fb-ask-reply-title', 'Reply ready to send to the person who asked'), el('span', 'fb-ask-spacer'), show, copy)
+    card.appendChild(head)
+    if (open) card.appendChild(el('div', 'fb-ask-reply-text', reply))
     return card
   }
 
   #sourcesList(sources: AskSource[]): HTMLElement {
     const list = el('div', 'fb-ask-sources')
+    list.dataset['ask'] = 'sources'
     list.appendChild(el('div', 'fb-ask-caps', 'Sources'))
     const workspace = this.#state.scope.kind === 'workspace'
     sources.forEach((source, index) => {
-      const n = source.n ?? null
-      const row = el('button', 'fb-ask-source')
-      row.type = 'button'
-      if (n !== null) row.dataset['sourceN'] = String(n)
-      row.appendChild(el('span', 'fb-ask-source-n', n === null ? '·' : String(n)))
+      const n = source.n ?? index + 1
+      const row = el('div', 'fb-ask-source')
+      row.dataset['sourceN'] = String(n)
+      row.tabIndex = -1
+      row.appendChild(el('span', 'fb-ask-cite fb-ask-cite-static', String(n)))
       if (workspace && source.project !== undefined) row.appendChild(this.#projectPrefix(source.project))
-      row.appendChild(el('span', 'fb-ask-source-label', source.label))
-      if (source.file !== undefined && this.#host.canPeek(source.project)) {
-        row.appendChild(el('span', 'fb-ask-source-file', baseName(source.file)))
-        row.title = `Open ${baseName(source.file)}`
-        const file = source.file
-        row.addEventListener('click', (event) => {
-          event.stopPropagation()
-          this.#host.peekFile(file)
-        })
-      } else if (source.file !== undefined) {
-        row.appendChild(el('span', 'fb-ask-source-file', baseName(source.file)))
-        row.tabIndex = n === null ? -1 : 0
-      } else {
-        row.appendChild(el('span', 'fb-ask-source-know', 'from knowledge'))
-        row.tabIndex = n === null ? -1 : 0
+      if (source.featureId !== undefined) {
+        const name = this.#host.featureLabel(source.featureId) ?? labelOfId(source.featureId)
+        row.appendChild(this.#featureChip(source.featureId, name))
       }
-      row.dataset['index'] = String(index)
+      if (source.file !== undefined) row.appendChild(this.#fileChip(source.file, source.file, source.project))
+      const label = source.label.trim()
+      if (label !== '') row.appendChild(el('span', 'fb-ask-source-label', label))
+      row.appendChild(el('em', 'fb-ask-source-kind', source.file !== undefined ? 'read in the code' : 'from knowledge'))
       list.appendChild(row)
     })
     return list
@@ -1319,19 +1645,18 @@ export class AskPanelView {
     const answer = turn.answer
     if (answer === null) return null
     const lines: HTMLElement[] = []
-    if (answer.factsLearned > 0) {
-      const line = el('div')
-      line.append(
-        el('span', 'fb-ask-good-text', `${String(answer.factsLearned)} fact${answer.factsLearned === 1 ? '' : 's'} learned`),
-        document.createTextNode(', now part of what Flow knows.'),
-      )
+    const facts = factsSentence(turn, (id) => this.#host.featureLabel(id))
+    if (facts !== null) {
+      const line = el('div', 'fb-ask-learn')
+      line.dataset['ask'] = 'learned'
+      line.append(icon(ICON_CHECK, 12), document.createTextNode(facts))
       lines.push(line)
     }
     if (!answer.factsSaved) lines.push(el('div', 'fb-ask-warn-text', "The facts this answer found couldn't be saved. The answer stands."))
     const saved = savedSentence(turn, this.#state.scope, (slug) => this.#projectName(slug))
     if (saved !== null) lines.push(el('div', 'fb-ask-saved-line', saved))
     else if (turn.saved !== null && turn.saved.usedConversation) {
-      lines.push(el('div', '', 'Used one of its author’s conversations (its content stays private).'))
+      lines.push(el('div', 'fb-ask-saved-line', 'Used one of your conversations (its content stays private).'))
     }
     if (lines.length === 0) return null
     const foot = el('div', 'fb-ask-answer-foot')
@@ -1350,9 +1675,9 @@ const LIVE_WORDS: Record<NonNullable<AskCellMark['live']>, string> = {
 }
 
 /**
- * Draw (or clear, with null) one cell's Ask marks: the outline, the live
- * state, the source numbers and the facts chip. The board calls this for
- * every drawn cell when the decoration changes, and never otherwise.
+ * Draw (or clear, with null) one cell's Ask marks. Since the sheet covers the
+ * map, the board passes null for every cell — kept so the decoration path has
+ * one clearing step.
  */
 export function paintCellMarks(cell: HTMLElement, mark: AskCellMark | null): void {
   cell.classList.remove(...MARK_CLASSES)
@@ -1360,20 +1685,44 @@ export function paintCellMarks(cell: HTMLElement, mark: AskCellMark | null): voi
   if (mark === null) return
   if (mark.role !== null) cell.classList.add(`fb-terr-ask-${mark.role}`)
   const chips: HTMLElement[] = []
-  if (mark.role === 'tagged' && mark.live === null && mark.numbers.length === 0) {
-    chips.push(el('span', 'fb-terr-ask-chip fb-terr-ask-chip-tag', 'tagged'))
-  }
-  if (mark.role === 'mentioned' && mark.numbers.length === 0 && mark.live === null) {
-    chips.push(el('span', 'fb-terr-ask-chip fb-terr-ask-chip-mention', 'mentioned in the answer'))
-  }
   if (mark.live !== null) chips.push(el('span', `fb-terr-ask-chip fb-terr-ask-live-${mark.live}`, LIVE_WORDS[mark.live]))
   for (const { n, label } of mark.numbers) chips.push(el('span', 'fb-terr-ask-chip', `${n} · ${label}`))
-  if (mark.facts > 0) chips.push(el('span', 'fb-terr-ask-chip fb-terr-ask-chip-facts', `+${mark.facts} fact${mark.facts === 1 ? '' : 's'} learned`))
   if (chips.length === 0) return
   const box = el('div', 'fb-terr-ask-marks')
   box.setAttribute('aria-hidden', 'true')
   box.append(...chips)
   cell.appendChild(box)
+}
+
+/**
+ * THE QUESTIONS YOU ASKED, ON THE MAP: a quiet speech-bubble and a count in a
+ * cell's footer row (its kicker), for a feature the person has saved
+ * questions about. Pressing it opens the sheet on that feature's questions.
+ * Null (or 0) removes it. The board calls this once per drawn cell when the
+ * sheet is drawn or the saved list was read — never per broadcast.
+ */
+export function paintQuestionMarker(cell: HTMLElement, count: number, label: string, press: () => void): void {
+  cell.querySelector('.fb-terr-asked')?.remove()
+  if (count <= 0) return
+  const host = cell.querySelector<HTMLElement>(':scope > .fb-terr-cell-kicker') ?? cell
+  const marker = document.createElement('button')
+  marker.type = 'button'
+  marker.className = 'fb-terr-asked'
+  marker.dataset['ask'] = 'cell-questions'
+  marker.setAttribute('aria-label', label)
+  marker.title = label
+  const glyph = document.createElement('fl-icon')
+  glyph.setAttribute('name', 'message')
+  marker.append(glyph, document.createTextNode(String(count)))
+  marker.addEventListener('click', (event) => {
+    event.stopPropagation()
+    press()
+  })
+  marker.addEventListener('keydown', (event) => event.stopPropagation())
+  // The cell's own press handlers never see a press on the marker.
+  marker.addEventListener('mousedown', (event) => event.stopPropagation())
+  marker.addEventListener('pointerdown', (event) => event.stopPropagation())
+  host.appendChild(marker)
 }
 
 /* ── Styles ───────────────────────────────────────────────────────────── */
@@ -1390,13 +1739,80 @@ function injectAskStyles(): void {
 
 // NO BACKTICKS IN HERE — this whole sheet is one template literal.
 const ASK_STYLES = `
-  /* THE HEADER FIELD — search-style, about 320px at rest, wider while open
-     (mockup G + D, board 5). It sits in the header strip, before the tiles. */
+  /* THE SHEET'S TOKENS — light is the base, dark the one override (as the board's). */
+  .flow-board-root {
+    --fb-ask-dimmer: rgba(15, 23, 42, 0.32);
+    --fb-ask-sheet: #ffffff;
+    --fb-ask-border: #d9dde3;
+    --fb-ask-rule: #e6e9ee;
+    --fb-ask-shadow: 0 18px 48px rgba(15, 23, 42, 0.24);
+    --fb-ask-field: #f6f7f9;
+    --fb-ask-accent: #1f8fcf;
+    --fb-ask-ring: rgba(31, 143, 207, 0.16);
+    --fb-ask-ink: #1d2128;
+    --fb-ask-body: #353b45;
+    --fb-ask-mute: #6b727d;
+    --fb-ask-chip-bg: #f1f3f5;
+    --fb-ask-chip-border: #d9dde3;
+    --fb-ask-chip-ink: #2a2f37;
+    --fb-ask-row-bg: #f8f9fb;
+    --fb-ask-row-border: #e3e6eb;
+    --fb-ask-row-hover: #eef4f9;
+    --fb-ask-code-bg: #eef1f4;
+    --fb-ask-code-border: #dde2e8;
+    --fb-ask-feat-bg: rgba(31, 143, 207, 0.08);
+    --fb-ask-feat-border: rgba(31, 143, 207, 0.4);
+    --fb-ask-feat-ink: #12699a;
+    --fb-ask-cite-bg: #e1eff8;
+    --fb-ask-cite-ink: #12699a;
+    --fb-ask-gap-border: #c9a24a;
+    --fb-ask-gap-bg: rgba(232, 176, 75, 0.1);
+    --fb-ask-gap-ink: #7a5610;
+    --fb-ask-good: #2f8f5f;
+    --fb-ask-good-dot: #34a56d;
+    --fb-ask-warn: #b07812;
+    --fb-ask-kbd-border: #cfd4db;
+  }
+  :root[data-theme='dark'] .flow-board-root {
+    --fb-ask-dimmer: rgba(6, 10, 14, 0.55);
+    --fb-ask-sheet: #151a21;
+    --fb-ask-border: #2e333c;
+    --fb-ask-rule: #232a33;
+    --fb-ask-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+    --fb-ask-field: #0f1216;
+    --fb-ask-accent: #6cc3f0;
+    --fb-ask-ring: rgba(108, 195, 240, 0.15);
+    --fb-ask-ink: #eef0f3;
+    --fb-ask-body: #c9cdd3;
+    --fb-ask-mute: #7d838d;
+    --fb-ask-chip-bg: #1b222b;
+    --fb-ask-chip-border: #2c3440;
+    --fb-ask-chip-ink: #d6dae0;
+    --fb-ask-row-bg: #181e26;
+    --fb-ask-row-border: #232a33;
+    --fb-ask-row-hover: #1d2530;
+    --fb-ask-code-bg: #1e2630;
+    --fb-ask-code-border: #2a3440;
+    --fb-ask-feat-bg: rgba(108, 195, 240, 0.1);
+    --fb-ask-feat-border: rgba(108, 195, 240, 0.35);
+    --fb-ask-feat-ink: #9fd8f5;
+    --fb-ask-cite-bg: #22303c;
+    --fb-ask-cite-ink: #9fd8f5;
+    --fb-ask-gap-border: #5a4a2a;
+    --fb-ask-gap-bg: rgba(232, 176, 75, 0.06);
+    --fb-ask-gap-ink: #e3c48a;
+    --fb-ask-good: #7fd3a6;
+    --fb-ask-good-dot: #4fbf8a;
+    --fb-ask-warn: #e3b25a;
+    --fb-ask-kbd-border: #343a45;
+  }
+
+  /* THE ISLAND FIELD — the small entry; its island look is the board's. */
   .flow-board-root .fb-askf {
     flex: 0 1 320px;
     width: 320px;
     max-width: 34vw;
-    min-width: 180px;
+    min-width: 0;
     height: 32px;
     box-sizing: border-box;
     display: flex;
@@ -1412,33 +1828,11 @@ const ASK_STYLES = `
     cursor: text;
   }
   .flow-board-root .fb-askf:hover { border-color: var(--fl-color-border-strong, var(--fb-card-border)); }
-  .flow-board-root .fb-askf.is-open {
-    flex-basis: 520px;
-    width: 520px;
-    max-width: 48vw;
-    border-color: var(--fb-accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--fb-accent) 18%, transparent);
-  }
-  .flow-board-root .fb-askf [hidden] { display: none !important; }
+  .flow-board-root .fb-askf.is-asking { border-color: var(--fb-ask-accent); }
   .flow-board-root .fb-askf-spark { flex: none; color: var(--fb-accent); }
-  /* ONE LINE, like the search field it is: chips scroll sideways before the text. */
-  .flow-board-root .fb-askf-chips {
-    flex: 0 1 auto;
-    min-width: 0;
-    max-width: 60%;
-    display: flex;
-    flex-wrap: nowrap;
-    gap: var(--fl-space-xs, 4px);
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .flow-board-root .fb-askf-chips::-webkit-scrollbar { display: none; }
-  .flow-board-root .fb-askf .fb-ask-chip { flex: none; white-space: nowrap; }
-  .flow-board-root .fb-askf .fb-ask-chip { height: 22px; padding: 0 6px; font-size: 12px; }
-  .flow-board-root .fb-askf-count { flex: none; color: var(--fl-color-text-muted, var(--fb-ink-dim)); font-size: 12px; white-space: nowrap; }
   .flow-board-root .fb-askf-input {
     flex: 1 1 auto;
-    min-width: 60px;
+    min-width: 0;
     height: 20px;
     box-sizing: border-box;
     margin: 0;
@@ -1453,23 +1847,11 @@ const ASK_STYLES = `
     overflow: hidden;
     white-space: pre;
     outline: none;
+    cursor: pointer;
+    caret-color: transparent;
   }
   .flow-board-root .fb-askf-input::placeholder { color: var(--fl-color-text-muted, var(--fb-ink-dim)); }
-  .flow-board-root .fb-askf-clear {
-    flex: none;
-    width: 20px;
-    height: 20px;
-    padding: 0;
-    background: transparent;
-    border: 0;
-    border-radius: var(--fl-radius-sm, 4px);
-    color: var(--fl-color-text-muted, var(--fb-ink-dim));
-    font: inherit;
-    font-size: 14px;
-    line-height: 1;
-    cursor: pointer;
-  }
-  .flow-board-root .fb-askf-clear:hover { color: var(--fl-color-text, var(--fb-ink)); background: var(--fb-paper); }
+  .flow-board-root .fb-askf:focus-within { border-color: var(--fb-ask-accent); }
   .flow-board-root .fb-askf-key {
     flex: none;
     padding: 0 6px;
@@ -1480,406 +1862,586 @@ const ASK_STYLES = `
     font-size: 11px;
     line-height: 18px;
   }
-  .flow-board-root .fb-askf.is-open .fb-askf-key { cursor: pointer; }
 
   /* A project's colour on a chip, a picker row or a source. */
-  .flow-board-root .fb-ask-proj { color: var(--fb-ask-proj, var(--fb-ink-dim)); white-space: nowrap; }
+  .flow-board-root .fb-ask-proj { color: var(--fb-ask-proj, var(--fb-ask-mute)); white-space: nowrap; }
   .flow-board-root .fb-ask-swatch {
     flex: none;
     width: 7px;
     height: 7px;
     border-radius: 2px;
-    background: var(--fb-ask-proj, var(--fb-ink-dim));
+    background: var(--fb-ask-proj, var(--fb-ask-mute));
   }
 
-  /* THE PANEL — attached under the field, at its width; placed in script. */
+  /* THE DIM LAYER — the whole board, under the sheet. */
   .flow-board-root { position: relative; }
-  .flow-board-root .fb-ask {
-    --fb-ask-good: var(--fb-learn-known);
-    --fb-ask-warn: var(--fb-warn);
+  .flow-board-root .fb-ask-dim {
     position: absolute;
-    top: 46px;
-    right: var(--fl-space-lg, 16px);
-    width: 520px;
-    max-width: calc(100% - 16px);
-    max-height: calc(100% - 60px);
-    z-index: 13;
+    inset: 0;
+    z-index: 60;
+    background: var(--fb-ask-dimmer);
+  }
+  .flow-board-root .fb-ask-dim[hidden] { display: none; }
+
+  /* THE SHEET — 760px, centred, under the island's height. */
+  .flow-board-root .fb-ask {
+    position: absolute;
+    left: 50%;
+    top: 56px;
+    transform: translateX(-50%);
+    width: 760px;
+    max-width: calc(100% - 48px);
+    max-height: calc(100% - 96px);
     display: flex;
     flex-direction: column;
     box-sizing: border-box;
-    background: var(--fb-card);
-    color: var(--fb-ink);
-    border: 1px solid var(--fb-card-border);
-    border-radius: 10px;
-    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
-    font-family: var(--fl-font-ui, system-ui, sans-serif);
+    background: var(--fb-ask-sheet);
+    color: var(--fb-ask-ink);
+    border: 1px solid var(--fb-ask-border);
+    border-radius: 14px;
+    box-shadow: var(--fb-ask-shadow);
+    font-family: var(--fl-font-ui, Inter, system-ui, sans-serif);
     font-size: 13px;
     overflow: hidden;
+    outline: none;
   }
-  .flow-board-root .fb-ask[hidden] { display: none; }
   .flow-board-root .fb-ask [hidden] { display: none !important; }
   .flow-board-root .fb-ask-spacer { flex: 1; }
-  .flow-board-root .fb-ask-icon-btn {
-    width: 28px;
-    height: 28px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background: transparent;
-    border: 0;
-    border-radius: var(--fl-radius-row, 6px);
-    color: var(--fb-ink-dim);
-    cursor: pointer;
+
+  .flow-board-root .fb-ask-head {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px 18px 12px;
+    border-bottom: 1px solid var(--fb-ask-rule);
   }
-  .flow-board-root .fb-ask-icon-btn:hover { background: var(--fb-paper); color: var(--fb-ink); }
-  .flow-board-root .fb-ask-body {
+  .flow-board-root .fb-ask[data-view='answer'] .fb-ask-head { gap: 8px; }
+  .flow-board-root .fb-ask-big {
+    height: 44px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 10px 0 14px;
+    background: var(--fb-ask-field);
+    border: 1px solid var(--fb-ask-accent);
+    box-shadow: 0 0 0 3px var(--fb-ask-ring);
+    border-radius: 10px;
+    cursor: text;
+  }
+  .flow-board-root .fb-ask-big-spark { flex: none; color: var(--fb-ask-accent); }
+  .flow-board-root .fb-ask-input {
     flex: 1 1 auto;
-    min-height: 0;
-    overflow-y: auto;
-    padding: 14px;
+    min-width: 0;
+    height: 22px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--fb-ask-ink);
+    font: inherit;
+    font-size: 15px;
+    line-height: 22px;
+    resize: none;
+    overflow: hidden;
+    white-space: pre;
+    outline: none;
   }
-  .flow-board-root .fb-ask-hints {
-    flex: 0 0 auto;
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 8px 14px;
-    border-top: 1px solid var(--fb-border);
-    color: var(--fb-ink-dim);
-    font-size: 11px;
-  }
-  .flow-board-root .fb-ask-kbd { font-family: var(--fl-font-mono, ui-monospace, monospace); color: var(--fb-ink); }
-  .flow-board-root .fb-ask-scope { display: flex; flex-direction: column; gap: var(--fl-space-sm, 8px); }
-  .flow-board-root .fb-ask-scope-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-  .flow-board-root .fb-ask-scope-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 3px 10px;
-    border: 1px solid var(--fb-card-border);
-    border-radius: 999px;
-    font-size: 12px;
-  }
-  .flow-board-root .fb-ask-pick { display: flex; flex-direction: column; gap: 2px; margin: -8px -8px 0; }
-  .flow-board-root .fb-ask-pick-head { padding: 0 8px 4px; }
-  .flow-board-root .fb-ask-pick-list { display: flex; flex-direction: column; gap: 2px; }
-  .flow-board-root .fb-ask-history-head { display: flex; align-items: center; gap: var(--fl-space-xs, 4px); margin: -6px 0 0 -6px; }
-  .flow-board-root .fb-ask-status {
-    display: flex;
-    align-items: center;
-    gap: var(--fl-space-sm, 8px);
-    min-height: 24px;
-    color: var(--fb-ink-dim);
+  .flow-board-root .fb-ask-input::placeholder { color: var(--fb-ask-mute); opacity: 1; }
+  .flow-board-root .fb-ask-esc,
+  .flow-board-root .fb-ask-kbd {
+    flex: none;
     font-family: var(--fl-font-mono, ui-monospace, monospace);
     font-size: 11px;
+    line-height: 18px;
+    padding: 0 6px;
+    border: 1px solid var(--fb-ask-kbd-border);
+    border-radius: 4px;
+    color: var(--fb-ask-mute);
+    background: transparent;
   }
-  .flow-board-root .fb-ask-status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
-  .flow-board-root .fb-ask-status-good .fb-ask-status-dot { background: var(--fb-ask-good); }
-  .flow-board-root .fb-ask-status-warn .fb-ask-status-dot { background: var(--fb-ask-warn); }
-  .flow-board-root .fb-ask-status-busy { color: var(--fb-accent); }
-  .flow-board-root .fb-ask-status-text { color: var(--fb-ink-dim); }
-  .flow-board-root .fb-ask-knowledge {
-    padding: var(--fl-space-sm, 8px) 10px;
-    border-radius: var(--fl-radius-row, 6px);
-    background: color-mix(in srgb, var(--fb-ask-warn) 12%, transparent);
-    color: var(--fb-ask-warn);
-    font-size: 12px;
-    line-height: 1.5;
-  }
-  .flow-board-root .fb-ask-connections {
+  .flow-board-root .fb-ask-big .fb-ask-esc { cursor: pointer; }
+
+  .flow-board-root .fb-ask-scope {
     display: flex;
-    flex-direction: column;
+    flex-wrap: wrap;
+    align-items: center;
     gap: 6px;
-    padding-top: 10px;
-    border-top: 1px solid var(--fb-border);
+    font-size: 12px;
+    color: var(--fb-ask-mute);
   }
-  .flow-board-root .fb-ask-connection { display: flex; align-items: center; gap: var(--fl-space-sm, 8px); font-size: 12px; }
-  .flow-board-root .fb-ask-connection-words { min-width: 0; line-height: 1.5; }
-  .flow-board-root .fb-ask-connection-words .fb-ask-proj { white-space: normal; }
-  .flow-board-root .fb-ask-follow-row { display: flex; gap: var(--fl-space-sm, 8px); }
-  .flow-board-root .fb-ask-compose,
-  .flow-board-root .fb-ask-answer,
-  .flow-board-root .fb-ask-history,
-  .flow-board-root .fb-ask-turn {
-    display: flex;
-    flex-direction: column;
-    gap: var(--fl-space-md, 12px);
-  }
-  .flow-board-root .fb-ask-answer { gap: var(--fl-space-lg, 16px); }
-  .flow-board-root .fb-ask-muted { margin: 0; color: var(--fb-ink-dim); font-size: 12px; line-height: 1.5; }
+  .flow-board-root .fb-ask-scope-label { margin-right: 2px; }
   .flow-board-root .fb-ask-chip {
     display: inline-flex;
     align-items: center;
     gap: 6px;
     height: 24px;
-    padding: 0 var(--fl-space-sm, 8px);
-    border-radius: var(--fl-radius-row, 6px);
+    padding: 0 9px;
+    box-sizing: border-box;
+    background: var(--fb-ask-chip-bg);
+    border: 1px solid var(--fb-ask-chip-border);
+    border-radius: 999px;
+    color: var(--fb-ask-chip-ink);
     font-size: 12px;
+    white-space: nowrap;
   }
-  .flow-board-root .fb-ask-chip-map {
-    background: color-mix(in srgb, var(--fb-ask-good) 20%, transparent);
-    color: var(--fb-ask-good);
-  }
-  .flow-board-root .fb-ask-chip-dot { width: 6px; height: 6px; border-radius: 3px; background: var(--fb-ask-good); }
-  .flow-board-root .fb-ask-chip-conv {
-    background: var(--fb-card);
-    border: 1px solid var(--fb-border);
-    color: var(--fb-ink);
-  }
+  .flow-board-root .fb-ask-chip-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fb-ask-accent); flex: none; }
   .flow-board-root .fb-ask-chip-x {
     background: none;
     border: 0;
-    padding: 0;
-    color: inherit;
+    padding: 0 0 0 2px;
+    color: var(--fb-ask-mute);
     font: inherit;
     cursor: pointer;
-    opacity: 0.8;
   }
-  .flow-board-root .fb-ask-chip-x:hover { opacity: 1; }
+  .flow-board-root .fb-ask-chip-x:hover { color: var(--fb-ask-ink); }
+  .flow-board-root .fb-ask-add {
+    background: none;
+    border: 0;
+    padding: 0 4px;
+    color: var(--fb-ask-accent);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .flow-board-root .fb-ask-add:hover { text-decoration: underline; }
+
+  .flow-board-root .fb-ask-qhead { display: flex; align-items: flex-start; gap: 10px; }
+  .flow-board-root .fb-ask-qtitle {
+    flex: 1;
+    min-width: 0;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--fb-ask-ink);
+    overflow-wrap: anywhere;
+  }
+  .flow-board-root .fb-ask-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    min-height: 26px;
+    font-size: 12px;
+    color: var(--fb-ask-mute);
+  }
+
+  .flow-board-root .fb-ask-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 14px 18px 16px;
+  }
+  .flow-board-root .fb-ask-compose { display: flex; flex-direction: column; gap: 14px; }
+  .flow-board-root .fb-ask-cols { display: flex; gap: 18px; }
+  .flow-board-root .fb-ask-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .flow-board-root .fb-ask-col-head { display: flex; align-items: center; gap: 8px; }
+  @media (max-width: 640px) {
+    .flow-board-root .fb-ask-cols { flex-direction: column; }
+  }
+  .flow-board-root .fb-ask-caps,
+  .flow-board-root .fb-ask-picker-kind {
+    font-family: var(--fl-font-mono, ui-monospace, monospace);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fb-ask-mute);
+  }
+  .flow-board-root .fb-ask-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 9px 12px;
+    box-sizing: border-box;
+    background: var(--fb-ask-row-bg);
+    border: 1px solid var(--fb-ask-row-border);
+    border-radius: 9px;
+    color: var(--fb-ask-chip-ink);
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .flow-board-root .fb-ask-row:hover,
+  .flow-board-root .fb-ask-row:focus-visible { background: var(--fb-ask-row-hover); border-color: var(--fb-ask-feat-border); outline: none; }
+  .flow-board-root .fb-ask-row > svg { flex: none; color: var(--fb-ask-accent); }
+  .flow-board-root .fb-ask-row-q { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .flow-board-root .fb-ask-row em { flex: none; font-style: normal; color: var(--fb-ask-mute); font-size: 11.5px; }
+  .flow-board-root .fb-ask-rows { display: flex; flex-direction: column; gap: 6px; }
+
+  .flow-board-root .fb-ask-hints {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 18px;
+    border-top: 1px solid var(--fb-ask-rule);
+    color: var(--fb-ask-mute);
+    font-size: 11.5px;
+  }
+  .flow-board-root .fb-ask-keyhint { display: inline-flex; align-items: center; gap: 6px; }
+
+  .flow-board-root .fb-ask-pick { display: flex; flex-direction: column; gap: 2px; }
+  .flow-board-root .fb-ask-pick-head { padding: 0 8px 6px; }
+  .flow-board-root .fb-ask-pick-list { display: flex; flex-direction: column; gap: 2px; }
+  .flow-board-root .fb-ask-picker-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    flex: none;
+    padding: 8px;
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    color: var(--fb-ask-ink);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .flow-board-root .fb-ask-picker-row:hover { background: var(--fb-ask-row-bg); }
+  .flow-board-root .fb-ask-picker-row.on { background: var(--fb-ask-feat-bg); }
+  .flow-board-root .fb-ask-picker-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .flow-board-root .fb-ask-picker-empty { padding: 6px 8px; color: var(--fb-ask-mute); font-size: 12px; }
+
+  .flow-board-root .fb-ask-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+    background: var(--fb-ask-row-bg);
+    border: 1px solid var(--fb-ask-row-border);
+    border-radius: 10px;
+  }
+  .flow-board-root .fb-ask-suggest-head { font-size: 12px; color: var(--fb-ask-ink); }
+  .flow-board-root .fb-ask-suggest-row,
+  .flow-board-root .fb-ask-suggest-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .flow-board-root .fb-ask-suggest-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 8px;
+    background: transparent;
+    border: 1px dashed var(--fb-ask-chip-border);
+    border-radius: 6px;
+    color: var(--fb-ask-ink);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .flow-board-root .fb-ask-suggest-chip:hover { border-color: var(--fb-ask-accent); color: var(--fb-ask-accent); }
+
+  .flow-board-root .fb-ask-history { display: flex; flex-direction: column; gap: 12px; }
+  .flow-board-root .fb-ask-history-head { display: flex; align-items: center; gap: 6px; margin: -4px 0 0 -6px; }
+  .flow-board-root .fb-ask-history-title { font-size: 14px; font-weight: 600; color: var(--fb-ask-ink); }
+
   .flow-board-root .fb-ask-secondary {
-    height: 30px;
-    padding: 0 var(--fl-space-md, 12px);
-    background: var(--fb-paper);
-    border: 1px solid var(--fb-border);
-    border-radius: var(--fl-radius-row, 6px);
-    color: var(--fb-ink);
+    height: 26px;
+    padding: 0 10px;
+    background: var(--fb-ask-chip-bg);
+    border: 1px solid var(--fb-ask-chip-border);
+    border-radius: 6px;
+    color: var(--fb-ask-chip-ink);
     font: inherit;
     font-size: 12px;
     cursor: pointer;
     white-space: nowrap;
   }
-  .flow-board-root .fb-ask-secondary:hover:not(:disabled) { border-color: var(--fb-accent); }
+  .flow-board-root .fb-ask-secondary:hover:not(:disabled) { border-color: var(--fb-ask-accent); }
   .flow-board-root .fb-ask-secondary:disabled { opacity: 0.5; cursor: default; }
-  .flow-board-root .fb-ask-quiet {
+  .flow-board-root .fb-ask-small { height: 24px; padding: 0 9px; }
+  .flow-board-root .fb-ask-quiet,
+  .flow-board-root .fb-ask-link {
     background: transparent;
     border: 0;
-    color: var(--fb-ink-dim);
+    padding: 0;
+    color: var(--fb-ask-accent);
     font: inherit;
     font-size: 12px;
     cursor: pointer;
+    white-space: nowrap;
   }
-  .flow-board-root .fb-ask-small { height: 24px; padding: 0 10px; }
-  .flow-board-root .fb-ask-picker-row {
-    display: flex;
-    align-items: center;
-    gap: var(--fl-space-sm, 8px);
-    width: 100%;
+  .flow-board-root .fb-ask-quiet { color: var(--fb-ask-mute); }
+  .flow-board-root .fb-ask-quiet:hover,
+  .flow-board-root .fb-ask-link:hover { text-decoration: underline; }
+  .flow-board-root .fb-ask-newq { margin-top: 2px; }
+  .flow-board-root .fb-ask-icon-btn {
     flex: none;
-    padding: var(--fl-space-sm, 8px);
+    min-width: 28px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 2px;
     background: transparent;
     border: 0;
-    border-radius: var(--fl-radius-row, 6px);
-    color: var(--fb-ink);
-    font: inherit;
-    text-align: left;
+    border-radius: 6px;
+    color: var(--fb-ask-mute);
     cursor: pointer;
   }
-  .flow-board-root .fb-ask-picker-row:hover { background: var(--fb-paper); }
-  .flow-board-root .fb-ask-picker-row.on { background: color-mix(in srgb, var(--fb-accent) 22%, var(--fb-card)); }
-  .flow-board-root .fb-ask-picker-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .flow-board-root .fb-ask-picker-kind,
-  .flow-board-root .fb-ask-caps {
-    font-size: 11px;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--fb-ink-dim);
-  }
-  .flow-board-root .fb-ask-picker-empty { padding: 6px var(--fl-space-sm, 8px); color: var(--fb-ink-dim); font-size: 12px; }
-  .flow-board-root .fb-ask-card {
+  .flow-board-root .fb-ask-icon-btn:hover { background: var(--fb-ask-row-bg); color: var(--fb-ask-ink); }
+
+  /* STATUS — one row, in the header. */
+  .flow-board-root .fb-ask-status { display: inline-flex; align-items: center; gap: 8px; color: var(--fb-ask-mute); }
+  .flow-board-root .fb-ask-status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fb-ask-mute); flex: none; }
+  .flow-board-root .fb-ask-status-good .fb-ask-status-dot { background: var(--fb-ask-good-dot); }
+  .flow-board-root .fb-ask-status-warn .fb-ask-status-dot { background: var(--fb-ask-warn); }
+  .flow-board-root .fb-ask-status-error .fb-ask-status-dot { background: var(--fb-danger, #d14b4b); }
+  .flow-board-root .fb-ask-status-busy { color: var(--fb-ask-body); }
+  .flow-board-root .fb-ask-status-busy svg { color: var(--fb-ask-accent); }
+  .flow-board-root .fb-ask-spin { animation: fb-ask-spin 1s linear infinite; }
+  @keyframes fb-ask-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .flow-board-root .fb-ask-spin { animation: none; } }
+  .flow-board-root .fb-ask-turn-status { font-size: 12px; color: var(--fb-ask-mute); }
+
+  .flow-board-root .fb-ask-steps {
     display: flex;
     flex-direction: column;
-    gap: var(--fl-space-sm, 8px);
-    padding: 10px var(--fl-space-md, 12px);
-    background: var(--fb-paper);
-    border: 1px solid var(--fb-border);
-    border-radius: 10px;
+    gap: 6px;
+    padding: 10px 12px;
+    border: 1px solid var(--fb-ask-row-border);
+    border-radius: 9px;
+    background: var(--fb-ask-row-bg);
+    font-size: 12px;
+    color: var(--fb-ask-mute);
   }
-  .flow-board-root .fb-ask-suggest-head { font-size: 12px; color: var(--fb-ink); }
-  .flow-board-root .fb-ask-suggest-row,
-  .flow-board-root .fb-ask-suggest-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-  .flow-board-root .fb-ask-suggest-chip {
-    height: 26px;
-    padding: 0 var(--fl-space-sm, 8px);
-    background: transparent;
-    border: 1px dashed var(--fb-card-border);
-    border-radius: var(--fl-radius-row, 6px);
-    color: var(--fb-ink);
+  .flow-board-root .fb-ask-step { display: flex; align-items: center; gap: 8px; }
+  .flow-board-root .fb-ask-step-done { color: var(--fb-ask-good); }
+  .flow-board-root .fb-ask-step-current { color: var(--fb-ask-ink); }
+  .flow-board-root .fb-ask-step-dot { width: 6px; height: 6px; margin: 0 2.5px; border-radius: 50%; background: var(--fb-ask-accent); }
+
+  /* THE ANSWER — a lead, short sections, real lists. */
+  .flow-board-root .fb-ask-answer { display: flex; flex-direction: column; gap: 22px; }
+  .flow-board-root .fb-ask-turn { display: flex; flex-direction: column; gap: 16px; }
+  .flow-board-root .fb-ask-doc { display: flex; flex-direction: column; gap: 12px; }
+  .flow-board-root .fb-ask-lead { font-size: 14.5px; line-height: 1.5; font-weight: 500; color: var(--fb-ask-ink); }
+  .flow-board-root .fb-ask-h {
+    margin: 4px 0 -6px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--fb-ask-ink);
+  }
+  .flow-board-root .fb-ask-p { margin: 0; font-size: 13px; line-height: 1.55; color: var(--fb-ask-body); }
+  .flow-board-root .fb-ask-ul { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.6; color: var(--fb-ask-body); }
+  .flow-board-root .fb-ask-ul li + li { margin-top: 2px; }
+  .flow-board-root .fb-ask-code {
+    font-family: var(--fl-font-mono, 'JetBrains Mono', ui-monospace, monospace);
+    font-size: 11.5px;
+    padding: 0 5px;
+    background: var(--fb-ask-code-bg);
+    border: 1px solid var(--fb-ask-code-border);
+    border-radius: 4px;
+    color: var(--fb-ask-chip-ink);
+    overflow-wrap: anywhere;
+  }
+  .flow-board-root .fb-ask-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 100%;
+    padding: 1px 6px;
+    box-sizing: border-box;
+    font-family: var(--fl-font-mono, 'JetBrains Mono', ui-monospace, monospace);
+    font-size: 11.5px;
+    line-height: 1.45;
+    background: var(--fb-ask-chip-bg);
+    border: 1px solid var(--fb-ask-chip-border);
+    border-radius: 5px;
+    color: var(--fb-ask-chip-ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: baseline;
+  }
+  .flow-board-root button.fb-ask-file { cursor: pointer; }
+  .flow-board-root button.fb-ask-file:hover { border-color: var(--fb-ask-accent); color: var(--fb-ask-ink); }
+  .flow-board-root .fb-ask-feat {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 1px 7px;
     font: inherit;
     font-size: 12px;
+    line-height: 1.45;
+    background: var(--fb-ask-feat-bg);
+    border: 1px solid var(--fb-ask-feat-border);
+    border-radius: 5px;
+    color: var(--fb-ask-feat-ink);
+    white-space: nowrap;
+    vertical-align: baseline;
+  }
+  .flow-board-root button.fb-ask-feat { cursor: pointer; }
+  .flow-board-root button.fb-ask-feat:hover { border-color: var(--fb-ask-accent); }
+  .flow-board-root .fb-ask-feat-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fb-ask-accent); flex: none; }
+  .flow-board-root .fb-ask-cite {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 15px;
+    height: 15px;
+    margin-left: 2px;
+    padding: 0 3px;
+    box-sizing: border-box;
+    border: 0;
+    border-radius: 4px;
+    background: var(--fb-ask-cite-bg);
+    color: var(--fb-ask-cite-ink);
+    font-family: var(--fl-font-mono, 'JetBrains Mono', ui-monospace, monospace);
+    font-size: 10px;
+    line-height: 15px;
+    vertical-align: 1px;
     cursor: pointer;
   }
-  .flow-board-root .fb-ask-suggest-chip:hover { border-color: var(--fb-ask-good); color: var(--fb-ask-good); }
-  .flow-board-root .fb-ask-before {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 10px var(--fl-space-md, 12px);
-    border: 1px solid var(--fb-border);
-    border-radius: 10px;
+  .flow-board-root button.fb-ask-cite:hover { outline: 1px solid var(--fb-ask-accent); }
+  .flow-board-root .fb-ask-cite-static { cursor: default; margin-left: 0; flex: none; }
+
+  .flow-board-root .fb-ask-gap {
+    padding: 9px 12px;
+    border: 1px dashed var(--fb-ask-gap-border);
+    background: var(--fb-ask-gap-bg);
+    border-radius: 9px;
+    color: var(--fb-ask-gap-ink);
+    font-size: 12.5px;
+    line-height: 1.5;
   }
-  .flow-board-root .fb-ask-saved-row {
+  .flow-board-root .fb-ask-gap strong { font-weight: 600; }
+
+  .flow-board-root .fb-ask-sources { display: flex; flex-direction: column; gap: 5px; }
+  .flow-board-root .fb-ask-source {
     display: flex;
     align-items: center;
-    gap: var(--fl-space-sm, 8px);
-    padding: 6px 0;
-    background: transparent;
-    border: 0;
-    color: var(--fb-ink);
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
+    gap: 8px;
+    min-width: 0;
+    padding: 2px 4px;
+    margin: 0 -4px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--fb-ask-body);
+    outline: none;
+    transition: background 0.3s;
   }
-  .flow-board-root .fb-ask-saved-row:hover .fb-ask-saved-q { color: var(--fb-accent); }
-  .flow-board-root .fb-ask-saved-q { flex: 1; min-width: 0; }
-  .flow-board-root .fb-ask-saved-meta { flex: 0 0 auto; color: var(--fb-ink-dim); font-size: 12px; }
+  .flow-board-root .fb-ask-source.is-flash { background: var(--fb-ask-feat-bg); }
+  .flow-board-root .fb-ask-source-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .flow-board-root .fb-ask-source-kind { margin-left: auto; flex: none; font-style: normal; font-size: 11px; color: var(--fb-ask-mute); }
+
+  .flow-board-root .fb-ask-reply {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 9px 12px;
+    border: 1px solid var(--fb-ask-row-border);
+    background: var(--fb-ask-row-bg);
+    border-radius: 9px;
+    font-size: 12.5px;
+    color: var(--fb-ask-body);
+  }
+  .flow-board-root .fb-ask-reply-head { display: flex; align-items: center; gap: 8px; }
+  .flow-board-root .fb-ask-reply-text { line-height: 1.5; white-space: pre-wrap; color: var(--fb-ask-ink); }
+
+  .flow-board-root .fb-ask-answer-foot { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--fb-ask-mute); }
+  .flow-board-root .fb-ask-learn { display: flex; align-items: center; gap: 8px; color: var(--fb-ask-good); }
+  .flow-board-root .fb-ask-saved-line { color: var(--fb-ask-mute); }
+  .flow-board-root .fb-ask-muted { margin: 0; color: var(--fb-ask-mute); font-size: 12px; line-height: 1.5; }
   .flow-board-root .fb-ask-warn-text { color: var(--fb-ask-warn); }
-  .flow-board-root .fb-ask-good-text { color: var(--fb-ask-good); }
+  .flow-board-root .fb-ask-error { margin: 0; color: var(--fb-danger, #d14b4b); font-size: 12px; line-height: 1.5; }
   .flow-board-root .fb-ask-bubble {
     align-self: flex-end;
     max-width: 88%;
-    display: flex;
-    flex-direction: column;
-    gap: var(--fl-space-sm, 8px);
-    padding: 10px var(--fl-space-md, 12px);
-    background: var(--fb-paper);
+    padding: 9px 12px;
+    background: var(--fb-ask-row-bg);
+    border: 1px solid var(--fb-ask-row-border);
     border-radius: 10px;
-  }
-  .flow-board-root .fb-ask-bubble-text { line-height: 1.5; white-space: pre-wrap; }
-  .flow-board-root .fb-ask-bubble-tags { display: flex; flex-wrap: wrap; gap: var(--fl-space-xs, 4px); }
-  .flow-board-root .fb-ask-mini {
-    padding: 1px 6px;
-    border-radius: var(--fl-radius-sm, 4px);
-    background: var(--fb-card);
-    color: var(--fb-ink);
-    font-size: 11px;
-  }
-  .flow-board-root .fb-ask-mini-map {
-    background: color-mix(in srgb, var(--fb-ask-good) 20%, transparent);
-    color: var(--fb-ask-good);
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    color: var(--fb-ask-ink);
   }
   .flow-board-root .fb-ask-stale {
     display: flex;
     align-items: center;
-    gap: var(--fl-space-sm, 8px);
-    padding: var(--fl-space-sm, 8px) 10px;
-    border-radius: var(--fl-radius-md, 8px);
-    background: color-mix(in srgb, var(--fb-ask-warn) 12%, transparent);
-    color: var(--fb-ask-warn);
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--fb-ask-gap-bg);
+    color: var(--fb-ask-gap-ink);
     font-size: 12px;
   }
   .flow-board-root .fb-ask-stale > span { flex: 1; }
-  .flow-board-root .fb-ask-explain { line-height: 1.6; color: var(--fb-ink); }
-  .flow-board-root .fb-ask-explain p { margin: 0 0 var(--fl-space-sm, 8px); }
-  .flow-board-root .fb-ask-explain p:last-child { margin-bottom: 0; }
-  .flow-board-root .fb-ask-ref {
-    padding: 0 1px;
-    background: none;
-    border: 0;
-    color: var(--fb-accent);
-    font: inherit;
-    cursor: pointer;
-  }
-  .flow-board-root .fb-ask-ref:hover { text-decoration: underline; }
-  .flow-board-root .fb-ask-dig,
   .flow-board-root .fb-ask-verdict {
     display: flex;
     flex-direction: column;
-    gap: var(--fl-space-sm, 8px);
-    padding: var(--fl-space-md, 12px);
-    background: color-mix(in srgb, var(--fb-accent) 8%, var(--fb-card));
-    border: 1px solid color-mix(in srgb, var(--fb-accent) 35%, var(--fb-border));
-    border-radius: 10px;
-  }
-  .flow-board-root .fb-ask-verdict { padding: 10px var(--fl-space-md, 12px); gap: 6px; }
-  .flow-board-root .fb-ask-dig-head { display: flex; align-items: center; gap: var(--fl-space-sm, 8px); color: var(--fb-accent); }
-  .flow-board-root .fb-ask-dig-title { font-weight: 500; color: var(--fb-ink); }
-  .flow-board-root .fb-ask-spin { animation: fb-ask-spin 1s linear infinite; }
-  @keyframes fb-ask-spin { to { transform: rotate(360deg); } }
-  @media (prefers-reduced-motion: reduce) { .flow-board-root .fb-ask-spin { animation: none; } }
-  .flow-board-root .fb-ask-steps { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; font-size: 12px; }
-  .flow-board-root .fb-ask-step { display: flex; align-items: center; gap: 6px; }
-  .flow-board-root .fb-ask-step-done { color: var(--fb-ask-good); }
-  .flow-board-root .fb-ask-step-current { color: var(--fb-ink); }
-  .flow-board-root .fb-ask-dig-note { padding-left: 22px; font-size: 12px; color: var(--fb-ink-dim); }
-  .flow-board-root .fb-ask-verdict-head { display: flex; align-items: center; gap: var(--fl-space-sm, 8px); }
-  .flow-board-root .fb-ask-verdict-label {
-    padding: 2px var(--fl-space-sm, 8px);
-    border-radius: var(--fl-radius-sm, 4px);
-    background: color-mix(in srgb, var(--fb-accent) 22%, transparent);
-    color: var(--fb-accent);
-    font-size: 12px;
-    font-weight: 500;
-  }
-  .flow-board-root .fb-ask-verdict-risk { line-height: 1.5; color: var(--fb-ink); }
-  .flow-board-root .fb-ask-branch { display: flex; align-items: center; gap: 6px; color: var(--fb-ask-warn); font-size: 12px; }
-  .flow-board-root .fb-ask-reply-head { display: flex; align-items: center; gap: var(--fl-space-sm, 8px); }
-  .flow-board-root .fb-ask-reply-text { line-height: 1.5; white-space: pre-wrap; }
-  .flow-board-root .fb-ask-sources { display: flex; flex-direction: column; gap: 2px; }
-  .flow-board-root .fb-ask-source {
-    display: flex;
-    align-items: baseline;
-    gap: var(--fl-space-sm, 8px);
-    padding: var(--fl-space-xs, 4px) 0;
-    background: transparent;
-    border: 0;
-    color: var(--fb-ink);
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-  }
-  .flow-board-root .fb-ask-source:focus-visible { outline: 2px solid var(--fb-accent); outline-offset: 1px; }
-  .flow-board-root .fb-ask-source-n { color: var(--fb-ink-dim); min-width: 1em; }
-  .flow-board-root .fb-ask-source-file {
-    color: var(--fb-ink-dim);
-    font-family: var(--fl-font-mono, ui-monospace, monospace);
-    font-size: 11px;
-  }
-  .flow-board-root .fb-ask-source-know { color: var(--fb-ink-dim); font-size: 11px; }
-  .flow-board-root .fb-ask-answer-foot {
-    display: flex;
-    flex-direction: column;
-    gap: var(--fl-space-xs, 4px);
-    padding: var(--fl-space-sm, 8px) 10px 0;
-    border-top: 1px solid var(--fb-border);
-    font-size: 12px;
-    color: var(--fb-ink-dim);
-  }
-  .flow-board-root .fb-ask-error { margin: 0; color: var(--fb-danger); font-size: 12px; line-height: 1.5; }
-  .flow-board-root .fb-ask-foot {
-    flex: 0 0 auto;
-    display: flex;
-    flex-direction: column;
     gap: 6px;
-    padding: 10px 14px var(--fl-space-md, 12px);
-    border-top: 1px solid var(--fb-border);
+    padding: 10px 12px;
+    background: var(--fb-ask-feat-bg);
+    border: 1px solid var(--fb-ask-feat-border);
+    border-radius: 9px;
+  }
+  .flow-board-root .fb-ask-verdict-head { display: flex; align-items: center; gap: 8px; }
+  .flow-board-root .fb-ask-verdict-label { font-size: 12px; font-weight: 600; color: var(--fb-ask-feat-ink); }
+  .flow-board-root .fb-ask-verdict-risk { line-height: 1.5; color: var(--fb-ask-body); font-size: 12.5px; }
+  .flow-board-root .fb-ask-branch { display: flex; align-items: center; gap: 6px; color: var(--fb-ask-warn); font-size: 12px; }
+  .flow-board-root .fb-ask-connections { display: flex; flex-direction: column; gap: 6px; }
+  .flow-board-root .fb-ask-connection { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .flow-board-root .fb-ask-connection-words { min-width: 0; line-height: 1.5; }
+  .flow-board-root .fb-ask-connection-words .fb-ask-proj { white-space: normal; }
+
+  /* FOOTER — the follow-up field and Continue in a conversation. */
+  .flow-board-root .fb-ask-foot {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 18px;
+    border-top: 1px solid var(--fb-ask-rule);
   }
   .flow-board-root .fb-ask-follow {
     flex: 1;
     min-width: 0;
     height: 32px;
     box-sizing: border-box;
-    padding: 0 10px;
-    background: var(--fb-paper);
-    border: 1px solid var(--fb-border);
-    border-radius: var(--fl-radius-md, 8px);
-    color: var(--fb-ink);
+    padding: 0 11px;
+    background: var(--fb-ask-field);
+    border: 1px solid var(--fb-ask-chip-border);
+    border-radius: 8px;
+    color: var(--fb-ask-ink);
     font: inherit;
+    font-size: 13px;
     outline: none;
   }
-  .flow-board-root .fb-ask-follow:focus { border-color: var(--fb-accent); }
+  .flow-board-root .fb-ask-follow::placeholder { color: var(--fb-ask-mute); }
+  .flow-board-root .fb-ask-follow:focus { border-color: var(--fb-ask-accent); }
   .flow-board-root .fb-ask-follow:disabled { opacity: 0.6; }
   .flow-board-root .fb-ask-foot .fb-ask-secondary { height: 32px; }
 
-  /* ── The map while the panel is open ── */
-  .flow-board-root .fb-terr-cell.fb-terr-ask-tagged {
-    border-color: var(--fb-learn-known);
-    box-shadow: inset 0 0 0 2px var(--fb-learn-known);
+  /* THE QUESTIONS YOU ASKED, on a cell: quiet until the cell is pointed at. */
+  .flow-board-root .fb-terr-asked {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    height: 18px;
+    margin-left: auto;
+    padding: 0 5px;
+    flex: none;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    color: var(--fb-ink-dim);
+    font: inherit;
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.8;
+    pointer-events: auto;
   }
-  .flow-board-root .fb-terr-cell.fb-terr-ask-mentioned {
-    outline: 2px dashed var(--fb-accent);
-    outline-offset: -2px;
-    box-shadow: none;
-  }
+  .flow-board-root .fb-terr-asked fl-icon { --fl-icon-size: 12px; }
+  .flow-board-root .fb-terr-cell:hover .fb-terr-asked,
+  .flow-board-root .fb-terr-asked:focus-visible { opacity: 1; color: var(--fb-accent); border-color: var(--fb-card-border); }
+  .flow-board-root .fb-terr-asked:hover { background: var(--fb-paper); }
+
+  /* The map's Ask marks — cleared while the sheet is open (it covers the map). */
   .flow-board-root .fb-terr-ask-marks {
     position: absolute;
     top: 6px;
@@ -1888,7 +2450,7 @@ const ASK_STYLES = `
     display: flex;
     flex-direction: column;
     align-items: flex-end;
-    gap: var(--fl-space-xs, 4px);
+    gap: 4px;
     max-width: calc(100% - 12px);
     pointer-events: none;
   }
@@ -1898,52 +2460,11 @@ const ASK_STYLES = `
     text-overflow: ellipsis;
     white-space: nowrap;
     padding: 1px 6px;
-    border-radius: var(--fl-radius-sm, 4px);
+    border-radius: 4px;
     background: var(--fb-card);
     border: 1px solid var(--fb-border);
     color: var(--fb-ink);
     font-size: 11px;
     line-height: 1.5;
   }
-  .flow-board-root .fb-terr-ask-chip-tag,
-  .flow-board-root .fb-terr-ask-live-read,
-  .flow-board-root .fb-terr-ask-live-reading,
-  .flow-board-root .fb-terr-ask-chip-facts { color: var(--fb-learn-known); }
-  .flow-board-root .fb-terr-ask-chip-facts {
-    background: color-mix(in srgb, var(--fb-learn-known) 18%, var(--fb-card));
-  }
-  .flow-board-root .fb-terr-ask-chip-mention { color: var(--fb-accent); }
-  .flow-board-root .fb-terr-ask-live-thin { color: var(--fb-warn); }
-  .flow-board-root .fb-terr-ask-live-reading { animation: fb-ask-pulse 1.4s ease-in-out infinite; }
-  @keyframes fb-ask-pulse { 50% { opacity: 0.55; } }
-  @media (prefers-reduced-motion: reduce) { .flow-board-root .fb-terr-ask-live-reading { animation: none; } }
-  .flow-board-root .fb-terr-ask-open .fb-terr-cell { cursor: copy; }
-
-  /* A LIGHT DIM over the map while Ask is open: still visible, still pressable. */
-  .flow-board-root.fb-ask-active .fb-stage::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.12);
-    pointer-events: none;
-    z-index: 3;
-  }
-
-  /* ── The Workspace sheet while the panel is open (note 8) ── */
-  .flow-board-root .fb-ws-ask-open .fb-ws-cell,
-  .flow-board-root .fb-ws-ask-open .fb-ws-country.fb-ws-zoomable { cursor: copy; }
-  .flow-board-root .fb-ws-ask-open .fb-ws-cell.fb-ws-ask-dim { opacity: 0.35; }
-  .flow-board-root .fb-ws-ask-open .fb-ws-country.fb-ws-ask-dim { opacity: 0.45; }
-  .flow-board-root .fb-ws-country.fb-ws-ask-tagged {
-    border-color: var(--fb-ws-hue, var(--fb-learn-known));
-    box-shadow: inset 0 0 0 2px var(--fb-ws-hue, var(--fb-learn-known));
-  }
-  .flow-board-root .fb-ws-country.fb-ws-ask-mentioned {
-    outline: 2px dashed var(--fb-accent);
-    outline-offset: -2px;
-  }
-  .flow-board-root .fb-ws-ask-note { color: var(--fb-warn); font-size: 12px; white-space: nowrap; }
-  .flow-board-root .fb-ws-ask-open svg.fb-ws-links .fb-ws-ribbon { pointer-events: stroke; cursor: copy; }
-  .flow-board-root .fb-ws-ask-open svg.fb-ws-links .fb-ws-bridge,
-  .flow-board-root .fb-ws-ask-open svg.fb-ws-links .fb-ws-pill { pointer-events: all; cursor: copy; }
 `

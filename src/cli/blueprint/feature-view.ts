@@ -35,6 +35,7 @@ import { join } from 'node:path';
 import { FEATURE_ROLES, isFeatureRole, type FeatureRole } from './feature-role.js';
 import { readFeatures } from './feature-store.js';
 import { VIEW_PORT_CROSSES_MAX } from './feature-view-ports-prompt.js';
+import { LEARNED_AT_RE, stampLearnedAt } from '../state/knowledge-provenance.js';
 
 export { PORTS_EXAMPLE_LINE, VIEW_PORT_CROSSES_MAX, viewPortsPromptLines } from './feature-view-ports-prompt.js';
 
@@ -184,6 +185,11 @@ export interface FeatureView {
   phases?: Array<{ n: number; title: string }>;
   /** Levels by id. `root` is required and is what opens. */
   views: Record<string, ViewLevel>;
+  /**
+   * Where the view was learned — a reference into the provenance records
+   * (`state/knowledge-provenance.ts`). Stamped only by `writeFeatureView`.
+   */
+  learnedAt?: string;
 }
 
 /** Result of validating a candidate view. */
@@ -900,9 +906,27 @@ export function writeFeatureView(
   flowDir: string,
   view: FeatureView,
   repoRoot?: string,
+  options: { keepLearnedAt?: boolean } = {},
 ): ViewValidation {
   const validation = validateFeatureView(view, repoRoot);
   if (!validation.ok) return validation;
+  // The writer stamps where the view was learned, from `repoRoot` and the
+  // files its excerpts cite; a caller's own `learnedAt` is dropped. A heal
+  // (`keepLearnedAt`) only moves addresses, so it keeps the stamp it read —
+  // the claim did not change, so neither did where it was learned.
+  const stamped: FeatureView = { ...view };
+  if (options.keepLearnedAt !== true) {
+    delete stamped.learnedAt;
+    if (repoRoot !== undefined) {
+      const cited = Object.values(view.views).flatMap((level) =>
+        level.nodes.flatMap((node) => (node.code === undefined ? [] : [node.code.file])),
+      );
+      const learnedAt = stampLearnedAt(flowDir, repoRoot, cited);
+      if (learnedAt !== null) stamped.learnedAt = learnedAt;
+    }
+  } else if (stamped.learnedAt !== undefined && !LEARNED_AT_RE.test(stamped.learnedAt)) {
+    delete stamped.learnedAt;
+  }
   const dir = featureViewsDir(flowDir);
   mkdirSync(dir, { recursive: true });
   const filePath = featureViewPath(flowDir, view.feature);
@@ -915,7 +939,7 @@ export function writeFeatureView(
     }
   }
   const temp = `${filePath}.tmp`;
-  writeFileSync(temp, `${JSON.stringify(view, null, 2)}\n`, 'utf-8');
+  writeFileSync(temp, `${JSON.stringify(stamped, null, 2)}\n`, 'utf-8');
   renameSync(temp, filePath);
   return validation;
 }
@@ -1013,7 +1037,7 @@ export function healFeatureView(
   // `healed 1` forever over a write that never happened. Refusal stays a
   // return, never a throw — a heal that throws over a lost race would turn
   // maintenance into an outage.
-  const written = writeFeatureView(flowDir, healedView, repoRoot);
+  const written = writeFeatureView(flowDir, healedView, repoRoot, { keepLearnedAt: true });
   if (!written.ok) return { healed: 0, gone, unknown };
   return counts;
 }

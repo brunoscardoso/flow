@@ -262,6 +262,62 @@ describe('empty index', () => {
       rows: [],
       noFeatureRows: [],
       totalInTab: 0,
+      inFeatureInTab: 0,
+      emptyReason: 'index',
+      totalEntries: 0,
+      unparented: 0,
     })
+  })
+})
+
+describe('feature-scoped counts and the empty reason', () => {
+  // The real shape that read as broken: a feature nothing is linked to, in a
+  // project whose docs are mostly unparented.
+  const index = [
+    entry({ name: 'C1', kind: 'change', featureSlug: 'billing', path: 'c1.md' }),
+    entry({ name: 'C2', kind: 'change', featureSlug: null, path: 'c2.md' }),
+    entry({ name: 'D1', kind: 'discovery', featureSlug: null, path: 'd1.md' }),
+    entry({ name: 'D2', kind: 'discovery', featureSlug: 'auth', path: 'd2.md' }),
+    entry({ name: 'D3', kind: 'discovery', featureSlug: null, path: 'd3.md' }),
+  ]
+
+  it('tab badges follow the feature filter, and count the project without one', () => {
+    expect(countCorpusTabs(index)).toEqual({ changes: 2, discoveries: 3 })
+    expect(countCorpusTabs(index, 'auth')).toEqual({ changes: 0, discoveries: 1 })
+    expect(countCorpusTabs(index, 'nobody')).toEqual({ changes: 0, discoveries: 0 })
+  })
+
+  it('the M of "N of M" is the feature-scoped count', () => {
+    const view = deriveCorpusBrowserView(index, state({ tab: 'discoveries', featureSlug: 'auth' }))
+    expect(view.totalInTab).toBe(3)
+    expect(view.inFeatureInTab).toBe(1)
+    expect(deriveCorpusBrowserView(index, state({ tab: 'discoveries' })).inFeatureInTab).toBe(3)
+  })
+
+  it('a feature with nothing linked is empty for the FEATURE, with the totals to offer', () => {
+    const view = deriveCorpusBrowserView(index, state({ featureSlug: 'auth' }))
+    expect(view.rows).toEqual([])
+    expect(view.emptyReason).toBe('feature')
+    expect(view.totalEntries).toBe(5)
+    expect(view.unparented).toBe(3)
+  })
+
+  it('a search that hides what the feature holds is empty for the FILTERS', () => {
+    const view = deriveCorpusBrowserView(index, state({ featureSlug: 'billing', search: 'zzz' }))
+    expect(view.inFeatureInTab).toBe(1)
+    expect(view.emptyReason).toBe('filters')
+  })
+
+  it('an empty tab is empty for the INDEX, and a list with rows has no reason', () => {
+    const changesOnly = [entry({ kind: 'change', path: 'x.md' })]
+    expect(deriveCorpusBrowserView(changesOnly, state({ tab: 'discoveries', featureSlug: 'auth' })).emptyReason).toBe('index')
+    expect(deriveCorpusBrowserView(index, state()).emptyReason).toBeNull()
+  })
+
+  it('clearing the feature filter brings the unparented group back', () => {
+    const cleared = clearFeatureFilter(state({ featureSlug: 'auth' }))
+    const view = deriveCorpusBrowserView(index, cleared)
+    expect(names(view.rows)).toEqual(['C1'])
+    expect(names(view.noFeatureRows)).toEqual(['C2'])
   })
 })

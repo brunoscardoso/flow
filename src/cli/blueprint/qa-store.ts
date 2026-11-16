@@ -8,8 +8,12 @@
  * `planflow-ai blueprint qa record | follow-up` (allowed-pattern #14). An agent
  * never writes either drawer directly.
  *
- * WHAT IS NEVER STORED. The log is shared knowledge (it syncs append-only with
- * a Workspace), so nothing from a personal conversation may land in it — only
+ * NOT SHARED (user, 2026-11-16). The log is the person's own: it is classified
+ * `personal` and never syncs with a Workspace. What an answer TAUGHT is shared —
+ * its facts go through `blueprint observe` — but the questions are not.
+ *
+ * WHAT IS NEVER STORED. The log once synced, and may again be read beside
+ * shared stores, so nothing from a personal conversation may land in it — only
  * THAT one was used (`usedConversation`) and how many (`conversationCount`).
  * The writer is strict: an unknown key is refused, and a key that looks like
  * conversation content (`conversation`, `messages`, …) is refused by name, so

@@ -33,12 +33,16 @@ test('the header retires New Blueprint and offers Learning instead', async ({ wi
   // GONE — not merely hidden. A hidden-but-present button would still be a
   // control someone could re-enable by flipping a display rule.
   await expect(
-    window.locator('.flow-board-root .fb-header fl-button', { hasText: 'New Blueprint' }),
+    window.locator('.flow-board-root .fb-head-island fl-button', { hasText: 'New Blueprint' }),
   ).toHaveCount(0)
 
   // PRESENT and reachable, with a project open.
-  const learning = window.locator('.flow-board-root .fb-header button.fb-learn-tile[aria-label="Learn"]')
+  // ON THE MAP THE WAY IN IS THE KNOWLEDGE PILL (islands standard, user pick
+  // 2026-11-15): the bottom island's pill opens the Learning panel, and it is
+  // shown while nothing has been learned — the moment this test guards.
+  const learning = window.locator('.flow-board-root .fb-knowledge-pill:visible').first()
   await expect(learning).toBeVisible({ timeout: 30_000 })
+  await expect(learning).toContainText('Nothing learned yet')
 
   // And it does the one thing it claims: opens the learning panel — including
   // when the learn chip is hidden because nothing has been learned yet.

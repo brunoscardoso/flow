@@ -77,9 +77,12 @@ export class StoryCard {
     // ── Header row ─────────────────────────────────────────────────────────
     const head = document.createElement('div')
     head.className = 'fl-story-head'
-    const icon = document.createElement('span')
+    // A line icon in the Blueprint's own style — no emoji (the card is a piece
+    // of the Blueprint shown in the chat, so it wears the board's look).
+    const icon = document.createElement('fl-icon')
     icon.className = 'fl-story-glyph'
-    icon.textContent = '📖'
+    icon.setAttribute('name', 'map')
+    icon.setAttribute('size', '14')
     icon.setAttribute('aria-hidden', 'true')
     const label = document.createElement('span')
     label.className = 'fl-story-label'
@@ -390,21 +393,22 @@ function injectStoryStyles(): void {
   if (stylesInjected) return
   stylesInjected = true
   const style = document.createElement('style')
-  // Drafting palette (Prussian/vellum) scoped to the card so chat chrome stays
-  // untouched. Dark is the default; light applies via prefers-color-scheme AND
-  // the app's <html data-theme> stamp (data-theme wins over the media query).
+  // The Blueprint's palette (2026-11-15): the card is a piece of the board
+  // shown in the chat, so it uses the board's card surface, hairline border,
+  // mono section labels and cyan accent. Dark is the default; light applies via
+  // prefers-color-scheme AND the app's <html data-theme> stamp (data-theme wins).
   style.textContent = `
     .fl-story-card {
-      --story-accent: #6ea8d8;
-      --story-bg: #12202e;
-      --story-bg-raised: #17293a;
-      --story-fg: #e8e2d0;
-      --story-muted: #9fb3c4;
-      --story-border: #2f4a63;
-      --story-glow: rgba(110,168,216,0.28);
+      --story-accent: #6cc3f0;
+      --story-bg: #141c25;
+      --story-bg-raised: #1a2029;
+      --story-fg: #e4e6ea;
+      --story-muted: #8b97a0;
+      --story-border: #2a3540;
       --story-green: #7fbf9a;
       --story-red: #d98a8a;
       --story-amber: #d9b86a;
+      --story-on-accent: #0e1a24;
       position: relative;
       display: flex;
       flex-direction: column;
@@ -413,56 +417,54 @@ function injectStoryStyles(): void {
       color: var(--story-fg);
       background: var(--story-bg);
       border: 1px solid var(--story-border);
-      border-left: 3px solid var(--story-accent);
-      border-radius: var(--fl-radius-md);
-      box-shadow: 0 0 0 1px var(--story-glow), 0 6px 22px -12px var(--story-glow);
+      border-radius: 10px;
       font-family: var(--fl-font-ui);
       outline: none;
     }
     .fl-story-card:focus-visible { box-shadow: 0 0 0 2px var(--story-accent); }
     @media (prefers-color-scheme: light) {
       .fl-story-card {
-        --story-accent: #2b4a6f;
-        --story-bg: #f4efe0;
-        --story-bg-raised: #ece5d2;
-        --story-fg: #1f2d3a;
-        --story-muted: #5a6b78;
-        --story-border: #d8cdb0;
-        --story-glow: rgba(43,74,111,0.18);
-        --story-green: #3f7d54;
-        --story-red: #b04d4d;
-        --story-amber: #9a7a2e;
-      }
-    }
-    :root[data-theme="dark"] .fl-story-card {
-      --story-accent: #6ea8d8;
-      --story-bg: #12202e;
-      --story-bg-raised: #17293a;
-      --story-fg: #e8e2d0;
-      --story-muted: #9fb3c4;
-      --story-border: #2f4a63;
-      --story-glow: rgba(110,168,216,0.28);
-      --story-green: #7fbf9a;
-      --story-red: #d98a8a;
-      --story-amber: #d9b86a;
-    }
-    :root[data-theme="light"] .fl-story-card {
-      --story-accent: #2b4a6f;
-      --story-bg: #f4efe0;
-      --story-bg-raised: #ece5d2;
-      --story-fg: #1f2d3a;
-      --story-muted: #5a6b78;
-      --story-border: #d8cdb0;
-      --story-glow: rgba(43,74,111,0.18);
+      --story-accent: #1f7fae;
+      --story-bg: #f6f8fa;
+      --story-bg-raised: #ffffff;
+      --story-fg: #1d232b;
+      --story-muted: #5f6873;
+      --story-border: #d6dde4;
       --story-green: #3f7d54;
       --story-red: #b04d4d;
       --story-amber: #9a7a2e;
+      --story-on-accent: #ffffff;
+      }
+    }
+    :root[data-theme="dark"] .fl-story-card {
+      --story-accent: #6cc3f0;
+      --story-bg: #141c25;
+      --story-bg-raised: #1a2029;
+      --story-fg: #e4e6ea;
+      --story-muted: #8b97a0;
+      --story-border: #2a3540;
+      --story-green: #7fbf9a;
+      --story-red: #d98a8a;
+      --story-amber: #d9b86a;
+      --story-on-accent: #0e1a24;
+    }
+    :root[data-theme="light"] .fl-story-card {
+      --story-accent: #1f7fae;
+      --story-bg: #f6f8fa;
+      --story-bg-raised: #ffffff;
+      --story-fg: #1d232b;
+      --story-muted: #5f6873;
+      --story-border: #d6dde4;
+      --story-green: #3f7d54;
+      --story-red: #b04d4d;
+      --story-amber: #9a7a2e;
+      --story-on-accent: #ffffff;
     }
     .fl-story-head { display: flex; align-items: center; gap: var(--fl-space-sm); }
-    .fl-story-glyph { font-size: 15px; line-height: 1; }
+    .fl-story-glyph { display: inline-flex; color: var(--story-accent); }
     .fl-story-label {
-      font-size: var(--fl-text-caption-size); font-weight: var(--fl-text-ui-weight-medium);
-      letter-spacing: 0.16em; color: var(--story-accent);
+      font-family: var(--fl-font-mono, monospace); font-size: 10px; font-weight: 500;
+      letter-spacing: 0.12em; color: var(--story-muted);
     }
     .fl-story-meta {
       font-family: var(--fl-font-mono, monospace); font-size: var(--fl-text-caption-size);
@@ -471,7 +473,7 @@ function injectStoryStyles(): void {
     .fl-story-toggle {
       margin-left: auto; flex: none; border: 1px solid var(--story-border);
       background: var(--story-bg-raised); color: var(--story-fg); cursor: pointer;
-      padding: 3px var(--fl-space-sm); border-radius: var(--fl-radius-sm);
+      padding: 3px var(--fl-space-sm); border-radius: 6px;
       font-family: var(--fl-font-ui); font-size: var(--fl-text-caption-size);
     }
     .fl-story-toggle:hover { border-color: var(--story-accent); }
@@ -488,12 +490,12 @@ function injectStoryStyles(): void {
     .fl-story-stepchip:hover { border-color: var(--story-accent); }
     .fl-story-stepchip.active {
       background: var(--story-accent); border-color: var(--story-accent);
-      color: var(--story-bg); font-weight: var(--fl-text-ui-weight-medium);
+      color: var(--story-on-accent); font-weight: var(--fl-text-ui-weight-medium);
     }
     .fl-story-step { display: flex; flex-direction: column; gap: var(--fl-space-xs); }
     .fl-story-kicker {
-      font-size: var(--fl-text-caption-size); letter-spacing: 0.18em; text-transform: uppercase;
-      color: var(--story-accent); opacity: 0.9;
+      font-family: var(--fl-font-mono, monospace); font-size: 10px;
+      letter-spacing: 0.12em; text-transform: uppercase; color: var(--story-muted);
     }
     .fl-story-title {
       font-size: var(--fl-text-prose-size); font-weight: var(--fl-text-ui-weight-medium);
@@ -518,8 +520,8 @@ function injectStoryStyles(): void {
     .fl-story-group-anchors { border-left-color: var(--story-accent); }
     .fl-story-group-head { display: flex; align-items: center; gap: var(--fl-space-xs); }
     .fl-story-group-label {
-      font-size: var(--fl-text-caption-size); letter-spacing: 0.08em; text-transform: uppercase;
-      color: var(--story-muted);
+      font-family: var(--fl-font-mono, monospace); font-size: 10px;
+      letter-spacing: 0.12em; text-transform: uppercase; color: var(--story-muted);
     }
     .fl-story-pill {
       font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;

@@ -1123,6 +1123,8 @@ interface ParsedInvestigationNote {
   provenance: string
   anchors: BlueprintAnchor[]
   supersedes?: string
+  /** Where it was learned — a provenance reference the CLI's writer stamped. */
+  learnedAt?: string
 }
 
 /**
@@ -1161,6 +1163,9 @@ function parseInvestigationNoteLine(line: string): ParsedInvestigationNote | nul
   }
   if (typeof record.supersedes === 'string') {
     note.supersedes = record.supersedes
+  }
+  if (typeof record.learnedAt === 'string' && /^[0-9a-f]{16}$/.test(record.learnedAt)) {
+    note.learnedAt = record.learnedAt
   }
   return note
 }

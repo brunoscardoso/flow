@@ -1,9 +1,12 @@
 import {
+  WORKSPACE_INTENT_SEE_BOTH_EVENT,
+  WORKSPACE_INTENT_UNDO_EVENT,
   WORKSPACE_SETTINGS_EVENT,
   WORKSPACE_SYNC_EVENT,
   createWorkspacePauseNotifier,
+  workspaceIntentMergeNotification,
 } from './pause-notice'
-import type { WorkspaceSyncStatus } from '../../shared/workspaces-contract'
+import type { WorkspaceIntentMergeDocument, WorkspaceIntentMergeSet, WorkspaceSyncStatus } from '../../shared/workspaces-contract'
 
 const AT = '2026-10-02T12:00:00.000Z'
 
@@ -53,5 +56,67 @@ describe('the Workspace pause notifier', () => {
     expect(notifier.observe('acme', status('offline', "Flow couldn't reach Acme's shared repository."), AT)).toBeNull()
     expect(notifier.observe('acme', status('idle', 'Flow will try again shortly.'), AT)).toBeNull()
     expect(notifier.observe('acme', status('error', 'Nothing was sent.'), AT)).toMatchObject({ level: 'error' })
+  })
+})
+
+describe('the "Flow merged two edits" notification (FR-12)', () => {
+  const document = (overrides: Partial<WorkspaceIntentMergeDocument> = {}): WorkspaceIntentMergeDocument => ({
+    id: 'ask-1',
+    path: 'projects/api/brain/decisions/queue.md',
+    kind: 'decision',
+    title: 'Use one queue for jobs',
+    theirName: 'Bea',
+    ours: 'a\n',
+    theirs: 'b\n',
+    base: null,
+    merged: 'a b\n',
+    current: 'merged',
+    ...overrides,
+  })
+  const set = (documents: WorkspaceIntentMergeDocument[]): WorkspaceIntentMergeSet => ({
+    slug: 'acme',
+    mergeId: 'm1',
+    at: AT,
+    documents,
+  })
+  /** Anything that reads as an internal: a path, a command, a setting key, a file name. */
+  const INTERNALS = /projects\/|\.md\b|planflow|--|workspace sync|\.flowconfig|[a-z]+_[a-z]+:|merges\//i
+
+  it('one document: the approved title and body, Undo and a quiet See both, naming the merge set', () => {
+    const notice = workspaceIntentMergeNotification(set([document()]), AT, 'Acme')
+    expect(notice).toMatchObject({
+      title: 'Flow merged two edits to "Use one queue for jobs"',
+      body: 'You and Bea both changed this decision. Flow combined them into one version and kept both originals.',
+      label: 'Acme',
+      rootId: 'workspace:acme',
+      level: 'info',
+      action: { label: 'Undo', event: WORKSPACE_INTENT_UNDO_EVENT, detail: { slug: 'acme', mergeId: 'm1' } },
+      secondaryAction: { label: 'See both', event: WORKSPACE_INTENT_SEE_BOTH_EVENT, detail: { slug: 'acme', mergeId: 'm1' } },
+    })
+  })
+
+  it('several documents: one notification that lists them; no git name → "a teammate"; the kind word each', () => {
+    const notice = workspaceIntentMergeNotification(
+      set([document({ theirName: null }), document({ id: 'r-1', kind: 'plan', title: 'Queue plan', theirName: null })]),
+      AT,
+    )
+    expect(notice?.title).toBe('Flow merged edits to 2 documents')
+    expect(notice?.body).toBe(
+      'You and a teammate both changed these. Flow combined each into one version and kept both originals.\n- "Use one queue for jobs" (decision)\n- "Queue plan" (plan)',
+    )
+    expect(notice?.label).toBe('Workspace')
+  })
+
+  it('no command, path or setting key in any of its words', () => {
+    for (const notice of [
+      workspaceIntentMergeNotification(set([document()]), AT, 'Acme'),
+      workspaceIntentMergeNotification(set([document({ kind: 'discovery' }), document({ id: 'x', kind: 'plan', theirName: null })]), AT),
+    ]) {
+      // Positive first: there is copy to check.
+      expect(notice?.body.length).toBeGreaterThan(20)
+      const words = [notice?.title, notice?.body, notice?.action?.label, notice?.secondaryAction?.label].join(' ')
+      expect(words).not.toMatch(INTERNALS)
+    }
+    expect(workspaceIntentMergeNotification(set([]), AT)).toBeNull()
   })
 })

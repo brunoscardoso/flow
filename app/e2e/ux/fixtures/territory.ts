@@ -10,19 +10,28 @@ import { expect, type Page } from '@playwright/test'
  * project is known, which can swallow an early press. So this presses until
  * the title strip names the cell, and fails with a sentence if it never does.
  */
+/**
+ * WHERE THE BOARD STANDS — the trail under the Ask field names the level
+ * (mockup J3: the title strip is gone, the trail's `data-where` says it).
+ */
+export const WHERE = '.flow-board-root .fb-float-trail'
+
+export async function whereName(win: Page): Promise<string | null> {
+  return win.locator(WHERE).first().getAttribute('data-where', { timeout: 1_000 }).catch(() => null)
+}
+
 export async function diveIntoCell(win: Page, name: string, timeout = 45_000): Promise<void> {
-  const title = win.locator('.flow-board-root .fb-terr-title-name').first()
   await expect
     .poll(
       async () => {
-        if ((await title.textContent().catch(() => null)) === name) return true
+        if ((await whereName(win)) === name) return true
         await win
           .locator('.fb-terr-cell', { hasText: name })
           .first()
           .click({ position: { x: 8, y: 26 }, timeout: 5_000 })
           .catch(() => undefined)
         await win.waitForTimeout(1_200)
-        return (await title.textContent().catch(() => null)) === name
+        return (await whereName(win)) === name
       },
       { timeout, intervals: [100], message: `the dive into ${name} never happened` },
     )
@@ -30,32 +39,31 @@ export async function diveIntoCell(win: Page, name: string, timeout = 45_000): P
 }
 
 /**
- * Open the DIVED level's feature view — the header's `[data-control-glyph="diagram"]`
- * control (the cell's own door is gone, plan cell-hover-diagram FR-5).
+ * Open the DIVED level's feature view — the trail's Blocks · Diagram switch
+ * (it replaced the one-way diagram glyph, user 2026-11-15).
  */
 export async function openFeatureView(win: Page, name: string): Promise<void> {
   await win.mouse.move(0, 0)
-  await win.getByRole('button', { name: new RegExp(`^Open ${escapeRegExp(name)}'s feature view`) }).click()
-}
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  await win.locator(`${WHERE} .fb-view-switch-btn[data-view="diagram"]`).click()
+  await expect(win.locator('.flow-board-root .fb-deep-chrome .fb-view-switch-btn[data-view="diagram"][aria-pressed="true"]'), `${name}'s diagram never opened`).toBeVisible({ timeout: 30_000 })
 }
 
 /**
- * The Learning panel's door. The header's learn CHIP (`.fb-learn-chip`) is
- * only painted by the module-card stage (`#buildBoard` → `#renderLearnChip`),
- * which the Territory never draws; the permanent "Learn" header tile (`button.fb-learn-tile`, accessible name "Learn") is the
- * door a person has on the default sheet.
+ * The Learning panel's door. On a territory (the default sheet) the header is
+ * not drawn (mockup J3): the Knowledge pill at the map's bottom right opens the
+ * panel. Every other view keeps the header's permanent "Learn" tile.
  */
-export const LEARN_BUTTON = '.flow-board-root .fb-header button.fb-learn-tile[aria-label="Learn"]'
+export const KNOWLEDGE_PILL = '.flow-board-root .fb-knowledge-pill'
+export const LEARN_TILE = '.flow-board-root button.fb-learn-tile[aria-label="Learn"]'
+/** Whichever door is drawn on this view (only one is visible at a time). */
+export const LEARN_BUTTON = `${KNOWLEDGE_PILL}:visible, ${LEARN_TILE}:visible`
 
 export async function openLearningPanel(win: Page): Promise<void> {
   // The board is ONE instance per window: a panel left open in another
   // project's scope is still open here, and the button TOGGLES — so open only
   // what is closed.
   if (await win.locator('.flow-board-root .fb-learn-panel').first().isVisible()) return
-  const button = win.locator(LEARN_BUTTON).first()
+  const button = win.locator(`${KNOWLEDGE_PILL}:visible, ${LEARN_TILE}:visible`).first()
   await expect(button).toBeVisible({ timeout: 30_000 })
   await button.click()
   await expect(win.locator('.flow-board-root .fb-learn-panel').first()).toBeVisible({ timeout: 15_000 })
@@ -87,26 +95,36 @@ export async function openDriftPanel(win: Page): Promise<void> {
  * on a cell with a drawn diagram it pins that diagram instead of diving.
  */
 export async function openFeatureViewByName(win: Page, name: string): Promise<void> {
-  const title = win.locator('.flow-board-root .fb-terr-title-name').first()
   const cell = win.locator('.fb-terr-cell', { hasText: name }).first()
+  // A cell press opens a feature in the view the reader chose last (the
+  // Blocks · Diagram switch remembers it), so the press may land straight on
+  // the diagram — which is where this helper is going anyway.
+  const diagramOf = win.locator(
+    `.flow-board-root .fb-deep-chrome .fb-view-switch[aria-label="How to show ${name}"] [data-view="diagram"][aria-pressed="true"], .flow-board-root .fb-brief-bar:visible:has-text("${name}")`,
+  )
   for (let i = 0; i < 5 && (await cell.count()) === 0; i += 1) {
     await win.keyboard.press('Escape')
     await win.waitForTimeout(500)
   }
   await expect(cell, `${name} is not on the sheet to open`).toBeVisible({ timeout: 30_000 })
+  let arrived: 'blocks' | 'diagram' | null = null
   await expect
     .poll(
       async () => {
-        if ((await title.textContent().catch(() => null)) === name) return true
+        if ((await whereName(win)) === name) arrived = 'blocks'
+        else if ((await diagramOf.count()) > 0) arrived = 'diagram'
+        if (arrived !== null) return true
         await win.mouse.move(0, 0)
         await cell.dblclick({ position: { x: 8, y: 26 }, timeout: 5_000 }).catch(() => undefined)
         await win.waitForTimeout(1_200)
-        return (await title.textContent().catch(() => null)) === name
+        if ((await whereName(win)) === name) arrived = 'blocks'
+        else if ((await diagramOf.count()) > 0) arrived = 'diagram'
+        return arrived !== null
       },
       { timeout: 45_000, intervals: [100], message: `the dive into ${name} never happened` },
     )
     .toBe(true)
-  await openFeatureView(win, name)
+  if (arrived === 'blocks') await openFeatureView(win, name)
 }
 
 /**
@@ -117,18 +135,17 @@ export async function openFeatureViewByName(win: Page, name: string): Promise<vo
  * opened inside it.
  */
 export async function enterProject(win: Page, project: string): Promise<void> {
-  const title = win.locator('.flow-board-root .fb-terr-title-name').first()
   await expect
     .poll(
       async () => {
-        if ((await title.textContent().catch(() => null)) === project) return true
+        if ((await whereName(win)) === project) return true
         await win
           .locator('.flow-board-root .fb-ws-name', { hasText: project })
           .first()
           .click({ timeout: 3_000 })
           .catch(() => undefined)
         await win.waitForTimeout(800)
-        return (await title.textContent().catch(() => null)) === project
+        return (await whereName(win)) === project
       },
       { timeout: 45_000, intervals: [200], message: `the board never showed project ${project}` },
     )

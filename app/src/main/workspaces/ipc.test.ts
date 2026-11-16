@@ -133,6 +133,14 @@ function harness(options: { trusted?: boolean } = {}) {
         received.push({ resolve: request })
         return { ok: true, status: { state: 'synced', lastSyncedAt: null, detail: null, asks: [], reviews: [] } }
       },
+      intentMerges: (request) => {
+        received.push({ intentMerges: request })
+        return null
+      },
+      keepIntent: async (request) => {
+        received.push({ keepIntent: request })
+        return { ok: false, reason: 'not-found', detail: 'gone', status: { state: 'idle', lastSyncedAt: null, detail: null, asks: [], reviews: [] } }
+      },
     },
     remote: {
       hostTools: async () => {
@@ -309,6 +317,20 @@ describe('workspaces channels', () => {
     await expect(h.call('workspaces:resolve', { slug: 'acme', path: 'a.md', take: 'text' })).rejects.toThrow(/text must be/)
     await expect(h.call('workspaces:syncNow', { slug: 7 })).rejects.toThrow(/slug/)
     await expect(harness({ trusted: false }).call('workspaces:syncNow', { slug: 'acme' })).rejects.toThrow(/not available here/)
+  })
+
+  it('the intent-merge channels rebuild their request field by field: never a text or a path from the renderer', async () => {
+    const h = harness()
+    await h.call('workspaces:intentMerges', { slug: 'acme', mergeId: 'm1', path: '/etc/passwd' })
+    await h.call('workspaces:keepIntent', { slug: 'acme', mergeId: 'm1', keep: 'ours', text: 'injected', path: '/etc/passwd' })
+    await h.call('workspaces:keepIntent', { slug: 'acme', mergeId: 'm1', documentId: 'ask-1', keep: 'theirs' })
+    expect(h.received).toEqual([
+      { intentMerges: { slug: 'acme', mergeId: 'm1' } },
+      { keepIntent: { slug: 'acme', mergeId: 'm1', keep: 'ours' } },
+      { keepIntent: { slug: 'acme', mergeId: 'm1', documentId: 'ask-1', keep: 'theirs' } },
+    ])
+    await expect(h.call('workspaces:keepIntent', { slug: 'acme', mergeId: 'm1', keep: 'file:/etc/passwd' })).rejects.toThrow(/keep must be/)
+    await expect(h.call('workspaces:intentMerges', { slug: 'acme' })).rejects.toThrow(/mergeId/)
   })
 
   it('the shared-repository channels rebuild every request field by field; replace only as an explicit true', async () => {

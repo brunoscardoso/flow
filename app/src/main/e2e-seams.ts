@@ -17,6 +17,9 @@
  *   · `basicDiscovery` — runs one project's basic discovery (learn/
  *                      basic-discovery.ts) instead of the learn orchestrator's
  *                      agent passes, so a spec decides when it ends and how.
+ *   · `mergeIntent`  — answers the Workspace sync's merge of two edits to a
+ *                      decision, plan or discovery. Unset in a hidden run, the
+ *                      merge answers nothing and the pause stays for a person.
  *
  * Basic discovery is the one seam whose ABSENCE also means something: a hidden
  * run that has not set it never sweeps a project automatically and never holds
@@ -40,6 +43,8 @@ export interface E2ESeams {
   runtime?: () => AgentRuntime
   /** Stands in for one project's basic discovery (the learn orchestrator's sweep). */
   basicDiscovery?: (root: string) => Promise<BasicDiscoveryRunOutcome>
+  /** Stands in for the intent-merge model call (knowledge-sync/intent-merge.ts). */
+  mergeIntent?: FastModelCall
 }
 
 const GLOBAL_KEY = '__flowE2ESeams'

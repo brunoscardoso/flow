@@ -210,7 +210,8 @@ describe('reduceAsk — saved answers', () => {
     expect(s.turns).toHaveLength(2)
     expect(s.turns[0]).toMatchObject({ phase: 'done', saved: { id: 'qa-1', author: 'Ana', stale: true } })
     expect(s.turns[0].tags).toEqual([{ id: 'feature:connectors/credentials', kind: 'part', label: 'Credentials' }])
-    expect(s.turns[0].answer?.sources.map((x) => x.n)).toEqual([null, 1])
+    // Numbered by position, as a fresh answer's are — what its [n] citations name.
+    expect(s.turns[0].answer?.sources.map((x) => x.n)).toEqual([1, 2])
     expect(s.turns[1]).toMatchObject({ phase: 'partial' })
     expect(followUpTarget(s)).toBe('qa-1')
   })

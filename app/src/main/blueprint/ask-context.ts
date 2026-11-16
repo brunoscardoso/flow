@@ -33,6 +33,7 @@ import { join } from 'node:path'
 
 import { qualifyFeatureId, splitQualifiedFeatureId, type AskConnectionKind } from '../../shared/ask-contract'
 import type { BlueprintFeatureEdge, BlueprintFeatureNode } from '../../shared/ipc-contract'
+import type { KnowledgeStatusReader } from '../../shared/knowledge-status'
 import { isFileChangeTool } from '../../shared/tool-file-changes'
 import type { MessageRecord, ThreadRecord } from '../store/thread-store'
 import type { RunResult } from '../worktree/thread-worktree'
@@ -195,6 +196,13 @@ export interface AskNote {
   anchors: string[]
   /** Workspace scope: the project it was recorded in. */
   project?: string
+  /**
+   * `draft` when it was learned on a branch not merged yet (absent = solid).
+   * Abandoned notes never get this far — `notesWithStatus` drops them.
+   */
+  status?: 'draft'
+  /** The branch a draft was learned on, when known. */
+  branch?: string | null
 }
 
 /** A feature or part in the slice the prompt carries. */
@@ -206,6 +214,8 @@ export interface AskFeature {
   /** For a part, the feature it belongs to. */
   partOf?: string
   tagged: boolean
+  /** The branch its knowledge is a draft of — absent when its knowledge is solid. */
+  draftBranch?: string
   /** Workspace scope: the project it is in (its id is qualified with it). */
   project?: string
 }
@@ -294,6 +304,7 @@ function toAskFeature(node: BlueprintFeatureNode, tagged: boolean): AskFeature {
     summary: clip(node.summary ?? '', MAX_SUMMARY_CHARS),
     ...(node.kind === 'part' ? { partOf: ownerOf(node) } : {}),
     tagged,
+    ...(node.status === 'draft' ? { draftBranch: node.draftBranch ?? 'another branch' } : {}),
   }
 }
 
@@ -343,14 +354,72 @@ export function sliceFeatureGraph(
   return { features, relations }
 }
 
-/** Notes worth showing: those naming a tagged feature's slug first, then the newest. */
-function pickNotes(notes: readonly AskNote[], features: readonly AskFeature[], max: number = MAX_NOTES): AskNote[] {
+/** A recorded note as read from the store, before its status is known. */
+export interface StoredAskNote {
+  ts: string
+  text: string
+  anchors: Array<{ ref: string }>
+  learnedAt?: string
+}
+
+/**
+ * Lay each note's status on it through THE resolver (the CLI's rules, shared):
+ * abandoned notes are dropped, drafts carry their branch, solid notes nothing.
+ * `fingerprint` is the investigation fingerprint the item id is built from.
+ */
+export function notesWithStatus<N extends StoredAskNote>(
+  notes: readonly N[],
+  reader: KnowledgeStatusReader,
+  fingerprint: (note: N) => string,
+): AskNote[] {
+  const out: AskNote[] = []
+  for (const note of notes) {
+    const resolved = reader.of({ kind: 'note', scope: '', text: fingerprint(note), learnedAt: note.learnedAt ?? null })
+    if (resolved.status === 'abandoned') continue
+    out.push({
+      ts: note.ts,
+      text: note.text,
+      anchors: note.anchors.map((anchor) => anchor.ref),
+      ...(resolved.status === 'draft' ? { status: 'draft' as const, branch: resolved.branch } : {}),
+    })
+  }
+  return out
+}
+
+/**
+ * Notes worth showing: those naming a tagged feature's slug first, then the
+ * newest — SOLID FIRST (discovery `workspace_knowledge_draft_solid`, FR-9). A
+ * draft is shown only when it was learned on the session's own branch (that
+ * work is what the person is in the middle of) or when no solid note is
+ * relevant (then a labelled draft beats silence).
+ */
+export function pickNotes(
+  notes: readonly AskNote[],
+  features: readonly AskFeature[],
+  max: number = MAX_NOTES,
+  sessionBranch: string | null = null,
+): AskNote[] {
   const slugs = features.filter((feature) => feature.tagged).map((feature) => feature.id.replace(/^feature:/, '').split('/')[0])
   const mentions = (note: AskNote): boolean =>
     slugs.some((slug) => note.text.includes(slug) || note.anchors.some((anchor) => anchor.includes(slug)))
-  const relevant = notes.filter(mentions)
-  const rest = notes.filter((note) => !mentions(note))
-  return [...relevant.slice(-max), ...rest.slice(-max)].slice(0, max)
+  const solid = notes.filter((note) => note.status !== 'draft')
+  const relevantSolid = solid.filter(mentions)
+  // "Relevant" with nothing tagged means any solid note at all.
+  const solidAnswers = slugs.length === 0 ? solid.length > 0 : relevantSolid.length > 0
+  const ownBranch = (note: AskNote): boolean => sessionBranch !== null && note.branch === sessionBranch
+  const drafts = notes.filter(
+    (note) => note.status === 'draft' && (ownBranch(note) || (!solidAnswers && (slugs.length === 0 || mentions(note)))),
+  )
+  const relevant = [...relevantSolid.slice(-max), ...drafts.filter(mentions).slice(-max)]
+  const rest = [...solid.filter((note) => !mentions(note)).slice(-max), ...drafts.filter((note) => !mentions(note)).slice(-max)]
+  return [...relevant, ...rest].slice(0, max)
+}
+
+/** The session checkout's current branch, or null (detached, not a checkout, git refused). */
+export async function sessionBranchOf(git: AskGit, checkout: string): Promise<string | null> {
+  const result = await git(checkout, ['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => null)
+  const branch = result !== null && result.ok ? result.stdout.trim() : ''
+  return branch === '' ? null : branch
 }
 
 /** The project-local ids a Workspace tag names in `project`: its qualified feature tags, unqualified. */
@@ -400,6 +469,7 @@ async function gatherWorkspaceKnowledge(
   const count = Math.max(1, scope.projects.length)
   const featureShare = Math.max(MIN_PROJECT_FEATURES, Math.floor(MAX_WORKSPACE_FEATURES / count))
   const noteShare = Math.max(MIN_PROJECT_NOTES, Math.floor(MAX_NOTES / count))
+  const sessionBranch = await sessionBranchOf(deps.git, input.rootPath)
   const [hits, perProject] = await Promise.all([
     deps.searchKnowledge(input.rootPath, input.question).catch(() => [] as AskKnowledgeHit[]),
     Promise.all(
@@ -411,6 +481,7 @@ async function gatherWorkspaceKnowledge(
           notes,
           slice.features.map((feature) => ({ ...feature, id: splitQualifiedFeatureId(feature.id)?.localId ?? feature.id })),
           noteShare,
+          sessionBranch,
         ).map((note) => ({ ...note, project: project.slug }))
         return { slice, notes: picked }
       }),
@@ -475,10 +546,11 @@ export async function gatherAskContext(
     ])
     return { ...knowledge, threads }
   }
-  const [hits, graph, notes] = await Promise.all([
+  const [hits, graph, notes, sessionBranch] = await Promise.all([
     deps.searchKnowledge(input.rootPath, input.question).catch(() => [] as AskKnowledgeHit[]),
     deps.readFeatureGraph(input.rootPath).catch(() => ({ nodes: [], edges: [] })),
     deps.readNotes(join(input.rootPath, 'flow')).catch(() => [] as AskNote[]),
+    sessionBranchOf(deps.git, input.rootPath),
   ])
   const { features, relations } = sliceFeatureGraph(graph.nodes, graph.edges, input.tags)
   const threads = await gatherThreads(input.conversationIds, deps)
@@ -486,7 +558,7 @@ export async function gatherAskContext(
     hits: hits.slice(0, MAX_BRAIN_HITS),
     features,
     relations,
-    notes: pickNotes(notes, features),
+    notes: pickNotes(notes, features, MAX_NOTES, sessionBranch),
     threads,
     knownIds: graph.nodes.filter(isAddressable).map((node) => node.id),
   }

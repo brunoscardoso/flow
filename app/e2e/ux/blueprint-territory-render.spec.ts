@@ -386,11 +386,12 @@ test.fixme('a cell is a dot and a name; the second line and the control are earn
   const hovered = await control.evaluate((el) => Number.parseFloat(getComputedStyle(el).opacity))
   expect(hovered, 'the Learn control never appeared on hover').toBeGreaterThan(0.5)
 
-  // ── THE TITLE STRIP AND THE ONE-LINE BLOCK ARE PRESENT AND PAINTED. ──
-  const strip = await boxOf(window, '.fb-terr-title')
-  expect(strip, 'the title strip is not in the DOM').not.toBeNull()
-  expect(strip!.height, 'the title strip paints nothing').toBeGreaterThan(10)
-  await expect(window.locator('.fb-terr-title-name')).toHaveText('Features')
+  // ── THE TRAIL (it replaced the title strip, mockup J3) AND THE ONE-LINE BLOCK
+  //    ARE PRESENT AND PAINTED. ──
+  const strip = await boxOf(window, '.flow-board-root .fb-float-trail')
+  expect(strip, 'the trail is not in the DOM').not.toBeNull()
+  expect(strip!.height, 'the trail paints nothing').toBeGreaterThan(10)
+  await expect(window.locator('.flow-board-root .fb-float-trail')).toHaveAttribute('data-where', 'Features')
 
   const block = await boxOf(window, '.fb-terr-block')
   expect(block, 'the title block is not in the DOM').not.toBeNull()
@@ -400,13 +401,14 @@ test.fixme('a cell is a dot and a name; the second line and the control are earn
   expect(block!.height, 'the title block is more than one line tall').toBeLessThan(24)
   await expect(window.locator('.fb-terr-block')).toContainText('area = lines of code')
 
-  // The Ask field lives in the board HEADER now (the strip's keyword box is gone).
+  // The Ask field floats at the map's top left (mockup J3); no header row.
   const ask = await boxOf(window, '[data-ask="field"]')
-  expect(ask, 'the Ask field is not in the header').not.toBeNull()
+  expect(ask, 'the Ask field is not on the board').not.toBeNull()
   expect(ask!.width, 'the Ask field paints nothing').toBeGreaterThan(40)
-  const header = await boxOf(window, '.flow-board-root .fb-header')
-  expect(header, 'the board header is not in the DOM').not.toBeNull()
-  expect(ask!.y, 'the Ask field is not inside the header band').toBeLessThan(header!.y + header!.height)
+  await expect(window.locator('.flow-board-root .fb-header')).toBeHidden()
+  const stage = await boxOf(window, '.flow-board-root .fb-stage')
+  expect(ask!.y - stage!.y, 'the Ask field is not at the top of the map').toBeLessThan(40)
+  expect(ask!.x - stage!.x, 'the Ask field is not at the left of the map').toBeLessThan(40)
 })
 
 // FIXME (unrelated to plan cell-hover-diagram): the root crumb is the project's name in a Workspace, not 'Features' (the header-control repair above is verified past it)
@@ -437,7 +439,7 @@ test.fixme('one gesture, one meaning — the body dives, the header control open
       crumbNames: crumbEls.map((c) => c.textContent ?? ''),
       currentCrumb: crumbEls.find((c) => c.classList.contains('on'))?.textContent ?? '',
       currentDisabled: crumbEls.find((c) => c.classList.contains('on'))?.disabled ?? false,
-      title: document.querySelector('.fb-terr-title-name')?.textContent ?? '',
+      title: document.querySelector<HTMLElement>('.fb-float-trail')?.dataset['where'] ?? '',
       backLabel: nav[0]?.getAttribute('aria-label') ?? '',
       backDisabled: nav[0]?.disabled ?? true,
       cellNames: [...document.querySelectorAll<HTMLElement>('.fb-terr-cell')].map(
@@ -469,7 +471,7 @@ test.fixme('one gesture, one meaning — the body dives, the header control open
   //    unchanged afterwards; that is the whole point of splitting the two
   //    gestures apart. ──
   await window.mouse.move(0, 0)
-  await window.locator('.flow-board-root [data-control-glyph="diagram"]').click()
+  await window.locator('.flow-board-root .fb-float-trail .fb-view-switch-btn[data-view="diagram"]').click()
   await expect(
     window.locator('.fb-brief-bar').first(),
     'the feature-view control produced no level at all',
