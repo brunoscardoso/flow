@@ -1558,6 +1558,29 @@ export class AgentManager extends EventEmitter {
     return text === '' ? null : text
   }
 
+  /**
+   * One tool-less call to the brief model (sonnet) under the project's bound
+   * account, with a signal so a caller's timeout really stops it — the
+   * Workspace sync's merge of two edits to a decision, plan or discovery.
+   * Two documents are a judgment, not a summary, so not the fast model.
+   */
+  readonly askMergeModel: FastModelCall = async ({ projectRoot, prompt, signal }) => {
+    const abortController = new AbortController()
+    if (signal.aborted) return null
+    signal.addEventListener('abort', () => abortController.abort(), { once: true })
+    const options: Options = {
+      cwd: projectRoot,
+      maxTurns: 1,
+      allowedTools: [],
+      permissionMode: 'default',
+      model: BRIEF_MODEL,
+      abortController,
+    }
+    await this.applyAuthEnv(options, projectRoot)
+    const text = (await this.runOneShot(prompt, options)).trim()
+    return text === '' ? null : text
+  }
+
   /** Dispose one thread's session (thread deleted / window closing). */
   disposeThread(threadId: string): void {
     this.attachTracker.clearThread(threadId)

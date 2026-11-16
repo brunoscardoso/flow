@@ -259,24 +259,29 @@ import {
   type InFlightMark,
 } from './learn-inflight'
 import {
-  anchorQueryField,
-  BRAIN_QUERY_LIMIT,
-  buildBrainHighlight,
-  DIM_CLASS,
-  failQuery,
-  hitAction,
-  idleQuery,
-  LIT_CLASS,
-  QUERY_PANEL_MIN_HEIGHT,
-  QUERY_PANEL_WIDTH,
-  queryAvailableAtDepth,
-  resolveQuery,
-  statusLine,
-  submitQuery,
-  type BrainHighlight,
-  type BrainHitAction,
-  type BrainQueryState,
-} from './brain-query-model'
+  ASK_BLUEPRINT_EVENT,
+  qualifyFeatureId,
+  splitQualifiedFeatureId,
+  type AskBlueprintOpenDetail,
+  type AskOpenTag,
+  type AskSavedThread,
+} from '../../shared/ask-contract'
+import { questionCountLabel, questionCounts, type SuggestInput } from './ask-answer-model'
+import { savedSectionView, type SavedRowView } from './ask-saved-model'
+import {
+  askDecoration,
+  decorationKey,
+  initialAskState,
+  kindOfId,
+  linkTagId,
+  projectDecoration,
+  projectWorkspaceDecoration,
+  tagsFromOpen,
+  type AskScope,
+  type AskTag,
+} from './ask-panel-model'
+import { AskPanelView, paintCellMarks, paintQuestionMarker } from './ask-panel-view'
+import { workspaceCandidates, type PickerCandidate, type SuggestNode } from './ask-tag-suggest'
 // ── Territory (plan_blueprint_territory_v1) ────────────────────────────────
 // The three pure modules that replaced the retired ring's three. NOTHING
 // decidable without a document lives in this file: where a cell sits, what it
@@ -285,13 +290,14 @@ import {
 // and only WIRED here.
 import {
   activationOf as territoryActivationOf,
-  BRAIN_FIELD_LABEL,
-  BRAIN_FIELD_TITLE,
   buildTerritoryView,
-  CONTROL_GLYPH,
   CORPUS_CONTROL_GLYPH,
   decorate as decorateTerritory,
   DEFAULT_STAGE,
+  DIM_CLASS,
+  LIT_CLASS,
+  draftTagLabel,
+  draftTagTitle,
   inFlightFor,
   levelNodes,
   progressFor,
@@ -326,6 +332,7 @@ import { REVEAL_IN_TREE_EVENT, type RevealInTreeDetail } from '../editor/file-tr
 // how connections are routed are all decided in these two pure modules.
 import {
   buildWorkspaceSheet,
+  colourSlot,
   connectionsChip,
   CONNECTIONS_UNREADABLE,
   connectionsControlView,
@@ -334,7 +341,6 @@ import {
   COULD_NOT_READ,
   NOT_ON_THIS_COMPUTER,
   projectUnderstood,
-  understoodFigure,
   workspaceIsRoot,
   type WorkspaceSheetView,
 } from './workspace-sheet'
@@ -361,7 +367,6 @@ import {
 import { buildFeatureViewRequest, matchFeatureViewNotice } from './feature-view-request'
 import { isDerivedView } from './derived-level'
 import {
-  brainQueryCap,
   buildLimitationsReport,
   limitationsLabel,
   type AppliedCap,
@@ -370,7 +375,6 @@ import {
   crumbs as focusCrumbs,
   depthDive,
   depthForward,
-  depthGoTo,
   depthNavLabels,
   depthPop,
   depthPopTo,
@@ -409,6 +413,7 @@ import {
 } from './territory-level'
 import { buildCuratedChrome, type CuratedChrome } from './curated-chrome'
 import { curatedCrumbs, curatedLadder, litWire } from './curated-nav'
+import { askAboutPlaceholder, deepKnowledgeView, filesAmong, toggleSheet } from './deep-island-model'
 import { buildCuratedDrawer, codeProvenance, type PartKnowledge } from './curated-drawer'
 import {
   computeLearnProgress,
@@ -425,9 +430,27 @@ import {
   understoodFraction,
 } from './learn-progress-model'
 import {
+  DRIFT_SORTS,
+  driftBatchView,
+  driftCount,
+  driftFolders,
+  driftReason,
+  driftSummary,
   groupOpenByDefault,
+  isDriftSort,
   moduleGroups,
+  passDurations,
   projectLearnRows,
+  pruneSelection,
+  selectionLine,
+  selectionState,
+  sortDriftRows,
+  toggleSelection,
+  type DriftBatch,
+  type DriftBatchItem,
+  type DriftFiles,
+  type DriftSort,
+  type TriState,
   workspaceLearnLine,
   type ModuleFolder,
   type ModuleGroupKey,
@@ -452,6 +475,20 @@ import {
   storyMatchesDoc,
 } from './preview-menu-model'
 import { resolveChangesetMode } from './changeset-mode'
+import { pinOpenAction } from './pin-open-model'
+import { understoodPercent } from '../../shared/understood'
+import {
+  LEGACY_CONNECTIONS_PREF,
+  MAP_LAYER_PREF,
+  chooseLayer,
+  mapLayersView,
+  readLayerPref,
+  type ChosenLayer,
+  type MapLayer,
+  type MapLayersView,
+} from './map-layers-model'
+import { driftNote, knowledgePillView, type ConnectionsState, type KnowledgeDriftNote, type KnowledgePillView } from './knowledge-pill-model'
+import { FEATURE_VIEW_PREF, cellPressOpens, planSwap, readFeatureViewPref, viewSwitchOffered, type FeatureView } from './view-switch-model'
 import { NodePopover, type PopoverChangesExtras } from './node-popover'
 import { StoryCard } from '../threads/story-card'
 import {
@@ -620,8 +657,14 @@ interface HoverCell {
   learn: (() => void) | null
   /** The feature that press learns — how the grown cell knows its pass is running or waiting. */
   learnRef: string | null
-  /** The cell's own press — what its pinned toolbar's Open does (dive, or the code story). */
+  /** The cell's own press (dive, or the code story). */
   press: () => void
+  /**
+   * What the pinned toolbar's Open does: the SAME diagram, full size — the
+   * feature's own level (`pinOpenAction`). Null keeps the press, for a cell
+   * with no diagram view to open.
+   */
+  open: (() => void) | null
   /**
    * WHERE IT LIVES, whole (plan feature-home-folders, FR-7): every row the
    * CLI sent and "N more folders", drawn above the grown cell's words. Null
@@ -827,23 +870,26 @@ const FIT_PADDING = 56
 /** One plain sentence for links that could not be read — no file names, no codes. */
 const WS_LINKS_UNREADABLE = CONNECTIONS_UNREADABLE
 
-/** Where the Connections choice is remembered — this viewer's own preference. */
-const WS_CONNECTIONS_PREF = 'flow.blueprint.workspace.connections'
-
-function readWorkspaceConnectionsPref(): boolean {
+/** One stored string, or null when storage is refused or empty. */
+function readPref(key: string): string | null {
   try {
-    return window.localStorage.getItem(WS_CONNECTIONS_PREF) === 'on'
+    return window.localStorage.getItem(key)
   } catch {
-    return false // storage refused — off, the default
+    return null // storage refused — the default
   }
 }
 
-function writeWorkspaceConnectionsPref(on: boolean): void {
+function writePref(key: string, value: string): void {
   try {
-    window.localStorage.setItem(WS_CONNECTIONS_PREF, on ? 'on' : 'off')
+    window.localStorage.setItem(key, value)
   } catch {
     // storage refused — the choice holds for this session only
   }
+}
+
+/** What the map is coloured by — the stored choice, migrating the old Connections toggle. */
+function readMapLayerPref(): ChosenLayer {
+  return readLayerPref(readPref(MAP_LAYER_PREF), readPref(LEGACY_CONNECTIONS_PREF))
 }
 
 /** Where a plan review's unsent comments are kept — this viewer's storage, or none when it is refused. */
@@ -1140,6 +1186,13 @@ const LEARN_FRACTION_NOUN: Record<'parts' | 'files' | 'modules' | 'features', st
 
 const LEARN_ALL_CONFIRM_THRESHOLD = 25
 
+/** localStorage key for the Drifted group's sort (a per-viewer convenience). */
+const DRIFT_SORT_KEY = 'flow.blueprint.driftSort'
+/** Rows a folder shows before "+ N more". */
+const DRIFT_FOLDER_CAP = 6
+/** Rows each part of an updating batch shows before "+ N waiting/updated". */
+const DRIFT_BATCH_CAP = 3
+
 /** The label tiers below a full name (`cellLabelClass`'s `tiny` / `dot` /
  *  `blank`). A cell wearing any of them has no corner to spare for a
  *  percentage — see `#paintProgressMark`. */
@@ -1206,6 +1259,25 @@ interface NavEntry {
 }
 
 const ROOT_NAV_ENTRY: NavEntry = { featureRef: null, trail: [] }
+
+/**
+ * Does a header (or the island built from it) have anything to say: a place
+ * named, or an action with a visible label? Navigation arrows and icon-only
+ * chips do not count — on their own they draw an empty bar.
+ */
+function islandHasContent(root: HTMLElement): boolean {
+  // HIDDEN BY STYLE COUNTS AS HIDDEN: header actions are switched off with
+  // display:none (the CTA once a project is open), not the hidden attribute.
+  const shown = (el: Element): boolean =>
+    !(el as HTMLElement).hidden && (el as HTMLElement).closest('[hidden]') === null && (el as HTMLElement).style.display !== 'none'
+  // fl-button IS A BUTTON: "Open Project…" is one, and a selector of plain
+  // buttons read the no-project header as empty and took its only action away.
+  for (const el of root.querySelectorAll<HTMLElement>('.fb-brief-trail, .fb-head-strip, button, fl-button, .fb-head-btn, .fb-headbtn')) {
+    if (!shown(el) || el.closest('.fb-nav') !== null) continue
+    if ((el.textContent ?? '').trim().length > 0) return true
+  }
+  return false
+}
 
 export class BlueprintBoard {
   readonly element: HTMLElement
@@ -1407,8 +1479,35 @@ export class BlueprintBoard {
   readonly #learnGroupOpen = new Map<string, boolean>()
   /** Other projects' snapshots, read when their row is open (root → snapshot). */
   readonly #learnOtherSnapshots = new Map<string, BlueprintSnapshot | 'loading' | 'failed'>()
-  /** A large Learn waiting for its confirmation, on its project's row. */
-  #lpConfirm: { slug: string; root: string; modules: string[] } | null = null
+  /** A large Learn waiting for its confirmation, on its project's row (or, for
+   *  a drifted batch, in the Drifted group's own bar). */
+  #lpConfirm: { slug: string; root: string; modules: string[]; drift?: boolean } | null = null
+  /** The Drifted group's sort — remembered per viewer. */
+  #driftSort: DriftSort = ((): DriftSort => {
+    const stored = readPref(DRIFT_SORT_KEY)
+    return isDriftSort(stored) ? stored : 'folder'
+  })()
+  /** Drifted modules ticked for a selection update / ignore (this project only). */
+  #driftSelected = new Set<string>()
+  /** Which drifted folders are open (folder → open); unset = the largest only. */
+  readonly #driftFolderOpen = new Map<string, boolean>()
+  /** Folders showing every row instead of the first few. */
+  readonly #driftFolderAll = new Set<string>()
+  /** Why each drifted module drifted, per root (learn:driftReasons), read once
+   *  when the group is shown. `files: null` = the check could not run. */
+  readonly #driftFiles = new Map<string, { files: DriftFiles | null; asked: Set<string> }>()
+  /** Roots with a reasons read in flight. */
+  readonly #driftFilesPending = new Set<string>()
+  /** The drifted batch being updated from this panel, per root (memory only). */
+  readonly #driftBatches = new Map<string, DriftBatch>()
+  /** Roots whose batch was queued after the learner's last answer: until the
+   *  next answer, a still-drifted module of it counts as waiting (the queue
+   *  has it; the status the panel holds is older than the press). */
+  readonly #driftBatchUnconfirmed = new Set<string>()
+  /** Whether an updating batch lists every row. */
+  #driftBatchAll = false
+  /** The root's automatic re-learn setting (null until read with the ignore list). */
+  #learnAuto: boolean | null = null
   /** Each project row's header, repainted in place by the live poll. */
   readonly #lpHeaders = new Map<string, HTMLElement>()
   /** Ignore-list extras (#learn-ignore) — the active root's flowconfig
@@ -1665,6 +1764,9 @@ export class BlueprintBoard {
   #paneBackButtons: HTMLElement[] = []
   /** Feature id the open brief belongs to — what a feature learn writes to. */
   #briefFeatureRef: string | null = null
+  /** The feature brief's "Questions asked" section, and the read that fills it. */
+  #briefAsked: HTMLElement | null = null
+  #briefAskedSeq = 0
   /**
    * The feature being UNDERSTOOD right now, or null.
    *
@@ -1698,17 +1800,18 @@ export class BlueprintBoard {
 
   // ── The Learning lens (Phase 8) ──────────────────────────────────────────
   //
-  // ONE STATE FIELD, AND IT IS THE PANEL'S. The lens is not a mode the reader
-  // turns on separately — it IS the Learning panel being open, so there is no
-  // second switch that can disagree with the panel's own `#learnPanelOpen`.
-  // `#lensOn()` is the one reading of it, and everything below is gated on it.
+  // ONE READING, `#lensOn()`. On a map view (a territory, the Workspace
+  // sheet) the lens IS the Layers choice — Layers = Learning (mockup J3,
+  // 2026-11-15) — and opening or closing the Learning panel no longer changes
+  // the colouring. Every other view keeps the panel-is-the-lens rule, because
+  // its header still carries the Learn tile. Everything below is gated on it.
 
   /**
    * The files each visible feature stands on, as `blueprint:featureMap`
    * reported them. Keyed by FEATURE NODE ID (what the fetch was made with).
    *
    * FETCHED ONLY WHILE SOMEONE IS LOOKING (allowed-pattern #17). Each entry is
-   * a bundled-CLI spawn, so nothing is asked for while the panel is closed, and
+   * a bundled-CLI spawn, so nothing is asked for while the lens is off, and
    * a fetch whose lens has since closed is dropped rather than stored.
    *
    * CACHED UNTIL THE STRUCTURE MOVES, not until the learning does. A learn pass
@@ -1823,6 +1926,8 @@ export class BlueprintBoard {
   #featureFetchFailure: string | null = null
   /** What the store is NOT saying (Phase 8). Null = never measured, not clean. */
   #featureLimitations: BlueprintFeatureLimitations | null = null
+  /** The default branch's name, as the graph read said it — what a draft tag merges into. */
+  #featureDefaultBranch: string | null = null
   /** A basic discovery this board started, still in flight (root PATH). */
   #discoveryRunning: string | null = null
   /** The last discovery failure, kept on the board after its toast has gone. */
@@ -1895,7 +2000,7 @@ export class BlueprintBoard {
    * so the level's back control can NAME where it returns to instead of
    * saying "back" and hoping.
    */
-  #levelReturn: { depth: number; stack: FocusNode[]; label: string } | null = null
+  #levelReturn: { depth: number; stack: FocusNode[]; label: string; focus?: FocusNode } | null = null
   /**
    * THE MOUNTED TERRITORY — the feature board's sheet, and what everything that
    * decorates it hangs off. Null = not on stage (the code map, a brief, a
@@ -1959,7 +2064,7 @@ export class BlueprintBoard {
   /** A sibling the reader zoomed into: its root becomes active, and the board lands inside it. */
   #wsPendingRoot: string | null = null
   /** A feature pressed on the Workspace sheet in a sibling project — opened once that project's map is read. */
-  #wsPendingFeature: { root: string; id: string; action?: 'learn' | 'story' } | null = null
+  #wsPendingFeature: { root: string; id: string; action?: 'learn' | 'story' | 'level' } | null = null
   /**
    * The reader came into a feature STRAIGHT FROM THE WORKSPACE SHEET (user,
    * 2026-10-06: "we should always back to main workspace"): Back from that
@@ -1972,7 +2077,35 @@ export class BlueprintBoard {
   /** The last sync time seen for this Workspace — a new one means teammates' knowledge arrived. */
   #wsLastSynced: string | null = null
   /** Connections drawn — remembered per viewer. */
-  #wsShowConnections = readWorkspaceConnectionsPref()
+  /** What the map is coloured by, as this viewer last chose it (the Layers button). */
+  #mapLayerChosen: ChosenLayer = readMapLayerPref()
+  /** Connections are on screen exactly when the map's layer is Connections. */
+  get #wsShowConnections(): boolean {
+    return this.#mapLayer() === 'connections'
+  }
+  /** Whether the Layers menu is open — survives a repaint of the chrome. */
+  #layersMenuOpen = false
+  /** The floating chrome's live parts, rebuilt with each territory render. */
+  #float: { layers: HTMLElement; pill: HTMLElement; switchHost: HTMLElement | null } | null = null
+  /** Every other screen's top island (a story, a review, a state message): the header's own controls, moved in. */
+  #headerIsland: { island: HTMLElement; header: HTMLElement; order: Element[] } | null = null
+  /** The Learning panel's place for a deep level's "Understand it again", beside Re-check. */
+  #learnUnderstandSlot: HTMLElement | null = null
+  /** A deep level's two islands (a feature's diagram or brief): mounted over the whole main pane. */
+  #deepChrome: HTMLElement | null = null
+  /** The crumbs inside the deep top island — repainted when the curated trail moves. */
+  #deepCrumbsHost: HTMLElement | null = null
+  /** Which tab's sheet the deep bottom island has grown into, or none. */
+  #deepSheetOpen: string | null = null
+  /** The feature the open sheet belongs to: a different feature starts folded. */
+  #deepSheetFor: string | null = null
+  /** The understood fraction the current territory view shows (the pill's figure). */
+  #floatUnderstood: { done: number; total: number } | null = null
+  /** The header's arrow pair's home. On a territory view the SAME two buttons
+   *  move to the trail (one Back on screen, never two), and come home here. */
+  #headerNav: HTMLElement | null = null
+  /** Blocks or Diagram — the view a feature opens in, as this viewer last chose it. */
+  #featureView: FeatureView = readFeatureViewPref(readPref(FEATURE_VIEW_PREF))
   /** This Workspace's connections-learning run — going now, or the last one. */
   #wsLearning: ConnectionsLearningStatus | null = null
   /** What the Workspace sheet mounted, for selection repaints and resize. */
@@ -1992,36 +2125,22 @@ export class BlueprintBoard {
   /** Coalesces the resize re-render to one per frame (NFR-2). */
   #terrResizeFrame: number | null = null
   /**
-   * The open brain-query field (Phase 7), or null when it is closed.
-   *
-   * Lives beside `#territory` because it is the same lifetime: the panel is
-   * DOM inside the sheet's wrap, so whoever drops that wrap drops this
-   * too (`#takeStage`). Everything it DECIDES — the state machine, where it
-   * opens, what it says, which nodes light — is `brain-query-model`'s; this
-   * holds only the elements and the in-flight sequence number.
+   * The Ask the Blueprint panel (plan ask_the_blueprint), built on first open.
+   * It lives on the board root rather than the sheet's wrap, so a dive, a pop
+   * or a resize re-renders the map under it without dropping the question.
    */
-  #brainQuery: {
-    panel: HTMLElement
-    input: HTMLInputElement
-    status: HTMLElement
-    results: HTMLElement
-    /** Where the affordance was, in stage coordinates, when it opened. */
-    anchor: OverlayPoint
-    state: BrainQueryState
-    highlight: BrainHighlight | null
-  } | null = null
-  /** Guards a slow answer that outlived its question (or its project). */
-  #brainQuerySeq = 0
+  #ask: AskPanelView | null = null
+  /** What the map last drew for it — `#paintAsk` redraws only on a change. */
+  #askDecorationKey = ''
   /**
-   * The cell a search result asked to be shown, or null.
-   *
-   * It OUTLIVES the query panel on purpose: activating a row closes the panel
-   * (the answer has been chosen), and the reader still has to be able to see
-   * which node they were sent to — including across the re-render a depth
-   * change causes. Cleared by the next navigation the reader makes themselves,
-   * and by a click on the sheet background.
+   * Every saved question of the open project, read ONCE per board load (and
+   * again only when an answer is saved) — never per broadcast (allowed-pattern
+   * #17). Feeds the sheet's "Your recent questions" and the cells' markers.
    */
-  #brainFocusNodeId: string | null = null
+  #askSaved: AskSavedThread[] | null = null
+  /** The project `#askSaved` was read for; a read for another is dropped. */
+  #askSavedRoot: string | null = null
+  #askSavedCounts: Map<string, number> = new Map()
   /** Pending flight timer, so a fast second click cannot strand a half-transition. */
   #flightTimer: ReturnType<typeof setTimeout> | null = null
   /** The state change `#flightTimer` is holding, so a gesture that arrives
@@ -2137,22 +2256,18 @@ export class BlueprintBoard {
     // Learning: a permanent way into the learning panel. The learn chip also
     // toggles it, but the chip hides itself when there is nothing learned yet —
     // which is exactly when a user wants to check whether learning is running.
-    const learning = document.createElement('fl-button')
-    learning.setAttribute('variant', 'ghost')
-    learning.setAttribute('small', '')
-    learning.setAttribute('title', 'Show learning progress')
-    // AN ICON LIKE EVERY OTHER BUTTON UP HERE. It was the one word without
-    // one, which read as a different kind of thing sitting in the same row.
-    const learningIcon = document.createElement('fl-icon')
-    learningIcon.setAttribute('name', 'brain')
-    learningIcon.setAttribute('size', '12')
-    learning.appendChild(learningIcon)
-    const learningText = document.createElement('span')
-    // "Learn", not "Learning" — a present participle on a permanent button
-    // reads as a status ("we are always learning") rather than an action.
-    learningText.textContent = 'Learn'
-    learning.appendChild(learningText)
-    learning.addEventListener('click', () => this.#toggleLearnPanel())
+    // A TILE LIKE ITS NEIGHBOURS (mockup G + D, user pick 2026-11-15): the
+    // header's actions are equal 32px squares with a 16px line icon, their
+    // names in the tooltip and the accessible name. "Learn", not "Learning" —
+    // a present participle on a permanent button reads as a status.
+    const learning = this.#headerTile({
+      icon: 'brain-lobes',
+      name: 'Learn',
+      title: 'Learn · show learning progress',
+      pressed: false,
+      press: () => this.#toggleLearnPanel(),
+    })
+    learning.classList.add('fb-learn-tile')
     this.#learningButton = learning
 
     // Out-of-sync warning dot on the learn chip: the retired "Sync status"
@@ -2189,7 +2304,13 @@ export class BlueprintBoard {
       const btn = document.createElement('button')
       btn.type = 'button'
       btn.className = 'fb-nav-btn'
-      btn.textContent = glyph
+      // A LINE CHEVRON in a 26px target (user, 2026-11-15: the glyph pair was
+      // too small to press). The glyph stays the fallback text for no-icon runs.
+      const chevron = document.createElement('fl-icon')
+      chevron.setAttribute('name', glyph === '‹' ? 'chevron-left' : 'chevron-right')
+      chevron.setAttribute('size', '14')
+      chevron.setAttribute('aria-hidden', 'true')
+      btn.appendChild(chevron)
       btn.title = label
       btn.setAttribute('aria-label', label)
       btn.addEventListener('click', () => void this.#navGo(delta))
@@ -2200,6 +2321,7 @@ export class BlueprintBoard {
     const nav = document.createElement('span')
     nav.className = 'fb-nav'
     nav.append(this.#backButton, this.#forwardButton)
+    this.#headerNav = nav
 
     // ── WHERE YOU ARE, BESIDE THE ARROWS THAT MOVE YOU (2026-08-31) ────────
     //
@@ -2283,6 +2405,8 @@ export class BlueprintBoard {
       }
     })
     this.element.append(this.#split)
+    // The header's controls ride the standard's top island from the first paint.
+    this.#syncHeaderIsland()
 
     // Polite announcer (item 19): drill/pop/board transitions rebuild the
     // stage wholesale, which says nothing to a screen reader. One hidden
@@ -2377,6 +2501,12 @@ export class BlueprintBoard {
       }
       if (event.key === 'Escape') {
         if (this.#onEscape()) event.preventDefault()
+        return
+      }
+      // `/` OPENS ASK THE BLUEPRINT on the feature map (and closes it again).
+      if (event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey && !isTypingTarget(event.target) && this.#activeRoot !== null && (this.#territory !== null || this.#wsMounted?.kind === 'root')) {
+        this.#toggleAsk()
+        event.preventDefault()
         return
       }
       // → / ← step the review tour while it is open; nothing while it is closed.
@@ -2692,6 +2822,14 @@ export class BlueprintBoard {
   setRoot(rootPath: string | null): void {
     if (rootPath === this.#activeRoot) return
     this.#activeRoot = rootPath
+    // A QUESTION BELONGS TO ITS PROJECT: its tags, answer and saved list mean
+    // nothing over another project's map.
+    this.#ask?.dispose()
+    this.#ask = null
+    this.#askDecorationKey = ''
+    this.#askSaved = null
+    this.#askSavedRoot = null
+    this.#askSavedCounts = new Map()
     // WHERE THE BOARD LANDS. A project switch opens at the Workspace — except
     // the switch the reader asked for by pressing a sibling on the Workspace
     // sheet, which lands INSIDE that project, as a zoom does.
@@ -3189,6 +3327,9 @@ export class BlueprintBoard {
     // Same for a running discovery.
     this.#stopDiscoveryWatch()
     this.#popover.dispose()
+    // The Ask panel drops its `ask:state` subscription with it.
+    this.#ask?.dispose()
+    this.#ask = null
   }
 
   // ── Decoration (Phase-5 seam) ─────────────────────────────────────────────
@@ -3324,7 +3465,7 @@ export class BlueprintBoard {
      * missing from the first frame. Every entrance passing through this method
      * either sets the record or clears it; none can leave a stale one behind.
      */
-    ret: { depth: number; stack: FocusNode[]; label: string } | null = null,
+    ret: { depth: number; stack: FocusNode[]; label: string; focus?: FocusNode } | null = null,
   ): void {
     this.#levelReturn = ret
     // SCOPE BEFORE PAINT. A feature brief owns the stage, so the scope must
@@ -3336,6 +3477,8 @@ export class BlueprintBoard {
       this.#briefScope = result.nodes.map((node) => node.nodeId)
       this.#briefFeatureRef = featureId
     }
+    this.#dropBriefAsked()
+    if (featureId !== undefined) void this.#loadBriefAsked(featureId)
     this.showBrief(
       {
         nodes: result.nodes,
@@ -3817,6 +3960,7 @@ export class BlueprintBoard {
     this.#clearBriefActions()
     this.#briefFoot?.remove()
     this.#briefFoot = null
+    this.#dropBriefAsked()
     this.#brief = null
     this.#curated = null
     this.#curatedView = null
@@ -3855,6 +3999,15 @@ export class BlueprintBoard {
     delta: BriefDeltaInput,
     chrome: CuratedChrome | null = null,
   ): HTMLElement | null {
+    return this.#slotChipRow(this.#briefSlots(view, delta, chrome))
+  }
+
+  /** The brief's slots — the chips' data, and the deep bottom island's tabs. */
+  #briefSlots(
+    view: BriefView,
+    delta: BriefDeltaInput,
+    chrome: CuratedChrome | null = null,
+  ): Array<{ label: string; count: string; items: Array<[string, string]> }> {
     // THE ARTIFACT'S SLOTS REPLACE the store-derived ones, they do not join
     // them. Both answer "how does this work today" — one from learnings mined
     // out of module notes, one written while reading the plan — and showing two
@@ -3884,13 +4037,11 @@ export class BlueprintBoard {
           .filter((part) => part.length > 0)
           .join(' · '),
       ])
-      return this.#slotChipRow(
-        [
-          ...generated,
-          { label: 'What we learned', count: String(learned.length), items: learned },
-          anchorSlot(),
-        ].filter((slot) => slot.items.length > 0),
-      )
+      return [
+        ...generated,
+        { label: 'What we learned', count: String(learned.length), items: learned },
+        anchorSlot(),
+      ].filter((slot) => slot.items.length > 0)
     }
     const learnings = view.intro?.learnings ?? []
     const current = learnings.filter((entry: BriefLearning) => entry.supersededReason === undefined)
@@ -3944,7 +4095,7 @@ export class BlueprintBoard {
         ]),
       },
     ].filter((slot) => slot.items.length > 0)
-    return this.#slotChipRow(slots)
+    return slots
   }
 
   /** One row of slot chips, whatever produced them. */
@@ -4128,6 +4279,41 @@ export class BlueprintBoard {
   }
 
   /** A one-paragraph honest state (“no index yet”, “nothing matches”). */
+  /** The feature chip leaves nothing: say so in the board's words, and offer
+   *  the way out as a button — the whole index, one press. */
+  #corpusFeatureEmpty(total: number, unparented: number): HTMLElement {
+    const corpus = this.#corpus
+    const wrap = document.createElement('div')
+    wrap.className = 'fb-corpus-empty'
+    const slug = corpus?.state.featureSlug ?? null
+    const name = slug === null ? 'this feature' : this.#corpusFeatureName(slug)
+    wrap.appendChild(this.#corpusNotice(`Nothing is linked to ${name} yet.`))
+    const show = document.createElement('button')
+    show.type = 'button'
+    show.className = 'fb-corpus-showall'
+    show.textContent = `Show all ${total}`
+    show.title = 'Clear the feature filter and list every change and discovery'
+    show.addEventListener('click', () => {
+      if (this.#corpus === null) return
+      this.#corpus.state = clearFeatureFilter(this.#corpus.state)
+      this.#renderCorpusBody()
+    })
+    wrap.appendChild(show)
+    if (unparented > 0) {
+      const quiet = document.createElement('p')
+      quiet.className = 'fb-corpus-empty-note'
+      quiet.textContent = `${unparented} of them are not linked to any feature.`
+      wrap.appendChild(quiet)
+    }
+    return wrap
+  }
+
+  /** The feature's own name for a corpus slug, from the map; the slug when the map has no node. */
+  #corpusFeatureName(slug: string): string {
+    const node = this.#featureGraph?.nodes.find((entry) => entry.slug === slug)
+    return node?.name ?? slug
+  }
+
   #corpusNotice(text: string): HTMLElement {
     const notice = document.createElement('p')
     notice.className = 'fb-corpus-notice'
@@ -4166,9 +4352,10 @@ export class BlueprintBoard {
       return
     }
 
-    // Tabs — the learn panel's own tab chrome, counts over the WHOLE index so
-    // a filtered tab still says what it holds.
-    const counts = countCorpusTabs(corpus.entries)
+    // Tabs — the learn panel's own tab chrome. Counted under the feature chip
+    // when one is on: the project's totals beside "feature auth" read as
+    // "Auth has 28 changes" (a user concluded the browser was broken).
+    const counts = countCorpusTabs(corpus.entries, corpus.state.featureSlug)
     const tabbar = buildTabBar<CorpusBrowserTab>({
       barClass: 'fb-learn-tabbar',
       tabClass: 'fb-learn-tab',
@@ -4310,14 +4497,15 @@ export class BlueprintBoard {
 
     const view = deriveCorpusBrowserView(corpus.entries, corpus.state)
     const visible = view.rows.length + view.noFeatureRows.length
-    count.textContent = `${visible} of ${view.totalInTab} on this tab`
+    count.textContent = `${visible} of ${view.inFeatureInTab} on this tab`
 
     const children: HTMLElement[] = []
-    if (view.totalInTab === 0) {
-      // Empty INDEX and emptied-by-filters are different sentences — the
-      // model's `totalInTab` exists precisely so this line can tell them apart.
+    // Three empties, three sentences — the model names which one this is.
+    if (view.emptyReason === 'index') {
       children.push(this.#corpusNotice('Nothing indexed on this tab yet.'))
-    } else if (visible === 0) {
+    } else if (view.emptyReason === 'feature') {
+      children.push(this.#corpusFeatureEmpty(view.totalEntries, view.unparented))
+    } else if (view.emptyReason === 'filters') {
       children.push(this.#corpusNotice('No docs match the current filters.'))
     }
     for (const row of view.rows) children.push(this.#corpusRow(row))
@@ -4505,6 +4693,7 @@ export class BlueprintBoard {
     }
     slot.replaceChildren(...trail.childNodes)
     slot.hidden = slot.childElementCount === 0
+    this.#paintDeepCrumbs()
   }
 
   /** Empty the header's brief slot. Called wherever the brief goes away — a
@@ -4518,11 +4707,290 @@ export class BlueprintBoard {
     slot.hidden = true
   }
 
+  /**
+   * THE DEEP LEVEL'S TWO ISLANDS (user, 2026-11-15). The top one is the
+   * map's: arrows, crumbs (Workspace / project / … / the feature), this
+   * level's actions with the Blocks · Diagram switch first, and the Ask field
+   * scoped to the feature. The bottom one holds what is known about it: the
+   * brief's tabs, the known issue as one line, and Knowledge.
+   */
+  #mountDeepChrome(input: {
+    ref: string
+    name: string
+    slots: ReadonlyArray<{ label: string; count: string; items: Array<[string, string]> }>
+    band: { tone: string; label: string; text: string } | null
+  }): void {
+    const main = this.#stage.parentElement
+    if (main === null) return
+    this.#removeHeaderIsland()
+    if (this.#deepSheetFor !== input.ref) this.#deepSheetOpen = null
+    this.#deepSheetFor = input.ref
+    if (this.#deepSheetOpen !== null && !input.slots.some((slot) => slot.label === this.#deepSheetOpen)) this.#deepSheetOpen = null
+    const host = document.createElement('div')
+    host.className = 'fb-deep-chrome'
+    const crumbs = document.createElement('div')
+    crumbs.className = 'fb-terr-crumbs'
+    this.#deepCrumbsHost = crumbs
+    const actions: HTMLElement[] = []
+    const slot = this.#briefActionSlot
+    if (slot !== null && slot.childElementCount > 0) actions.push(slot)
+    const { tl } = this.#buildTopIsland({ where: input.name, crumbs, actions, ask: true })
+    if (this.#activeRoot !== null) {
+      this.#askPanel().setFieldScope({
+        placeholder: askAboutPlaceholder(input.name),
+        open: () => this.#askAbout(input.ref, { text: '' }),
+      })
+    }
+
+    const bottom = document.createElement('div')
+    bottom.className = 'fb-float fb-island fb-float-bottom fb-deep-bottom'
+    const sheet = document.createElement('div')
+    sheet.className = 'fb-deep-sheet'
+    const row = document.createElement('div')
+    row.className = 'fb-deep-row'
+    const tabs = document.createElement('div')
+    tabs.className = 'fb-deep-tabs'
+    tabs.setAttribute('role', 'tablist')
+    tabs.setAttribute('aria-label', `What is known about ${input.name}`)
+    const paintSheet = (): void => {
+      const open = input.slots.find((entry) => entry.label === this.#deepSheetOpen) ?? null
+      bottom.classList.toggle('is-open', open !== null)
+      for (const tab of tabs.querySelectorAll<HTMLElement>('.fb-deep-tab')) {
+        const on = tab.dataset['tab'] === this.#deepSheetOpen
+        tab.setAttribute('aria-selected', String(on))
+        tab.classList.toggle('on', on)
+      }
+      if (open === null) {
+        sheet.hidden = true
+        sheet.replaceChildren()
+        return
+      }
+      sheet.hidden = false
+      const head = document.createElement('div')
+      head.className = 'fb-deep-sheet-head'
+      head.textContent = open.label
+      const list = document.createElement('div')
+      list.className = 'fb-deep-sheet-list'
+      list.setAttribute('role', 'tabpanel')
+      for (const [text, meta] of open.items) {
+        const item = document.createElement('div')
+        item.className = 'fb-deep-sheet-item'
+        const main = document.createElement('div')
+        main.className = 'fb-deep-sheet-text'
+        main.textContent = text
+        item.appendChild(main)
+        if (meta.length > 0) {
+          const sub = document.createElement('div')
+          sub.className = 'fb-deep-sheet-meta'
+          sub.textContent = meta
+          item.appendChild(sub)
+        }
+        list.appendChild(item)
+      }
+      sheet.replaceChildren(head, list)
+    }
+    const press = (label: string): void => {
+      this.#deepSheetOpen = toggleSheet(this.#deepSheetOpen, label)
+      paintSheet()
+    }
+    for (const entry of input.slots) {
+      const tab = document.createElement('button')
+      tab.type = 'button'
+      tab.className = 'fb-deep-tab'
+      tab.dataset['tab'] = entry.label
+      tab.setAttribute('role', 'tab')
+      const label = document.createElement('span')
+      label.textContent = entry.label
+      const count = document.createElement('span')
+      count.className = 'fb-deep-tab-count'
+      count.textContent = entry.count.replace(/ anchors$/, '')
+      tab.append(label, count)
+      tab.title = `${entry.label} — ${entry.count}`
+      tab.addEventListener('click', () => press(entry.label))
+      tabs.appendChild(tab)
+    }
+    const divider = (): HTMLElement => {
+      const rule = document.createElement('span')
+      rule.className = 'fb-island-divider'
+      rule.setAttribute('aria-hidden', 'true')
+      return rule
+    }
+    row.appendChild(tabs)
+    const issueHost = document.createElement('div')
+    issueHost.className = 'fb-island-hint'
+    if (input.band !== null) {
+      const band = input.band
+      const issue = document.createElement('button')
+      issue.type = 'button'
+      issue.className = `fb-deep-issue fb-deep-issue-${band.tone}`
+      const tag = document.createElement('span')
+      tag.className = 'fb-deep-issue-tag'
+      tag.textContent = band.label
+      const text = document.createElement('span')
+      text.className = 'fb-deep-issue-text'
+      text.textContent = band.text
+      issue.append(tag, text)
+      issue.title = `${band.label}: ${band.text}`
+      const problems = input.slots.find((entry) => entry.label === 'Known problems')
+      if (problems !== undefined) issue.addEventListener('click', () => press(problems.label))
+      else issue.disabled = true
+      issueHost.appendChild(issue)
+    }
+    row.append(divider(), issueHost, divider())
+    const knowledge = document.createElement('button')
+    knowledge.type = 'button'
+    knowledge.className = 'fb-knowledge-pill fb-deep-knowledge'
+    knowledge.addEventListener('click', (event) => {
+      event.stopPropagation()
+      this.#pressKnowledgePill(knowledge, event)
+    })
+    const br = document.createElement('div')
+    br.className = 'fb-float-br'
+    br.appendChild(knowledge)
+    row.appendChild(br)
+    bottom.append(sheet, row)
+    host.append(tl, bottom)
+    for (const el of [tl, bottom]) el.addEventListener('click', (event) => event.stopPropagation())
+    main.classList.add('fb-deep')
+    main.appendChild(host)
+    this.#deepChrome = host
+    paintSheet()
+    this.#paintDeepCrumbs()
+    this.#paintDeepKnowledge()
+    this.#refreshNav()
+  }
+
+  /** The deep islands are on screen. */
+  #deepLive(): boolean {
+    return this.#deepChrome !== null && this.#deepChrome.parentElement !== null
+  }
+
+  /** Take the deep islands down: the header, its action slot and the arrows go home. */
+  #removeDeepChrome(): void {
+    const host = this.#deepChrome
+    if (host === null) return
+    this.#deepChrome = null
+    this.#deepCrumbsHost = null
+    host.remove()
+    this.#stage.parentElement?.classList.remove('fb-deep')
+    this.#ask?.setFieldScope(null)
+    const slot = this.#briefActionSlot
+    const header = this.#headerNav?.parentElement ?? null
+    if (slot !== null && header !== null && slot.parentElement !== header) {
+      for (const child of slot.children) child.classList.remove('fb-float-act')
+      header.insertBefore(slot, this.#learningButton.parentElement === header ? this.#learningButton : null)
+    }
+    this.#homeNav()
+  }
+
+  /** Fold the deep bottom island's sheet. True when there was one to fold. */
+  #foldDeepSheet(): boolean {
+    if (!this.#deepLive() || this.#deepSheetOpen === null) return false
+    this.#deepSheetOpen = null
+    const bottom = this.#deepChrome?.querySelector<HTMLElement>('.fb-deep-bottom')
+    const sheet = bottom?.querySelector<HTMLElement>('.fb-deep-sheet')
+    if (bottom !== undefined && bottom !== null && sheet !== undefined && sheet !== null) {
+      bottom.classList.remove('is-open')
+      sheet.hidden = true
+      sheet.replaceChildren()
+      for (const tab of bottom.querySelectorAll<HTMLElement>('.fb-deep-tab')) {
+        tab.setAttribute('aria-selected', 'false')
+        tab.classList.remove('on')
+      }
+    }
+    return true
+  }
+
+  /** Workspace / project / the levels above / the feature (and any curated drill). */
+  #paintDeepCrumbs(): void {
+    const trail = this.#deepCrumbsHost
+    if (trail === null || !this.#deepLive()) return
+    trail.replaceChildren()
+    const sep = (): void => {
+      const el = document.createElement('span')
+      el.className = 'fb-terr-crumb-sep'
+      el.textContent = '/'
+      trail.appendChild(el)
+    }
+    const step = (name: string, press: (() => void) | null, cls = 'fb-terr-crumb'): void => {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = `${cls}${press === null ? ' on' : ''}`
+      button.textContent = name
+      button.disabled = press === null
+      if (press !== null) button.addEventListener('click', () => press())
+      trail.appendChild(button)
+    }
+    const project = this.#wsCurrentProject()
+    if (project !== null) {
+      step(this.#wsGraph?.workspace?.name ?? 'Workspace', () => {
+        this.clearBrief()
+        this.#zoomOutToWorkspace()
+        this.#renderFeatureBoard()
+      }, 'fb-ws-crumb')
+      sep()
+    }
+    const leaveTo = (depth: number): void => {
+      this.clearBrief()
+      this.#popFeatureFocusTo(depth)
+    }
+    step(project?.name ?? 'Features', () => leaveTo(0))
+    const stack = this.#levelReturn?.stack ?? []
+    stack.forEach((node, index) => {
+      sep()
+      step(node.name, () => leaveTo(index + 1))
+    })
+    curatedCrumbs(this.#curatedView, this.#curatedTrail).forEach((crumb, index) => {
+      sep()
+      step(crumb.title, crumb.current ? null : () => this.#walkCuratedTo(index))
+    })
+  }
+
+  /** Knowledge on a deep level: this feature's share understood, its files and parts. */
+  #paintDeepKnowledge(): void {
+    const pill = this.#deepChrome?.querySelector<HTMLElement>('.fb-deep-knowledge')
+    if (pill === undefined || pill === null) return
+    const focus = this.#levelReturn?.focus
+    const fraction = this.#learnFraction(focus?.id ?? this.#briefFeatureRef)
+    const parts = focus !== undefined ? focus.childCount : this.#curatedParts.length
+    const view = deepKnowledgeView({
+      understood: fraction === null ? null : { done: fraction.done, total: fraction.total },
+      files: filesAmong(this.#brief?.delta.anchors ?? []),
+      parts,
+    })
+    const ring = document.createElement('span')
+    ring.className = 'fb-knowledge-ring'
+    ring.style.setProperty('--fb-ring', `${(view.ring * 100).toFixed(1)}%`)
+    ring.setAttribute('aria-hidden', 'true')
+    const text = document.createElement('span')
+    text.className = 'fb-knowledge-text'
+    const line1 = document.createElement('span')
+    line1.className = 'fb-knowledge-line1'
+    line1.textContent = view.line1
+    text.appendChild(line1)
+    if (view.line2 !== null) {
+      const line2 = document.createElement('span')
+      line2.className = 'fb-knowledge-line2'
+      line2.textContent = view.line2
+      text.appendChild(line2)
+    }
+    const drift = driftNote(this.#projectDriftCount())
+    if (drift !== null) text.appendChild(this.#knowledgeDriftSegment(drift))
+    pill.dataset['driftOnly'] = String(drift !== null && view.line2 === null)
+    pill.replaceChildren(ring, text)
+    pill.title = drift === null ? view.title : `${view.title}\n${drift.title}`
+    pill.setAttribute('aria-label', [view.line1, view.line2, drift?.label ?? null].filter((part) => part !== null).join(', '))
+    pill.setAttribute('aria-pressed', String(this.#learnPanelOpen))
+  }
+
   #renderBriefBar(): void {
     this.#briefBar?.remove()
     this.#briefBar = null
     this.#briefFoot?.remove()
     this.#briefFoot = null
+    this.#removeDeepChrome()
+    this.#learnUnderstandSlot?.replaceChildren()
+    if (this.#learnUnderstandSlot !== null) this.#learnUnderstandSlot.hidden = true
     const brief = this.#brief
     if (brief === null) return
 
@@ -4540,6 +5008,10 @@ export class BlueprintBoard {
         ? null
         : buildCuratedChrome(this.#curatedView, this.#curated, brief.time)
     let curatedBand: HTMLElement | null = null
+    // A DEEP LEVEL WEARS THE TWO ISLANDS (user, 2026-11-15, mockup "Deep
+    // levels"): a feature's own scoped level with its drawn (or derived)
+    // view. Document and plan briefs keep the header and the bar.
+    const deep = this.#briefScope !== null && chrome !== null && this.#storyline === null
 
     controls.className = 'fb-brief-controls'
     // TWO GROUPS, not one row of mixed things (layout call 2026-08-03): what
@@ -4683,7 +5155,13 @@ export class BlueprintBoard {
           this.#renderBriefBar()
         },
       )
-      if (understand !== null) actions.appendChild(understand)
+      if (understand !== null) {
+        // ON A DEEP LEVEL it goes to the Learning panel, opened from Knowledge.
+        if (deep && this.#learnUnderstandSlot !== null) {
+          this.#learnUnderstandSlot.replaceChildren(understand)
+          this.#learnUnderstandSlot.hidden = false
+        } else actions.appendChild(understand)
+      }
 
       // READ AS A STORY (code-storyline) — the feature's (or the part's) own
       // files, read from where the code starts.
@@ -4693,9 +5171,24 @@ export class BlueprintBoard {
         actions.appendChild(
           this.#headerButton({
             icon: 'file',
-            label: 'Read as a story',
-            title: `Read ${storyName}'s code as a story, from where it starts`,
+            label: 'Follow the code',
+            title: `Follow ${storyName}'s code from where it starts`,
             press: () => this.openStorylineForPart(storyRef, storyName),
+          }),
+        )
+      }
+
+      // ASK ABOUT THIS — the Ask panel with this feature tagged. On a deep
+      // level it folds INTO the Ask field ("Ask about Auth…"), so no button.
+      const askRef = this.#briefFeatureRef
+      if (askRef !== null && !deep) {
+        const askName = this.#featureNameFor(askRef, this.#brief?.delta.identity?.name) ?? askRef
+        actions.appendChild(
+          this.#headerButton({
+            icon: 'sparkles',
+            label: 'Ask about this',
+            title: `Ask the Blueprint about ${askName}`,
+            press: () => this.#askAbout(askRef, { text: '' }),
           }),
         )
       }
@@ -4706,6 +5199,17 @@ export class BlueprintBoard {
       // like the time switch it is something you DO, and the bar's design
       // context named that chrome for its top buttons.
       const corpusRef = this.#briefFeatureRef
+      if (deep) {
+        // A QUIET TEXT BUTTON in the top island, like its neighbours.
+        actions.appendChild(
+          this.#headerButton({
+            icon: 'archive',
+            label: 'Changes & discoveries',
+            title: 'Browse every change and discovery doc, pre-filtered to this feature',
+            press: () => void this.openCorpusBrowser(corpusRef),
+          }),
+        )
+      }
       const corpusWrap = document.createElement('div')
       corpusWrap.className = 'fb-brief-switch'
       const corpusBtn = document.createElement('button')
@@ -4719,7 +5223,7 @@ export class BlueprintBoard {
       corpusBtn.title = 'Browse every change and discovery doc, pre-filtered to this feature'
       corpusBtn.addEventListener('click', () => void this.openCorpusBrowser(corpusRef))
       corpusWrap.appendChild(corpusBtn)
-      actions.appendChild(corpusWrap)
+      if (!deep) actions.appendChild(corpusWrap)
     }
 
     // THE ACTIONS GO TO THE HEADER, the facts stay under the title. `controls`
@@ -4735,7 +5239,12 @@ export class BlueprintBoard {
         this.#dressForHeader(child)
         for (const inner of child.querySelectorAll('button')) this.#dressForHeader(inner)
       }
+      // BLOCKS · DIAGRAM, FIRST: the same switch the feature's blocks carry,
+      // with Diagram pressed. Only on a feature's level — the record names it.
+      const levelFocus = this.#levelReturn?.focus
+      if (levelFocus !== undefined && this.#curatedTrail.length === 0) slot.prepend(this.#buildViewSwitch('diagram', levelFocus))
       slot.hidden = slot.childElementCount === 0
+      if (deep) for (const child of slot.children) child.classList.add('fb-float-act')
     }
     if (facts.childElementCount > 0) controls.append(facts)
 
@@ -4918,6 +5427,18 @@ export class BlueprintBoard {
     if (bar.childElementCount > 0) {
       this.#briefBar = bar
       this.#stage.parentElement?.insertBefore(bar, this.#stage)
+    }
+
+    if (deep && chrome !== null) {
+      const ref = this.#briefFeatureRef ?? ''
+      const name = this.#featureNameFor(this.#briefFeatureRef, brief.delta.identity?.name) ?? ref
+      this.#mountDeepChrome({
+        ref,
+        name,
+        slots: this.#briefSlots(view, brief.delta, chrome),
+        band: chrome.band,
+      })
+      return
     }
 
     // ── THE FOOT: what you read AFTER the picture ──────────────────────────
@@ -5470,6 +5991,7 @@ export class BlueprintBoard {
     }
     // THE BRIEF'S ACTIONS are about the level under the story; they come back
     // when it closes.
+    this.#removeDeepChrome()
     if (this.#briefActionSlot !== null) this.#briefActionSlot.hidden = true
     if (this.#briefBar !== null) this.#briefBar.hidden = true
     if (this.#briefFoot !== null) this.#briefFoot.hidden = true
@@ -6148,6 +6670,9 @@ export class BlueprintBoard {
     this.#drawTerritoryFlow(
       decoration === null ? null : territoryFlowHops(mounted.view, decoration.flow),
     )
+    // AN OPEN QUESTION IS THE STANDING ANSWER: an overlay restored under it
+    // (a popover closing, a hover ending) does not erase what it lit.
+    if (this.#ask?.isOpen === true) this.#paintAsk(true)
   }
 
   /**
@@ -6241,6 +6766,8 @@ export class BlueprintBoard {
    * drawer, else pop one drill level.
    */
   #onEscape(): boolean {
+    // A GROWN DEEP SHEET FOLDS FIRST — it is drawn over the diagram.
+    if (this.#foldDeepSheet()) return true
     // AN OPEN REVIEW TOUR CLOSES FIRST, and Escape stops there: it is the
     // topmost thing, and the story under it stays open.
     if (this.#storyView?.tourOpen === true) {
@@ -6268,6 +6795,11 @@ export class BlueprintBoard {
     // closing the story underneath would leave its drawer behind.
     if (this.#peek.open) {
       this.closePeek()
+      return true
+    }
+    // AN OPEN ASK PANEL CLOSES before the map underneath it moves.
+    if (this.#ask?.isOpen === true) {
+      this.#ask.close()
       return true
     }
     if (this.#storyline !== null) {
@@ -6400,6 +6932,14 @@ export class BlueprintBoard {
     else this.openLearnPanel()
   }
 
+  /** The Learn tile shows the panel is open, as every tile shows its state. */
+  #paintLearnTile(): void {
+    const tile = this.#learningButton as HTMLElement | undefined
+    if (tile === undefined) return
+    tile.setAttribute('aria-pressed', String(this.#learnPanelOpen))
+    this.#float?.pill.setAttribute('aria-pressed', String(this.#learnPanelOpen))
+  }
+
   /**
    * Open the learning status panel as pane 2 of #split. Mutually exclusive with
    * the peek drawer — if the drawer holds the pane, it is closed first (keeps the
@@ -6425,6 +6965,7 @@ export class BlueprintBoard {
     this.#split.setAttribute('sizes', sizes.join(','))
     if (!this.#learnPanel.isConnected) this.#split.appendChild(this.#learnPanel)
     this.#learnPanelOpen = true
+    this.#paintLearnTile()
     // Fresh each time it opens: other projects learn while it is closed.
     this.#learnOtherSnapshots.clear()
     this.#lpConfirm = null
@@ -6444,6 +6985,7 @@ export class BlueprintBoard {
   closeLearnPanel(): void {
     if (this.#learnPanel.isConnected) this.#split.removeChild(this.#learnPanel)
     this.#learnPanelOpen = false
+    this.#paintLearnTile()
     this.#learnResetConfirm = false
     this.#learnAllConfirm = false
     this.#stopLearnLivePoll()
@@ -6468,6 +7010,11 @@ export class BlueprintBoard {
   /** Whether the map is in the lens — the panel's own state, read in one place
    *  so no surface can invent a second switch. */
   #lensOn(): boolean {
+    // ON A MAP VIEW THE LENS IS THE LAYER (mockup J3): Layers = Learning, and
+    // opening or closing the panel no longer changes the colouring. Every
+    // other view keeps the old rule — its header still has the Learn tile,
+    // and the panel being open is the lens there.
+    if (this.#territory !== null || this.#wsMounted !== null) return this.#mapLayer() === 'learning'
     return this.#learnPanelOpen
   }
 
@@ -6801,6 +7348,13 @@ export class BlueprintBoard {
    * rather than 0/0, and a domain level counts nothing of its own.
    */
   #refreshLevelFigure(): void {
+    // THE KNOWLEDGE PILL'S FIGURE (mockup J3) — the same source order, now on
+    // the pill instead of a strip.
+    if (this.#territory !== null) {
+      const fraction = this.#learnFraction(this.#featureStack.at(-1)?.id ?? null)
+      this.#floatUnderstood = fraction === null ? null : { done: fraction.done, total: fraction.total }
+      this.#paintFloatFigures()
+    }
     const el = (this.#territory === null ? null : (this.#headStrip?.querySelector<HTMLElement>('.fb-terr-title-understood') ?? null))
     if (el === undefined || el === null) return
     const focus = this.#featureStack.at(-1)
@@ -7053,7 +7607,14 @@ export class BlueprintBoard {
     close.textContent = '✕'
     close.addEventListener('click', () => this.closeLearnPanel())
 
-    header.append(this.#paneBack(), title, recheck, close)
+    // A DEEP LEVEL'S "UNDERSTAND IT AGAIN" lives here, beside Re-check (user,
+    // 2026-11-15: understanding belongs with the learning, not the top island).
+    const understandSlot = document.createElement('span')
+    understandSlot.className = 'fb-learn-understand'
+    understandSlot.hidden = true
+    this.#learnUnderstandSlot = understandSlot
+
+    header.append(this.#paneBack(), title, understandSlot, recheck, close)
 
     this.#learnPanelBody = document.createElement('div')
     this.#learnPanelBody.className = 'fb-learn-panel-body'
@@ -7071,14 +7632,19 @@ export class BlueprintBoard {
   async #loadLearnIgnore(rootId: string): Promise<void> {
     this.#learnIgnoreRoot = rootId // marked before the await — one fetch per root
     let extras: string[] = []
+    let auto: boolean | null = null
     try {
       const state = await window.flow.flow.state({ rootId })
       extras = parseLearnIgnore(state.flowconfig['learn_ignore'])
+      // Automatic re-learn is ON unless the project says exactly false (main's
+      // readLearnAutoEnabled reads it the same way).
+      auto = state.flowconfig['learn_auto'] !== 'false'
     } catch {
       extras = []
     }
     if (rootId !== this.#activeRoot) return // switched mid-fetch — drop
     this.#learnIgnoreExtras = extras
+    this.#learnAuto = auto
     if (this.#learnPanelOpen) this.#renderLearnPanel()
   }
 
@@ -7421,7 +7987,8 @@ export class BlueprintBoard {
     const moreSummary = document.createElement('summary')
     moreSummary.textContent = 'Activity and brain retrieval'
     more.append(moreSummary, ...extras)
-    body.replaceChildren(this.#buildLearnProjects([tabbar, tabpanel]), more)
+    const connections = this.#buildLearnConnectionsSection()
+    body.replaceChildren(this.#buildLearnProjects([tabbar, tabpanel]), more, ...(connections === null ? [] : [connections]))
     if (filterHadFocus && filterEl.isConnected) {
       filterEl.focus({ preventScroll: true })
       if (caretStart !== null && caretEnd !== null) filterEl.setSelectionRange(caretStart, caretEnd)
@@ -7625,7 +8192,8 @@ export class BlueprintBoard {
     const actions = document.createElement('div')
     actions.className = 'fb-lp-actions'
     const confirm = this.#lpConfirm
-    if (confirm !== null && confirm.slug === row.slug) {
+    // A drifted batch asks in the Drifted group's own bar, where it was pressed.
+    if (confirm !== null && confirm.slug === row.slug && confirm.drift !== true) {
       const question = document.createElement('span')
       question.className = 'fb-lp-question'
       question.textContent = `Queue ${String(confirm.modules.length)} modules?`
@@ -7686,12 +8254,27 @@ export class BlueprintBoard {
    * reader is in keeps its per-row Ignore and its lens hover; another
    * project's rows learn into THAT project.
    */
-  #buildLearnGroups(input: { slug: string; root: string | null; here: boolean; progress: LearnProgress }): HTMLElement[] {
+  #buildLearnGroups(input: { slug: string; root: string | null; here: boolean; progress: LearnProgress; allRows?: readonly LearnModuleRow[] }): HTMLElement[] {
     const out: HTMLElement[] = []
+    // A DRIFTED BATCH IN FLIGHT has its own group while it runs; once nothing
+    // of it is reading or waiting it is over, and its rows go back to theirs.
+    const batch = input.root === null ? undefined : this.#driftBatches.get(input.root)
+    let batchView: ReturnType<typeof driftBatchView> | null = null
+    if (batch !== undefined && input.root !== null) {
+      const busy = this.#learnRootBusy(input.root) || this.#driftBatchUnconfirmed.has(input.root)
+      batchView = driftBatchView(batch, input.allRows ?? input.progress.rows, busy, passDurations(this.#learnLog))
+      if (batchView.finished) {
+        this.#driftBatches.delete(input.root)
+        batchView = null
+      }
+    }
     // #1450: only the reader's own project knows its ignore list, so only there
     // does a person's Ignore keep a row (and its Unignore).
-    const groups = moduleGroups(input.progress, '', (module) =>
-      input.here && ignoreSource(module, this.#learnIgnoreExtras) === 'extra',
+    const groups = moduleGroups(
+      input.progress,
+      '',
+      (module) => input.here && ignoreSource(module, this.#learnIgnoreExtras) === 'extra',
+      batchView === null || batch === undefined ? [] : batch.modules,
     )
     if (groups.length === 0) {
       out.push(this.#lpNote(input.progress.total === 0 ? 'No modules yet — they appear once Flow has read this project.' : 'Nothing here matches.'))
@@ -7718,13 +8301,22 @@ export class BlueprintBoard {
       head.append(chev, title, count)
       head.addEventListener('click', () => {
         this.#learnGroupOpen.set(`${input.slug}|${group.key}`, !open)
+        // Opening the Drifted group reads its reasons afresh.
+        if (!open && group.key === 'drift' && input.root !== null) this.#driftFiles.delete(input.root)
         this.#renderLearnPanel()
       })
       wrap.appendChild(head)
       if (open) {
         const items = document.createElement('div')
         items.className = 'fb-lp-items'
-        if (group.key === 'todo') {
+        const lastWorkGroup = !groups.some((entry) => entry.key === 'drift')
+        if (group.key === 'drift') {
+          items.classList.add('fb-dr')
+          items.append(...this.#buildDriftBody(input, group.rows))
+        } else if (group.key === 'updating' && batchView !== null) {
+          items.classList.add('fb-dr')
+          items.append(...this.#buildDriftBatchBody(input, batchView, lastWorkGroup))
+        } else if (group.key === 'todo') {
           for (const folder of group.folders) items.appendChild(this.#buildLearnFolderRow(input, folder))
         } else {
           const cap = group.key === 'done' && !this.#learnShowAll ? 40 : Number.POSITIVE_INFINITY
@@ -7747,6 +8339,437 @@ export class BlueprintBoard {
     }
     return out
   }
+
+  // ── The Drifted group (mockup "Drifted, easier to update", 2026-11-16) ─────
+
+  /** Whether the learner still has work for a root: its pass, or its queue. */
+  #learnRootBusy(root: string): boolean {
+    const live = this.#learnLive
+    return (live.running && live.activeRoot === root) || (live.queuedByRoot?.[root] ?? 0) > 0
+  }
+
+  /**
+   * Read why each drifted module drifted — ONCE per showing of the group, not
+   * per row and never on a broadcast (allowed-pattern #17). Main runs one
+   * whole-project staleness check off the UI's path (#19). A module the answer
+   * did not cover is asked for again only when it newly appears.
+   */
+  #ensureDriftReasons(root: string, modules: readonly string[]): void {
+    if (this.#driftFilesPending.has(root)) return
+    const cached = this.#driftFiles.get(root)
+    if (cached !== undefined && modules.every((module) => cached.asked.has(module))) return
+    const ask = window.flow.learn?.driftReasons
+    if (typeof ask !== 'function') return
+    this.#driftFilesPending.add(root)
+    const asked = new Set(modules)
+    void ask({ rootId: root, modules: [...modules] })
+      .then((answer) => ({ files: answer.ok ? answer.files : null, asked }))
+      .catch(() => ({ files: null, asked }))
+      .then((entry) => {
+        this.#driftFilesPending.delete(root)
+        this.#driftFiles.set(root, entry)
+        if (this.#learnPanelOpen) this.#renderLearnModuleRowsOrPanel()
+      })
+  }
+
+  /** Repaint the rows host when it is on screen, else the whole panel. */
+  #renderLearnModuleRowsOrPanel(): void {
+    if (this.#learnRowsEl !== null && this.#learnRowsEl.isConnected) this.#renderLearnModuleRows()
+    else this.#renderLearnPanel()
+  }
+
+  #driftCheckbox(state: TriState, label: string, press: () => void): HTMLInputElement {
+    const box = document.createElement('input')
+    box.type = 'checkbox'
+    box.className = 'fb-dr-cb'
+    box.checked = state === 'all'
+    box.indeterminate = state === 'some'
+    box.setAttribute('aria-label', label)
+    box.addEventListener('click', (event) => {
+      event.stopPropagation()
+      press()
+    })
+    return box
+  }
+
+  #setDriftSelected(next: Set<string>): void {
+    this.#driftSelected = next
+    this.#renderLearnModuleRowsOrPanel()
+  }
+
+  /** Queue drifted modules as (part of) this project's update batch. */
+  #driftQueue(slug: string, root: string, modules: readonly string[]): void {
+    this.#lpQueue(slug, root, modules, false, true)
+  }
+
+  /** The group's body at rest: summary, select-all and sort, rows, selection, auto. */
+  #buildDriftBody(input: { slug: string; root: string | null; here: boolean }, rows: readonly LearnModuleRow[]): HTMLElement[] {
+    const out: HTMLElement[] = []
+    const root = input.root
+    const modules = rows.map((row) => row.module)
+    if (root !== null) this.#ensureDriftReasons(root, modules)
+    const files = root === null ? null : (this.#driftFiles.get(root)?.files ?? null)
+    if (input.here) this.#driftSelected = pruneSelection(this.#driftSelected, modules)
+    const selectable = input.here && root !== null
+
+    // The summary bar — or, for a batch over the threshold, its one question.
+    const bar = document.createElement('div')
+    bar.className = 'fb-dr-bar'
+    const confirm = this.#lpConfirm
+    if (confirm !== null && confirm.drift === true && confirm.root === root) {
+      const question = document.createElement('span')
+      question.className = 'fb-dr-bar-text'
+      question.textContent = `Update ${String(confirm.modules.length)} modules? Each one is read again, one at a time.`
+      const yes = this.#lpAction('Update them', 'Queue them all', () => this.#lpQueue(confirm.slug, confirm.root, confirm.modules, true, true))
+      yes.classList.add('fb-lp-primary', 'fb-dr-confirm-yes')
+      const no = this.#lpAction('Cancel', 'Keep things as they are', () => {
+        this.#lpConfirm = null
+        this.#renderLearnModuleRowsOrPanel()
+      })
+      bar.append(question, yes, no)
+    } else {
+      const summary = driftSummary(rows, files)
+      const text = document.createElement('span')
+      text.className = 'fb-dr-bar-text'
+      text.textContent = summary.text
+      bar.appendChild(text)
+      if (root !== null) {
+        const all = this.#lpAction(`Update all ${String(summary.modules)}`, 'Read every drifted module again, one at a time', () => this.#driftQueue(input.slug, root, modules))
+        all.classList.add('fb-lp-primary', 'fb-dr-update-all')
+        bar.appendChild(all)
+      }
+    }
+    out.push(bar)
+
+    // Select-all and the sort.
+    const controls = document.createElement('div')
+    controls.className = 'fb-dr-controls'
+    if (selectable) {
+      const label = document.createElement('label')
+      label.className = 'fb-dr-selectall'
+      label.append(
+        this.#driftCheckbox(selectionState(modules, this.#driftSelected), 'Select every drifted module', () => this.#setDriftSelected(toggleSelection(modules, this.#driftSelected))),
+        document.createTextNode('Select'),
+      )
+      controls.appendChild(label)
+    }
+    const spacer = document.createElement('span')
+    spacer.className = 'fb-dr-spacer'
+    const sortLabel = document.createElement('span')
+    sortLabel.className = 'fb-dr-sort-label'
+    sortLabel.textContent = 'Sort'
+    const seg = document.createElement('div')
+    seg.className = 'fb-dr-seg'
+    seg.setAttribute('role', 'radiogroup')
+    seg.setAttribute('aria-label', 'Sort drifted modules')
+    for (const option of DRIFT_SORTS) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'fb-dr-seg-btn'
+      button.dataset['sort'] = option.key
+      button.textContent = option.label
+      button.setAttribute('role', 'radio')
+      button.setAttribute('aria-checked', String(this.#driftSort === option.key))
+      button.addEventListener('click', (event) => {
+        event.stopPropagation()
+        if (this.#driftSort === option.key) return
+        this.#driftSort = option.key
+        writePref(DRIFT_SORT_KEY, option.key)
+        this.#renderLearnModuleRowsOrPanel()
+      })
+      seg.appendChild(button)
+    }
+    controls.append(spacer, sortLabel, seg)
+    out.push(controls)
+
+    // The rows: by folder, or one list in the chosen order.
+    const list = document.createElement('div')
+    list.className = 'fb-dr-list'
+    if (this.#driftSort === 'folder') {
+      const folders = driftFolders(rows, files)
+      folders.forEach((folder, index) => {
+        if (folder.rows.length === 1) {
+          list.appendChild(this.#buildDriftRow(input, folder.rows[0] as LearnModuleRow, files, selectable))
+          return
+        }
+        const open = this.#driftFolderOpen.get(folder.folder) ?? index === 0
+        const fold = document.createElement('div')
+        fold.className = 'fb-dr-fold'
+        fold.dataset['folder'] = folder.folder
+        fold.setAttribute('role', 'button')
+        fold.tabIndex = 0
+        fold.setAttribute('aria-expanded', String(open))
+        const toggle = (): void => {
+          this.#driftFolderOpen.set(folder.folder, !open)
+          this.#renderLearnModuleRowsOrPanel()
+        }
+        fold.addEventListener('click', toggle)
+        fold.addEventListener('keydown', (event) => {
+          if (event.target !== fold || (event.key !== 'Enter' && event.key !== ' ')) return
+          event.preventDefault()
+          toggle()
+        })
+        const chev = document.createElement('fl-icon')
+        chev.setAttribute('name', open ? 'chevron-down' : 'chevron-right')
+        chev.setAttribute('size', '12')
+        fold.appendChild(chev)
+        if (selectable) {
+          fold.appendChild(
+            this.#driftCheckbox(selectionState(folder.modules, this.#driftSelected), `Select the drifted modules under ${folder.folder}`, () =>
+              this.#setDriftSelected(toggleSelection(folder.modules, this.#driftSelected)),
+            ),
+          )
+        }
+        const name = document.createElement('span')
+        name.className = 'fb-lp-path fb-dr-fold-name'
+        name.textContent = folder.folder
+        const facts = document.createElement('span')
+        facts.className = 'fb-dr-facts'
+        facts.textContent = folder.facts
+        fold.append(name, facts)
+        if (root !== null) {
+          const update = this.#lpAction(`Update ${String(folder.modules.length)}`, `Read the ${String(folder.modules.length)} drifted modules under ${folder.folder} again`, () =>
+            this.#driftQueue(input.slug, root, folder.modules),
+          )
+          update.classList.add('fb-dr-fold-update')
+          fold.appendChild(update)
+        }
+        list.appendChild(fold)
+        if (!open) return
+        const showAll = this.#driftFolderAll.has(folder.folder)
+        const cap = showAll ? folder.rows.length : DRIFT_FOLDER_CAP
+        for (const row of folder.rows.slice(0, cap)) {
+          const rowEl = this.#buildDriftRow(input, row, files, selectable)
+          rowEl.classList.add('fb-dr-ind')
+          list.appendChild(rowEl)
+        }
+        if (folder.rows.length > cap) {
+          const more = document.createElement('button')
+          more.type = 'button'
+          more.className = 'fb-dr-more fb-dr-ind'
+          more.textContent = `+ ${String(folder.rows.length - cap)} more`
+          more.addEventListener('click', (event) => {
+            event.stopPropagation()
+            this.#driftFolderAll.add(folder.folder)
+            this.#renderLearnModuleRowsOrPanel()
+          })
+          list.appendChild(more)
+        }
+      })
+    } else {
+      for (const row of sortDriftRows(rows, files, this.#driftSort)) list.appendChild(this.#buildDriftRow(input, row, files, selectable))
+    }
+    out.push(list)
+
+    // The selection's own bar.
+    const picked = modules.filter((module) => this.#driftSelected.has(module))
+    if (selectable && root !== null && picked.length > 0) {
+      const sel = document.createElement('div')
+      sel.className = 'fb-dr-selbar'
+      const text = document.createElement('span')
+      text.className = 'fb-dr-sel-text'
+      text.textContent = selectionLine(picked.length, passDurations(this.#learnLog))
+      const spacerSel = document.createElement('span')
+      spacerSel.className = 'fb-dr-spacer'
+      const clear = this.#lpAction('Clear', 'Untick every module', () => this.#setDriftSelected(new Set()))
+      clear.classList.add('fb-dr-sel-clear')
+      const ignore = this.#lpAction(`Ignore ${String(picked.length)}`, 'Stop learning these modules — they join this project’s ignore list', () => {
+        const extras = picked.reduce<string[]>((list2, module) => addIgnorePattern(list2, module), this.#learnIgnoreExtras)
+        this.#driftSelected = new Set()
+        void this.#writeLearnIgnore(extras)
+      })
+      ignore.classList.add('fb-dr-sel-ignore')
+      const update = this.#lpAction(`Update ${String(picked.length)}`, 'Read the ticked modules again, one at a time', () => this.#driftQueue(input.slug, root, picked))
+      update.classList.add('fb-lp-primary', 'fb-dr-sel-update')
+      sel.append(text, spacerSel, clear, ignore, update)
+      out.push(sel)
+    }
+    if (input.here && root !== null) out.push(this.#buildDriftAuto(root))
+    return out
+  }
+
+  /** One drifted module: checkbox, amber dot, path, why, when — Update / Ignore on hover. */
+  #buildDriftRow(input: { slug: string; root: string | null; here: boolean }, row: LearnModuleRow, files: DriftFiles | null, selectable: boolean): HTMLElement {
+    const rowEl = this.#buildLearnModuleRow(input, row)
+    rowEl.classList.add('fb-dr-row')
+    rowEl.dataset['module'] = row.module
+    if (selectable) {
+      rowEl.prepend(
+        this.#driftCheckbox(this.#driftSelected.has(row.module) ? 'all' : 'none', `Select ${row.module}`, () => {
+          const next = new Set(this.#driftSelected)
+          if (next.has(row.module)) next.delete(row.module)
+          else next.add(row.module)
+          this.#setDriftSelected(next)
+        }),
+      )
+    }
+    const reason = driftReason(driftCount(files, row.module))
+    if (reason !== null) {
+      const why = document.createElement('span')
+      why.className = 'fb-dr-why'
+      why.textContent = reason
+      const when = rowEl.querySelector('.fb-lp-when')
+      if (when !== null) rowEl.insertBefore(why, when)
+      else rowEl.appendChild(why)
+    }
+    return rowEl
+  }
+
+  /** The batch in flight: a progress line, Pause / Stop, and where each module is. */
+  #buildDriftBatchBody(input: { slug: string; root: string | null; here: boolean }, view: ReturnType<typeof driftBatchView>, withAuto: boolean): HTMLElement[] {
+    const out: HTMLElement[] = []
+    const root = input.root
+    if (root === null) return out
+    const files = this.#driftFiles.get(root)?.files ?? null
+    const line = document.createElement('div')
+    line.className = 'fb-dr-progress'
+    const bar = document.createElement('div')
+    bar.className = 'fb-dr-prog'
+    bar.setAttribute('role', 'progressbar')
+    bar.setAttribute('aria-label', 'Drifted modules updated')
+    bar.setAttribute('aria-valuemin', '0')
+    bar.setAttribute('aria-valuemax', String(view.total))
+    bar.setAttribute('aria-valuenow', String(view.done))
+    const fill = document.createElement('b')
+    fill.style.width = `${view.percent.toFixed(1)}%`
+    bar.appendChild(fill)
+    const text = document.createElement('span')
+    text.className = 'fb-dr-progress-text'
+    text.textContent = view.line
+    const spacer = document.createElement('span')
+    spacer.className = 'fb-dr-spacer'
+    line.append(bar, text, spacer)
+    // Both controls are the learner's own: Pause holds this project's queue
+    // (the pass in flight finishes), Stop drops it.
+    const paused = (this.#learnLive.pausedRoots ?? []).includes(root)
+    const pause = this.#lpAction(paused ? 'Resume' : 'Pause', paused ? 'Resume updating' : 'Pause this project’s learning — the module being read finishes first', () => {
+      void window.flow.learn.pauseRoot({ rootId: root, paused: !paused }).then(() => this.#refreshLearnLive())
+    })
+    pause.classList.add('fb-dr-pause')
+    const stop = this.#lpAction('Stop', 'Stop learning in this project — the module being read stops and nothing queued here runs', () => {
+      this.#driftBatches.delete(root)
+      void window.flow.learn.cancel({ rootId: root }).then(() => this.#refreshLearnLive())
+      this.#renderLearnModuleRowsOrPanel()
+    })
+    stop.classList.add('fb-dr-stop')
+    line.append(pause, stop)
+    out.push(line)
+
+    const sections: Array<{ items: DriftBatchItem[]; noun: string }> = [
+      { items: view.items.filter((item) => item.state === 'reading' || item.state === 'next' || item.state === 'waiting'), noun: 'waiting' },
+      { items: view.items.filter((item) => item.state === 'updated'), noun: 'updated' },
+      { items: view.items.filter((item) => item.state === 'not-updated'), noun: 'not updated' },
+    ]
+    for (const section of sections) {
+      const cap = this.#driftBatchAll ? section.items.length : DRIFT_BATCH_CAP
+      for (const item of section.items.slice(0, cap)) out.push(this.#buildDriftBatchRow(item, files))
+      if (section.items.length > cap) {
+        const more = document.createElement('button')
+        more.type = 'button'
+        more.className = 'fb-dr-more'
+        more.textContent = `+ ${String(section.items.length - cap)} ${section.noun}`
+        more.addEventListener('click', (event) => {
+          event.stopPropagation()
+          this.#driftBatchAll = true
+          this.#renderLearnModuleRowsOrPanel()
+        })
+        out.push(more)
+      }
+    }
+    if (withAuto && input.here) out.push(this.#buildDriftAuto(root))
+    return out
+  }
+
+  #buildDriftBatchRow(item: DriftBatchItem, files: DriftFiles | null): HTMLElement {
+    const row = document.createElement('div')
+    row.className = `fb-lp-row fb-dr-row fb-dr-batch-row fb-dr-${item.state}`
+    row.dataset['module'] = item.module
+    const dot = document.createElement('span')
+    const dotState = item.state === 'reading' ? 'learning' : item.state === 'updated' ? 'learned' : item.state === 'not-updated' ? 'stale' : 'queued'
+    dot.className = `fb-lp-dot fb-learn-${dotState}`
+    const path = document.createElement('span')
+    path.className = 'fb-lp-path'
+    const cut = item.module.lastIndexOf('/')
+    if (cut > 0) {
+      const lead = document.createElement('span')
+      lead.className = 'fb-lp-path-lead'
+      lead.textContent = item.module.slice(0, cut + 1)
+      path.append(lead, item.module.slice(cut + 1))
+    } else {
+      path.textContent = item.module
+    }
+    path.title = item.module
+    const state = document.createElement('span')
+    state.className = 'fb-dr-state'
+    const count = driftCount(files, item.module)
+    state.textContent = item.state === 'reading' && count !== null && count > 0 ? `reading ${String(count)} changed file${count === 1 ? '' : 's'} now` : item.label
+    const when = document.createElement('span')
+    when.className = 'fb-lp-when'
+    if (item.state === 'updated' && item.notedAt !== undefined) {
+      when.textContent = formatRelative(item.notedAt)
+      when.title = formatTime(item.notedAt)
+    }
+    row.append(dot, path, state, when)
+    return row
+  }
+
+  /** "Update drifted modules automatically" — the project's own setting, here where drift shows. */
+  #buildDriftAuto(root: string): HTMLElement {
+    const wrap = document.createElement('div')
+    wrap.className = 'fb-dr-auto'
+    const top = document.createElement('div')
+    top.className = 'fb-dr-auto-line'
+    const on = this.#learnAuto !== false
+    const sw = document.createElement('button')
+    sw.type = 'button'
+    sw.className = 'fb-dr-switch'
+    sw.setAttribute('role', 'switch')
+    sw.setAttribute('aria-checked', String(on))
+    sw.setAttribute('aria-label', 'Update drifted modules automatically')
+    sw.disabled = this.#learnAuto === null
+    sw.addEventListener('click', (event) => {
+      event.stopPropagation()
+      void this.#writeLearnAuto(root, !on)
+    })
+    const label = document.createElement('span')
+    label.className = 'fb-dr-auto-label'
+    label.textContent = 'Update drifted modules automatically'
+    const state = document.createElement('span')
+    state.className = 'fb-dr-auto-state'
+    state.textContent = this.#learnAuto === null ? '' : on ? 'on for this project' : 'off for this project'
+    top.append(sw, label, state)
+    const help = document.createElement('div')
+    help.className = 'fb-dr-auto-help'
+    help.textContent = 'When code a module was learned from changes enough, Flow reads it again on its own, one at a time, in the background.'
+    wrap.append(top, help)
+    return wrap
+  }
+
+  /** Write the project's automatic re-learn setting through the Flow settings writer, then re-read it. */
+  async #writeLearnAuto(root: string, next: boolean): Promise<void> {
+    this.#learnAuto = next
+    this.#renderLearnModuleRowsOrPanel()
+    try {
+      await window.flow.flow.setConfig({ rootId: root, updates: { learn_auto: next ? 'true' : 'false' } })
+    } catch (error) {
+      console.warn('flow: automatic re-learn update failed', error)
+    }
+    // Re-read so a failed write puts the switch back.
+    if (root === this.#activeRoot) await this.#loadLearnIgnore(root)
+  }
+
+  /** Open the Learning panel on the Drifted group, open and scrolled to (the Knowledge pill's drift note). */
+  #openLearnPanelAtDrift(): void {
+    const slug = this.#learnHereSlug()
+    this.#learnPanelTab = 'modules'
+    this.#learnGroupOpen.set(`${slug}|drift`, true)
+    if (this.#learnOpenProjects !== null) this.#learnOpenProjects.add(slug)
+    if (this.#activeRoot !== null) this.#driftFiles.delete(this.#activeRoot)
+    if (this.#learnPanelOpen) this.#renderLearnPanel()
+    else this.openLearnPanel()
+    this.#learnPanel.querySelector<HTMLElement>('.fb-lp-project.open .fb-lp-group[data-lp-group="drift"]')?.scrollIntoView({ block: 'start' })
+  }
+
 
   /** "src/app (14)" — and Learn 14, into that folder's project. */
   #buildLearnFolderRow(input: { slug: string; root: string | null }, folder: ModuleFolder): HTMLElement {
@@ -7773,7 +8796,7 @@ export class BlueprintBoard {
   }
 
   /** One module: its state as a dot, its path, when it was learned, and its action on hover. */
-  #buildLearnModuleRow(input: { root: string | null; here: boolean }, row: LearnModuleRow): HTMLElement {
+  #buildLearnModuleRow(input: { root: string | null; here: boolean; slug?: string }, row: LearnModuleRow): HTMLElement {
     const rowEl = document.createElement('div')
     rowEl.className = 'fb-lp-row fb-learn-row'
     if (input.here) {
@@ -7811,7 +8834,8 @@ export class BlueprintBoard {
       if (row.status === 'stale') label = LEARN_ACTION_LABEL.relearn
       else if (row.status === 'learned') label = 'Re-learn'
       const action = this.#lpAction(label, row.status === 'none' ? 'Learn this module — read its code and write the understanding doc' : 'Read this module again and update what was learned', () => {
-        void window.flow.learn.learnModule({ rootId: root, modulePath: row.module })
+        if (row.status === 'stale' && input.slug !== undefined) this.#lpQueue(input.slug, root, [row.module], false, true)
+        else void window.flow.learn.learnModule({ rootId: root, modulePath: row.module })
       })
       action.classList.add(row.status === 'stale' ? 'fb-learn-update-btn' : 'fb-learn-learn-btn')
       rowEl.appendChild(action)
@@ -7831,14 +8855,22 @@ export class BlueprintBoard {
    * Queue learning for some of a project's modules — a big batch asks first,
    * on that project's own row (the old Learn all's counted confirm, per project).
    */
-  #lpQueue(slug: string, root: string, modules: readonly string[], confirmed = false): void {
+  #lpQueue(slug: string, root: string, modules: readonly string[], confirmed = false, drift = false): void {
     if (modules.length === 0) return
     if (!confirmed && modules.length >= LEARN_ALL_CONFIRM_THRESHOLD) {
-      this.#lpConfirm = { slug, root, modules: [...modules] }
+      this.#lpConfirm = { slug, root, modules: [...modules], drift }
       this.#renderLearnPanel()
       return
     }
     this.#lpConfirm = null
+    if (drift) {
+      // One batch per project: more drifted modules join the running one.
+      const current = this.#driftBatches.get(root)
+      const merged = current === undefined ? [...modules] : [...current.modules, ...modules.filter((module) => !current.modules.includes(module))]
+      this.#driftBatches.set(root, { root, modules: merged, startedAt: current?.startedAt ?? Date.now() })
+      this.#driftBatchUnconfirmed.add(root)
+      for (const module of modules) this.#driftSelected.delete(module)
+    }
     for (const modulePath of modules) void window.flow.learn.learnModule({ rootId: root, modulePath })
     this.#notify('Learning queued', `${String(modules.length)} module${modules.length === 1 ? '' : 's'} queued in ${this.#lpProjectName(slug)}`)
     this.#refreshLearnLive()
@@ -7945,6 +8977,7 @@ export class BlueprintBoard {
         root: this.#activeRoot,
         here: true,
         progress: { ...p, rows: filteredRows },
+        allRows: p.rows,
       }),
     )
     host.replaceChildren(...children)
@@ -7987,11 +9020,15 @@ export class BlueprintBoard {
   #refreshLearnLive(): void {
     const ask = window.flow.learn?.status
     if (typeof ask !== 'function') return
+    // A batch queued before this question is answered by it (the queue's
+    // invokes reach main first, in order).
+    const confirming = [...this.#driftBatchUnconfirmed]
     void ask()
       .then(async (live) => {
         const wasRunning = this.#learnLive.running
         const before = this.#learnLive
         this.#learnLive = live
+        for (const root of confirming) this.#driftBatchUnconfirmed.delete(root)
         // ANOTHER PROJECT'S PASS ENDED: its row's progress came from a snapshot
         // read before it, so read it again (the read re-renders when it lands).
         const passRoot = before.activeRoot ?? null
@@ -8019,6 +9056,8 @@ export class BlueprintBoard {
         // The controls DO change with the live state (Learning… vs Learn all,
         // Pause, Stop), so a transition still earns one full render.
         if (wasRunning !== live.running) this.#renderLearnPanel()
+        // A drifted batch now knows whether the learner has it.
+        else if (confirming.length > 0) this.#renderLearnModuleRowsOrPanel()
       })
       .catch(() => undefined)
   }
@@ -10078,6 +11117,9 @@ export class BlueprintBoard {
     this.#boardFingerprint = null
     this.#wsMounted = null
     this.#headStrip?.replaceChildren()
+    // The trail goes with the stage; its arrows go home to the header.
+    this.#float = null
+    this.#homeNav()
     // The TERRITORY is DOM the stage is about to drop, and so is its lens. The
     // handles go with it, or the resize pass re-renders against a sheet that is
     // no longer in the document — the same class of bug the fingerprint reset
@@ -10090,11 +11132,6 @@ export class BlueprintBoard {
       cancelAnimationFrame(this.#terrResizeFrame)
       this.#terrResizeFrame = null
     }
-    // The query panel is DOM inside that same wrap, so it goes with it. A
-    // stale handle here would leave the board applying a highlight to nodes
-    // that no longer exist.
-    this.#brainQuery = null
-    this.#brainQuerySeq += 1
     // THE TRAIL BELONGS TO THE LEVEL, and the level is what is being replaced.
     // Cleared HERE rather than in each renderer: this is the one gate every
     // surface passes through on its way onto the stage, so a trail cannot
@@ -10757,10 +11794,10 @@ export class BlueprintBoard {
     const nearIsHere = nearProject === null || here === null || nearProject === here
     if (press.kind === 'file' && nearIsHere) {
       const name = press.symbol === null ? storyFileName(press.file) : `${press.symbol} in ${storyFileName(press.file)}`
-      return { title: `Read ${name} as a story`, run: () => this.#followPortStory({ file: press.file }, press.symbol) }
+      return { title: `Follow ${name}'s code`, run: () => this.#followPortStory({ file: press.file }, press.symbol) }
     }
     if (press.kind === 'part' && nearIsHere) {
-      return { title: `Read ${press.partName} as a story`, run: () => this.#followPortStory({ partRef: press.part, label: press.partName }, null) }
+      return { title: `Follow ${press.partName}'s code`, run: () => this.#followPortStory({ partRef: press.part, label: press.partName }, null) }
     }
     const far = placed.port.far
     const featureId = far.featureId ?? null
@@ -11644,6 +12681,116 @@ export class BlueprintBoard {
   /** Enable/disable the header arrows for where we are — in DEPTH on the
    *  feature map, in tab history everywhere else. */
   #refreshNav(): void {
+    this.#syncHeaderIsland()
+    this.#homeNav()
+    this.#refreshHeaderNav()
+  }
+
+  /**
+   * THE ISLAND STANDARD ON EVERY SCREEN (user, 2026-11-15). A territory and a
+   * deep level mount their own islands; every other screen — a story, a plan
+   * review, the corpus browser, a loading or empty message — gets ONE top
+   * island built by the same `#buildTopIsland`, holding the header's own
+   * controls (moved, never copied, so every rule that fills them still
+   * holds). The header row itself is never drawn.
+   */
+  #syncHeaderIsland(): void {
+    // ONE PASS PER FRAME, after the screen settled. Every screen change passes
+    // through here mid-swap (the stage is empty for a moment before a map
+    // mounts its own islands); deciding then built and dropped an island on
+    // every render, and the island's room resized the stage, which re-rendered
+    // the map — measured at 72 rebuilds in 3 s at rest.
+    if (this.#islandFrame !== null) return
+    this.#islandFrame = requestAnimationFrame(() => {
+      this.#islandFrame = null
+      if (this.#islandSyncing) return
+      this.#islandSyncing = true
+      try {
+        this.#syncHeaderIslandNow()
+        this.#homeNav()
+      } finally {
+        this.#islandSyncing = false
+      }
+    })
+  }
+
+  #islandSyncing = false
+  #islandFrame: number | null = null
+
+  #syncHeaderIslandNow(): void {
+    const main = this.#stage?.parentElement ?? null
+    if (main === null) return
+    // MOUNTED, not on screen: a board built before it joins the document must
+    // not build a second island on every pass.
+    const floatMounted = this.#float !== null && this.#stage.contains(this.#float.pill)
+    const deepMounted = this.#deepChrome !== null && this.#deepChrome.parentElement === main
+    if (floatMounted || deepMounted) {
+      this.#removeHeaderIsland()
+      return
+    }
+    if (this.#headerIsland !== null && this.#headerIsland.island.parentElement === main) {
+      // Still worth showing? A pane that emptied (a load starting over a
+      // screen) takes its island down rather than leave an empty bar.
+      if (islandHasContent(this.#headerIsland.island)) return
+    }
+    this.#removeHeaderIsland()
+    const header = this.#headerNav?.parentElement ?? null
+    if (header === null) return
+    // NOTHING TO SAY, NO ISLAND (user, 2026-11-15: an empty bar with two
+    // arrows and one icon while the Workspace loads). The island exists to
+    // say where you are and what you can do; with no place named and no
+    // labelled action it is chrome around nothing. A screen that fills in
+    // later passes through here again on its own render.
+    if (!islandHasContent(header)) return
+    const order = [...header.children]
+    const where = document.createElement('span')
+    where.className = 'fb-head-island-where'
+    const trailSlot = this.#briefTrailSlot
+    const strip = this.#headStrip
+    if (trailSlot !== null) where.appendChild(trailSlot)
+    if (strip !== null) where.appendChild(strip)
+    const actions = order.filter(
+      (el): el is HTMLElement =>
+        el instanceof HTMLElement && el !== this.#headerNav && el !== trailSlot && el !== strip && !el.classList.contains('fb-header-spacer'),
+    )
+    const { tl } = this.#buildTopIsland({ where: '', crumbs: where, actions, ask: this.#activeRoot !== null })
+    tl.classList.add('fb-head-island')
+    tl.addEventListener('click', (event) => event.stopPropagation())
+    main.classList.add('fb-islanded')
+    main.appendChild(tl)
+    this.#headerIsland = { island: tl, header, order }
+  }
+
+  /** Put the header's controls back where they live, and take the island down. */
+  #removeHeaderIsland(): void {
+    const held = this.#headerIsland
+    if (held === null) return
+    this.#headerIsland = null
+    held.header.append(...held.order)
+    held.island.remove()
+    this.#stage.parentElement?.classList.remove('fb-islanded')
+  }
+
+  /** The arrows go back to the header whenever the trail that borrowed them is gone. */
+  #homeNav(): void {
+    // Every screen change passes here, so the standard's top island is kept here too.
+    if (!this.#islandSyncing) this.#syncHeaderIsland()
+    const home = this.#headerNav
+    const back = this.#backButton
+    const forward = this.#forwardButton
+    if (home === null || back === undefined || forward === undefined) return
+    // ON A SCREEN WEARING THE HEADER'S ISLAND the arrows live in that island.
+    const held = this.#headerIsland
+    if (held !== null && held.island.parentElement !== null) {
+      const nav = held.island.querySelector('.fb-float-nav')
+      if (nav !== null && back.parentElement !== nav) nav.append(back, forward)
+      return
+    }
+    if (back.parentElement === home || this.#floatLive() || this.#deepLive()) return
+    home.append(back, forward)
+  }
+
+  #refreshHeaderNav(): void {
     const back = this.#backButton
     const forward = this.#forwardButton
     const story = this.#storyline
@@ -11853,16 +13000,6 @@ export class BlueprintBoard {
     const sheet = document.createElement('div')
     sheet.className = 'fb-terr-sheet'
 
-    // A click on the sheet itself closes an open query and restores the map —
-    // including a mark left behind by a chosen result. Every cell, control and
-    // piece of chrome stops propagation, so only the BACKGROUND reaches this —
-    // no document-level listener to leak.
-    sheet.addEventListener('click', () => {
-      this.#brainFocusNodeId = null
-      this.#applyBrainHighlight(null)
-      this.#closeBrainQuery()
-    })
-
     // COUNTRIES FIRST, then what stands on them: a group is GROUND, and ground
     // that painted over its provinces would take their clicks with it.
     const groups = new Map<string, HTMLElement>()
@@ -11902,8 +13039,13 @@ export class BlueprintBoard {
     const limits = document.createElement('details')
     limits.className = 'fb-terr-limits'
 
-    this.#headStrip?.replaceChildren(this.#buildTerritoryTitle(view))
-    wrap.append(sheet, this.#buildTerritoryFoot(view, limits))
+    // NO HEADER ROWS ON A TERRITORY (mockup J3, user pick 2026-11-15): the
+    // board header is not drawn while this sheet is on stage, and the chrome
+    // floats over the map — Ask and the trail top-left, Layers bottom-left,
+    // Knowledge bottom-right, the foot's quiet line between them.
+    this.#headStrip?.replaceChildren()
+    const foot = this.#buildTerritoryFoot(view, limits)
+    wrap.append(sheet)
     // THE CLASSIFY OFFER, above the cells, in the room `topBand` left for it.
     this.#roleOfferEl = null
     if (this.#roleOfferShown()) {
@@ -11923,17 +13065,27 @@ export class BlueprintBoard {
       `${view.title.name}, ${view.cells.length} item${view.cells.length === 1 ? '' : 's'}`,
     )
     this.#territory = { wrap, sheet, view, nodes, cells, groups, limits }
+    const levelFraction = this.#learnFraction(this.#featureStack.at(-1)?.id ?? null)
+    this.#mountFloatChrome(wrap, {
+      where: view.title.name,
+      kicker: view.title.kicker,
+      crumbs: this.#buildTerritoryCrumbs(view),
+      actions: this.#territoryActions(view),
+      foot,
+      understood: levelFraction === null ? null : { done: levelFraction.done, total: levelFraction.total },
+      ask: true,
+    })
     this.#paintLimitations()
     // A STANDING OVERLAY SURVIVES THE SWAP. `#decoration` is the board's, not
     // the sheet's — a neighbourhood lighting a cell must still light it after a
     // dive, a pop or a resize rebuilds every element it was hanging off.
-    // Before the brain mark below, so an explicit search result (the more
-    // recent gesture) wins the sheet.
     this.#applyTerritoryOverlay(this.#decoration)
-    // A search result's mark has to SURVIVE the re-render its own navigation
-    // caused — otherwise the reader is flown to a level and left to guess which
-    // cell they were sent to.
-    this.#applyBrainFocus()
+    // AN OPEN QUESTION SURVIVES IT TOO: the Ask panel lives on the board, and
+    // its outlines, numbers and live states are re-drawn on the new cells.
+    this.#paintAsk(true)
+    // THE QUESTIONS YOU ASKED, on the new cells — the list is read once per load.
+    this.#paintQuestionMarkers()
+    void this.#loadAskSaved()
     // …AND SO HAS A RUNNING PASS. Every re-render lands here, so the mark is
     // re-derived from `#featureViewRunning` on the new sheet rather than being
     // carried across (it cannot be — the old sheet's DOM is gone). This is what
@@ -12228,6 +13380,39 @@ export class BlueprintBoard {
   }
 
   /**
+   * THE PINNED CARD'S OPEN ON THE WORKSPACE SHEET (user, 2026-11-15): the card
+   * showed the feature's diagram, so Open opens that diagram full size — in
+   * the root's own project in place, in a sibling open in Flow once it is the
+   * active project. Never the blocks one level down.
+   */
+  async #wsCellOpenLevel(slug: string, featureId: string): Promise<void> {
+    const project = this.#wsGraph?.projects.find((entry) => entry.slug === slug)
+    if (project === undefined || project.graph === null || project.local === null) return
+    const node = levelNodes(project.graph).get(featureId)
+    if (node === undefined) return
+    this.#wsSelected = null
+    if (project.current) {
+      this.#wsLevel = 'project'
+      this.#wsRemote = null
+      this.#setDepthNav({ stack: [], forward: [] })
+      void this.#openNodeLevel({ id: node.id, kind: 'feature', name: node.name }, { focus: node, returnStack: [] })
+      return
+    }
+    try {
+      const roots = await window.flow.project.list()
+      if (roots.some((root) => root.rootPath === project.local)) {
+        this.#wsPendingFeature = { root: project.local, id: featureId, action: 'level' }
+        this.#wsPendingRoot = project.local
+        await window.flow.project.setActive({ rootPath: project.local })
+        return
+      }
+    } catch (error) {
+      console.warn('flow: could not switch to the sibling project', error)
+    }
+    await this.#zoomIntoFeature(slug, featureId)
+  }
+
+  /**
    * Back from a feature entered from the Workspace sheet → the Workspace.
    * True when it went there (the caller does nothing else).
    */
@@ -12392,86 +13577,611 @@ export class BlueprintBoard {
   }
 
   /**
-   * THE CONNECTIONS CONTROL — one pill that is whatever the Workspace needs
-   * now (connectionsControlView): Learn connections, the run's progress, the
-   * show/hide toggle, and an attached Update while pairs changed since they
-   * were checked. Repainted in place while a run goes.
+   * THE HEADER'S TILE (mockup G + D, user pick 2026-11-15). Connections and
+   * Learn are equal 32px squares — one 1px border, one 8px radius, one 16px
+   * line icon — with their names in the tooltip and the accessible name. A
+   * count rides as a small badge; a toggle that is on (or a panel that is
+   * open) keeps `aria-pressed`, which the tile draws raised, so the state is
+   * visible on every tile.
    */
-  #buildConnectionsControl(): HTMLElement {
+  #headerTile(input: {
+    icon: string
+    name: string
+    title: string
+    badge?: string | null
+    disabled?: boolean
+    busy?: boolean
+    pressed?: boolean | null
+    press: () => void
+  }): HTMLButtonElement {
+    const tile = document.createElement('button')
+    tile.type = 'button'
+    tile.className = 'fb-head-tile'
+    const icon = document.createElement('fl-icon')
+    icon.setAttribute('name', input.icon)
+    icon.setAttribute('size', '16')
+    if (input.busy === true) icon.classList.add('fb-head-tile-spin')
+    tile.appendChild(icon)
+    if (input.badge !== undefined && input.badge !== null && input.badge !== '') {
+      const badge = document.createElement('span')
+      badge.className = 'fb-head-tile-badge'
+      badge.textContent = input.badge
+      badge.setAttribute('aria-hidden', 'true')
+      tile.appendChild(badge)
+    }
+    tile.title = input.title
+    tile.setAttribute('aria-label', input.badge !== undefined && input.badge !== null && input.badge !== '' ? `${input.name}, ${input.badge}` : input.name)
+    if (input.disabled === true) {
+      tile.disabled = true
+      tile.setAttribute('aria-disabled', 'true')
+    }
+    if (input.busy === true) tile.setAttribute('aria-busy', 'true')
+    if (input.pressed !== undefined && input.pressed !== null) tile.setAttribute('aria-pressed', String(input.pressed))
+    tile.addEventListener('click', (event) => {
+      event.stopPropagation()
+      if (input.disabled === true) return
+      input.press()
+    })
+    return tile
+  }
+
+  /** A connections run moved: the pill's line and the panel's Connections section follow it. */
+  #paintLearnButton(): void {
+    this.#paintKnowledgePill()
+    this.#paintLearnConnectionsSection()
+  }
+
+  /* ── THE FLOATING CHROME (mockup J3, user pick 2026-11-15) ────────────────
+   *
+   * Four jobs, four places, over the map instead of three rows above it:
+   *   · WHERE AM I + ASK — top-left: the Ask field, the trail under it
+   *     (‹ › history, crumbs, the level's own quiet actions);
+   *   · WHAT THE MAP SHOWS — bottom-left: the Layers button, one at a time;
+   *   · IS THE KNOWLEDGE FRESH — bottom-right: the Knowledge pill;
+   *   · the foot's quiet line between the two bottom pills.
+   * The top-right stays empty: the app's tab icons sit above it. Every
+   * decision lives in `map-layers-model` and `knowledge-pill-model`.
+   */
+
+  /** The top island — the map's and a deep level's alike: the trail, then the Ask field on the right. */
+  #buildTopIsland(input: {
+    where: string
+    kicker?: string
+    lead?: string | null
+    crumbs: HTMLElement
+    actions: HTMLElement[]
+    ask: boolean
+  }): { tl: HTMLElement; switchHost: HTMLElement | null } {
+    const tl = document.createElement('div')
+    tl.className = 'fb-float fb-island fb-float-tl'
+    const askSlot = document.createElement('div')
+    askSlot.className = 'fb-float-ask'
+    if (input.ask) {
+      this.#mountAskField(askSlot)
+    }
+
+    const trail = document.createElement('nav')
+    trail.className = 'fb-float-trail'
+    trail.setAttribute('aria-label', 'Where you are')
+    trail.dataset['where'] = input.where
+    if (input.kicker !== undefined && input.kicker.length > 0) {
+      trail.dataset['kicker'] = input.kicker
+      trail.title = `${input.where} · ${input.kicker}`
+    }
+    const nav = document.createElement('span')
+    nav.className = 'fb-nav fb-float-nav'
+    // THE SAME TWO ARROWS, borrowed from the header (which is not drawn here).
+    if (this.#backButton !== undefined && this.#forwardButton !== undefined) nav.append(this.#backButton, this.#forwardButton)
+    trail.appendChild(nav)
+    if (input.lead !== undefined && input.lead !== null && input.lead.length > 0) {
+      const lead = document.createElement('span')
+      lead.className = 'fb-float-lead'
+      lead.textContent = input.lead
+      const sep = document.createElement('span')
+      sep.className = 'fb-terr-crumb-sep'
+      sep.textContent = '/'
+      trail.append(lead, sep)
+    }
+    trail.appendChild(input.crumbs)
+    let switchHost: HTMLElement | null = null
+    if (input.actions.length > 0) {
+      const actions = document.createElement('span')
+      actions.className = 'fb-float-actions'
+      actions.append(...input.actions)
+      switchHost = actions
+      trail.appendChild(actions)
+    }
+    tl.appendChild(trail)
+    if (askSlot.childElementCount > 0) tl.appendChild(askSlot)
+
+    return { tl, switchHost }
+  }
+
+  #mountFloatChrome(
+    wrap: HTMLElement,
+    input: {
+      /** The level's own name — the trail says it, and a test can read it. */
+      where: string
+      /** What the level holds ("10 parts · 3 domains") — the trail's tooltip. */
+      kicker?: string
+      lead?: string | null
+      crumbs: HTMLElement
+      actions: HTMLElement[]
+      foot: HTMLElement | null
+      understood: { done: number; total: number } | null
+      ask: boolean
+    },
+  ): void {
+    this.#floatUnderstood = input.understood
+    // One set of islands at a time: the map's replace a deep level's.
+    this.#removeDeepChrome()
+    this.#removeHeaderIsland()
+    this.#ask?.setFieldScope(null)
+    // TWO FLOATING ISLANDS (user pick "B", 2026-11-15): one glass bar at the
+    // top (the trail, then the Ask field on the right) and one at the bottom
+    // (Layers | the hint | Knowledge) — each ONE object, its pieces split by
+    // thin dividers rather than boxed on their own.
+    const { tl, switchHost } = this.#buildTopIsland(input)
+
+    const bottom = document.createElement('div')
+    bottom.className = 'fb-float fb-island fb-float-bottom'
+    const divider = (): HTMLElement => {
+      const rule = document.createElement('span')
+      rule.className = 'fb-island-divider'
+      rule.setAttribute('aria-hidden', 'true')
+      return rule
+    }
+    const bl = document.createElement('div')
+    bl.className = 'fb-float-bl'
+    const br = document.createElement('div')
+    br.className = 'fb-float-br'
+    const pill = document.createElement('button')
+    pill.type = 'button'
+    pill.className = 'fb-knowledge-pill'
+    pill.addEventListener('click', (event) => {
+      event.stopPropagation()
+      this.#pressKnowledgePill(pill, event)
+    })
+    br.appendChild(pill)
+    const hint = document.createElement('div')
+    hint.className = 'fb-island-hint'
+    if (input.foot !== null) {
+      input.foot.classList.add('fb-float-foot')
+      hint.appendChild(input.foot)
+    }
+    bottom.append(bl, divider(), hint, divider(), br)
+    wrap.append(tl, bottom)
+    // Presses on the chrome are the chrome's: never the sheet's deselect.
+    for (const el of [tl, bottom]) el.addEventListener('click', (event) => event.stopPropagation())
+    this.#float = { layers: bl, pill, switchHost }
+    this.#paintLayers()
+    this.#paintKnowledgePill()
+    this.#refreshNav()
+  }
+
+  /** The chrome is on screen — nothing below paints for a view nobody sees. */
+  #floatLive(): boolean {
+    return this.#float !== null && this.#float.pill.isConnected
+  }
+
+  /** Where Connections exist as a thing on this view: the Workspace sheet, or a project's top level in a Workspace. */
+  #connectionsHere(): boolean {
+    if (!this.#wsKnown() || this.#brief !== null || this.#storyline !== null) return false
+    if (this.#wsRemote !== null) return this.#wsRemote.stack.length === 0
+    if (this.#featureStack.length > 0) return false
+    return this.#wsLevel === 'workspace' || this.#wsCurrentProject() !== null
+  }
+
+  /** The Connections layer's input — null where there is nothing to draw (none here, or none learned yet). */
+  #connectionsContext(): { count: number | null; unreadableReason?: string } | null {
+    if (!this.#connectionsHere()) return null
+    const graph = this.#wsGraph
+    if (graph === null) return null
+    if (graph.links === null) return { count: null, unreadableReason: WS_LINKS_UNREADABLE }
+    let count = graph.links.length
+    if (this.#wsRemote !== null) {
+      const slug = this.#wsRemote.slug
+      count = graph.projects.find((project) => project.slug === slug)?.connections ?? 0
+    } else if (this.#wsLevel !== 'workspace') {
+      count = this.#wsCurrentProject()?.connections ?? 0
+    }
+    return count > 0 ? { count } : null
+  }
+
+  /** The changeset, on the project's own map only — the one sheet its highlight lands on. */
+  #changesContext(): { files: number; dismissed: boolean } | null {
+    if (this.#territory === null) return null
+    const state = resolveChangesetMode({
+      changedByCard: this.#changedByCard,
+      stagedByCard: this.#computeStagedByCard(),
+      otherDecorationActive: false,
+      dismissedFingerprint: this.#changesetDismissed,
+    })
+    return state.totalFiles === 0 ? null : { files: state.totalFiles, dismissed: !state.chipVisible }
+  }
+
+  #mapLayersView(): MapLayersView {
+    return mapLayersView({
+      connections: this.#connectionsContext(),
+      understood: understoodPercent(this.#floatUnderstood),
+      changes: this.#changesContext(),
+      chosen: this.#mapLayerChosen,
+    })
+  }
+
+  /** What the map is coloured by now — ONE reading, which every layer consults. */
+  #mapLayer(): MapLayer {
+    return this.#mapLayersView().current
+  }
+
+  /** Pick a layer from the menu: remember it, dismiss or restore the changeset, repaint. */
+  #chooseLayer(picked: MapLayer): void {
+    const before = this.#mapLayersView()
+    const choice = chooseLayer(picked, before)
+    if (choice.dismissChanges) {
+      this.#changesetDismissed = resolveChangesetMode({
+        changedByCard: this.#changedByCard,
+        stagedByCard: this.#computeStagedByCard(),
+        otherDecorationActive: false,
+        dismissedFingerprint: null,
+      }).fingerprint
+    }
+    if (choice.restoreChanges) this.#changesetDismissed = null
+    if (choice.store !== null) {
+      this.#mapLayerChosen = choice.store
+      writePref(MAP_LAYER_PREF, choice.store)
+    }
+    this.#closeLayersMenu()
+    if (before.current === 'learning' && this.#mapLayer() !== 'learning') {
+      // The province filter does not outlive the lens it filtered.
+      this.#lensFeatureFilter = null
+      if (this.#learnPanelOpen) this.#renderLearnPanel()
+    }
+    this.#applyChangesetMode()
+    // Connections are drawn by the sheet's build; the lens and the changeset
+    // repaint in place — one render covers all three.
+    this.#renderFeatureBoard()
+  }
+
+  #layersOutside: ((event: Event) => void) | null = null
+
+  #openLayersMenu(): void {
+    this.#layersMenuOpen = true
+    // PAY ONLY WHILE OPEN: the outside-press and Escape listeners exist only
+    // while the menu is on screen.
+    if (this.#layersOutside === null) {
+      this.#layersOutside = (event: Event) => {
+        if (event instanceof KeyboardEvent) {
+          if (event.key !== 'Escape') return
+          event.stopPropagation()
+          this.#closeLayersMenu()
+          return
+        }
+        const host = this.#float?.layers
+        if (host !== undefined && event.target instanceof Node && host.contains(event.target)) return
+        this.#closeLayersMenu()
+      }
+      document.addEventListener('pointerdown', this.#layersOutside, true)
+      document.addEventListener('keydown', this.#layersOutside, true)
+    }
+    this.#paintLayers()
+    this.#float?.layers.querySelector<HTMLElement>('[role="menuitemradio"][aria-checked="true"]')?.focus({ preventScroll: true })
+  }
+
+  #closeLayersMenu(): void {
+    this.#layersMenuOpen = false
+    if (this.#layersOutside !== null) {
+      document.removeEventListener('pointerdown', this.#layersOutside, true)
+      document.removeEventListener('keydown', this.#layersOutside, true)
+      this.#layersOutside = null
+    }
+    this.#paintLayers()
+  }
+
+  /** The Layers button, its menu while open, and the learning key while Learning is the layer. */
+  #paintLayers(): void {
+    if (!this.#floatLive()) return
+    const host = this.#float?.layers
+    if (host === undefined) return
+    const view = this.#mapLayersView()
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'fb-layers-btn'
+    button.dataset['layer'] = view.current
+    button.setAttribute('aria-haspopup', 'menu')
+    button.setAttribute('aria-expanded', String(this.#layersMenuOpen))
+    button.title = 'Choose what the map shows'
+    const icon = document.createElement('fl-icon')
+    icon.setAttribute('name', 'layers')
+    icon.setAttribute('size', '14')
+    const label = document.createElement('span')
+    label.className = 'fb-layers-label'
+    label.textContent = view.buttonLabel
+    const caret = document.createElement('span')
+    caret.className = 'fb-layers-caret'
+    caret.textContent = '▾'
+    caret.setAttribute('aria-hidden', 'true')
+    button.append(icon, label, caret)
+    button.setAttribute('aria-label', `What the map shows: ${view.current === 'map' ? 'just the map' : view.buttonLabel}`)
+    button.addEventListener('click', () => {
+      if (this.#layersMenuOpen) this.#closeLayersMenu()
+      else this.#openLayersMenu()
+    })
+    const parts: HTMLElement[] = []
+    if (this.#layersMenuOpen) {
+      const menu = document.createElement('div')
+      menu.className = 'fb-layers-menu'
+      menu.setAttribute('role', 'menu')
+      menu.setAttribute('aria-label', 'What the map shows')
+      const head = document.createElement('div')
+      head.className = 'fb-layers-head'
+      head.textContent = 'Show on the map'
+      menu.appendChild(head)
+      for (const option of view.options) {
+        const item = document.createElement('button')
+        item.type = 'button'
+        item.className = 'fb-layers-item'
+        item.setAttribute('role', 'menuitemradio')
+        item.setAttribute('aria-checked', String(option.id === view.current))
+        item.dataset['layer'] = option.id
+        item.title = option.title
+        item.disabled = option.disabled
+        const mark = document.createElement('span')
+        mark.className = 'fb-layers-mark'
+        mark.setAttribute('aria-hidden', 'true')
+        const name = document.createElement('span')
+        name.className = 'fb-layers-name'
+        name.textContent = option.label
+        item.append(mark, name)
+        if (option.figure !== null) {
+          const figure = document.createElement('span')
+          figure.className = 'fb-layers-figure'
+          figure.textContent = option.figure
+          item.appendChild(figure)
+        }
+        item.addEventListener('click', () => this.#chooseLayer(option.id))
+        menu.appendChild(item)
+      }
+      if (view.showKey) menu.appendChild(this.#buildLensKey())
+      parts.push(menu)
+    }
+    parts.push(button)
+    // THE KEY RIDES WITH THE LAYER: while Learning is chosen, what the colours
+    // mean sits beside the button that chose them.
+    if (view.showKey && !this.#layersMenuOpen) {
+      const key = document.createElement('div')
+      key.className = 'fb-layers-key'
+      key.appendChild(this.#buildLensKey())
+      parts.push(key)
+    }
+    // UNDERSTAND IT AGAIN, WITH THE LEARNING LAYER ONLY (user, 2026-11-15):
+    // after a divider, acting on the drilled feature. Another layer, gone.
+    if (view.current === 'learning') {
+      const understand = this.#layerUnderstandButton()
+      if (understand !== null) {
+        const rule = document.createElement('span')
+        rule.className = 'fb-island-divider'
+        rule.setAttribute('aria-hidden', 'true')
+        understand.classList.add('fb-layer-understand')
+        parts.push(rule, understand)
+      }
+    }
+    host.replaceChildren(...parts)
+  }
+
+  /** The drilled feature's Understand action, for the bottom island's Learning layer. Null where no feature is drilled. */
+  #layerUnderstandButton(): HTMLElement | null {
+    const focus = this.#featureStack.at(-1)
+    if (focus === undefined || focus.kind !== 'feature') return null
+    const known = this.#emptyLevelModules.get(focus.id)
+    if (known === undefined) void this.#resolveEmptyLevelModules(focus.id)
+    const learned = (this.#learnFraction(focus.id)?.done ?? 0) > 0
+    const control = this.#understandActionButton(learned ? 'curated' : 'derived', focus.id, focus.name, known ?? null, () => this.#render())
+    if (control === null) return null
+    for (const button of control instanceof HTMLButtonElement ? [control] : [...control.querySelectorAll('button')]) {
+      button.classList.add('fb-layer-understand-btn')
+    }
+    return control
+  }
+
+  /** The learning key, with the lens's own line explained. */
+  #buildLensKey(): HTMLElement {
+    const key = this.#buildLearnKey()
+    if (this.#territory !== null) {
+      const item = document.createElement('span')
+      item.className = 'fb-terr-key-item'
+      item.title = 'the line at a cell’s foot is the share of its ground that has been learned'
+      const line = document.createElement('i')
+      line.className = 'fb-terr-key-line'
+      item.append(line, document.createTextNode('ground learned'))
+      key.appendChild(item)
+    }
+    return key
+  }
+
+  /** The Workspace's connections, as the Knowledge pill and the panel's section read them. */
+  #connectionsState(): ConnectionsState | null {
+    if (!this.#connectionsHere()) return null
+    const graph = this.#wsGraph
+    if (graph === null) return null
+    const links = graph.links === null ? null : graph.links.length
     const view = connectionsControlView({
       run: this.#wsLearning,
-      learning: this.#wsGraph?.learning ?? null,
-      links: this.#wsGraph?.links === null || this.#wsGraph === null ? null : this.#wsGraph.links.length,
+      learning: graph.learning ?? null,
+      links,
       showing: this.#wsShowConnections,
       projectName: (slug) => this.#wsProjectName(slug),
     })
-    const group = document.createElement('span')
-    group.className = 'fb-ws-conn'
-    group.dataset['wsControl'] = view.mode
-    const icon: Record<typeof view.mode, string> = { learn: 'sparkles', learning: 'spinner', toggle: 'link', none: 'link', unreadable: 'warning' }
-    const main = this.#headerButton({
-      icon: icon[view.mode],
-      label: view.label,
-      title: view.title,
-      // The learning label is just a figure; its sentence is the accessible name.
-      ariaLabel: view.mode === 'learning' ? view.title : view.label,
-      disabled: view.disabled,
-      pressed: view.mode === 'toggle' ? view.pressed : null,
-      press: () => {
-        if (view.mode === 'learn') {
-          void this.#learnConnections()
-          return
+    const run = this.#wsLearning
+    switch (view.mode) {
+      case 'unreadable':
+        return { mode: 'unreadable' }
+      case 'learning':
+        return { mode: 'learning', percent: run === null || run.total === 0 ? null : learningPercent(run), title: view.title }
+      case 'learn':
+        return { mode: 'learn', title: view.title }
+      case 'none':
+        return { mode: 'none', title: view.title }
+      case 'toggle':
+        return {
+          mode: 'toggle',
+          count: links ?? 0,
+          pending: graph.learning?.pending ?? 0,
+          updateTitle: view.update?.title ?? null,
+          lastCheckedAt: graph.learning?.lastCheckedAt ?? null,
         }
-        if (view.mode !== 'toggle') return
-        this.#wsShowConnections = !this.#wsShowConnections
-        writeWorkspaceConnectionsPref(this.#wsShowConnections)
-        this.#renderFeatureBoard()
-      },
-    })
-    main.dataset['wsConnections'] = view.mode === 'toggle' ? 'toggle' : view.mode
-    main.setAttribute('aria-busy', String(view.mode === 'learning'))
-    group.appendChild(main)
-    if (view.update !== null) {
-      const update = this.#headerButton({
-        icon: 'refresh',
-        label: view.update.label,
-        title: view.update.title,
-        ariaLabel: 'Update connections',
-        press: () => void this.#learnConnections(),
-      })
-      update.dataset['wsUpdate'] = 'button'
-      group.appendChild(update)
     }
-    return group
   }
 
-  #paintLearnButton(): void {
-    const current = this.element.querySelector<HTMLElement>('.fb-ws-title [data-ws-control]')
-    if (current !== null) current.replaceWith(this.#buildConnectionsControl())
-    const line = this.element.querySelector<HTMLElement>('.fb-ws-title > .fb-ws-learning-line')
-    if (line !== null) this.#paintLearningLine(line)
+  #knowledgeView(): KnowledgePillView {
+    const project = this.#territory !== null
+    const snapshot = this.#snapshot
+    const entries = snapshot?.learning ?? []
+    const progress = project && snapshot !== null ? computeLearnProgress(snapshot.graph, entries, this.#learnIgnoreExtras) : null
+    const active = project ? entries.filter((entry) => entry.status === 'learning') : []
+    const queued = project ? entries.filter((entry) => entry.status === 'queued') : []
+    return knowledgePillView({
+      understood: this.#floatUnderstood,
+      modules: progress === null || progress.total === 0 ? null : { learned: progress.learned, total: progress.total, stale: progress.stale },
+      run: project ? { active: active.length, queued: queued.length, current: active[0]?.module ?? queued[0]?.module ?? null } : null,
+      connections: this.#connectionsState(),
+      outOfSync: project && snapshot !== null ? this.#syncStatus().outOfSync : false,
+      now: Date.now(),
+    })
   }
+
+  /** The Knowledge pill: a ring of the share understood, its figure, and the one line worth reading now. */
+  #paintKnowledgePill(): void {
+    if (!this.#floatLive()) return
+    const pill = this.#float?.pill
+    if (pill === undefined) return
+    const view = this.#knowledgeView()
+    const ring = document.createElement('span')
+    ring.className = 'fb-knowledge-ring'
+    ring.style.setProperty('--fb-ring', `${(view.ring * 100).toFixed(1)}%`)
+    ring.setAttribute('aria-hidden', 'true')
+    const text = document.createElement('span')
+    text.className = 'fb-knowledge-text'
+    const line1 = document.createElement('span')
+    line1.className = 'fb-knowledge-line1'
+    line1.textContent = view.line1
+    text.appendChild(line1)
+    if (view.line2 !== null) {
+      const line2 = document.createElement('span')
+      line2.className = 'fb-knowledge-line2'
+      line2.textContent = view.line2
+      text.appendChild(line2)
+    }
+    if (view.drift !== null) text.appendChild(this.#knowledgeDriftSegment(view.drift))
+    pill.dataset['driftOnly'] = String(view.driftOnly)
+    const parts: HTMLElement[] = [ring, text]
+    if (view.dot) {
+      const dot = document.createElement('span')
+      dot.className = 'fb-sync-dot fb-knowledge-dot'
+      dot.setAttribute('aria-hidden', 'true')
+      parts.push(dot)
+    }
+    pill.replaceChildren(...parts)
+    pill.classList.toggle('is-busy', view.busy)
+    pill.classList.toggle('is-warn', view.warn)
+    pill.dataset['knowledge'] = view.busy ? 'busy' : view.warn ? 'warn' : 'rest'
+    pill.title = view.title
+    pill.setAttribute('aria-label', [view.line1, view.line2, view.drift?.label ?? null].filter((part) => part !== null).join(', '))
+    pill.setAttribute('aria-pressed', String(this.#learnPanelOpen))
+  }
+
+  /** The pill's drift note: an amber dot and "31 drifted". Pressing it opens the Drifted group. */
+  #knowledgeDriftSegment(drift: KnowledgeDriftNote): HTMLElement {
+    const segment = document.createElement('span')
+    segment.className = 'fb-knowledge-drift'
+    segment.title = drift.title
+    const dot = document.createElement('span')
+    dot.className = 'fb-knowledge-drift-dot'
+    dot.setAttribute('aria-hidden', 'true')
+    segment.append(dot, drift.label)
+    return segment
+  }
+
+  /** A press on a Knowledge pill: its drift note (or the pill, when drift is all it says) opens the Drifted group. */
+  #pressKnowledgePill(pill: HTMLElement, event: Event): void {
+    const onDrift = event.target instanceof Element && event.target.closest('.fb-knowledge-drift') !== null
+    // The pill stays a toggle: an open panel closes, unless the drift note itself was pressed.
+    if (onDrift || (pill.dataset['driftOnly'] === 'true' && !this.#learnPanelOpen)) this.#openLearnPanelAtDrift()
+    else this.#toggleLearnPanel()
+  }
+
+  /** How many of the open project's modules drifted (0 when unknown). */
+  #projectDriftCount(): number {
+    const snapshot = this.#snapshot
+    if (snapshot === null) return 0
+    return computeLearnProgress(snapshot.graph, snapshot.learning ?? [], this.#learnIgnoreExtras).stale
+  }
+
+  /** The understood figure moved (a pass, a refresh): the pill, and the Layers menu if open. */
+  #paintFloatFigures(): void {
+    this.#paintKnowledgePill()
+    if (this.#layersMenuOpen) this.#paintLayers()
+  }
+
+  #lpConnectionsEl: HTMLElement | null = null
 
   /**
-   * A RUN YOU CAN SEE FROM ACROSS THE ROOM — a line along the strip's foot,
-   * filling as pairs are checked (marching while the projects are read).
+   * THE PANEL'S CONNECTIONS SECTION, at its foot — moved from the old
+   * Connections control's learn / learning / update modes, same action.
+   * Only where Connections exist (the Workspace sheet, a project's top level).
    */
-  #buildLearningLine(): HTMLElement {
-    const line = document.createElement('div')
-    line.className = 'fb-ws-learning-line'
-    line.setAttribute('aria-hidden', 'true')
-    line.appendChild(document.createElement('span'))
-    this.#paintLearningLine(line)
-    return line
+  #buildLearnConnectionsSection(): HTMLElement | null {
+    const view = this.#knowledgeView().connections
+    if (view === null) {
+      this.#lpConnectionsEl = null
+      return null
+    }
+    const section = document.createElement('div')
+    section.className = 'fb-lp-connections'
+    section.dataset['lpConnections'] = view.action ?? (view.busy ? 'learning' : 'status')
+    const title = document.createElement('div')
+    title.className = 'fb-lp-connections-title'
+    title.textContent = 'Connections'
+    section.appendChild(title)
+    if (view.action !== null) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'fb-learn-all-btn fb-lp-connections-btn'
+      button.textContent = view.label
+      button.title = view.title
+      button.dataset['learnConnections'] = view.action
+      button.addEventListener('click', () => void this.#learnConnections())
+      section.appendChild(button)
+    } else {
+      const line = document.createElement('div')
+      line.className = 'fb-lp-connections-line'
+      line.textContent = view.label
+      line.title = view.title
+      section.appendChild(line)
+      if (view.busy) {
+        const bar = document.createElement('div')
+        bar.className = 'fb-lp-connections-bar'
+        bar.classList.toggle('is-indeterminate', view.percent === null)
+        const fill = document.createElement('span')
+        if (view.percent !== null) fill.style.width = `${String(view.percent)}%`
+        bar.appendChild(fill)
+        section.appendChild(bar)
+      }
+    }
+    this.#lpConnectionsEl = section
+    return section
   }
 
-  #paintLearningLine(line: HTMLElement): void {
-    const run = this.#wsLearning
-    const running = run?.running === true
-    line.hidden = !running
-    line.classList.toggle('is-indeterminate', running && run.total === 0)
-    const fill = line.firstElementChild as HTMLElement | null
-    if (fill !== null) fill.style.width = running && run.total > 0 ? `${String(learningPercent(run))}%` : ''
+  #paintLearnConnectionsSection(): void {
+    if (!this.#learnPanelOpen) return
+    const current = this.#lpConnectionsEl
+    const next = this.#buildLearnConnectionsSection()
+    if (current !== null && current.isConnected) {
+      if (next === null) current.remove()
+      else current.replaceWith(next)
+      return
+    }
+    if (next !== null) this.#learnPanelBody.appendChild(next)
   }
 
   async #readLearningStatus(rootId: string, workspace: string): Promise<void> {
@@ -12507,8 +14217,8 @@ export class BlueprintBoard {
         this.#wsLearning = status
         // What a person asked to learn, they want to see.
         if (status.found > 0 && !this.#wsShowConnections) {
-          this.#wsShowConnections = true
-          writeWorkspaceConnectionsPref(true)
+          this.#mapLayerChosen = 'connections'
+          writePref(MAP_LAYER_PREF, 'connections')
         }
       }
     } catch (error) {
@@ -12519,81 +14229,11 @@ export class BlueprintBoard {
     this.#workspaceChanged()
   }
 
-  /** The Connections toggle — off by default, remembered per viewer. */
-  #buildConnectionsToggle(): HTMLElement {
-    const unreadable = this.#wsGraph?.links === null
-    const on = this.#wsShowConnections && !unreadable
-    let title = on ? 'Hide how these projects connect' : 'Show how these projects connect'
-    if (unreadable) title = WS_LINKS_UNREADABLE
-    const button = this.#headerButton({
-      icon: unreadable ? 'warning' : 'link',
-      label: 'Connections',
-      title,
-      disabled: unreadable,
-      pressed: on,
-      press: () => {
-        this.#wsShowConnections = !this.#wsShowConnections
-        writeWorkspaceConnectionsPref(this.#wsShowConnections)
-        this.#renderFeatureBoard()
-      },
-    })
-    button.dataset['wsConnections'] = 'toggle'
-    return button
-  }
-
-  /** The strip, shared by the sheet and a shared-knowledge project. */
-  #buildWorkspaceStrip(input: {
-    name: string
-    prefix: string
-    kicker: string
-    figure: string
-    figureTitle: string
-    extra?: HTMLElement | null
-  }): HTMLElement {
-    const strip = document.createElement('div')
-    strip.className = 'fb-terr-title fb-ws-title'
-    const where = document.createElement('div')
-    where.className = 'fb-terr-title-where'
-    if (input.prefix.length > 0) {
-      const prefix = document.createElement('span')
-      prefix.className = 'fb-terr-title-prefix'
-      prefix.textContent = input.prefix
-      where.appendChild(prefix)
-    }
-    const name = document.createElement('span')
-    name.className = 'fb-terr-title-name'
-    name.textContent = input.name
-    where.appendChild(name)
-    const kicker = document.createElement('span')
-    kicker.className = 'fb-terr-title-kicker'
-    kicker.textContent = input.kicker
-    where.appendChild(kicker)
-    const figure = document.createElement('span')
-    figure.className = 'fb-terr-title-understood fb-ws-understood'
-    figure.textContent = input.figure
-    if (input.figure.length > 0) figure.title = input.figureTitle
-    where.appendChild(figure)
-    where.appendChild(this.#buildLearnKey())
-    strip.appendChild(where)
-    const controls = document.createElement('div')
-    controls.className = 'fb-ws-controls'
-    if (input.extra !== undefined && input.extra !== null) controls.appendChild(input.extra)
-    controls.appendChild(this.#buildConnectionsControl())
-    strip.appendChild(controls)
-    strip.appendChild(this.#buildLearningLine())
-    return strip
-  }
-
-  /** The foot: the trail, a line of words, and what the sheet is. */
-  #buildWorkspaceFoot(input: { crumbs: { name: string; press: (() => void) | null }[]; detail: string; block: string }): {
-    foot: HTMLElement
-    detail: HTMLElement
-  } {
-    const foot = document.createElement('div')
-    foot.className = 'fb-terr-foot fb-ws-foot'
+  /** A trail's crumbs from a list — the Workspace sheets' own. */
+  #crumbsFrom(crumbs: { name: string; press: (() => void) | null }[]): HTMLElement {
     const trail = document.createElement('div')
     trail.className = 'fb-terr-crumbs'
-    input.crumbs.forEach((crumb, index) => {
+    crumbs.forEach((crumb, index) => {
       if (index > 0) {
         const sep = document.createElement('span')
         sep.className = 'fb-terr-crumb-sep'
@@ -12609,7 +14249,16 @@ export class BlueprintBoard {
       if (press !== null) step.addEventListener('click', () => press())
       trail.appendChild(step)
     })
-    foot.appendChild(trail)
+    return trail
+  }
+
+  /** The foot's quiet line: a line of words (the selection's), and what the sheet is. */
+  #buildWorkspaceFoot(input: { detail: string; block: string }): {
+    foot: HTMLElement
+    detail: HTMLElement
+  } {
+    const foot = document.createElement('div')
+    foot.className = 'fb-terr-foot fb-ws-foot'
     const detail = document.createElement('p')
     detail.className = 'fb-terr-note fb-ws-detail'
     detail.textContent = input.detail
@@ -12677,6 +14326,8 @@ export class BlueprintBoard {
       name.setAttribute('aria-label', country.zoomable ? `${country.name} — open this project` : `${country.name} — ${COULD_NOT_READ}`)
       name.addEventListener('click', (event) => {
         event.stopPropagation()
+        // ASK OPEN: the band's press tags the project instead of zooming.
+        if (this.#askTagWorkspaceProject(country.slug)) return
         void this.#zoomIntoProject(country.slug)
       })
       band.appendChild(name)
@@ -12705,7 +14356,15 @@ export class BlueprintBoard {
         el.classList.add('fb-ws-zoomable')
         el.addEventListener('click', (event) => {
           event.stopPropagation()
+          if (this.#askTagWorkspaceProject(country.slug)) return
           void this.#zoomIntoProject(country.slug)
+        })
+      } else {
+        // A project that cannot be opened can still be asked about.
+        el.addEventListener('click', (event) => {
+          if (this.#ask?.isOpen !== true) return
+          event.stopPropagation()
+          this.#askTagWorkspaceProject(country.slug)
         })
       }
       countries.set(country.slug, el)
@@ -12815,13 +14474,21 @@ export class BlueprintBoard {
         this.#paintWorkspaceSelection()
       }
       const zoomIn = (): void => {
+        // ASK OPEN: every press on a feature tags it (FR-3), wherever it came from.
+        if (this.#askTagWorkspaceCell(cell.project, cell.id, cell.name)) return
         // A PRESS ENDS THE HOVER: a grow still pending would re-lay the map
         // under the zoom (and read its diagram) a moment later.
         this.#hoverDispatch({ type: 'reset' })
+        // THE REMEMBERED VIEW (Blocks · Diagram), where the feature has a checkout to draw from.
+        if (cellPressOpens({ pref: this.#featureView, cellKind: 'feature', hasNode: cellLocal !== null }) === 'diagram') {
+          void this.#wsCellOpenLevel(cell.project, cell.id)
+          return
+        }
         void this.#wsCellPress(cell.project, cell.id)
       }
       el.addEventListener('click', (event) => {
         event.stopPropagation()
+        if (this.#askTagWorkspaceCell(cell.project, cell.id, cell.name)) return
         // A press goes in; Shift+press keeps the feature's lines on screen.
         if (event.shiftKey) {
           select()
@@ -12831,6 +14498,7 @@ export class BlueprintBoard {
       })
       el.addEventListener('dblclick', (event) => {
         event.stopPropagation()
+        if (this.#ask?.isOpen === true) return
         if (!event.shiftKey) zoomIn()
       })
       // HOVER GROWS IT IN PLACE, its diagram read from the feature's OWN
@@ -12851,6 +14519,7 @@ export class BlueprintBoard {
         learn: cellLocal === null ? null : () => void this.#wsCellLearn(cell.project, cell.id),
         learnRef: cellLocal === null || cellProject?.current !== true ? null : cell.id,
         press: zoomIn,
+        open: diagramRoot === null ? null : () => void this.#wsCellOpenLevel(cell.project, cell.id),
         folders:
           cell.folders === null || folderContext === null
             ? null
@@ -12874,29 +14543,29 @@ export class BlueprintBoard {
         if (event.key !== 'Enter' && event.key !== ' ') return
         event.preventDefault()
         event.stopPropagation()
+        if (this.#askTagWorkspaceCell(cell.project, cell.id, cell.name)) return
         this.#openOnClick(cell.key, zoomIn)
       })
       cells.set(cell.key, el)
       sheet.appendChild(el)
     }
 
-    const strip = this.#buildWorkspaceStrip({
-      name: view.title.name,
-      prefix: 'Workspace',
-      kicker: view.title.kicker,
-      figure: view.title.figure,
-      figureTitle: view.title.figureTitle,
-    })
-    const { foot, detail } = this.#buildWorkspaceFoot({
-      crumbs: [{ name: view.title.name, press: null }],
-      detail: '',
-      block: view.block,
-    })
-    this.#headStrip?.replaceChildren(strip)
-    wrap.append(sheet, foot)
+    const { foot, detail } = this.#buildWorkspaceFoot({ detail: '', block: view.block })
+    this.#headStrip?.replaceChildren()
+    wrap.append(sheet)
     this.#stage.appendChild(wrap)
     this.#wsMounted = { kind: 'root', sheet, view, cells, countries, focusView: null, detail }
+    // THE FLOATING CHROME (mockup J3): Ask first, the trail under it.
+    const crumbs = this.#crumbsFrom([{ name: view.title.name, press: null }])
+    crumbs.title = view.title.kicker
+    this.#mountFloatChrome(wrap, { where: view.title.name, lead: 'Workspace', crumbs, actions: [], foot, understood: view.title.understood, ask: true })
+    this.#refreshLens()
+    // A PROJECT QUESTION does not follow the reader out to the Workspace: its
+    // tags name one project's features, which this sheet speaks of differently.
+    if (this.#ask?.isOpen === true && this.#ask.state.scope.kind !== 'workspace') this.#ask.close()
     this.#paintWorkspaceSelection()
+    // AN OPEN QUESTION SURVIVES A RE-RENDER: its marks go on the new cells and bands.
+    this.#paintAsk(true)
     this.#paintInFlight()
     this.#announce(`${view.title.name}, ${String(view.countries.length)} projects`)
     this.#restoreBoardFocus()
@@ -12957,6 +14626,9 @@ export class BlueprintBoard {
     }
     mounted.detail.textContent = text
     mounted.detail.title = text
+    // AN OPEN QUESTION STANDS OVER THE SELECTION: a hover repaint must not
+    // take its lit/dim away (it is given back when the panel closes).
+    if (this.#ask?.isOpen === true) this.#paintAsk(true)
   }
 
   /** The SVG layer: ribbons at rest, the selected feature's lines when one is pressed. */
@@ -12981,6 +14653,7 @@ export class BlueprintBoard {
           const { x, y, w, h } = ribbon.bridge
           const band = svgEl('rect', { x: String(x), y: String(y), width: String(w), height: String(h), rx: '3', class: 'fb-ws-bridge' })
           band.dataset['wsRibbon'] = ribbon.key
+          this.#wireRibbonTag(band, ribbon.key)
           svg.appendChild(band)
           // Side by side → light the two vertical borders; stacked → the two horizontal ones.
           const edges: Array<[number, number, number, number]> =
@@ -12993,6 +14666,7 @@ export class BlueprintBoard {
         } else {
           const path = svgEl('path', { d: ribbon.path, class: 'fb-ws-ribbon', 'stroke-width': String(ribbon.width) })
           path.dataset['wsRibbon'] = ribbon.key
+          this.#wireRibbonTag(path, ribbon.key)
           svg.appendChild(path)
           for (const end of [ribbon.from, ribbon.to]) svg.appendChild(svgEl('circle', { cx: String(end.x), cy: String(end.y), r: '4', class: 'fb-ws-end' }))
         }
@@ -13004,6 +14678,7 @@ export class BlueprintBoard {
         const pillTitle = svgEl('title', {})
         pillTitle.textContent = `${this.#wsProjectName(a ?? '')} ↔ ${this.#wsProjectName(b ?? '')}: ${String(ribbon.count)} connection${ribbon.count === 1 ? '' : 's'} — Shift+press a feature to see its own`
         pill.appendChild(pillTitle)
+        this.#wireRibbonTag(pill, ribbon.key)
         svg.append(pill, count)
       }
     } else {
@@ -13024,6 +14699,19 @@ export class BlueprintBoard {
       )
     }
     mounted.sheet.appendChild(svg)
+  }
+
+  /**
+   * A ribbon pressed while Ask is open tags the connection between its two
+   * projects. Ribbons take presses only then (the sheet's open class gives
+   * them pointer events), so at rest they stay what they were: a drawing.
+   */
+  #wireRibbonTag(target: SVGElement, ribbonKey: string): void {
+    target.addEventListener('click', (event) => {
+      if (this.#ask?.isOpen !== true) return
+      event.stopPropagation()
+      this.#askTagWorkspaceLink(ribbonKey)
+    })
   }
 
   /** Connection lines: a halo, the line with its arrow, its start dot, and a hover sentence. */
@@ -13246,14 +14934,6 @@ export class BlueprintBoard {
       open = button
     }
     const fraction = remote.stack.length === 0 ? projectUnderstood(project) : null
-    const strip = this.#buildWorkspaceStrip({
-      name: view.title.name,
-      prefix: view.title.prefix,
-      kicker: view.title.kicker,
-      figure: understoodFigure(fraction),
-      figureTitle: 'features on this sheet, stale not counted',
-      extra: open,
-    })
     const crumbs: { name: string; press: (() => void) | null }[] = [
       {
         name: this.#wsGraph?.workspace?.name ?? 'Workspace',
@@ -13276,11 +14956,23 @@ export class BlueprintBoard {
       project.state === 'remote'
         ? `${NOT_ON_THIS_COMPUTER} — its features come from the Workspace's shared knowledge.`
         : `${project.name} isn't open here yet — open it to see its files, learn it and ask about it.`
-    const { foot, detail: detailEl } = this.#buildWorkspaceFoot({ crumbs, detail, block: view.title.block })
-    this.#headStrip?.replaceChildren(strip)
-    wrap.append(sheet, foot)
+    const { foot, detail: detailEl } = this.#buildWorkspaceFoot({ detail, block: view.title.block })
+    this.#headStrip?.replaceChildren()
+    wrap.append(sheet)
     this.#stage.appendChild(wrap)
     this.#wsMounted = { kind: 'remote', sheet, view: null, cells, countries: new Map(), focusView: null, detail: detailEl }
+    if (open !== null) open.classList.add('fb-float-act')
+    // A shared project's own sheet has no Ask field: there is no checkout here to ask.
+    this.#mountFloatChrome(wrap, {
+      where: view.title.name,
+      lead: null,
+      crumbs: this.#crumbsFrom(crumbs),
+      actions: open === null ? [] : [open],
+      foot,
+      understood: fraction,
+      ask: false,
+    })
+    this.#refreshLens()
     // Its links to the others leave the edge too, at its top level.
     const links = this.#wsGraph?.links ?? null
     if (remote.stack.length === 0 && links !== null && this.#wsShowConnections) {
@@ -13492,6 +15184,21 @@ export class BlueprintBoard {
     return el
   }
 
+  /** The `draft · <branch>` pill on a draft cell, its hover saying what merging means. */
+  #buildDraftTag(branch: string): HTMLElement {
+    const label = draftTagLabel(branch)
+    const tag = document.createElement('span')
+    tag.className = 'fb-terr-draft-tag'
+    tag.dataset['draftBranch'] = branch
+    tag.title = draftTagTitle(branch, this.#featureDefaultBranch)
+    tag.appendChild(document.createTextNode(label.lead))
+    const name = document.createElement('span')
+    name.className = 'fb-terr-draft-branch'
+    name.textContent = label.branch
+    tag.appendChild(name)
+    return tag
+  }
+
   /**
    * ONE CELL: a dot and a name, a second line only when there is room for one,
    * and the open-level control on hover.
@@ -13509,6 +15216,7 @@ export class BlueprintBoard {
       cell.labelClass === '' ? '' : `fb-terr-${cell.labelClass}`,
       cell.roomy ? 'fb-terr-roomy' : '',
       cell.stale ? 'fb-terr-stale' : '',
+      cell.draftBranch !== null ? 'fb-terr-draft' : '',
       cell.active ? 'fb-feature-active' : '',
     ]
       .filter((name) => name.length > 0)
@@ -13598,6 +15306,11 @@ export class BlueprintBoard {
     name.textContent = cell.name
     el.appendChild(name)
 
+    // WORK IN PROGRESS (plan workspace_knowledge_draft_solid, note 10): the
+    // branch this knowledge was learned on, under the name, with what merging
+    // it means on hover. territory-view decided it; this only spells it.
+    if (cell.draftBranch !== null) el.appendChild(this.#buildDraftTag(cell.draftBranch))
+
     // WHERE IT LIVES, as the file explorer would say it (plan
     // feature-home-folders, option 3 "Explorer rows"): under the name, which
     // they never displace, its top folders with their shares.
@@ -13668,11 +15381,19 @@ export class BlueprintBoard {
       // Modules list beside it — so the press filters that list instead of
       // navigating. The control and the crumbs still navigate, and closing the
       // panel puts the ordinary dive straight back.
-      if (this.#lensOn() && this.#lensPathsFor(cell) !== null) {
+      // Only while the Learning panel is open beside it: with the panel
+      // closed there is no list to filter, and a press is a press.
+      if (this.#lensOn() && this.#learnPanelOpen && this.#lensPathsFor(cell) !== null) {
         this.#filterLearnRowsToFeature(cell)
         return
       }
       if (node === undefined) return
+      // THE REMEMBERED VIEW (Blocks · Diagram): a reader who last chose the
+      // diagram opens a feature as its diagram.
+      if (cellPressOpens({ pref: this.#featureView, cellKind: cell.kind, hasNode: true }) === 'diagram') {
+        void this.#openNodeLevel({ id: cell.id, kind: 'feature', name: cell.name }, { focus: node })
+        return
+      }
       // THE LAST LEVEL READS AS A STORY (plan cell-hover-diagram, FR-6): a
       // part, or a feature with no parts, opens its code storyline. Anything
       // with a level below it zooms in. The part page is never shown.
@@ -13685,7 +15406,9 @@ export class BlueprintBoard {
     // A PRESS OPENS THE CELL (`#openOnClick`); the lens keeps its own press,
     // which already says what it does.
     const open = (): void => {
-      if (this.#lensOn()) {
+      // WHILE ASK IS OPEN A PRESS IS A TAG, NOT A DIVE (plan ask_the_blueprint).
+      if (this.#askTagFromCell(cell)) return
+      if (this.#lensOn() && this.#learnPanelOpen) {
         activate()
         return
       }
@@ -13698,6 +15421,7 @@ export class BlueprintBoard {
     // A DOUBLE-CLICK GOES IN — zoom, or the code story — from the map.
     el.addEventListener('dblclick', (event) => {
       event.stopPropagation()
+      if (this.#ask?.isOpen === true) return
       activate()
     })
     // Enter/Space is what a role=button owes its user — the SAME one code path
@@ -13729,6 +15453,7 @@ export class BlueprintBoard {
       learn,
       learnRef: learn === null ? null : (partOwner?.id ?? cell.id),
       press: activate,
+      open: drawable ? this.#territoryPinOpen(cell, partOwner) : null,
       folders:
         cell.folders === null || folderContext === null
           ? null
@@ -13746,6 +15471,17 @@ export class BlueprintBoard {
     return el
   }
 
+
+  /** The pinned card's Open on the project's map: the feature's level (a part's owner's). */
+  #territoryPinOpen(cell: { id: string; kind: FocusNodeKind; name: string }, owner: { id: string; name: string } | null): (() => void) | null {
+    const action = pinOpenAction(cell, owner)
+    if (action.kind !== 'level') return null
+    return () => {
+      // The node behind it, so its diagram offers the switch back to blocks.
+      const focus = this.#territory?.nodes.get(action.id)
+      void this.#openNodeLevel({ id: action.id, kind: 'feature', name: action.name }, focus === undefined ? {} : { focus })
+    }
+  }
 
   /**
    * A CONTROL ON A CELL — the open-level mark, and the corpus mark on the strip.
@@ -14852,13 +16588,27 @@ export class BlueprintBoard {
     bar.append(
       zoom,
       button('Fit', 'Show the whole diagram', () => this.#pinFit(), 'fb-terr-pin-fit'),
-      button('Open', `Open ${view.cell.name}`, () => view.cell.press(), 'fb-terr-pin-open'),
+      // OPEN KEEPS THE PICTURE (user, 2026-11-15): a reader looking at a
+      // diagram opens the diagram, full size — never the blocks one level down.
+      button('Open', `Open ${view.cell.name}`, () => this.#pinOpen(view.cell), 'fb-terr-pin-open'),
       this.#pinCloseButton(button),
     )
     // A press on the toolbar is never a pan, and never the cell's double-click.
     bar.addEventListener('pointerdown', (event) => event.stopPropagation())
     bar.addEventListener('dblclick', (event) => event.stopPropagation())
     return bar
+  }
+
+  /** The pinned toolbar's Open: the cell's diagram view, else its press. */
+  #pinOpen(cell: HoverCell): void {
+    const open = cell.open
+    if (open === null) {
+      cell.press()
+      return
+    }
+    this.#unpin(false)
+    this.#hoverDispatch({ type: 'reset' })
+    open()
   }
 
   /**
@@ -15117,137 +16867,121 @@ export class BlueprintBoard {
   }
 
   /**
-   * THE TITLE STRIP — everything the ring's centre used to hold, on a line.
+   * THE LEVEL'S OWN ACTIONS, at the end of the trail (mockup J3).
    *
-   * Where you are, what it contains, the way into its feature view, the way
-   * into its changes & discoveries, and (at the root only) the field you ask
-   * the brain with. The way BACK is not here: a strip has a left end, so "out"
-   * is the parent crumb in the foot rather than a disc the reader has to be
-   * told is clickable.
+   * What the title strip used to carry beside the name: the BLOCKS · DIAGRAM
+   * switch (a drilled feature only), the way into its changes & discoveries,
+   * and Follow the code. Quiet small buttons — the trail is a line, not a bar.
+   * The name, the counts and the understood figure left with the strip: the
+   * trail's current crumb is the name, and the Knowledge pill is the figure.
    */
-  #buildTerritoryTitle(view: TerritoryView): HTMLElement {
-    const strip = document.createElement('div')
-    strip.className = 'fb-terr-title'
-
-    const where = document.createElement('div')
-    where.className = 'fb-terr-title-where'
-    if (view.title.prefix.length > 0) {
-      const prefix = document.createElement('span')
-      prefix.className = 'fb-terr-title-prefix'
-      prefix.textContent = view.title.prefix
-      where.appendChild(prefix)
-    }
-    // Inside a Workspace, the project's name is led by the Workspace's, as a
-    // link back up — the way out is where the eye already is.
-    if (this.#featureStack.length === 0 && this.#wsCurrentProject() !== null) {
-      const up = document.createElement('button')
-      up.type = 'button'
-      up.className = 'fb-ws-title-up'
-      up.textContent = `${this.#wsGraph?.workspace?.name ?? 'Workspace'} ›`
-      up.title = 'Back to every project in this Workspace'
-      up.addEventListener('click', () => {
-        this.#zoomOutToWorkspace()
-        this.#renderFeatureBoard()
-        this.#refreshNav()
-      })
-      where.appendChild(up)
-    }
-    const name = document.createElement('span')
-    name.className = 'fb-terr-title-name'
-    name.textContent = view.title.name
-    where.appendChild(name)
-    if (view.title.kicker.length > 0) {
-      const kicker = document.createElement('span')
-      kicker.className = 'fb-terr-title-kicker'
-      kicker.textContent = view.title.kicker
-      where.appendChild(kicker)
-    }
-    // THE LEVEL'S OWN FIGURE — main's centre fix, re-hosted (381b0409). The
-    // ring's centre counted MODULES while the ring around it held FEATURES, so
-    // a board with two features finished at 100% reported 0% in the middle.
-    // The strip is the centre now, and it counts what the sheet holds.
-    const figure = document.createElement('span')
-    figure.className = 'fb-terr-title-understood'
-    where.appendChild(figure)
-    // …AND THE WHOLE PROJECT'S, beside it, at the root only.
-    //
-    // THE TWO COUNT DIFFERENT THINGS AND BOTH SAY WHICH. This figure was
-    // removed once for a good reason: the ring's centre printed MODULES while
-    // the ring held FEATURES, so a board with two features at 100% reported 0%
-    // in the middle and nothing on screen said they were answers to different
-    // questions. The fix then was to drop one. The fix now is to LABEL both —
-    // a reader wants "how much of this project have we read" and "how much of
-    // what it does do we understand", and they are not the same number.
-    const modules = document.createElement('span')
-    modules.className = 'fb-terr-title-modules'
-    where.appendChild(modules)
-    // WHAT THE COLOURS MEAN, beside the number they explain. The percentage was
-    // the only thing on the sheet naming the learning state, and it named it in
-    // words while every cell said it in colour — so amber (drifted) had no
-    // reference anywhere on the board at all, and a reader who had never seen a
-    // stale cell had no way to learn what one looks like.
-    if (view.title.showBrainField) where.appendChild(this.#buildLearnKey())
-    strip.appendChild(where)
-
+  #territoryActions(view: TerritoryView): HTMLElement[] {
+    const actions: HTMLElement[] = []
     const focus = this.#featureStack.at(-1)
-    if (view.title.showControl && focus !== undefined) {
-      strip.appendChild(
-        this.#buildTerritoryControl(CONTROL_GLYPH, view.title.controlTitle, () => {
-          void this.#openNodeLevel({ id: focus.id, kind: focus.kind, name: focus.name })
-        }),
-      )
+    // BLOCKS · DIAGRAM, FIRST (user, 2026-11-15). Replaces the one-way glyph
+    // into the diagram: the same feature, two views, one switch on both.
+    if (view.title.showControl && focus !== undefined && viewSwitchOffered(focus)) {
+      actions.push(this.#buildViewSwitch('blocks', focus))
     }
-    // The CHANGES & DISCOVERIES door (#1532) — a drilled FEATURE only, which is
-    // `showCorpusControl`'s decision, not a kind test repeated here.
-    if (view.title.showCorpusControl && focus !== undefined) {
-      strip.appendChild(
-        this.#buildTerritoryControl(CORPUS_CONTROL_GLYPH, view.title.corpusControlTitle, () => {
-          void this.openCorpusBrowser(focus.id)
-        }),
-      )
-    }
-
     // READ AS A STORY, above the last level (plan cell-hover-diagram, FR-8):
-    // with a feature's parts on screen, the header reads the WHOLE feature's
+    // with a feature's parts on screen, the trail reads the WHOLE feature's
     // code as one story — the same action its brief carries. Not on a domain
     // or at the project's top level: neither is one feature's code.
     if (focus !== undefined && focus.kind === 'feature' && this.#activeRoot !== null) {
       const story = this.#headerButton({
         icon: 'file',
-        label: 'Read as a story',
-        title: `Read ${focus.name}'s code as a story, from where it starts`,
+        label: 'Follow the code',
+        title: `Follow ${focus.name}'s code from where it starts`,
         press: () => this.openStorylineForPart(focus.id, focus.name),
       })
       story.dataset['featureStory'] = focus.id
-      strip.appendChild(story)
+      story.classList.add('fb-float-act')
+      actions.push(story)
     }
-
-    // CONNECTIONS — this project's links to the others, run off the edge. At
-    // the project's own top level only: deeper levels are one feature's.
-    if (this.#featureStack.length === 0 && this.#wsKnown()) strip.appendChild(this.#buildConnectionsToggle())
-    if (view.title.showBrainField) {
-      const ask = this.#headerButton({
-        icon: 'search',
-        label: BRAIN_FIELD_LABEL,
-        title: BRAIN_FIELD_TITLE,
-        ariaLabel: BRAIN_FIELD_TITLE,
-        press: () => {
-          // THE ANCHOR IS THE FIELD'S REAL SCREEN POSITION, measured at the
-          // moment it is pressed — in the header now, so the panel opens at
-          // the top of the stage, under it.
-          const box = ask.getBoundingClientRect()
-          const stage = this.#stage.getBoundingClientRect()
-          this.#toggleBrainQuery({
-            x: box.left - stage.left + box.width / 2,
-            y: Math.max(0, box.bottom - stage.top),
-          })
-        },
+    // The CHANGES & DISCOVERIES door (#1532) — a drilled FEATURE only, which is
+    // `showCorpusControl`'s decision, not a kind test repeated here. A quiet
+    // text button, the same one the feature's diagram carries, so Blocks and
+    // Diagram of one feature wear the same top island.
+    if (view.title.showCorpusControl && focus !== undefined) {
+      const corpus = this.#headerButton({
+        icon: 'archive',
+        label: 'Changes & discoveries',
+        title: view.title.corpusControlTitle,
+        press: () => void this.openCorpusBrowser(focus.id),
       })
-      ask.classList.add('fb-terr-ask')
-      ask.dataset['brainQuery'] = 'open'
-      strip.appendChild(ask)
+      corpus.classList.add('fb-float-act')
+      actions.push(corpus)
     }
-    return strip
+    return actions
+  }
+
+  /**
+   * BLOCKS · DIAGRAM — one two-state switch for one feature's two views
+   * (`view-switch-model`). The current view is pressed; pressing the other
+   * swaps it for the same focus, and Back from either view leaves the feature.
+   */
+  #buildViewSwitch(current: FeatureView, focus: FocusNode): HTMLElement {
+    const group = document.createElement('span')
+    group.className = 'fb-view-switch'
+    group.setAttribute('role', 'group')
+    group.setAttribute('aria-label', `How to show ${focus.name}`)
+    group.dataset['viewSwitch'] = current
+    const option = (view: FeatureView, label: string, title: string): HTMLButtonElement => {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'fb-view-switch-btn'
+      button.textContent = label
+      button.title = title
+      button.dataset['view'] = view
+      button.setAttribute('aria-pressed', String(view === current))
+      button.addEventListener('click', (event) => {
+        event.stopPropagation()
+        if (view === current) return
+        this.#swapFeatureView(current, focus)
+      })
+      return button
+    }
+    group.append(
+      option('blocks', 'Blocks', `Show ${focus.name} as its parts`),
+      option('diagram', 'Diagram', `Show ${focus.name} as its diagram`),
+    )
+    return group
+  }
+
+  /** Swap one feature's view — same place, different view (`planSwap`). */
+  #swapFeatureView(from: FeatureView, focus: FocusNode): void {
+    const stack = from === 'blocks' ? this.#featureStack : (this.#levelReturn?.stack ?? this.#featureStack)
+    const plan = planSwap({ from, stack, focus })
+    this.#featureView = plan.to
+    writePref(FEATURE_VIEW_PREF, plan.to)
+    if (plan.to === 'diagram') {
+      // The diagram's way out is the feature's PARENT, so Back leaves the
+      // feature rather than stepping back to its blocks.
+      void this.#openNodeLevel({ id: focus.id, kind: 'feature', name: focus.name }, { focus, returnStack: plan.returnStack })
+      return
+    }
+    // BLOCKS: close the diagram straight onto the feature's own level — the
+    // return record is pointed at it first, so nothing flashes the parent.
+    const ret = this.#levelReturn
+    this.#levelReturn = {
+      depth: plan.blocksStack.length,
+      stack: plan.blocksStack,
+      label: ret?.label ?? FOCUS_ROOT_LABEL,
+    }
+    this.clearBrief()
+    this.#setDepthNav({ stack: plan.blocksStack, forward: [] })
+    this.#refreshNav()
+  }
+
+  /**
+   * The Ask field in a strip — one field for the project strip and the
+   * Workspace sheet's, MOVED into each strip so the question survives a
+   * repaint. Nothing is mounted when no project is open: there is nothing to
+   * ask.
+   */
+  #mountAskField(parent: HTMLElement): void {
+    if (this.#activeRoot === null) return
+    this.#askPanel().mountField(parent)
   }
 
   /**
@@ -15292,10 +17026,8 @@ export class BlueprintBoard {
     return key
   }
 
-  #buildTerritoryFoot(view: TerritoryView, limits: HTMLElement): HTMLElement {
-    const foot = document.createElement('div')
-    foot.className = 'fb-terr-foot'
-
+  /** The trail's crumbs: `Workspace / project / feature`, each step pressable but the current one. */
+  #buildTerritoryCrumbs(view: TerritoryView): HTMLElement {
     const trail = document.createElement('div')
     trail.className = 'fb-terr-crumbs'
     // THE WORKSPACE IS ONE CRUMB UP: `Workspace / project / feature`.
@@ -15318,7 +17050,17 @@ export class BlueprintBoard {
       if (!crumb.current) step.addEventListener('click', () => this.#popFeatureFocusTo(index))
       trail.appendChild(step)
     })
-    foot.appendChild(trail)
+    return trail
+  }
+
+  /**
+   * THE FOOT'S QUIET LINE — what the sheet leaves out (the note and the
+   * limitations disclosure) and what the sheet IS. Between the Layers button
+   * and the Knowledge pill (mockup J3); the crumbs moved to the trail.
+   */
+  #buildTerritoryFoot(view: TerritoryView, limits: HTMLElement): HTMLElement {
+    const foot = document.createElement('div')
+    foot.className = 'fb-terr-foot'
 
     const note = document.createElement('p')
     note.className = 'fb-terr-note'
@@ -15563,140 +17305,447 @@ export class BlueprintBoard {
     return block
   }
 
-  /* ── The brain query (Phase 7.2 / 7.3 / 7.4) ──────────────────────────────
+  /* ── Ask the Blueprint (plan ask_the_blueprint, Phase 3) ─────────────────
    *
-   * ROOT-ONLY, and the affordance is only drawn at the root, so there is no
-   * second gate to keep in sync — `queryAvailableAtDepth` is asserted here as
-   * a guard rather than relied on as a condition.
+   * AT EVERY DEPTH. The keyword field it replaced was root-only because it
+   * could reach only the whole-project brain; the Ask panel takes tags, so a
+   * question asked inside a feature is asked about that feature's parts.
+   *
+   * Everything the panel DECIDES is `ask-panel-model`'s; the panel's DOM is
+   * `ask-panel-view`'s. The board owns three things: where the panel lives (on
+   * the board root, so a dive or a resize does not drop it), what a cell press
+   * means while it is open (a tag, not a dive), and painting the decoration —
+   * through `#applyTerritoryDecoration`, the one lit/dim path, and only when
+   * `askDecoration` says something different from what is already drawn.
    */
 
   /**
-   * Open the field (or close it if it is already open).
-   *
-   * `anchor` is the field's own box in STAGE coordinates, measured by the
-   * caller at the moment of the press. There is no projection to undo: the
-   * territory has no camera, so where the strip's button is on screen is where
-   * it is, full stop.
+   * The panel and its header field, built with the first strip that shows the
+   * field and kept for the board's lifetime (a project switch disposes them).
    */
-  #toggleBrainQuery(anchor: OverlayPoint): void {
-    if (this.#brainQuery !== null) {
-      this.#closeBrainQuery()
+  #askPanel(): AskPanelView {
+    if (this.#ask !== null) return this.#ask
+    const panel = new AskPanelView({
+      rootId: () => this.#activeRoot,
+      scope: () => this.#askSheetScope(),
+      workspaceScope: () => this.#askWorkspaceScope(),
+      graphNodes: (scope) => this.#askGraphNodes(scope),
+      extraCandidates: (scope) => this.#askExtraCandidates(scope),
+      historyScope: () => this.#askHistoryScope(),
+      project: (slug) => this.#askProjectLook(slug),
+      featureName: (project, id) => this.#wsFeatureName(project, id) ?? null,
+      featureLabel: (id) => this.#askFeatureLabel(id),
+      suggestInput: (scope, tags) => this.#askSuggestInput(scope, tags),
+      savedAll: () => this.#askSaved,
+      onSaved: () => void this.#loadAskSaved(true),
+      onChange: () => this.#paintAsk(false),
+      canOpenFile: (project) => this.#askFileRoot(project) !== null,
+      openFile: (relPath, project) => this.#askOpenFile(relPath, project),
+      featureTarget: (id) => this.#askFeatureTarget(id),
+      onConnectionSaved: () => this.#workspaceChanged(),
+      onClosed: () => this.#restoreBoardFocus(),
+    })
+    this.element.appendChild(panel.element)
+    this.#ask = panel
+    return panel
+  }
+
+  /** The Workspace sheet (its root, not a shared project's) is what the board shows. */
+  #onWorkspaceSheet(): boolean {
+    return this.#territory === null && this.#wsMounted?.kind === 'root'
+  }
+
+  /** The Workspace as an Ask scope, or null outside one. */
+  #askWorkspaceScope(): AskScope | null {
+    const graph = this.#wsGraph
+    if (!this.#wsKnown() || graph === null || graph.workspace === null) return null
+    return {
+      kind: 'workspace',
+      workspace: graph.workspace.slug,
+      name: graph.workspace.name,
+      projects: graph.projects.map((project) => ({ slug: project.slug, name: project.name })),
+    }
+  }
+
+  /** What a fresh question asks: the Workspace on its sheet, the project everywhere else. */
+  #askSheetScope(): AskScope {
+    if (this.#onWorkspaceSheet()) {
+      const workspace = this.#askWorkspaceScope()
+      if (workspace !== null) return workspace
+    }
+    return { kind: 'project', name: this.#wsCurrentProject()?.name ?? null }
+  }
+
+  /**
+   * The features and parts suggestions and the @ picker read. On the
+   * Workspace, EVERY project's graph, each id qualified with its project — two
+   * projects' same slug stay two rows (FR-5).
+   */
+  #askGraphNodes(scope: AskScope): readonly SuggestNode[] {
+    if (scope.kind === 'project') return this.#featureGraph?.nodes ?? []
+    const out: SuggestNode[] = []
+    for (const project of this.#wsGraph?.projects ?? []) {
+      for (const node of project.graph?.nodes ?? []) {
+        if (node.kind === 'child') continue
+        out.push({
+          id: qualifyFeatureId(project.slug, node.id),
+          name: node.name,
+          kind: node.kind,
+          ...(node.summary !== undefined && node.summary !== null ? { summary: node.summary } : {}),
+          ...(node.partOf !== undefined && node.partOf !== null ? { partOf: node.partOf } : {}),
+          project: project.slug,
+        })
+      }
+    }
+    return out
+  }
+
+  /** On the Workspace: its projects and the connections between them. */
+  #askExtraCandidates(scope: AskScope): readonly PickerCandidate[] {
+    if (scope.kind !== 'workspace') return []
+    const projects = this.#wsGraph?.projects ?? []
+    return workspaceCandidates(
+      projects.map((project) => ({ slug: project.slug, name: project.name, description: project.description })),
+      this.#wsGraph?.links ?? null,
+    )
+  }
+
+  /** A project's name and its one colour — the app's accent for a checkout here, else its slot. */
+  #askProjectLook(slug: string): { name: string; color: string | null } | null {
+    const project = this.#wsGraph?.projects.find((entry) => entry.slug === slug)
+    if (project === undefined) return null
+    const color = project.local !== null ? ensureAccentProperty(project.local) : `var(--fb-ws-hue-${String(colourSlot(project.colorIndex))})`
+    return { name: project.name, color }
+  }
+
+  /** The header field and the shortcut: open, or close when open. */
+  #toggleAsk(): void {
+    if (this.#ask?.isOpen === true) {
+      this.#ask.close()
+      return
+    }
+    this.openAsk({})
+  }
+
+  /**
+   * Open the Ask panel — the one door every opener uses (`flow:ask-blueprint`,
+   * wired in `index.ts`, plus the header field and the shortcut). Tags without
+   * a label take the name the board knows them by. A pointer to a Workspace
+   * answer (`workspace: true`) opens in the Workspace wherever it was pressed.
+   */
+  openAsk(detail: AskBlueprintOpenDetail): void {
+    if (this.#activeRoot === null) return
+    const workspace = detail.workspace === true ? this.#askWorkspaceScope() : null
+    const scope = workspace ?? this.#askSheetScope()
+    const current = this.#wsCurrentProject()?.slug
+    // An opener's tag on the Workspace that did not say its project is this
+    // board's own project — the feature brief and the palette speak project ids.
+    const given = (detail.tags ?? []).map((tag) =>
+      scope.kind === 'workspace' && tag.kind !== 'conversation' && tag.project === undefined && current !== undefined
+        ? { ...tag, project: current }
+        : tag,
+    )
+    const names = new Map(this.#askGraphNodes(scope).map((node) => [node.id, node.name]))
+    const tags = tagsFromOpen(given, detail.threadId, detail.threadTitle, scope).map((tag) =>
+      detail.tags?.find((entry) => entry.id === tag.id || qualifyFeatureId(entry.project ?? current ?? '', entry.id) === tag.id)?.label ===
+        undefined && names.has(tag.id)
+        ? { ...tag, label: names.get(tag.id) as string }
+        : tag,
+    )
+    const fresh = detail.text !== undefined || tags.length > 0
+    // The field lives in the header strip; a board with no strip yet gets it now.
+    const panel = this.#askPanel()
+    panel.open({
+      scope,
+      ...(fresh ? { text: detail.text ?? '', tags } : {}),
+      ...(detail.view !== undefined ? { view: detail.view } : {}),
+      ...(detail.entryId !== undefined ? { entryId: detail.entryId } : {}),
+      ...(detail.submit === true ? { submit: true } : {}),
+    })
+  }
+
+  /** Project scope: which features "Saved questions" reads when nothing is tagged — what this sheet draws. */
+  #askHistoryScope(): string[] {
+    const cells = this.#territory?.view.cells ?? []
+    return cells
+      .filter((cell) => cell.kind === 'feature' || cell.kind === 'part')
+      .map((cell) => cell.id)
+      .slice(0, 20)
+  }
+
+  /** A feature or part id's name — the project's own graph, or (qualified) its project's. */
+  #askFeatureLabel(id: string): string | null {
+    const split = splitQualifiedFeatureId(id)
+    if (split !== null) {
+      const name = this.#wsFeatureName(split.project, split.localId)
+      if (name !== undefined) return name
+      if (split.project !== this.#wsCurrentProject()?.slug) return null
+      return this.#featureGraph?.nodes.find((node) => node.id === split.localId)?.name ?? null
+    }
+    return this.#featureGraph?.nodes.find((node) => node.id === id)?.name ?? null
+  }
+
+  /**
+   * What the sheet's "Try asking" is built from — deterministic, no model: the
+   * one feature in scope with its parts and connections, else the scope's
+   * biggest features (and, on the Workspace, its projects).
+   */
+  #askSuggestInput(scope: AskScope, tags: readonly AskTag[]): SuggestInput {
+    const featureTags = tags.filter((tag) => tag.kind === 'feature' || tag.kind === 'part')
+    const focusTag = featureTags.length === 1 ? featureTags[0] : undefined
+    let focus: SuggestInput['focus'] = null
+    if (focusTag !== undefined) {
+      const split = splitQualifiedFeatureId(focusTag.id)
+      const localId = split?.localId ?? focusTag.id
+      const graph = split !== null ? (this.#wsGraph?.projects.find((project) => project.slug === split.project)?.graph ?? null) : this.#featureGraph
+      const nodes = graph?.nodes ?? []
+      const node = nodes.find((candidate) => candidate.id === localId)
+      const parts =
+        node !== undefined && node.kind === 'core'
+          ? nodes.filter((candidate) => candidate.kind === 'part' && candidate.partOf === node.slug).map((candidate) => candidate.name)
+          : []
+      const related = (graph?.edges ?? [])
+        .flatMap((edge) => (edge.from === localId ? [edge.to] : edge.to === localId ? [edge.from] : []))
+        .map((other) => nodes.find((candidate) => candidate.id === other)?.name)
+        .filter((name): name is string => name !== undefined)
+      focus = { name: focusTag.label, parts, related }
+    }
+    const pool =
+      scope.kind === 'workspace'
+        ? (this.#wsGraph?.projects ?? []).flatMap((project) => project.graph?.nodes ?? [])
+        : (this.#featureGraph?.nodes ?? [])
+    const features = pool
+      .filter((node) => node.kind === 'core')
+      .sort((a, b) => (b.size?.lines ?? 0) - (a.size?.lines ?? 0) || a.name.localeCompare(b.name))
+      .slice(0, 3)
+      .map((node) => node.name)
+    return {
+      focus,
+      projects: scope.kind === 'workspace' ? scope.projects.map((project) => project.name) : [],
+      scopeName: scope.name,
+      features,
+    }
+  }
+
+  /** The checkout a cited file is opened from: this project's, or a Workspace sibling's on this computer. */
+  #askFileRoot(project: string | undefined): string | null {
+    const current = this.#wsCurrentProject()?.slug
+    if (project === undefined || project === current) return this.#activeRoot
+    return this.#wsGraph?.projects.find((entry) => entry.slug === project)?.local ?? null
+  }
+
+  /** A file chip pressed: the file opens in the app's editor (the same door the git panel and search use). */
+  #askOpenFile(relPath: string, project: string | undefined): void {
+    const rootPath = this.#askFileRoot(project)
+    if (rootPath === null) return
+    document.dispatchEvent(new CustomEvent('flow:open-file', { detail: { rootPath, relPath } }))
+  }
+
+  /**
+   * A feature chip pressed: the sheet closes and that feature opens here — a
+   * dive into its cell when the map draws it, else its own view; a part's story. Null for another project's feature,
+   * which this board cannot open.
+   */
+  #askFeatureTarget(id: string): (() => void) | null {
+    const split = splitQualifiedFeatureId(id)
+    if (split !== null && split.project !== this.#wsCurrentProject()?.slug) return null
+    const localId = split?.localId ?? id
+    const node = this.#featureGraph?.nodes.find((candidate) => candidate.id === localId)
+    if (node === undefined) return null
+    if (node.kind === 'part') return () => this.openStorylineForPart(localId, node.name)
+    if (node.kind !== 'core') return null
+    return () => {
+      // Drawn on this map: the same dive a press on its cell makes. Otherwise
+      // (the Workspace sheet, another level): the feature's own view.
+      if (this.#territory?.nodes.has(localId) === true) this.#drillFrom(localId)
+      else void this.#openFeatureBrief(localId)
+    }
+  }
+
+  /**
+   * Read every saved question of the project — ONCE per board load (a render
+   * for a project already read does nothing), and again only when an answer
+   * is saved (`again`). Never on a broadcast. A failed read leaves the markers
+   * off and is logged; it never draws an error.
+   */
+  async #loadAskSaved(again = false): Promise<void> {
+    const rootId = this.#activeRoot
+    const api = window.flow.ask
+    if (rootId === null || api === undefined) return
+    if (!again && this.#askSavedRoot === rootId) return
+    this.#askSavedRoot = rootId
+    try {
+      const result = await api.list({ rootId, featureIds: [], all: true })
+      if (rootId !== this.#activeRoot) return
+      if (!result.ok) {
+        console.warn('Saved questions could not be read:', result.detail)
+        return
+      }
+      this.#askSaved = result.threads
+      this.#askSavedCounts = questionCounts(result.threads)
+      this.#paintQuestionMarkers()
+      this.#ask?.refreshSaved()
+    } catch (error) {
+      console.warn('Saved questions could not be read:', error)
+    }
+  }
+
+  /**
+   * THE QUESTIONS YOU ASKED, ON THE MAP: a quiet speech-bubble and a count in
+   * the footer row of every feature or part cell you have asked about.
+   * Pressing it opens the sheet on that feature's questions. Painted when the
+   * sheet is drawn and when the saved list is read — never per broadcast.
+   */
+  #paintQuestionMarkers(): void {
+    const mounted = this.#territory
+    if (mounted === null) return
+    const byId = new Map(mounted.view.cells.map((cell) => [cell.id, cell]))
+    for (const [id, cellEl] of mounted.cells) {
+      const cell = byId.get(id)
+      const count = cell !== undefined && (cell.kind === 'feature' || cell.kind === 'part') ? (this.#askSavedCounts.get(id) ?? 0) : 0
+      if (cell === undefined || count === 0) {
+        paintQuestionMarker(cellEl, 0, '', () => undefined)
+        continue
+      }
+      const kind = kindOfId(id) === 'part' ? 'part' : 'feature'
+      paintQuestionMarker(cellEl, count, questionCountLabel(count, cell.name), () =>
+        this.openAsk({ tags: [{ id, kind, label: cell.name }], view: 'history' }),
+      )
+    }
+  }
+
+  /** The open panel's scope is the Workspace. */
+  #askInWorkspace(): boolean {
+    return this.#ask?.state.scope.kind === 'workspace'
+  }
+
+  /**
+   * A cell pressed while the panel is open becomes a tag. True when the press
+   * was the panel's — the cell then does not dive. A Workspace question asked
+   * from inside a project qualifies the id with that project.
+   */
+  #askTagFromCell(cell: TerritoryCell): boolean {
+    const panel = this.#ask
+    if (panel === null || !panel.isOpen) return false
+    // A domain or a ghost is not something an answer can be about; the press
+    // is swallowed rather than diving out from under an open question.
+    if (cell.kind !== 'feature' && cell.kind !== 'part') return true
+    const kind = kindOfId(cell.id) === 'part' ? 'part' : 'feature'
+    const project = this.#askInWorkspace() ? this.#wsCurrentProject()?.slug : undefined
+    const tag: AskTag =
+      project !== undefined
+        ? { id: qualifyFeatureId(project, cell.id), kind, label: cell.name, project }
+        : { id: cell.id, kind, label: cell.name }
+    panel.addTagFromMap(tag)
+    return true
+  }
+
+  /**
+   * THE WORKSPACE SHEET'S PRESSES WHILE ASK IS OPEN (FR-2–FR-4): a feature
+   * cell, a project band or a connection ribbon becomes a tag instead of
+   * zooming or opening a story. True when the press was the panel's.
+   */
+  #askTagOnWorkspace(tag: AskTag): boolean {
+    const panel = this.#ask
+    if (panel === null || !panel.isOpen) return false
+    // A project question is not about another project: the press is swallowed
+    // rather than zooming out from under it.
+    if (!this.#askInWorkspace()) return true
+    panel.addTagFromMap(tag)
+    return true
+  }
+
+  #askTagWorkspaceCell(project: string, id: string, name: string): boolean {
+    const kind = kindOfId(id) === 'part' ? 'part' : 'feature'
+    return this.#askTagOnWorkspace({ id: qualifyFeatureId(project, id), kind, label: name, project })
+  }
+
+  #askTagWorkspaceProject(slug: string): boolean {
+    return this.#askTagOnWorkspace({ id: `project:${slug}`, kind: 'project', label: this.#wsProjectName(slug), project: slug })
+  }
+
+  /** A ribbon's key is `a|b`; its tag is the sorted pair. */
+  #askTagWorkspaceLink(ribbonKey: string): boolean {
+    const [a, b] = ribbonKey.split('|')
+    if (a === undefined || b === undefined) return false
+    return this.#askTagOnWorkspace({ id: linkTagId(a, b), kind: 'connection', label: `${this.#wsProjectName(a)} ↔ ${this.#wsProjectName(b)}` })
+  }
+
+  /**
+   * Draw what the panel asks of the map. `force` repaints even when the
+   * decoration has not changed — a re-render rebuilt every cell, or another
+   * overlay just spoke over it.
+   */
+  #paintAsk(force: boolean): void {
+    // THE SHEET COVERS THE MAP (option B, 2026-11-16): nothing is lit, dimmed
+    // or numbered under it, so the decoration is always the closed one — this
+    // path stays as the one step that clears any marks left on the cells.
+    const decoration = askDecoration(initialAskState())
+    const key = decorationKey(decoration)
+    if (!force && key === this.#askDecorationKey) return
+    this.#askDecorationKey = key
+    this.element.classList.toggle('fb-ask-active', decoration.active)
+    // THE WORKSPACE SHEET (note 8): painted from the same decoration, by
+    // qualified id; the project board path below is unchanged.
+    const ws = this.#wsMounted
+    if (this.#territory === null && ws !== null && ws.kind === 'root' && ws.view !== null) {
+      this.#paintWorkspaceAsk(decoration)
       return
     }
     const mounted = this.#territory
     if (mounted === null) return
-    if (!queryAvailableAtDepth(mounted.view.depth)) return
-
-    const panel = document.createElement('div')
-    panel.className = 'fb-terr-query'
-
-    const input = document.createElement('input')
-    input.type = 'text'
-    input.className = 'fb-terr-query-input'
-    input.placeholder = 'Ask the brain…'
-    input.setAttribute('aria-label', 'Ask the brain')
-
-    const status = document.createElement('p')
-    status.className = 'fb-terr-query-status'
-
-    const results = document.createElement('ul')
-    results.className = 'fb-terr-query-results'
-
-    panel.append(input, status, results)
-    // Escape closes and restores the map, from wherever the focus is.
-    panel.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') {
-        event.stopPropagation()
-        this.#closeBrainQuery()
-        return
-      }
-      if (event.key === 'Enter') {
-        // ENTER BELONGS TO WHATEVER HAS FOCUS. This handler is on the PANEL, so
-        // before the rows became buttons it could safely claim every Enter —
-        // the input was the only thing in here. Now a focused row's own Enter
-        // activates it, and this would ALSO re-run the search on top of it:
-        // measured live, pressing Enter on "Show Chats on the map" both lit
-        // Chats and re-opened the answer over it.
-        if (event.target !== input) return
-        event.stopPropagation()
-        void this.#runBrainQuery(input.value)
-      }
-    })
-    // Clicks inside the panel are the panel's, never the sheet's.
-    panel.addEventListener('click', (event) => event.stopPropagation())
-
-    mounted.wrap.appendChild(panel)
-    this.#brainQuery = {
-      panel,
-      input,
-      status,
-      results,
-      anchor,
-      state: idleQuery(),
-      highlight: null,
-    }
-    this.#placeBrainQuery()
-    this.#paintBrainQuery()
-    input.focus()
-  }
-
-  /** Position the panel under its anchor. Re-run on every re-fit. */
-  #placeBrainQuery(): void {
-    const query = this.#brainQuery
-    if (query === null) return
-    const stage = { width: this.#stage.clientWidth, height: this.#stage.clientHeight }
-    if (stage.width === 0 || stage.height === 0) return
-    // Measured, not assumed: the panel's height changes with the result list.
-    const field = {
-      width: query.panel.offsetWidth || QUERY_PANEL_WIDTH,
-      height: query.panel.offsetHeight || QUERY_PANEL_MIN_HEIGHT,
-    }
-    const placed = anchorQueryField(query.anchor, field, stage)
-    query.panel.style.left = `${placed.left.toFixed(1)}px`
-    query.panel.style.top = `${placed.top.toFixed(1)}px`
-    query.panel.classList.toggle('fb-terr-query-flipped', placed.flipped)
-  }
-
-  /** Ask the brain. The FIRST renderer caller of `brain:query`. */
-  async #runBrainQuery(raw: string): Promise<void> {
-    const query = this.#brainQuery
-    if (query === null) return
-    const state = submitQuery(raw)
-    query.state = state
-    if (state.phase === 'empty') {
-      // Never reaches IPC: asking the brain for nothing is not a search, and
-      // its empty answer would read as "this project knows nothing about it".
-      query.highlight = null
-      this.#paintBrainQuery()
+    mounted.wrap.classList.toggle('fb-terr-ask-open', decoration.active)
+    const drawn = new Set<string>([...mounted.cells.keys()])
+    const marks = projectDecoration(decoration, drawn)
+    for (const [id, el] of mounted.cells) paintCellMarks(el, marks.get(id) ?? null)
+    if (!decoration.active) {
+      // CLOSING PUTS THE MAP BACK — whatever overlay stood before it opened.
+      this.#applyTerritoryOverlay(this.#decoration)
       return
     }
-    this.#paintBrainQuery()
-
-    const rootId = this.#activeRoot
-    if (rootId === null) {
-      query.state = failQuery(state.query, new Error('no project is open'))
-      this.#paintBrainQuery()
+    // AN ANSWER THAT NAMES NOTHING ON THIS SHEET DIMS NOTHING: dimming every
+    // cell to say "the answer is elsewhere" reads as "the answer is nowhere".
+    if (marks.size === 0) {
+      this.#applyTerritoryDecoration(null)
       return
     }
-    const seq = ++this.#brainQuerySeq
-    let next: BrainQueryState
-    try {
-      const result = await window.flow.brain.query({
-        rootId,
-        query: state.query,
-        limit: BRAIN_QUERY_LIMIT,
-      })
-      next = resolveQuery(state.query, result.hits)
-    } catch (error) {
-      // FAIL-SOFT: an unavailable brain says so. It never throws into the
-      // board and never blanks the map.
-      next = failQuery(state.query, error)
+    this.#applyTerritoryDecoration({ lit: [...marks.keys()], dimOthers: decoration.dimOthers })
+  }
+
+  /**
+   * The Workspace branch of `#paintAsk`: its cells and country bands, lit and
+   * dimmed from the decoration. While Ask is open the selection's lit/dim is
+   * set aside; closing gives it back to `#paintWorkspaceSelection`.
+   */
+  #paintWorkspaceAsk(decoration: ReturnType<typeof askDecoration>): void {
+    const mounted = this.#wsMounted
+    if (mounted === null || mounted.view === null) return
+    const workspaceMarks = this.#askInWorkspace() || !decoration.active
+    mounted.sheet.classList.toggle('fb-ws-ask-open', decoration.active)
+    const drawn = mounted.view.cells.map((cell) => ({ key: cell.key, project: cell.project, id: cell.id }))
+    // A project question left open on the Workspace names nothing here.
+    const paint = projectWorkspaceDecoration(workspaceMarks ? decoration : { ...decoration, outlined: [], mentioned: [], live: [], numbers: [], facts: null, projects: [], citedProjects: [], knowledgeOnly: [] }, drawn)
+    for (const [key, el] of mounted.cells) {
+      paintCellMarks(el, paint.cells.get(key) ?? null)
+      const dim = paint.dim && !paint.lit.has(key)
+      el.classList.toggle('fb-ws-ask-dim', dim)
+      if (decoration.active) el.classList.remove('fb-ws-dim', 'fb-ws-hot', 'fb-ws-linked')
     }
-    // Drop an answer that outlived its question, its panel or its project.
-    if (seq !== this.#brainQuerySeq) return
-    if (this.#brainQuery !== query || rootId !== this.#activeRoot) return
-    query.state = next
-    this.#paintBrainQuery()
+    for (const [slug, el] of mounted.countries) {
+      const band = paint.bands.get(slug) ?? null
+      el.classList.toggle('fb-ws-ask-tagged', band?.role === 'tagged')
+      el.classList.toggle('fb-ws-ask-mentioned', band?.role === 'mentioned')
+      el.classList.toggle('fb-ws-ask-dim', paint.dim && !paint.litProjects.has(slug))
+      el.querySelector(':scope > .fb-ws-band > .fb-ws-ask-note')?.remove()
+      if (band?.knowledgeOnly === true) {
+        const note = document.createElement('span')
+        note.className = 'fb-ws-ask-note'
+        note.textContent = 'Answered from shared knowledge'
+        el.querySelector(':scope > .fb-ws-band')?.appendChild(note)
+      }
+    }
+    // CLOSING GIVES THE SHEET BACK: the selection's own lit/dim and lines.
+    if (!decoration.active) this.#paintWorkspaceSelection()
   }
 
   /**
@@ -15717,11 +17766,6 @@ export class BlueprintBoard {
     // and said here, where the board already reports what it hid.
     const view = this.#territory?.view
     if (view !== undefined) caps.push(...territoryCaps(view))
-    const query = this.#brainQuery
-    if (query !== null && query.state.phase === 'results') {
-      const cap = brainQueryCap(query.state.hits.length, BRAIN_QUERY_LIMIT)
-      if (cap !== null) caps.push(cap)
-    }
     return caps
   }
 
@@ -15782,170 +17826,6 @@ export class BlueprintBoard {
       }
       box.appendChild(list)
     }
-  }
-
-  /** Render the panel's text + list, and light the map. */
-  #paintBrainQuery(): void {
-    const query = this.#brainQuery
-    const mounted = this.#territory
-    if (query === null || mounted === null) return
-    const graph = this.#featureGraph
-    query.highlight =
-      query.state.phase === 'results' && graph !== null
-        ? buildBrainHighlight(graph, mounted.view.cells, query.state.hits)
-        : null
-
-    query.status.textContent = statusLine(query.state, query.highlight)
-    query.status.classList.toggle('on', query.state.phase === 'error')
-
-    // EVERY ROW IS A CONTROL (not a <li> with text in it, which is what it was
-    // and why clicking one did nothing). The <button> carries the semantics —
-    // tab stop, Enter/Space, focus ring — so none of that has to be re-created
-    // by hand, and `hitAction` decides what pressing it means.
-    const drawnIds = new Set(mounted.view.cells.map((cell) => cell.id))
-    query.results.replaceChildren()
-    for (const hit of query.state.hits) {
-      const action = hitAction(hit, graph, drawnIds)
-      const item = document.createElement('li')
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.className = `fb-terr-query-hit fb-terr-query-hit-${action.kind}`
-      const title = document.createElement('span')
-      title.className = 'fb-terr-query-hit-title'
-      title.textContent = hit.title
-      const kind = document.createElement('span')
-      kind.className = 'fb-terr-query-hit-kind'
-      kind.textContent = hit.kind
-      button.append(kind, title)
-      // WHAT PRESSING IT DOES — the tooltip and the accessible name, not the
-      // snippet. The snippet is context; the label is the promise.
-      button.title = hit.snippet.length > 0 ? `${action.label}\n\n${hit.snippet}` : action.label
-      button.setAttribute('aria-label', action.label)
-      // A row that cannot open anything stays focusable and still SAYS why —
-      // `disabled` would remove it from the tab order and take its tooltip
-      // with it, which is the silent no-op wearing a different hat.
-      if (action.kind === 'none') button.setAttribute('aria-disabled', 'true')
-      button.addEventListener('click', () => this.#activateBrainHit(action))
-      item.appendChild(button)
-      query.results.appendChild(item)
-    }
-
-    this.#applyBrainHighlight(query.highlight)
-    this.#placeBrainQuery()
-    // An answer can bring a cap with it, so the disclosure is refilled with it.
-    this.#paintLimitations()
-  }
-
-  /**
-   * ACTIVATE ONE RESULT ROW. Wiring only — `hitAction` decided all of this.
-   *
-   * The three doing-something answers all end with the reader looking at the
-   * thing they picked, and the fourth says why it cannot. Note what is NOT
-   * here: no branch re-derives whether a hit is a feature, and no branch
-   * assembles a focus stack by hand — `depthGoTo` is the same algebra the
-   * arrows, the centre and the breadcrumbs use, so depth cannot disagree with
-   * itself afterwards.
-   */
-  #activateBrainHit(action: BrainHitAction): void {
-    switch (action.kind) {
-      case 'focus': {
-        // Already on this sheet: no depth change, so nothing to fly. Close the
-        // panel (the answer has been chosen) and leave the cell marked.
-        this.#closeBrainQuery()
-        this.#setBrainFocus(action.nodeId)
-        return
-      }
-      case 'navigate': {
-        const stack = action.stack ?? []
-        this.#closeBrainQuery()
-        // A SEARCH RESULT IS A JUMP, NOT A DIVE. Nobody pressed a cell, so
-        // there is no rectangle to fly from — `flightFor` cuts, and the level
-        // the answer named is simply there.
-        this.#flyTerritory('jump', null, () => {
-          this.#setDepthNav(depthGoTo(this.#depthNav(), stack))
-          // Set INSIDE the mutation, so the render that follows the flight
-          // already knows which node to mark — and so the ordinary "any
-          // navigation clears the mark" rule cannot wipe the one we just made.
-          this.#brainFocusNodeId = action.nodeId
-        })
-        return
-      }
-      case 'peek': {
-        // THE BOARD ALREADY HAS A DOCUMENT SURFACE. `openPeek` is the read-only
-        // drawer every other file reference in here uses (story anchors,
-        // annotations, evidence rows), and it carries its own "Open in editor"
-        // promotion — a second viewer would be a second set of bugs.
-        if (action.path !== null) this.openPeek(action.path)
-        this.#closeBrainQuery()
-        return
-      }
-      case 'none': {
-        // NOT A SILENT NO-OP. The row's own words go to the status line, where
-        // the reader is already looking for the answer's state.
-        const query = this.#brainQuery
-        if (query !== null) {
-          query.status.textContent = action.label
-          query.status.classList.add('on')
-        }
-        return
-      }
-    }
-  }
-
-  /**
-   * Mark the node a search result sent the reader to.
-   *
-   * REUSES THE HIT VOCABULARY (`LIT_CLASS` / `DIM_CLASS`) rather than inventing
-   * a second highlight: the reader has just seen those exact classes mean "this
-   * is what your question matched", and a different treatment for "this is the
-   * one you picked" would be two languages for one idea.
-   */
-  #setBrainFocus(nodeId: string | null): void {
-    this.#brainFocusNodeId = nodeId
-    this.#applyBrainFocus()
-  }
-
-  /** Paint the mark. Called after every feature-map render, so it survives
-   *  the re-render a depth change causes. */
-  #applyBrainFocus(): void {
-    const id = this.#brainFocusNodeId
-    if (id === null) return
-    const mounted = this.#territory
-    if (mounted === null) return
-    // The node may not be on THIS sheet (the reader navigated on past it) — in
-    // which case the mark has outlived its meaning and is dropped rather than
-    // left pointing at nothing.
-    if (!mounted.view.cells.some((cell) => cell.id === id)) {
-      this.#brainFocusNodeId = null
-      return
-    }
-    this.#applyBrainHighlight({ lit: [id], dimmed: [], hitCount: 1, onMap: 1, offMap: 0 })
-  }
-
-  /**
-   * Light the hits, dim the rest. NO SCRIM — the map lighting up IS the
-   * result, and a scrim over it would hide the answer the query produced.
-   *
-   * A lit cell also reveals its FULL name whatever its size, because a match
-   * you cannot read is not a match you found (the CSS overrides the label rule
-   * for `.fb-terr-lit` only, so the rule itself stays one rule).
-   *
-   * It is a THIN WRAPPER on purpose: `#applyTerritoryDecoration` is the one
-   * place a cell is lit or dimmed, and a brain answer is one overlay among
-   * five. Translating the highlight into that vocabulary here is what stops
-   * "dim" meaning something slightly different depending on which overlay
-   * spoke last (allowed-pattern #14).
-   */
-  #applyBrainHighlight(highlight: BrainHighlight | null): void {
-    if (highlight === null) {
-      // CLEARING A QUERY PUTS THE MAP BACK — including a
-      // click-neighbourhood that was lighting it before the field opened.
-      // Clearing outright would let a question the reader closed erase an
-      // answer they never dismissed.
-      this.#applyTerritoryOverlay(this.#decoration)
-      return
-    }
-    this.#applyTerritoryDecoration({ lit: highlight.lit, dimOthers: true })
   }
 
   /**
@@ -16150,19 +18030,6 @@ export class BlueprintBoard {
     this.#connSeq += 1
     this.#connPanel?.remove()
     this.#connPanel = null
-  }
-
-  /** Close the field and put the map back exactly as it was. */
-  #closeBrainQuery(): void {
-    const query = this.#brainQuery
-    if (query === null) return
-    query.panel.remove()
-    this.#brainQuery = null
-    this.#brainQuerySeq += 1
-    this.#applyBrainHighlight(null)
-    // The query's cap left with it — a row about a closed answer would be a
-    // limitation of nothing that is on screen.
-    this.#paintLimitations()
   }
 
   /**
@@ -16690,10 +18557,6 @@ export class BlueprintBoard {
     this.#featureForward = next.forward
     // At the project's own top level, the way in from the Workspace is spent.
     if (next.stack.length === 0) this.#wsEnteredFeature = false
-    // A MARK BELONGS TO THE LEVEL IT WAS MADE ON. Any move the reader makes
-    // themselves retires it; `#activateBrainHit`'s navigate re-sets it straight
-    // after this call, which is exactly the one move that should keep it.
-    this.#brainFocusNodeId = null
   }
 
   /**
@@ -16859,13 +18722,19 @@ export class BlueprintBoard {
       // is the shape every pure territory module reads, and the gap report
       // is not something any of them should be able to see.
       this.#featureLimitations = result.limitations
+      this.#featureDefaultBranch = result.available ? (result.defaultBranch ?? null) : null
       // A FEATURE PRESSED ON THE WORKSPACE SHEET in this project, before it was
       // the active one: land on it now that its map is here.
       const pendingFeature = this.#wsPendingFeature
       if (pendingFeature !== null && pendingFeature.root === rootId) {
         this.#wsPendingFeature = null
         const node = levelNodes(this.#featureGraph).get(pendingFeature.id)
-        if (node !== undefined && pendingFeature.action === 'story') {
+        if (node !== undefined && pendingFeature.action === 'level') {
+          // THE PINNED CARD'S OPEN, from the Workspace sheet: the same diagram,
+          // full size, now that this checkout is the active one.
+          this.#wsLevel = 'project'
+          void this.#openNodeLevel({ id: node.id, kind: 'feature', name: node.name }, { focus: node, returnStack: [] })
+        } else if (node !== undefined && pendingFeature.action === 'story') {
           // A FEATURE WITH NO PARTS, pressed on the Workspace sheet: its story,
           // read from this checkout now that it is the active one. Back lands
           // on the project's own top level.
@@ -16911,7 +18780,16 @@ export class BlueprintBoard {
    *
    * Nothing here decides anything. `resolveLevel` does, in a pure module.
    */
-  async #openNodeLevel(target: { id: string; kind: FocusNodeKind; name: string }): Promise<void> {
+  async #openNodeLevel(
+    target: { id: string; kind: FocusNodeKind; name: string },
+    /**
+     * `focus` — the feature's node, so its diagram can offer the switch back
+     * to its blocks. `returnStack` — where closing the level lands, when that
+     * is not where the reader stands (a Blocks · Diagram swap returns to the
+     * feature's PARENT, so Back leaves the feature).
+     */
+    opts: { focus?: FocusNode; returnStack?: FocusNode[] } = {},
+  ): Promise<void> {
     // A PART HAS NO LEVEL ANY MORE (plan cell-hover-diagram, FR-7): the part
     // page — component strip over file boxes — is gone, and a part reads as
     // its code story. Nothing on the board passes one here; a caller that
@@ -16922,7 +18800,11 @@ export class BlueprintBoard {
     }
     // The depth is read BEFORE anything awaits — this is where the reader
     // pressed the control, and it is where closing the level must land.
-    const request = { ...target, depth: this.#featureStack.length }
+    const returnStack = opts.returnStack ?? [...this.#featureStack]
+    const request = { ...target, depth: returnStack.length }
+    const focusNode =
+      opts.focus ??
+      (this.#featureGraph === null ? undefined : levelNodes(this.#featureGraph, returnStack).get(target.id))
     const rootId = this.#activeRoot
     const ticket = ++this.#briefRequest
     // A DOMAIN RESOLVES WITHOUT A FETCH. It has no level of its own, so asking
@@ -16988,8 +18870,9 @@ export class BlueprintBoard {
       resolution.view ?? resolution.derived?.view ?? null,
       {
         depth: resolution.returnDepth,
-        stack: [...this.#featureStack],
-        label: focusCrumbs(this.#featureStack, FOCUS_ROOT_LABEL).at(-1)?.name ?? FOCUS_ROOT_LABEL,
+        stack: [...returnStack],
+        label: focusCrumbs(returnStack, FOCUS_ROOT_LABEL).at(-1)?.name ?? FOCUS_ROOT_LABEL,
+        ...(focusNode !== undefined && viewSwitchOffered(focusNode) ? { focus: focusNode } : {}),
       },
     )
     this.#navRecord()
@@ -17113,6 +18996,143 @@ export class BlueprintBoard {
     this.#takeBoardFocus()
   }
 
+  /** Send the ONE open event, with this feature tagged. */
+  #askAbout(featureId: string, extra: Omit<AskBlueprintOpenDetail, 'tags'>): void {
+    const tag: AskOpenTag = { id: featureId, kind: kindOfId(featureId) === 'part' ? 'part' : 'feature' }
+    document.dispatchEvent(
+      new CustomEvent(ASK_BLUEPRINT_EVENT, { detail: { ...extra, tags: [tag] } satisfies AskBlueprintOpenDetail }),
+    )
+  }
+
+  #dropBriefAsked(): void {
+    this.#briefAskedSeq += 1
+    this.#briefAsked?.remove()
+    this.#briefAsked = null
+  }
+
+  /**
+   * Read the saved answers about this feature ONCE, when its brief opens (not
+   * on any broadcast), and draw the section. Nothing saved draws nothing; a
+   * failed read is logged and draws nothing — never an error wall.
+   */
+  async #loadBriefAsked(featureId: string): Promise<void> {
+    const rootId = this.#activeRoot
+    const api = window.flow.ask
+    if (rootId === null || api === undefined) return
+    const seq = this.#briefAskedSeq
+    try {
+      const [list, stale] = await Promise.all([
+        api.list({ rootId, featureIds: [featureId] }),
+        api.stale({ rootId, featureId }).catch(() => null),
+      ])
+      if (seq !== this.#briefAskedSeq || this.#briefFeatureRef !== featureId) return
+      if (!list.ok) {
+        console.warn('Saved questions could not be read:', list.detail)
+        return
+      }
+      const view = savedSectionView(list.threads, stale !== null && stale.ok ? stale.results : [], Date.now())
+      if (view === null) return
+      const section = this.#buildBriefAsked(featureId, view)
+      this.#briefAsked = section
+      this.#stage.parentElement?.insertBefore(section, this.#stage.nextSibling)
+    } catch (error) {
+      console.warn('Saved questions could not be read:', error)
+    }
+  }
+
+  #buildBriefAsked(featureId: string, view: NonNullable<ReturnType<typeof savedSectionView>>): HTMLElement {
+    const section = document.createElement('div')
+    section.className = 'fb-brief-asked'
+    const head = document.createElement('div')
+    head.className = 'fb-asked-head'
+    const caps = document.createElement('span')
+    caps.className = 'fb-asked-caps'
+    caps.textContent = view.heading.toUpperCase()
+    head.appendChild(caps)
+    const spacer = document.createElement('span')
+    spacer.className = 'fb-asked-spacer'
+    head.appendChild(spacer)
+    if (view.hasMore) {
+      const all = document.createElement('button')
+      all.type = 'button'
+      all.className = 'fb-asked-link'
+      all.textContent = 'See all'
+      all.addEventListener('click', () => this.#askAbout(featureId, { view: 'history' }))
+      head.appendChild(all)
+    }
+    section.appendChild(head)
+    for (const row of view.rows) section.appendChild(this.#buildAskedRow(featureId, row))
+    return section
+  }
+
+  #buildAskedRow(featureId: string, row: SavedRowView): HTMLElement {
+    // A WORKSPACE ANSWER, listed here through its pointer, opens where it was
+    // saved — in the Workspace — and shows the whole answer (FR-10).
+    const open = (): void => {
+      if (row.workspaceEntry !== null) {
+        document.dispatchEvent(
+          new CustomEvent(ASK_BLUEPRINT_EVENT, {
+            detail: { entryId: row.workspaceEntry, workspace: true } satisfies AskBlueprintOpenDetail,
+          }),
+        )
+        return
+      }
+      this.#askAbout(featureId, { entryId: row.id })
+    }
+    const wrap = document.createElement('div')
+    wrap.className = 'fb-asked-row' + (row.stale ? ' stale' : '')
+    const main = document.createElement('button')
+    main.type = 'button'
+    main.className = 'fb-asked-main'
+    const question = document.createElement('span')
+    question.className = 'fb-asked-q'
+    question.textContent = row.question
+    const meta = document.createElement('span')
+    meta.className = 'fb-asked-meta'
+    if (row.chip !== null) {
+      const chip = document.createElement('span')
+      chip.className = 'fb-asked-chip'
+      chip.textContent = row.chip
+      meta.appendChild(chip)
+    }
+    meta.append(row.meta)
+    main.append(question, meta)
+    main.addEventListener('click', open)
+    wrap.appendChild(main)
+    if (row.stale) {
+      const foot = document.createElement('div')
+      foot.className = 'fb-asked-stale'
+      const note = document.createElement('span')
+      note.textContent = 'The code under this answer changed since'
+      const again = document.createElement('button')
+      again.type = 'button'
+      again.className = 'fb-asked-again'
+      again.textContent = 'Ask again'
+      again.addEventListener('click', () => {
+        // Only features and parts travel through an opener; a Workspace
+        // answer's project and connection tags are asked again by its scope.
+        const ids = (row.tags.length > 0 ? row.tags : [featureId]).filter((id) => id.startsWith('feature:'))
+        const tags: AskOpenTag[] = ids.map((id) => ({
+          id,
+          kind: kindOfId(id) === 'part' ? 'part' : 'feature',
+        }))
+        document.dispatchEvent(
+          new CustomEvent(ASK_BLUEPRINT_EVENT, {
+            detail: {
+              text: row.question,
+              tags,
+              submit: true,
+              ...(row.workspaceEntry !== null ? { workspace: true } : {}),
+            } satisfies AskBlueprintOpenDetail,
+          }),
+        )
+      })
+      foot.append(note, again)
+      wrap.appendChild(foot)
+    }
+    return wrap
+  }
+
   /**
    * Close an open level, landing at the depth it was opened from (Phase 5.4).
    *
@@ -17200,6 +19220,7 @@ export class BlueprintBoard {
     text.textContent = message
     pane.appendChild(text)
     this.#stage.replaceChildren(pane)
+    this.#syncHeaderIsland()
   }
 
   /** A valid but empty graph (zero nodes) — a calm empty state, not a blank grid
@@ -17248,6 +19269,8 @@ export class BlueprintBoard {
     text.textContent = label
     pane.append(spinner, text)
     this.#stage.replaceChildren(pane)
+    // A pane is a screen too: it wears the standard's top island.
+    this.#syncHeaderIsland()
   }
 
   #renderDeriving(): void {
@@ -17276,6 +19299,8 @@ export class BlueprintBoard {
     this.#derivingTimer = setInterval(sync, 1000)
     pane.append(spinner, text)
     this.#stage.replaceChildren(pane)
+    // A pane is a screen too: it wears the standard's top island.
+    this.#syncHeaderIsland()
   }
 
   #clearDerivingTimer(): void {
@@ -17314,6 +19339,8 @@ export class BlueprintBoard {
     text.textContent = 'Setting up plan-flow…'
     pane.append(spinner, text)
     this.#stage.replaceChildren(pane)
+    // A pane is a screen too: it wears the standard's top island.
+    this.#syncHeaderIsland()
   }
 
   #renderFailed(): void {
@@ -17507,8 +19534,6 @@ export class BlueprintBoard {
     // would clear the rebuild fingerprint set above), minus the stage wipe.
     this.#territory = null
     this.#terrLens = null
-    this.#brainQuery = null
-    this.#brainQuerySeq += 1
     this.#refreshNav()
     this.#stage.replaceChildren(this.#surface, ...chrome, this.#mapControls)
     // A fresh graph re-fits: the camera baseline follows the new content.
@@ -17528,6 +19553,10 @@ export class BlueprintBoard {
    */
   #renderLearnChip(): void {
     this.#ensureLearnIgnore()
+    // The Knowledge pill reads the same learning state the chip does.
+    this.#paintKnowledgePill()
+    // …and so does the deep view's pill, for its drift note.
+    if (this.#deepChrome !== null) this.#paintDeepKnowledge()
     const entries = this.#snapshot?.learning ?? []
     const progress = computeLearnProgress(
       this.#snapshot?.graph ?? null,
@@ -18006,10 +20035,6 @@ export class BlueprintBoard {
       return
     }
     if (this.#territory !== null) {
-      if (this.#brainQuery !== null) {
-        this.#placeBrainQuery()
-        return
-      }
       if (this.#terrResizeFrame !== null) return
       this.#terrResizeFrame = requestAnimationFrame(() => {
         this.#terrResizeFrame = null
@@ -18654,6 +20679,30 @@ function injectStyles(): void {
 
 const BOARD_STYLES = `
   .flow-board-root {
+    --fb-isl-bg: rgba(255, 255, 255, 0.78);
+    --fb-isl-border: #d9dde3;
+    --fb-isl-shadow: rgba(15, 23, 42, 0.12);
+    --fb-isl-nav: #9aa0a9;
+    --fb-isl-crumb: #5f6672;
+    --fb-isl-sep: #b7bcc4;
+    --fb-isl-current: #1d2128;
+    --fb-isl-track: #f1f3f5;
+    --fb-isl-track-border: #d9dde3;
+    --fb-isl-seg-on: #ffffff;
+    --fb-isl-seg-on-ink: #111418;
+    --fb-isl-seg-off: #5f6672;
+    --fb-isl-action: #4a515c;
+    --fb-isl-field: #f6f7f9;
+    --fb-isl-field-border: #d5dae1;
+    --fb-isl-spark: #1f8fcf;
+    --fb-isl-placeholder: #8a919b;
+    --fb-isl-key-border: #cfd4db;
+    --fb-isl-key: #6b727d;
+    --fb-isl-hover: rgba(15, 23, 42, 0.06);
+    --fb-isl-ink: #2a2f37;
+    --fb-isl-dim: #737a85;
+    --fb-isl-caret: #8a919b;
+    --fb-isl-count: #737a85;
     /* VELLUM — the light theme (and the base set the dark block overrides). */
     /* WELL — a recessed field inside a card (the reject input): the ground
        colour, one layer down from --fb-card in both themes. GRID-STRONG — the
@@ -18812,6 +20861,30 @@ const BOARD_STYLES = `
      accent) gets its couple of percent back to stay visible on the darker
      stock. */
   :root[data-theme='dark'] .flow-board-root {
+    --fb-isl-bg: rgba(18, 21, 26, 0.72);
+    --fb-isl-border: #2e333c;
+    --fb-isl-shadow: rgba(0, 0, 0, 0.35);
+    --fb-isl-nav: #5d636d;
+    --fb-isl-crumb: #8b919b;
+    --fb-isl-sep: #4c525b;
+    --fb-isl-current: #e4e6ea;
+    --fb-isl-track: #0f1216;
+    --fb-isl-track-border: #2a2f37;
+    --fb-isl-seg-on: #262b33;
+    --fb-isl-seg-on-ink: #eef0f3;
+    --fb-isl-seg-off: #8b919b;
+    --fb-isl-action: #b0b5be;
+    --fb-isl-field: #0f1216;
+    --fb-isl-field-border: #2c313a;
+    --fb-isl-spark: #6cc3f0;
+    --fb-isl-placeholder: #7d838d;
+    --fb-isl-key-border: #343a45;
+    --fb-isl-key: #9aa0aa;
+    --fb-isl-hover: rgba(255, 255, 255, 0.06);
+    --fb-isl-ink: #d6dae0;
+    --fb-isl-dim: #7d838d;
+    --fb-isl-caret: #6f7580;
+    --fb-isl-count: #8b919b;
     --fb-paper: #0C1320;
     /* ONE CARD, EVERY SCREEN (user, 2026-10-06: "all the blueprint screens
        should follow the same pattern of colors"). The blue disc stock is gone:
@@ -18820,8 +20893,8 @@ const BOARD_STYLES = `
        navy drafting sheet. */
     --fb-card: #212833;
     --fb-cell: #212833;
-    --fb-cell-quiet: #1C2129;
-    --fb-cell-border: #2B333E;
+    --fb-cell-quiet: #18202a;
+    --fb-cell-border: #2a3540;
     --fb-accent: #57C4EA;
     --fb-ink: #E6E8EB;
     --fb-ink-dim: #8B929C;
@@ -20233,30 +22306,6 @@ const BOARD_STYLES = `
     color: var(--fb-ink-dim);
     white-space: nowrap;
   }
-  /* ASK THE BRAIN, at the strip's right end and at the root only. A pill rather
-     than a bare mark: it is the board's one search entry point, and an
-     unlabelled glyph in a corner is a feature nobody finds. */
-  .flow-board-root .fb-terr-ask {
-    margin-left: auto;
-    flex: none;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px 10px;
-    border: 1px solid var(--fb-card-border);
-    border-radius: 10px;
-    background: var(--fb-card);
-    font-family: var(--fl-font-mono, ui-monospace, monospace);
-    font-size: 9.5px;
-    letter-spacing: 0.1em;
-    color: var(--fb-ink-dim);
-    cursor: pointer;
-  }
-  .flow-board-root .fb-terr-ask:hover {
-    border-color: var(--fb-accent);
-    color: var(--fb-accent);
-  }
-  .flow-board-root .fb-terr-ask-glyph { font-size: 11px; }
 
   /* ── A country: transparent ground with a mono label row ── */
   .flow-board-root .fb-terr-group {
@@ -20483,7 +22532,7 @@ const BOARD_STYLES = `
     position: absolute;
     left: 6px;
     right: 6px;
-    top: 8px;
+    top: 70px;
     height: 36px;
     z-index: 2;
     box-sizing: border-box;
@@ -21197,6 +23246,30 @@ const BOARD_STYLES = `
       transparent 6px 12px
     );
   }
+  /* WORK IN PROGRESS: knowledge learned on a branch that has not merged. No new
+     colour - the neutral secondary ink and a dashed border, in both themes. The
+     border stays 1px, so the box does not grow. */
+  .flow-board-root .fb-terr-cell.fb-terr-draft { border-style: dashed; border-color: var(--fb-ink-dim); }
+  .flow-board-root .fb-terr-cell.fb-terr-draft:hover { border-color: var(--fb-accent); }
+  .flow-board-root .fb-terr-draft-tag {
+    align-self: flex-start;
+    flex: none;
+    max-width: 100%;
+    margin-top: 3px;
+    padding: 0 6px;
+    border: 1px dashed var(--fb-ink-dim);
+    border-radius: 999px;
+    font-size: 10px;
+    line-height: 14px;
+    color: var(--fb-ink-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: help;
+  }
+  .flow-board-root .fb-terr-draft-branch { font-family: var(--fl-font-mono, ui-monospace, monospace); }
+  .flow-board-root .fb-terr-cell.fb-terr-dot .fb-terr-draft-tag,
+  .flow-board-root .fb-terr-cell.fb-terr-tiny .fb-terr-draft-tag { display: none; }
   /* Knowledge that has drifted past the code it describes: the amber hatch the
      board already uses for stale, at cell scale. */
   .flow-board-root .fb-terr-cell.fb-terr-stale {
@@ -21383,6 +23456,442 @@ const BOARD_STYLES = `
     opacity: 0.5;
     font-size: 10px;
   }
+
+  /* ── THE FLOATING CHROME (mockup J3, user pick 2026-11-15) ────────────────
+     No header rows over a territory: the board header is not drawn while a
+     territory sheet is on stage, and the chrome floats over the map in three
+     corners. The containers take no presses; only their own boxes do, so the
+     map stays reachable everywhere else. */
+  .flow-board-root .fb-main:has(> .fb-stage > .fb-territory) > .fb-header { display: none; }
+  .flow-board-root .fb-float {
+    position: absolute;
+    z-index: 4;
+    display: flex;
+    pointer-events: none;
+    font-family: var(--fl-font-ui, system-ui, sans-serif);
+  }
+  .flow-board-root .fb-float > * { pointer-events: auto; }
+  /* TWO FLOATING ISLANDS (user pick B, 2026-11-15). One glass surface for
+     both: translucent paper, a blur, a 1px border, radius 12, a soft shadow,
+     in the board's own tokens so it follows the theme. */
+  .flow-board-root .fb-island {
+    left: 12px;
+    right: 12px;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    box-sizing: border-box;
+    background: color-mix(in srgb, var(--fb-paper) 72%, transparent);
+    -webkit-backdrop-filter: blur(14px) saturate(1.2);
+    backdrop-filter: blur(14px) saturate(1.2);
+    border: 1px solid var(--fl-color-border, var(--fb-border));
+    border-radius: 12px;
+    box-shadow: 0 8px 24px color-mix(in srgb, #000 35%, transparent);
+    pointer-events: auto;
+  }
+  .flow-board-root .fb-float-tl { top: 10px; height: 48px; padding: 0 8px 0 10px; }
+  .flow-board-root .fb-float-bottom { bottom: 10px; height: 44px; padding: 0 6px; }
+  .flow-board-root .fb-float-tl > .fb-float-trail { flex: 1 1 auto; min-width: 0; }
+  .flow-board-root .fb-float-tl > .fb-float-ask { flex: 0 1 380px; min-width: 180px; display: flex; justify-content: flex-end; }
+  .flow-board-root .fb-island-divider {
+    width: 1px;
+    height: 18px;
+    flex: none;
+    background: var(--fl-color-border, var(--fb-border));
+  }
+  .flow-board-root .fb-float-bl { position: relative; display: flex; align-items: center; gap: 6px; flex: none; }
+  .flow-board-root .fb-float-br { position: relative; display: flex; align-items: center; flex: 0 0 auto; max-width: 48%; min-width: 0; }
+  .flow-board-root .fb-island-hint { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; overflow: hidden; }
+  /* The menu floats like the islands. */
+  .flow-board-root .fb-layers-menu {
+    background: color-mix(in srgb, var(--fl-color-surface-raised, var(--fb-paper)) 94%, transparent);
+    border: 1px solid var(--fl-color-border, var(--fb-border));
+    border-radius: 10px;
+    box-shadow: 0 8px 24px color-mix(in srgb, #000 35%, transparent);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+  }
+  /* THE ASK FIELD, inset in the top island: 32px, its own subtle border. */
+  .flow-board-root .fb-float-ask .fb-askf {
+    width: 100%;
+    max-width: 380px;
+    height: 32px;
+    flex: 1 1 auto;
+    min-width: 0;
+    box-sizing: border-box;
+    border-radius: 8px;
+    border: 1px solid var(--fl-color-border, var(--fb-border));
+    background: color-mix(in srgb, var(--fb-paper) 80%, #000 20%);
+  }
+  /* THE TRAIL — the top island's left side. Only its buttons take presses. */
+  .flow-board-root .fb-float-trail {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 22px;
+    padding-left: 4px;
+    max-width: 100%;
+    pointer-events: none;
+    font-size: var(--fl-text-caption-size, 12px);
+    color: var(--fl-color-text-secondary, var(--fb-ink-dim));
+  }
+  .flow-board-root .fb-float-trail button,
+  .flow-board-root .fb-float-trail fl-button,
+  .flow-board-root .fb-float-trail .fb-float-act,
+  .flow-board-root .fb-float-trail .fb-view-switch,
+  .flow-board-root .fb-float-trail select,
+  .flow-board-root .fb-float-trail input,
+  .flow-board-root .fb-float-trail label:has(select) { pointer-events: auto; }
+  .flow-board-root .fb-float-nav { display: inline-flex; gap: 0; flex: none; }
+  .flow-board-root .fb-float-lead { flex: none; color: var(--fl-color-text-muted, var(--fb-ink-dim)); }
+  .flow-board-root .fb-float-trail .fb-terr-crumbs { gap: 6px; min-width: 0; overflow: hidden; font-family: var(--fl-font-ui, system-ui, sans-serif); }
+  .flow-board-root .fb-float-trail .fb-terr-crumb,
+  .flow-board-root .fb-float-trail .fb-ws-crumb,
+  .flow-board-root .fb-float-trail .fb-terr-crumb-sep {
+    font-family: var(--fl-font-ui, system-ui, sans-serif);
+    font-size: var(--fl-text-caption-size, 12px);
+    letter-spacing: 0;
+    text-transform: none;
+    white-space: nowrap;
+  }
+  .flow-board-root .fb-float-trail .fb-terr-crumb,
+  .flow-board-root .fb-float-trail .fb-ws-crumb { color: var(--fl-color-text-secondary, var(--fb-ink-dim)); }
+  .flow-board-root .fb-float-trail .fb-terr-crumb.on,
+  .flow-board-root .fb-float-trail .fb-ws-crumb.on { color: var(--fl-color-text, var(--fb-ink)); font-weight: 600; }
+  .flow-board-root .fb-float-actions { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; flex: none; }
+  .flow-board-root .fb-float-actions .fb-terr-control { position: static; width: 22px; height: 22px; }
+  .flow-board-root .fb-float-actions .fb-float-act { opacity: 0.85; }
+  .flow-board-root .fb-float-actions .fb-float-act:hover { opacity: 1; }
+  .flow-board-root .fb-float-actions .fb-head-btn { height: 22px; padding: 0 6px; font-size: var(--fl-text-caption-size, 12px); }
+  /* THE DEEP LEVELS (user, 2026-11-15, mockup "Deep levels"): a feature's
+     diagram or brief wears the same two islands, over the whole main pane. */
+  .flow-board-root .fb-main { position: relative; }
+  .flow-board-root .fb-main.fb-deep > .fb-header { display: none; }
+  .flow-board-root .fb-main.fb-deep > .fb-stage { padding-top: 70px; padding-bottom: 66px; box-sizing: border-box; }
+  /* QUESTIONS ASKED on a deep level (user, 2026-11-15: the bottom island lay
+     over it). The band sits under the stage, outside the room the stage keeps
+     for the island — so when it is there, the band keeps that room instead. */
+  .flow-board-root .fb-main.fb-deep > .fb-stage:has(+ .fb-brief-asked) { padding-bottom: 0; }
+  .flow-board-root .fb-main.fb-deep > .fb-brief-asked { padding-bottom: 66px; }
+  .flow-board-root .fb-deep-chrome { position: absolute; inset: 0; pointer-events: none; z-index: 6; }
+  .flow-board-root .fb-deep-chrome > .fb-island { pointer-events: auto; }
+  .flow-board-root .fb-deep-chrome .fb-float-actions .fb-brief-headactions { display: inline-flex; align-items: center; gap: 4px; }
+  .flow-board-root .fb-deep-bottom {
+    height: auto;
+    min-height: 44px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+  .flow-board-root .fb-deep-row { display: flex; align-items: center; gap: 12px; height: 42px; padding: 0 6px; flex: none; min-width: 0; }
+  .flow-board-root .fb-deep-sheet {
+    max-height: 45vh;
+    overflow: auto;
+    padding: 12px 14px 6px;
+    border-bottom: 1px solid var(--fl-color-border, var(--fb-border));
+  }
+  .flow-board-root .fb-deep-sheet[hidden] { display: none; }
+  .flow-board-root .fb-deep-sheet-head { font-size: 12px; font-weight: 600; color: var(--fl-color-text, var(--fb-ink)); margin-bottom: 4px; }
+  .flow-board-root .fb-deep-sheet-item { padding: 7px 0; border-top: 1px solid color-mix(in srgb, var(--fl-color-border, var(--fb-border)) 60%, transparent); }
+  .flow-board-root .fb-deep-sheet-item:first-child { border-top: 0; }
+  .flow-board-root .fb-deep-sheet-text { font-size: 12.5px; line-height: 1.45; color: var(--fl-color-text, var(--fb-ink)); }
+  .flow-board-root .fb-deep-sheet-meta { font-size: 11px; margin-top: 2px; color: var(--fl-color-text-muted, var(--fb-ink-dim)); }
+  .flow-board-root .fb-deep-tabs { display: flex; align-items: center; gap: 2px; flex: none; min-width: 0; }
+  .flow-board-root .fb-deep-row > .fb-island-hint { flex: 1 1 0; min-width: 48px; }
+  .flow-board-root .fb-deep-tab {
+    border: 0;
+    background: transparent;
+    height: 30px;
+    padding: 0 9px;
+    border-radius: 7px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+    font: inherit;
+    font-size: 12px;
+    white-space: nowrap;
+    color: var(--fl-color-text-secondary, var(--fb-ink-dim));
+    cursor: pointer;
+  }
+  .flow-board-root .fb-deep-tab:hover { background: var(--fl-color-surface-sunken, var(--fb-card)); color: var(--fl-color-text, var(--fb-ink)); }
+  .flow-board-root .fb-deep-tab.on { background: var(--fl-color-surface-sunken, var(--fb-card)); color: var(--fl-color-text, var(--fb-ink)); font-weight: 600; }
+  .flow-board-root .fb-deep-tab-count { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--fl-color-text-muted, var(--fb-ink-dim)); }
+  .flow-board-root .fb-deep-issue {
+    border: 0;
+    background: transparent;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-width: 0;
+    height: 30px;
+    padding: 0 4px;
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+    color: var(--fl-color-text-secondary, var(--fb-ink-dim));
+    cursor: pointer;
+  }
+  .flow-board-root .fb-deep-issue:disabled { cursor: default; }
+  .flow-board-root .fb-deep-issue-tag {
+    flex: none;
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--fb-git-deleted);
+    background: color-mix(in srgb, var(--fb-git-deleted) 14%, transparent);
+  }
+  .flow-board-root .fb-deep-issue-unchanged .fb-deep-issue-tag,
+  .flow-board-root .fb-deep-issue-guarantee .fb-deep-issue-tag {
+    color: var(--fl-color-text-secondary, var(--fb-ink-dim));
+    background: var(--fl-color-surface-sunken, var(--fb-card));
+  }
+  .flow-board-root .fb-deep-issue-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* EVERY OTHER SCREEN'S TOP ISLAND: the header's controls, in the island. */
+  /* THE HEADER ROW IS NEVER DRAWN: every screen wears an island, and its
+     controls live in one. Hidden unconditionally — toggling it with the
+     screen resized the stage mid-swap, and the map re-rendered on every frame. */
+  .flow-board-root .fb-main > .fb-header { display: none; }
+  .flow-board-root .fb-main.fb-islanded > .fb-stage { padding-top: 70px; box-sizing: border-box; }
+  /* The story fills the stage absolutely, so it starts under the island itself. */
+  .flow-board-root .fb-main.fb-islanded > .fb-stage > .fb-story { top: 70px; }
+  .flow-board-root .fb-main.fb-islanded > .fb-brief-bar { margin-top: 70px; }
+  .flow-board-root .fb-main.fb-islanded > .fb-brief-bar + .fb-stage { padding-top: 0; }
+  .flow-board-root .fb-head-island { z-index: 6; }
+  .flow-board-root .fb-head-island-where { display: inline-flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; }
+  .flow-board-root .fb-head-island-where > [hidden] { display: none; }
+  .flow-board-root .fb-head-island-where .fb-head-strip { display: inline-flex; align-items: center; gap: 10px; min-width: 0; }
+  .flow-board-root .fb-learn-understand { display: inline-flex; align-items: center; margin-left: auto; }
+  .flow-board-root .fb-learn-understand[hidden] { display: none; }
+  .flow-board-root .fb-learn-understand button,
+  .flow-board-root .fb-float-bl .fb-layer-understand button,
+  .flow-board-root .fb-float-bl button.fb-layer-understand-btn {
+    height: 28px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    font: inherit;
+    font-size: 12px;
+    white-space: nowrap;
+    color: var(--fb-isl-action);
+    cursor: pointer;
+  }
+  .flow-board-root .fb-learn-understand button:hover,
+  .flow-board-root .fb-float-bl .fb-layer-understand button:hover,
+  .flow-board-root .fb-float-bl button.fb-layer-understand-btn:hover { background: var(--fb-isl-hover); color: var(--fb-isl-current); }
+  /* BLOCKS · DIAGRAM — a small segmented control, the current view pressed. */
+  .flow-board-root .fb-view-switch {
+    display: inline-flex;
+    flex: none;
+    padding: 1px;
+    border: 1px solid var(--fl-color-border, var(--fb-border));
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--fl-color-surface-raised, var(--fb-paper)) 90%, transparent);
+    text-shadow: none;
+  }
+  .flow-board-root .fb-view-switch-btn {
+    border: 0;
+    background: transparent;
+    padding: 0 8px;
+    height: 20px;
+    border-radius: 5px;
+    font: inherit;
+    font-size: var(--fl-text-caption-size, 12px);
+    color: var(--fl-color-text-secondary, var(--fb-ink-dim));
+    cursor: pointer;
+  }
+  .flow-board-root .fb-view-switch-btn:hover { color: var(--fl-color-text, var(--fb-ink)); }
+  .flow-board-root .fb-view-switch-btn[aria-pressed='true'] {
+    background: var(--fl-color-surface-sunken, var(--fb-card));
+    color: var(--fl-color-text, var(--fb-ink));
+    font-weight: 600;
+    cursor: default;
+  }
+  /* THE LAYERS BUTTON and its menu, one choice at a time. */
+  .flow-board-root .fb-layers-btn {
+    height: 32px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 0 12px;
+    font: inherit;
+    font-size: 12px;
+    color: var(--fl-color-text, var(--fb-ink));
+    cursor: pointer;
+  }
+  .flow-board-root .fb-layers-caret { color: var(--fl-color-text-muted, var(--fb-ink-dim)); }
+  .flow-board-root .fb-layers-btn:hover,
+  .flow-board-root .fb-knowledge-pill:hover { background: var(--fl-color-surface-sunken, var(--fb-card)); }
+  .flow-board-root .fb-layers-key {
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    padding: 0 6px;
+  }
+  .flow-board-root .fb-layers-key .fb-terr-key,
+  .flow-board-root .fb-layers-menu .fb-terr-key { display: inline-flex; margin-left: 0; }
+  .flow-board-root .fb-terr-key-line {
+    width: 12px;
+    height: 3px;
+    display: inline-block;
+    background: var(--fb-learn-known);
+    border-radius: 1px;
+  }
+  .flow-board-root .fb-layers-menu {
+    position: absolute;
+    left: 0;
+    bottom: calc(100% + 6px);
+    min-width: 220px;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    box-sizing: border-box;
+  }
+  .flow-board-root .fb-layers-head {
+    padding: 4px 8px 6px;
+    font-size: 11px;
+    color: var(--fl-color-text-muted, var(--fb-ink-dim));
+  }
+  .flow-board-root .fb-layers-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 30px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    font: inherit;
+    font-size: 13px;
+    color: var(--fl-color-text, var(--fb-ink));
+    text-align: left;
+    cursor: pointer;
+  }
+  .flow-board-root .fb-layers-item:hover:not(:disabled),
+  .flow-board-root .fb-layers-item:focus-visible { background: var(--fl-color-surface-sunken, var(--fb-card)); outline: none; }
+  .flow-board-root .fb-layers-item:disabled { opacity: 0.5; cursor: default; }
+  .flow-board-root .fb-layers-mark {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    border: 1px solid var(--fl-color-border-strong, var(--fb-card-border));
+    flex: none;
+  }
+  .flow-board-root .fb-layers-item[aria-checked='true'] .fb-layers-mark { background: var(--fb-accent); border-color: var(--fb-accent); }
+  .flow-board-root .fb-layers-name { flex: 1 1 auto; }
+  .flow-board-root .fb-layers-figure { color: var(--fl-color-text-muted, var(--fb-ink-dim)); font-size: 12px; }
+  .flow-board-root .fb-layers-menu .fb-terr-key { padding: 8px 8px 4px; border-top: 1px solid var(--fl-color-border, var(--fb-border)); margin-top: 4px; }
+  /* THE KNOWLEDGE PILL — a ring of the share understood, and one line. */
+  .flow-board-root .fb-knowledge-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    min-width: 0;
+    font: inherit;
+    text-align: left;
+    color: var(--fl-color-text, var(--fb-ink));
+    cursor: pointer;
+    max-width: 360px;
+  }
+  .flow-board-root .fb-knowledge-pill[aria-pressed='true'] { border-color: var(--fb-accent); }
+  .flow-board-root .fb-knowledge-ring {
+    --fb-ring: 0%;
+    width: 16px;
+    height: 16px;
+    flex: none;
+    border-radius: 50%;
+    background: conic-gradient(var(--fb-learn-known) 0 var(--fb-ring), color-mix(in srgb, var(--fb-card-border) 70%, transparent) var(--fb-ring) 100%);
+    -webkit-mask: radial-gradient(circle, transparent 4.5px, #000 5px);
+    mask: radial-gradient(circle, transparent 4.5px, #000 5px);
+  }
+  .flow-board-root .fb-knowledge-pill.is-busy .fb-knowledge-ring { animation: fb-knowledge-pulse 1.6s ease-in-out infinite; }
+  @keyframes fb-knowledge-pulse { 50% { opacity: 0.55; } }
+  @media (prefers-reduced-motion: reduce) {
+    .flow-board-root .fb-knowledge-pill.is-busy .fb-knowledge-ring { animation: none; }
+  }
+  /* ONE LINE: "N% understood · short status". */
+  .flow-board-root .fb-knowledge-text { display: flex; align-items: baseline; gap: 5px; min-width: 0; overflow: hidden; }
+  .flow-board-root .fb-knowledge-line1 { font-size: 12px; white-space: nowrap; }
+  .flow-board-root .fb-knowledge-line2 {
+    font-size: 11px;
+    color: var(--fl-color-text-secondary, var(--fb-ink-dim));
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .flow-board-root .fb-knowledge-line2::before { content: '·'; margin-right: 5px; }
+  .flow-board-root .fb-knowledge-pill.is-warn .fb-knowledge-line2 { color: var(--fb-learn-stale); }
+  .flow-board-root .fb-knowledge-dot { margin-left: 0; flex: none; }
+  /* THE DRIFT NOTE — amber dot and "31 drifted"; on a narrow pane the other
+     sub-line gives way first and the drift stays. */
+  .flow-board-root .fb-knowledge-drift {
+    display: inline-flex; align-items: center; gap: 4px; flex: none;
+    font-size: 11px; white-space: nowrap; color: var(--fb-learn-stale); border-radius: 4px;
+  }
+  .flow-board-root .fb-knowledge-drift::before { content: '·'; margin-right: 1px; color: var(--fl-color-text-secondary, var(--fb-ink-dim)); }
+  .flow-board-root .fb-knowledge-drift:hover { text-decoration: underline; }
+  .flow-board-root .fb-knowledge-drift-dot { width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--fb-learn-stale); box-sizing: border-box; }
+  /* THE HINT — the foot's line (what the sheet leaves out, and what it is),
+     between the two dividers of the bottom island: one line, truncated. */
+  .flow-board-root .fb-terr-foot.fb-float-foot {
+    position: static;
+    height: auto;
+    min-width: 0;
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    background: transparent;
+    border: 0;
+    font-size: 12px;
+    color: var(--fl-color-text-secondary, var(--fb-ink-dim));
+  }
+  .flow-board-root .fb-terr-foot.fb-float-foot > * { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* LEARNING ON THE WORKSPACE SHEET: a cell is tinted by how well it is
+     understood — the same claim its edge already makes, made loud. */
+  .flow-board-root .fb-terr-lens-on .fb-ws-cell.fb-terr-edge-learned { background: color-mix(in srgb, var(--fb-learn-known) 16%, var(--fb-card)); }
+  .flow-board-root .fb-terr-lens-on .fb-ws-cell.fb-terr-edge-stale { background: color-mix(in srgb, var(--fb-learn-stale) 16%, var(--fb-card)); }
+  .flow-board-root .fb-terr-lens-on .fb-ws-cell.fb-terr-edge-none { opacity: 0.7; }
+  /* THE PANEL'S CONNECTIONS SECTION, at its foot. */
+  .flow-board-root .fb-lp-connections {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 12px;
+    border-top: 1px solid var(--fl-color-border, var(--fb-border));
+  }
+  .flow-board-root .fb-lp-connections-title { font-weight: 600; font-size: 12px; margin-right: auto; }
+  .flow-board-root .fb-lp-connections-line { font-size: 12px; color: var(--fl-color-text-secondary, var(--fb-ink-dim)); }
+  .flow-board-root .fb-lp-connections-bar {
+    flex-basis: 100%;
+    height: 3px;
+    background: color-mix(in srgb, var(--fb-card-border) 60%, transparent);
+    overflow: hidden;
+  }
+  .flow-board-root .fb-lp-connections-bar > span { display: block; height: 100%; background: var(--fb-accent); }
+  .flow-board-root .fb-lp-connections-bar.is-indeterminate > span { width: 30%; animation: fb-lp-march 1.2s linear infinite; }
+  @keyframes fb-lp-march { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
   .flow-board-root .fb-terr-note {
     min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     flex: 1 1 auto;
@@ -21761,6 +24270,80 @@ const BOARD_STYLES = `
   /* THE OPEN FEATURE'S ACTIONS, ON THE HEADER. Same buttons the brief built —
      re-parented, not restyled beyond sitting on a header row: they keep the
      ghost look every other control up here already has. */
+  /* QUESTIONS ASKED — the saved answers about this feature, under the diagram.
+     (No backticks in here: this block lives inside a template literal.) */
+  .flow-board-root .fb-brief-asked {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px var(--fl-space-md, 12px) 12px;
+    border-top: 1px solid var(--fb-card-border);
+  }
+  .flow-board-root .fb-asked-head { display: flex; align-items: center; gap: 8px; }
+  .flow-board-root .fb-asked-caps {
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: var(--fl-color-text-secondary);
+  }
+  .flow-board-root .fb-asked-spacer { flex: 1; }
+  .flow-board-root .fb-asked-link,
+  .flow-board-root .fb-asked-again {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    font-size: 12px;
+    color: var(--fl-color-accent);
+    cursor: pointer;
+  }
+  .flow-board-root .fb-asked-link:hover,
+  .flow-board-root .fb-asked-again:hover { text-decoration: underline; }
+  .flow-board-root .fb-asked-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    border: 1px solid var(--fb-card-border);
+    border-radius: 8px;
+    background: var(--fl-color-surface-raised);
+  }
+  .flow-board-root .fb-asked-row.stale { border-color: var(--fb-ask-warn, var(--fb-card-border)); }
+  .flow-board-root .fb-asked-main {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px;
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .flow-board-root .fb-asked-q { font-weight: 500; }
+  .flow-board-root .fb-asked-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--fl-color-text-secondary);
+  }
+  .flow-board-root .fb-asked-chip {
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    background: var(--fl-color-surface);
+    color: var(--fl-color-accent);
+  }
+  .flow-board-root .fb-asked-stale {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 10px 10px;
+    font-size: 12px;
+    color: var(--fb-ask-warn, var(--fl-color-text-secondary));
+  }
   /* The brief's footer — under the diagram, in the same gutter the bar uses so
      the two read as one frame around the picture. */
   .flow-board-root .fb-brief-foot {
@@ -22100,6 +24683,14 @@ const BOARD_STYLES = `
     text-transform: uppercase;
     color: var(--fb-ink-dim);
   }
+  .flow-board-root .fb-corpus-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+  .flow-board-root .fb-corpus-showall {
+    height: 28px; padding: 0 12px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--fb-isl-field-border, var(--fl-border)); background: var(--fb-isl-seg-on, var(--fl-surface-2));
+    color: var(--fb-isl-seg-on-ink, var(--fl-text)); font: inherit; font-size: 12px;
+  }
+  .flow-board-root .fb-corpus-showall:hover { border-color: var(--fl-accent); }
+  .flow-board-root .fb-corpus-empty-note { margin: 0; font-size: 12px; color: var(--fb-isl-placeholder, var(--fl-text-dim)); }
   .flow-board-root .fb-corpus-notice {
     margin: 12px 0;
     font-size: 12.5px;
@@ -23536,7 +26127,6 @@ const BOARD_STYLES = `
     cursor: pointer;
   }
   .flow-board-root .fb-terr-title > .fb-ws-toggle { margin-left: auto; }
-  .flow-board-root .fb-terr-title > .fb-ws-toggle + .fb-terr-ask { margin-left: 8px; }
   .flow-board-root .fb-ws-toggle:hover:not(:disabled),
   .flow-board-root .fb-ws-open:hover { border-color: var(--fb-ws-link); color: var(--fb-ink); }
   .flow-board-root .fb-ws-toggle[aria-pressed='true'] {
@@ -23665,20 +26255,9 @@ const BOARD_STYLES = `
      the order the strip built them — on every sheet. */
   .flow-board-root .fb-head-strip .fb-terr-title-where { flex: 1 1 auto; }
   .flow-board-root .fb-head-strip .fb-terr-title > .fb-head-btn { flex: none; margin-left: 0; }
-  /* An older rule dressed Ask the brain as an upper-case pill; as a header
-     button it wears nothing of its own. */
-  .flow-board-root .fb-head-strip fl-button.fb-terr-ask {
-    border: 0;
-    padding: 0;
-    background: none;
-    box-shadow: none;
-    text-transform: none;
-    letter-spacing: 0;
-    font: inherit;
-    color: inherit;
-    height: auto;
-    min-width: 0;
-  }
+  /* THE ASK FIELD sits after where-you-are and before the tiles, on every
+     sheet; it keeps its own width (the panel's sheet styles size it). */
+  .flow-board-root .fb-head-strip .fb-terr-title > .fb-askf { margin-left: auto; }
   /* A project's own line on the map is a fact like any other: caption, UI face. */
   .flow-board-root .fb-ws-band .fb-ws-meta {
     font-family: var(--fl-font-ui);
@@ -23686,7 +26265,6 @@ const BOARD_STYLES = `
     letter-spacing: 0;
     text-transform: none;
   }
-  .flow-board-root .fb-head-strip .fb-ws-conn { gap: 0; }
   .flow-board-root .fb-head-btn fl-icon[name='spinner'] { animation: fb-ws-spin 0.9s linear infinite; }
   @media (prefers-reduced-motion: reduce) {
     .flow-board-root .fb-head-btn fl-icon[name='spinner'] { animation: none; }
@@ -23705,8 +26283,8 @@ const BOARD_STYLES = `
   }
   .flow-board-root .fb-head-strip .fb-terr-control:hover { background: var(--fl-color-surface-raised); color: var(--fl-color-text); }
   /* STATUS CHIPS read as ghost buttons too: same height, face and ink. */
-  .flow-board-root .fb-header .fb-learn-chip,
-  .flow-board-root .fb-header .fb-changeset-chip {
+  .flow-board-root :is(.fb-header, .fb-head-island) .fb-learn-chip,
+  .flow-board-root :is(.fb-header, .fb-head-island) .fb-changeset-chip {
     display: inline-flex;
     align-items: center;
     gap: var(--fl-space-xs, 4px);
@@ -23721,11 +26299,11 @@ const BOARD_STYLES = `
     letter-spacing: 0;
     text-transform: none;
   }
-  .flow-board-root .fb-header .fb-learn-chip { padding: 0 var(--fl-space-xs, 4px) 0 16px; color: var(--fl-color-text-secondary); }
-  .flow-board-root .fb-header .fb-changeset-chip { padding: 0 var(--fl-space-xs, 4px); }
-  .flow-board-root .fb-header .fb-learn-chip:hover,
-  .flow-board-root .fb-header .fb-changeset-chip:hover { background: var(--fl-color-surface-raised); }
-  .flow-board-root .fb-header .fb-learn-chip:hover { color: var(--fl-color-text); }
+  .flow-board-root :is(.fb-header, .fb-head-island) .fb-learn-chip { padding: 0 var(--fl-space-xs, 4px) 0 16px; color: var(--fl-color-text-secondary); }
+  .flow-board-root :is(.fb-header, .fb-head-island) .fb-changeset-chip { padding: 0 var(--fl-space-xs, 4px); }
+  .flow-board-root :is(.fb-header, .fb-head-island) .fb-learn-chip:hover,
+  .flow-board-root :is(.fb-header, .fb-head-island) .fb-changeset-chip:hover { background: var(--fl-color-surface-raised); }
+  .flow-board-root :is(.fb-header, .fb-head-island) .fb-learn-chip:hover { color: var(--fl-color-text); }
   /* THE CONTROLS SIT BY LEARN (user, 2026-10-06): with a strip in the header
      the strip takes the free room itself, so its controls end beside the
      header's own actions instead of mid-row. */
@@ -23735,8 +26313,64 @@ const BOARD_STYLES = `
   .flow-board-root .fb-header { gap: var(--fl-space-xs, 4px); }
   .flow-board-root .fb-header > .fb-nav { margin-right: var(--fl-space-xs, 4px); }
   .flow-board-root .fb-brief-headactions:empty { display: none; }
-  /* Ask the brain waits for its own design pass (user, 2026-10-06). */
-  .flow-board-root .fb-terr-ask { display: none !important; }
+  /* THE HEADER'S TILES (mockup G + D, user pick 2026-11-15): Connections and
+     Learn are equal 32px squares — one 1px border, one 8px radius, one 16px
+     line icon — named in their tooltips. A count rides as a small badge, and
+     a toggle that is on (or a panel that is open) stays raised in the accent,
+     so the state is visible on every tile. */
+  .flow-board-root .fb-head-tile {
+    position: relative;
+    flex: none;
+    width: 32px;
+    height: 32px;
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    background: var(--fl-color-surface-raised, var(--fb-card));
+    border: 1px solid var(--fl-color-border, var(--fb-border));
+    border-radius: 8px;
+    color: var(--fl-color-text-secondary, var(--fb-ink));
+    cursor: pointer;
+  }
+  .flow-board-root .fb-head-tile:hover:not(:disabled) {
+    color: var(--fl-color-text, var(--fb-ink));
+    border-color: var(--fl-color-border-strong, var(--fb-card-border));
+  }
+  .flow-board-root .fb-head-tile[aria-pressed='true'] {
+    background: color-mix(in srgb, var(--fb-accent) 22%, var(--fl-color-surface-raised, var(--fb-card)));
+    border-color: var(--fb-accent);
+    color: var(--fl-color-text, var(--fb-ink));
+  }
+  .flow-board-root .fb-head-tile:disabled { opacity: 0.5; cursor: default; }
+  .flow-board-root .fb-head-tile:focus-visible { outline: 2px solid var(--fb-accent); outline-offset: 1px; }
+  .flow-board-root .fb-head-tile-badge {
+    position: absolute;
+    top: -5px;
+    right: -7px;
+    min-width: 15px;
+    box-sizing: border-box;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--fl-color-text-secondary, var(--fb-ink-dim));
+    color: var(--fb-paper);
+    font-family: var(--fl-font-mono, ui-monospace, monospace);
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 15px;
+    text-align: center;
+    pointer-events: none;
+  }
+  .flow-board-root .fb-head-tile[aria-pressed='true'] .fb-head-tile-badge { background: var(--fb-accent); color: #ffffff; }
+  .flow-board-root .fb-head-tile-spin { animation: fb-ws-spin 0.9s linear infinite; }
+  @media (prefers-reduced-motion: reduce) {
+    .flow-board-root .fb-head-tile-spin { animation: none; }
+  }
+  .flow-board-root .fb-head-strip .fb-ws-conn { gap: var(--fl-space-sm, 8px); }
+  .flow-board-root .fb-head-strip .fb-ws-controls { gap: var(--fl-space-sm, 8px); }
+  .flow-board-root .fb-head-strip .fb-terr-title > .fb-head-tile { margin-left: var(--fl-space-xs, 4px); }
+  .flow-board-root .fb-header > .fb-learn-tile { margin-left: var(--fl-space-sm, 8px); }
   /* A FEATURE'S OWN ACTIONS in the header (Understand, Changes & discoveries)
      — ghost buttons too, one face and one size for the whole label. */
   .flow-board-root .fb-brief-headactions .fb-brief-time {
@@ -23869,6 +26503,86 @@ const BOARD_STYLES = `
   .flow-board-root .fb-lp-count { color: var(--fl-color-text-secondary); font-weight: normal; font-variant-numeric: tabular-nums; }
   .flow-board-root .fb-lp-items { display: flex; flex-direction: column; padding-left: 18px; }
   .flow-board-root .fb-lp-row { display: flex; align-items: center; gap: 8px; min-height: 24px; padding: 0 4px; border-radius: var(--fl-radius-sm, 4px); }
+  /* THE DRIFTED GROUP (mockup "Drifted, easier to update", 2026-11-16): a
+     summary with Update all, select and sort, folders with their own Update,
+     the reason on each row, a selection bar, then the automatic switch. Amber
+     is the drift colour, the accent fill is the one primary press. */
+  .flow-board-root .fb-lp-items.fb-dr { gap: 6px; padding-left: 0; }
+  .flow-board-root .fb-dr-bar {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--fb-learn-stale) 32%, var(--fl-color-border));
+    background: color-mix(in srgb, var(--fb-learn-stale) 7%, transparent);
+    border-radius: var(--fl-radius-md, 8px);
+    font-family: var(--fl-font-ui); font-size: var(--fl-text-caption-size, 12px);
+    color: color-mix(in srgb, var(--fb-learn-stale) 72%, var(--fl-color-text));
+  }
+  .flow-board-root .fb-dr-bar-text { flex: 1 1 auto; min-width: 0; }
+  .flow-board-root .fb-dr .fb-lp-action.fb-lp-primary {
+    background: var(--fb-accent); border-color: var(--fb-accent);
+    color: var(--fl-color-text-on-accent, #0e1a24); font-weight: 600; opacity: 1;
+  }
+  .flow-board-root .fb-dr .fb-lp-action.fb-lp-primary:hover { background: color-mix(in srgb, var(--fb-accent) 86%, var(--fl-color-text)); color: var(--fl-color-text-on-accent, #0e1a24); }
+  .flow-board-root .fb-dr-controls { display: flex; align-items: center; gap: 10px; min-height: 28px; padding: 0 4px; font-family: var(--fl-font-ui); font-size: var(--fl-text-caption-size, 12px); color: var(--fl-color-text-secondary); }
+  .flow-board-root .fb-dr-selectall { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+  .flow-board-root .fb-dr-spacer { flex: 1 1 auto; }
+  .flow-board-root .fb-dr-cb { flex: none; width: 13px; height: 13px; margin: 0; accent-color: var(--fb-accent); cursor: pointer; }
+  .flow-board-root .fb-dr-seg { display: inline-flex; padding: 2px; border: 1px solid var(--fl-color-border); border-radius: 7px; background: var(--fl-color-surface-sunken, var(--fl-color-surface)); }
+  .flow-board-root .fb-dr-seg-btn {
+    height: 22px; padding: 0 9px; border: 0; border-radius: 5px; background: transparent;
+    font: inherit; font-size: 11.5px; color: var(--fl-color-text-secondary); cursor: pointer; white-space: nowrap;
+  }
+  .flow-board-root .fb-dr-seg-btn:hover { color: var(--fl-color-text); }
+  .flow-board-root .fb-dr-seg-btn[aria-checked='true'] { background: var(--fl-color-surface-raised); color: var(--fl-color-text); }
+  .flow-board-root .fb-dr-list { display: flex; flex-direction: column; gap: 1px; }
+  .flow-board-root .fb-dr-fold {
+    display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 0 6px;
+    border-radius: var(--fl-radius-sm, 6px); background: var(--fl-color-surface-raised);
+    font-family: var(--fl-font-ui); font-size: var(--fl-text-caption-size, 12px); cursor: pointer;
+  }
+  .flow-board-root .fb-dr-fold:focus-visible { outline: 2px solid var(--fl-color-focus, var(--fb-accent)); outline-offset: -2px; }
+  .flow-board-root .fb-dr-fold > fl-icon { flex: none; color: var(--fl-color-text-secondary); }
+  .flow-board-root .fb-dr-fold-name { flex: 0 1 auto; }
+  .flow-board-root .fb-dr-facts { flex: 1 1 auto; min-width: 0; color: var(--fl-color-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+  .flow-board-root .fb-dr-fold .fb-lp-action.fb-dr-fold-update { border-color: var(--fl-color-border); color: var(--fl-color-text); }
+  .flow-board-root .fb-dr-row { min-height: 28px; }
+  .flow-board-root .fb-dr-ind { margin-left: 26px; }
+  .flow-board-root .fb-dr-why { flex: none; font-family: var(--fl-font-ui); font-size: 11.5px; color: color-mix(in srgb, var(--fb-learn-stale) 78%, var(--fl-color-text-secondary)); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .flow-board-root .fb-dr-row .fb-lp-when { min-width: 52px; text-align: right; }
+  .flow-board-root .fb-dr-more {
+    align-self: flex-start; padding: 2px 6px; border: 0; background: transparent; cursor: pointer;
+    font-family: var(--fl-font-ui); font-size: 11.5px; color: var(--fl-color-text-secondary);
+  }
+  .flow-board-root .fb-dr-more:hover { color: var(--fl-color-text); }
+  .flow-board-root .fb-dr-selbar {
+    display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px;
+    border: 1px solid var(--fl-color-border); border-radius: var(--fl-radius-md, 8px);
+    background: var(--fl-color-surface-raised);
+    font-family: var(--fl-font-ui); font-size: var(--fl-text-caption-size, 12px); color: var(--fl-color-text);
+  }
+  .flow-board-root .fb-dr-progress { display: flex; align-items: center; gap: 10px; min-height: 30px; padding: 0 4px; font-family: var(--fl-font-ui); font-size: var(--fl-text-caption-size, 12px); color: var(--fl-color-text); }
+  .flow-board-root .fb-dr-prog { flex: 1 1 auto; max-width: 180px; height: 4px; border-radius: 2px; overflow: hidden; background: color-mix(in srgb, var(--fb-card-border, var(--fl-color-border)) 80%, transparent); }
+  .flow-board-root .fb-dr-prog > b { display: block; height: 100%; background: var(--fb-accent); transition: width 240ms ease; }
+  .flow-board-root .fb-dr-progress-text { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .flow-board-root .fb-dr-state { flex: none; font-family: var(--fl-font-ui); font-size: 11.5px; color: var(--fl-color-text-secondary); white-space: nowrap; }
+  .flow-board-root .fb-dr-reading .fb-dr-state { color: var(--fb-accent); }
+  .flow-board-root .fb-dr-updated .fb-dr-state { color: var(--fb-learn-known); }
+  .flow-board-root .fb-dr-not-updated .fb-dr-state { color: var(--fb-learn-stale); }
+  .flow-board-root .fb-dr-auto { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; padding: 8px 4px 2px; border-top: 1px solid var(--fl-color-border); font-family: var(--fl-font-ui); }
+  .flow-board-root .fb-dr-auto-line { display: flex; align-items: center; gap: 10px; font-size: var(--fl-text-caption-size, 12px); color: var(--fl-color-text); }
+  .flow-board-root .fb-dr-auto-state { color: var(--fl-color-text-secondary); }
+  .flow-board-root .fb-dr-auto-help { font-size: 11.5px; line-height: 1.5; color: var(--fl-color-text-secondary); padding-left: 38px; }
+  .flow-board-root .fb-dr-switch {
+    position: relative; flex: none; width: 28px; height: 16px; padding: 0; border: 0; border-radius: 8px;
+    background: color-mix(in srgb, var(--fl-color-text-secondary) 40%, transparent); cursor: pointer;
+  }
+  .flow-board-root .fb-dr-switch::after {
+    content: ''; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%;
+    background: var(--fl-color-surface, #fff); transition: left 120ms ease;
+  }
+  .flow-board-root .fb-dr-switch[aria-checked='true'] { background: var(--fb-learn-known); }
+  .flow-board-root .fb-dr-switch[aria-checked='true']::after { left: 14px; }
+  .flow-board-root .fb-dr-switch:disabled { opacity: 0.5; cursor: default; }
+  .flow-board-root .fb-dr-switch:focus-visible { outline: 2px solid var(--fl-color-focus, var(--fb-accent)); outline-offset: 2px; }
   .flow-board-root .fb-lp-row:hover { background: var(--fl-color-surface-raised); }
   .flow-board-root .fb-lp-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: color-mix(in srgb, var(--fb-ink-dim) 35%, transparent); box-sizing: border-box; }
   .flow-board-root .fb-lp-dot.fb-learn-learned { background: var(--fb-learn-known); }
@@ -25612,4 +28326,193 @@ const BOARD_STYLES = `
   }
   .flow-board-root .fb-terr-grow-details > .fb-terr-grow-folders { margin: 0; }
   .flow-board-root .fb-terr-grow-details > .fb-terr-grow-away { margin: 0; }
+  /* THE MAP'S GROUND, as the approved mockup draws it in the dark theme:
+     #0e1a24 with a #16242f line every 40px. Scoped to the stage, so the
+     shared --fb-paper and grid tokens keep their values everywhere else. */
+  :root[data-theme='dark'] .flow-board-root .fb-stage {
+    background-color: #0e1a24;
+    background-image:
+      linear-gradient(#16242f 1px, transparent 1px),
+      linear-gradient(90deg, #16242f 1px, transparent 1px);
+    background-size: 40px 40px, 40px 40px;
+  }
+  /* THE ISLAND STANDARD (user, 2026-11-15: "match the mockups exactly",
+     Frame block B and Deep levels). One set of numbers for every island on
+     every screen; the colours are board-scoped tokens (--fb-isl-*), dark as
+     the mockup, light hand-matched. */
+  .flow-board-root .fb-island {
+    background: var(--fb-isl-bg);
+    border: 1px solid var(--fb-isl-border);
+    box-shadow: 0 8px 24px var(--fb-isl-shadow);
+  }
+  .flow-board-root .fb-float-tl { height: 48px; padding: 0 8px 0 14px; gap: 12px; }
+  .flow-board-root .fb-float-bottom:not(.fb-deep-bottom) { height: 44px; padding: 0 6px; gap: 10px; }
+  .flow-board-root .fb-island-divider { background: var(--fb-isl-border); }
+  .flow-board-root .fb-float-trail { gap: 12px; padding-left: 0; font-size: 13px; color: var(--fb-isl-crumb); }
+  .flow-board-root .fb-float-nav { gap: 2px; margin-right: -4px; }
+  .flow-board-root .fb-float-nav .fb-nav-btn {
+    width: 26px;
+    min-width: 26px;
+    height: 26px;
+    padding: 0;
+    margin: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--fb-isl-crumb);
+    cursor: pointer;
+  }
+  .flow-board-root .fb-float-nav .fb-nav-btn:hover:not(:disabled) { background: var(--fb-isl-hover); color: var(--fb-isl-current); }
+  .flow-board-root .fb-float-nav .fb-nav-btn:disabled { color: var(--fb-isl-sep); background: transparent; cursor: default; }
+  .flow-board-root .fb-float-trail .fb-terr-crumbs { gap: 10px; }
+  .flow-board-root .fb-float-trail .fb-terr-crumb,
+  .flow-board-root .fb-float-trail .fb-ws-crumb { font-size: 13px; color: var(--fb-isl-crumb); padding: 0; background: transparent; border: 0; }
+  .flow-board-root .fb-float-trail .fb-terr-crumb-sep { font-size: 13px; color: var(--fb-isl-sep); }
+  .flow-board-root .fb-float-trail .fb-terr-crumb.on,
+  .flow-board-root .fb-float-trail .fb-ws-crumb.on { font-size: 13px; font-weight: 600; color: var(--fb-isl-current); opacity: 1; }
+  .flow-board-root .fb-float-lead { font-size: 13px; color: var(--fb-isl-crumb); }
+  .flow-board-root .fb-float-actions { gap: 12px; margin-left: 0; }
+  .flow-board-root .fb-float-actions::before {
+    content: '';
+    width: 1px;
+    height: 18px;
+    flex: none;
+    background: var(--fb-isl-border);
+  }
+  .flow-board-root .fb-float-actions .fb-brief-headactions { gap: 12px; }
+  .flow-board-root .fb-float-actions .fb-head-btn,
+  .flow-board-root .fb-float-actions .fb-headbtn,
+  .flow-board-root .fb-float-actions .fb-float-act:not(.fb-view-switch) {
+    height: 24px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    font-size: 12px;
+    white-space: nowrap;
+    color: var(--fb-isl-action);
+    opacity: 1;
+    --fl-button-bg: transparent;
+    --fl-button-border: transparent;
+    --fl-button-fg: var(--fb-isl-action);
+  }
+  .flow-board-root .fb-float-actions .fb-head-btn fl-icon,
+  .flow-board-root .fb-float-actions .fb-headbtn fl-icon { display: none; }
+  .flow-board-root .fb-float-actions .fb-head-btn:hover,
+  .flow-board-root .fb-float-actions .fb-headbtn:hover { color: var(--fb-isl-current); }
+  .flow-board-root .fb-float-tl .fb-view-switch {
+    padding: 2px;
+    background: var(--fb-isl-track);
+    border: 1px solid var(--fb-isl-track-border);
+    border-radius: 7px;
+  }
+  .flow-board-root .fb-float-tl .fb-view-switch-btn { height: 24px; padding: 0 9px; font-size: 12px; color: var(--fb-isl-seg-off); }
+  .flow-board-root .fb-float-tl .fb-view-switch-btn[aria-pressed='true'] { background: var(--fb-isl-seg-on); color: var(--fb-isl-seg-on-ink); }
+  .flow-board-root .fb-float-tl > .fb-float-ask { flex: 0 100 380px; min-width: 160px; }
+  /* A NARROW PANE: the field gives way first (down to 160px), then the crumbs
+     (ellipsis); the actions never slide under the field. */
+  .flow-board-root .fb-float-tl > .fb-float-trail { overflow: hidden; }
+  .flow-board-root .fb-float-trail .fb-terr-crumbs,
+  .flow-board-root .fb-float-trail .fb-head-island-where { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+  .flow-board-root .fb-float-trail .fb-terr-crumbs > * { flex: none; }
+  /* Squeezed, the trail keeps where you ARE: it clips from the left. */
+  .flow-board-root .fb-float-trail .fb-terr-crumbs { justify-content: flex-end; }
+  .flow-board-root .fb-float-trail .fb-terr-crumbs > .on { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .flow-board-root .fb-float-actions { flex: none; }
+  .flow-board-root .fb-deep-chrome .fb-float-tl > .fb-float-ask { flex-basis: 300px; }
+  .flow-board-root .fb-float-ask .fb-askf {
+    max-width: 380px;
+    height: 32px;
+    min-height: 32px;
+    padding: 0 8px 0 11px;
+    gap: 9px;
+    border-radius: 8px;
+    border: 1px solid var(--fb-isl-field-border);
+    background: var(--fb-isl-field);
+    align-items: center;
+  }
+  .flow-board-root .fb-deep-chrome .fb-float-ask .fb-askf { max-width: 300px; }
+  .flow-board-root .fb-float-ask .fb-askf-spark { color: var(--fb-isl-spark); width: 14px; height: 14px; }
+  .flow-board-root .fb-float-ask .fb-askf-input { font-size: 13px; }
+  .flow-board-root .fb-float-ask .fb-askf-input::placeholder { color: var(--fb-isl-placeholder); opacity: 1; }
+  .flow-board-root .fb-float-ask .fb-askf-key {
+    font-family: var(--fl-font-mono, ui-monospace, monospace);
+    font-size: 11px;
+    line-height: 18px;
+    padding: 0 6px;
+    border: 1px solid var(--fb-isl-key-border);
+    border-radius: 4px;
+    font-weight: 500;
+    color: var(--fb-isl-key);
+    background: transparent;
+  }
+  .flow-board-root .fb-layers-btn { height: 32px; padding: 0 10px; font-size: 12px; color: var(--fb-isl-ink); }
+  .flow-board-root .fb-layers-btn fl-icon { width: 14px; height: 14px; }
+  .flow-board-root .fb-layers-caret { font-size: 10px; color: var(--fb-isl-caret); }
+  .flow-board-root .fb-island-hint,
+  .flow-board-root .fb-island-hint .fb-terr-note,
+  .flow-board-root .fb-island-hint .fb-terr-foot { font-size: 12px; color: var(--fb-isl-dim); }
+  .flow-board-root .fb-knowledge-ring { width: 16px; height: 16px; }
+  .flow-board-root .fb-knowledge-line1 { font-size: 12px; color: var(--fb-isl-ink); }
+  .flow-board-root .fb-knowledge-line2 { font-size: 11px; color: var(--fb-isl-dim); }
+  .flow-board-root .fb-deep-tab { height: 30px; padding: 0 10px; border-radius: 7px; font-size: 12px; color: var(--fb-isl-action); }
+  .flow-board-root .fb-deep-tab:hover,
+  .flow-board-root .fb-deep-tab.on { background: var(--fb-isl-seg-on); color: var(--fb-isl-seg-on-ink); }
+  .flow-board-root .fb-deep-tab-count { font-family: var(--fl-font-mono, ui-monospace, monospace); font-size: 11px; color: var(--fb-isl-count); }
+  .flow-board-root .fb-deep-issue { color: var(--fb-isl-action); }
+  .flow-board-root .fb-deep-sheet { border-bottom-color: var(--fb-isl-border); }
+  /* A NARROW PANE, ROUND TWO (user, 2026-11-15: ":67F /" with the feature
+     gone). Where you ARE is the last crumb and it never shrinks to nothing:
+     the ancestors give way first, and below 760px they are dropped (the back
+     arrow still walks up). The Ask field folds to its spark and key and opens
+     on focus, taking the actions' room while it is open. Only an island that
+     carries actions folds: the map's own island has the room. Container queries,
+     so a resized split pane reflows without a listener. */
+  .flow-board-root .fb-float-tl { container: fb-isl-top / inline-size; }
+  .flow-board-root .fb-float-trail .fb-terr-crumbs > * {
+    flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .flow-board-root .fb-float-trail .fb-terr-crumbs > .fb-terr-crumb-sep { flex: none; }
+  .flow-board-root .fb-float-trail .fb-terr-crumbs > :last-child { flex: 0 1 auto; min-width: 4em; }
+  @container fb-isl-top (max-width: 760px) {
+    .flow-board-root .fb-float-tl:has(.fb-float-actions) .fb-float-trail .fb-terr-crumbs > :not(:last-child),
+    .flow-board-root .fb-float-tl:has(.fb-float-actions) .fb-float-trail > .fb-float-lead,
+    .flow-board-root .fb-float-tl:has(.fb-float-actions) .fb-float-trail > .fb-float-lead + .fb-terr-crumb-sep { display: none; }
+    .flow-board-root .fb-island.fb-float-tl:has(.fb-float-actions) > .fb-float-ask { flex: 0 0 auto; flex-basis: auto; min-width: 0; width: auto; }
+    .flow-board-root .fb-island.fb-float-tl:has(.fb-float-actions) > .fb-float-ask .fb-askf {
+      flex: none; width: 70px; min-width: 0; max-width: none; transition: width 120ms ease; cursor: text;
+    }
+    .flow-board-root .fb-island.fb-float-tl:has(.fb-float-actions) > .fb-float-ask .fb-askf-input { min-width: 0; }
+    .flow-board-root .fb-float-tl:has(.fb-float-actions) .fb-float-ask .fb-askf-input::placeholder { color: transparent; }
+    .flow-board-root .fb-island.fb-float-tl:has(.fb-float-actions) > .fb-float-ask:focus-within .fb-askf,
+    .flow-board-root .fb-island.fb-float-tl:has(.fb-float-actions) > .fb-float-ask .fb-askf.is-open { width: min(380px, calc(100cqw - 220px)); }
+    .flow-board-root .fb-float-tl:has(.fb-float-actions) .fb-float-ask:focus-within .fb-askf-input::placeholder,
+    .flow-board-root .fb-float-tl:has(.fb-float-actions) .fb-float-ask .fb-askf.is-open .fb-askf-input::placeholder { color: var(--fb-isl-placeholder); }
+    .flow-board-root .fb-float-tl:has(.fb-float-ask:focus-within) .fb-float-actions,
+    .flow-board-root .fb-float-tl:has(.fb-askf.is-open) .fb-float-actions { display: none; }
+  }
+  /* The bottom island: the issue's tag is a fixed label, never cut mid-word;
+     on a narrow pane its sentence and the Knowledge sub-line step aside. */
+  .flow-board-root .fb-deep-bottom { container: fb-isl-deep / inline-size; }
+  /* The map's own island: when the drift note shares the pill with another
+     line and the pane is narrow, the other line steps aside first. */
+  .flow-board-root .fb-float-bottom:not(.fb-deep-bottom) { container: fb-isl-bottom / inline-size; }
+  @container fb-isl-bottom (max-width: 620px) {
+    .flow-board-root .fb-knowledge-text:has(.fb-knowledge-drift) .fb-knowledge-line2 { display: none; }
+  }
+  .flow-board-root .fb-deep-issue-tag { flex: none; }
+  @container fb-isl-deep (max-width: 760px) {
+    .flow-board-root .fb-deep-issue-text,
+    .flow-board-root .fb-deep-knowledge .fb-knowledge-line2 { display: none; }
+    .flow-board-root .fb-deep-knowledge .fb-knowledge-drift::before { content: none; }
+    .flow-board-root .fb-deep-row > .fb-island-hint:has(.fb-deep-issue) { flex: 0 1 auto; min-width: fit-content; }
+    .flow-board-root .fb-deep-row > .fb-island-hint:not(:has(.fb-deep-issue)) { flex: 1 1 0; min-width: 0; }
+  }
+  .flow-board-root .fb-knowledge-ring {
+    -webkit-mask: radial-gradient(circle, transparent 5px, #000 5.5px);
+    mask: radial-gradient(circle, transparent 5px, #000 5.5px);
+  }
 `

@@ -24,7 +24,11 @@ import {
   TITLE_STRIP_H,
   type ProgressNode,
   type StageSize,
-  type TerritoryCell, summaryParts } from './territory-view'
+  type TerritoryCell, summaryParts,
+  draftBranchOf,
+  draftTagLabel,
+  draftTagTitle,
+  UNKNOWN_DRAFT_BRANCH } from './territory-view'
 import {
   childrenOf,
   type FocusNode,
@@ -107,7 +111,9 @@ const byId = (cells: readonly TerritoryCell[], id: string): TerritoryCell => {
   return found
 }
 
-const TINY: StageSize = { width: 210, height: 120 }
+/** The floating chrome's bands grew (mockup J3) — every fixture keeps the sheet it was written for. */
+const CHROME = TITLE_STRIP_H + TITLE_BLOCK_H - 40
+const TINY: StageSize = { width: 210, height: 120 + CHROME }
 
 /* ── the sheet ──────────────────────────────────────────────────────────────*/
 
@@ -246,7 +252,7 @@ describe('a cell is a dot and a name (Phase 2.1)', () => {
       ],
       edges: [],
     }
-    const big = buildTerritoryView(described, [], { stage: { width: 900, height: 400 } })
+    const big = buildTerritoryView(described, [], { stage: { width: 900, height: 400 + CHROME } })
     // AT REST (2026-10-08, "by default we need show the description"): a card
     // with room prints its description; a card with nothing written prints none.
     expect(byId(big.cells, 'feature:chats').summary).toBe('A chat stream.')
@@ -388,7 +394,6 @@ describe('the title strip (Phase 2.1)', () => {
     expect(view.title.name).toBe('plan-flow')
     expect(view.title.prefix).toBe('')
     expect(view.title.kicker).toBe('4 features · 2 domains')
-    expect(view.title.showBrainField).toBe(true)
     expect(view.title.showControl).toBe(false)
     expect(view.title.showCorpusControl).toBe(false)
   })
@@ -406,7 +411,6 @@ describe('the title strip (Phase 2.1)', () => {
     expect(view.title.controlTitle).toBe("Open Chats's feature view")
     expect(view.title.showCorpusControl).toBe(true)
     expect(view.title.corpusControlTitle).toBe("Open Chats's changes & discoveries")
-    expect(view.title.showBrainField).toBe(false)
   })
 
   it('gives a DOMAIN neither control — it has no feature view and no changes', () => {
@@ -911,7 +915,7 @@ describe('area is the lines a feature stands on (2026-08-28)', () => {
   })
 
   it('puts the file count first on a roomy cell\'s second line', () => {
-    const view = buildTerritoryView(sized, [], { stage: { width: 1400, height: 800 } })
+    const view = buildTerritoryView(sized, [], { stage: { width: 1400, height: 800 + CHROME } })
     expect(byId(view.cells, 'feature:engine').secondLine).toBe('40 files')
   })
 
@@ -957,7 +961,7 @@ describe('summaryParts — a description is prose; provenance is a path (2026-10
 })
 
 describe('a hovered cell grows in place (plan cell-hover-diagram, in-place grow)', () => {
-  const STAGE: StageSize = { width: 1030, height: 520 }
+  const STAGE: StageSize = { width: 1030, height: 520 + CHROME }
   const centre = (r: { x: number; y: number; w: number; h: number }): { x: number; y: number } => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 })
   const holds = (r: { x: number; y: number; w: number; h: number }, p: { x: number; y: number }): boolean =>
     p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h
@@ -1114,7 +1118,7 @@ describe('where it lives — folder rows by tier (plan feature-home-folders)', (
   })
 
   it('calm at rest: a big cell prints ONE home line, never rows — the rows are the details', () => {
-    const cell = one({ width: 1030, height: 520 })
+    const cell = one({ width: 1030, height: 520 + CHROME })
     expect(cell.labelClass).toBe('')
     expect(cell.folders?.tier).toBe('line')
     expect(cell.folders?.shown).toEqual([])
@@ -1131,7 +1135,7 @@ describe('where it lives — folder rows by tier (plan feature-home-folders)', (
   })
 
   it('keeps the whole slice on a cell too small to print it — the grown cell reads it', () => {
-    const cell = one({ width: 150, height: 90 })
+    const cell = one({ width: 150, height: 90 + CHROME })
     expect(cell.folders?.tier).toBeNull()
     expect(cell.folders?.rows).toHaveLength(3)
     expect(cell.folders?.line.text).toBe('components/automations 72%')
@@ -1139,8 +1143,8 @@ describe('where it lives — folder rows by tier (plan feature-home-folders)', (
 
   it('the home line replaces the provenance path; the path stays only without rows', () => {
     const provenance = 'Confirmed from code:module/web/automations.'
-    expect(one({ width: 1030, height: 520 }, { summary: provenance }).path).toBeNull()
-    const without = one({ width: 1030, height: 520 }, { summary: provenance, folders: undefined })
+    expect(one({ width: 1030, height: 520 + CHROME }, { summary: provenance }).path).toBeNull()
+    const without = one({ width: 1030, height: 520 + CHROME }, { summary: provenance, folders: undefined })
     expect(without.folders).toBeNull()
     expect(without.path).toBe('web/automations')
   })
@@ -1153,9 +1157,9 @@ describe('where it lives — folder rows by tier (plan feature-home-folders)', (
       ],
       edges: [],
     }
-    const root = buildTerritoryView(input, [], { stage: { width: 1030, height: 520 } })
+    const root = buildTerritoryView(input, [], { stage: { width: 1030, height: 520 + CHROME } })
     for (const cell of root.cells.filter((c) => c.kind === 'domain')) expect(cell.folders).toBeNull()
-    const parts = buildTerritoryView(input, focusPath(input, domainId('Agent'), 'feature:chats'), { stage: { width: 1030, height: 520 } })
+    const parts = buildTerritoryView(input, focusPath(input, domainId('Agent'), 'feature:chats'), { stage: { width: 1030, height: 520 + CHROME } })
     expect(byId(parts.cells, 'part:chats/engine').folders?.rows[0]?.display).toBe('components/automations')
   })
 })
@@ -1172,17 +1176,17 @@ describe("a cell carries its type (plan feature-type-icons, change note 8)", () 
   }
 
   it('copies the role and its source as the CLI resolved them, never guessing one', () => {
-    const view = buildTerritoryView(typed, [], { stage: { width: 1200, height: 700 } })
+    const view = buildTerritoryView(typed, [], { stage: { width: 1200, height: 700 + CHROME } })
     expect(byId(view.cells, 'feature:chats')).toMatchObject({ role: 'ui', roleSource: 'learn' })
     expect(byId(view.cells, 'feature:store')).toMatchObject({ role: 'data', roleSource: 'guess' })
     // An older bundle sends no role: nothing to draw, and no guess made here.
     expect(byId(view.cells, 'feature:old')).toMatchObject({ role: null, roleSource: null, showRoleIcon: false })
-    const parts = buildTerritoryView(typed, focusPath(typed, 'feature:chats'), { stage: { width: 1200, height: 700 } })
+    const parts = buildTerritoryView(typed, focusPath(typed, 'feature:chats'), { stage: { width: 1200, height: 700 + CHROME } })
     expect(byId(parts.cells, 'part:chats/engine')).toMatchObject({ role: 'logic', roleSource: 'person' })
   })
 
   it('shows the icon on the full-name tier only — positive first, then the small tiers', () => {
-    const big = buildTerritoryView(typed, [], { stage: { width: 1200, height: 700 } })
+    const big = buildTerritoryView(typed, [], { stage: { width: 1200, height: 700 + CHROME } })
     const named = byId(big.cells, 'feature:chats')
     expect(named.labelClass).toBe('')
     expect(named.showRoleIcon).toBe(true)
@@ -1205,7 +1209,7 @@ describe("a cell carries its type (plan feature-type-icons, change note 8)", () 
   })
 
   it('a top band takes its room from the sheet, so a bar above never covers a cell', () => {
-    const stage = { width: 1200, height: 700 }
+    const stage = { width: 1200, height: 700 + CHROME }
     const plain = sheetRect(stage)
     const banded = sheetRect(stage, 46)
     expect(banded.y).toBe(plain.y + 46)
@@ -1213,5 +1217,48 @@ describe("a cell carries its type (plan feature-type-icons, change note 8)", () 
     const view = buildTerritoryView(typed, [], { stage, topBand: 46 })
     expect(view.cells.length).toBeGreaterThan(0)
     for (const cell of view.cells) expect(cell.rect.y).toBeGreaterThanOrEqual(plain.y + 46)
+  })
+})
+
+/* ── draft knowledge (workspace_knowledge_draft_solid, note 10) ─────────────*/
+
+describe('a draft cell carries its branch', () => {
+  const drafted: FeatureGraphInput = {
+    nodes: [
+      node({ id: 'feature:orders', name: 'Orders', anchorCount: 6, status: 'draft', draftBranch: 'feat/refunds' }),
+      node({ id: 'feature:billing', name: 'Billing', anchorCount: 6, status: 'solid' }),
+      node({ id: 'feature:old', name: 'Old', anchorCount: 6 }),
+      node({ id: 'part:orders/queue', name: 'Queue', kind: 'part', parent: 'feature:orders', anchorCount: 3, status: 'draft', draftBranch: 'feat/queue' }),
+      node({ id: 'part:orders/ledger', name: 'Ledger', kind: 'part', parent: 'feature:orders', anchorCount: 3, status: 'solid' }),
+    ],
+    edges: [],
+  }
+  const stage = { width: 1200, height: 700 + CHROME }
+
+  it('copies the draft branch onto feature and part cells, and nothing onto solid or older nodes', () => {
+    const root = buildTerritoryView(drafted, [], { stage })
+    expect(byId(root.cells, 'feature:orders').draftBranch).toBe('feat/refunds')
+    expect(byId(root.cells, 'feature:billing').draftBranch).toBeNull()
+    expect(byId(root.cells, 'feature:old').draftBranch).toBeNull()
+    const parts = buildTerritoryView(drafted, focusPath(drafted, 'feature:orders'), { stage })
+    expect(byId(parts.cells, 'part:orders/queue').draftBranch).toBe('feat/queue')
+    expect(byId(parts.cells, 'part:orders/ledger').draftBranch).toBeNull()
+  })
+
+  it('a draft whose branch is unknown still tags; a domain or change never does', () => {
+    expect(draftBranchOf(true, { status: 'draft' })).toBe(UNKNOWN_DRAFT_BRANCH)
+    expect(draftBranchOf(true, { status: 'draft', draftBranch: 'feat/x' })).toBe('feat/x')
+    expect(draftBranchOf(false, { status: 'draft', draftBranch: 'feat/x' })).toBeNull()
+    expect(draftBranchOf(true, undefined)).toBeNull()
+  })
+
+  it('the tag says the branch and what merging it does, naming the default branch when known', () => {
+    expect(draftTagLabel('feat/x')).toEqual({ lead: 'draft · ', branch: 'feat/x' })
+    expect(draftTagTitle('feat/x', 'develop')).toBe(
+      'Learned on feat/x, not merged yet. This becomes part of the map once the branch is merged to develop. ' +
+        'Until then agents and Ask treat it as work in progress.',
+    )
+    expect(draftTagTitle('feat/x', undefined)).toContain('merged to the main branch.')
+    expect(draftTagTitle('feat/x', '  ')).toContain('merged to the main branch.')
   })
 })

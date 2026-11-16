@@ -9,6 +9,7 @@
 // document.dispatchEvent — when it builds the command list.
 
 import type { SlashCommand } from '../../shared/ipc-contract'
+import { ASK_BLUEPRINT_EVENT } from '../../shared/ask-contract'
 
 /** One actionable command row. `run` fires the command's effect; `hint` is the
  *  optional secondary text (a slash command's description). */
@@ -35,6 +36,9 @@ interface CommandSpec {
   event: string
   detail?: unknown
 }
+
+/** The static command that opens the Ask panel empty. */
+export const ASK_COMMAND_ID = 'cmd:ask-blueprint'
 
 /**
  * The curated static registry: labels → the decoupled events the app already
@@ -90,6 +94,9 @@ export const PALETTE_COMMAND_SPECS: readonly CommandSpec[] = [
     icon: 'split-horizontal',
     event: 'flow:blueprint-toggle-wires',
   },
+  // Opens the Ask panel. With text typed, the view adds a second row that
+  // carries the text (see askCandidate in palette-sources).
+  { id: ASK_COMMAND_ID, label: 'Ask the Blueprint', icon: 'sparkles', event: ASK_BLUEPRINT_EVENT },
   { id: 'cmd:blueprint-drift', label: 'Blueprint: Show Drift', icon: 'refresh', event: 'flow:blueprint-drift' },
   { id: 'cmd:open-settings', label: 'Open Settings', icon: 'settings', event: 'flow:open-settings' },
   { id: 'cmd:open-flow-settings', label: 'Open Flow Settings', icon: 'settings', event: 'flow:open-flow-settings' },

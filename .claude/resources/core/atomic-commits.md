@@ -48,21 +48,12 @@ Flow-Run: <run_id>
 `<run_id>` is the run's own id, minted by the driver — never invented, and
 never read off the documents being written (allowed-pattern #25).
 
-**What it is for.** Knowledge documents written by this run carry the same
-token as `landed_by:` in their frontmatter, and the Workspace sync will not
-publish such a document until that token appears on the project's default
-branch. It is how "has this work actually merged?" is answered without anyone
-tracking branches by hand.
-
-**Why a trailer and not a sha.** A squash merge mints a NEW commit, so the
-branch's sha is never an ancestor of the default branch and an ancestry test
-would answer "not landed" for ever. Both squash and rebase preserve the commit
-*body*, so the trailer rides along.
-
-**Do not edit it out of a squash message.** Collapsing a branch is fine — the
-trailer only has to survive somewhere in the resulting commit's body. If it is
-deleted, the documents stamped with it wait indefinitely, and the way out is a
-person writing `status: shared` into the document, which outranks the token.
+**What it is for.** It names the run a commit belongs to, so one run's commits
+can be found together. The Workspace sync no longer reads it: the `landed_by:`
+gate it fed was retired (discovery `workspace_knowledge_draft_solid`). Knowledge
+from a branch now syncs as a draft, and is promoted to solid from git itself —
+ancestry, the files on the default branch, or the code host's PR state — which
+works however the branch was merged.
 
 ---
 

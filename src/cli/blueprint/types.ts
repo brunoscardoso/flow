@@ -227,6 +227,12 @@ export interface InvestigationEntry {
   hashStamps: AnchorHashStamp[];
   /** Fingerprint of the entry this one replaces (supersede chain). */
   supersedes?: string;
+  /**
+   * Where the note was learned — a reference into the provenance records
+   * (`state/knowledge-provenance.ts`). Stamped only by `appendInvestigationNote`;
+   * absent on notes written before stamping existed.
+   */
+  learnedAt?: string;
 }
 
 /**
@@ -378,4 +384,194 @@ export interface TouchedNode {
 export interface TouchedSet {
   phase: number;
   touched: TouchedNode[];
+}
+
+// ── Ask the Blueprint: the saved-answer log (`qa.jsonl`) ────────────────────
+// One line per saved question (or follow-up) in
+// `flow/brain/.structure/qa.jsonl`, written ONLY by `appendQaEntry` in
+// `qa-store.ts`, reached ONLY through `planflow-ai blueprint qa record |
+// follow-up` (allowed-pattern #14). Code facts never live here — they go
+// through `blueprint observe`. Nothing from a personal conversation is stored:
+// only THAT one was used (a boolean) and how many (a count).
+
+/** A short judgement on a "can we build Y?" question. */
+export interface QaVerdict {
+  /** e.g. "Yes · medium effort". */
+  label: string;
+  /** The main risk, in one sentence. */
+  risk?: string;
+}
+
+/** One source an answer leans on. */
+export interface QaSource {
+  /** What the reader sees, e.g. "Thread store — markTurnEnd". */
+  label: string;
+  /** The feature or part the source belongs to (`feature:<slug>[/<part>]`). */
+  featureId?: string;
+  /** Repo-relative file the source quotes. */
+  file?: string;
+  /** Content stamp of `file` at write time — minted by the writer, never supplied. */
+  hashStamp?: AnchorHashStamp;
+  /**
+   * Workspace answers only: the project slug the source belongs to. `file` is
+   * relative to THAT project's checkout and stamped against it. Absent on a
+   * project answer, whose sources all belong to the one repo.
+   */
+  project?: string;
+}
+
+/** One saved answer (or follow-up) in `qa.jsonl`. */
+export interface QaEntry {
+  /** Minted by the writer: `qa-<yyyymmddThhmmss>-<hex>`. */
+  id: string;
+  /** ISO timestamp minted by the writer. */
+  ts: string;
+  /** Who asked. */
+  author: string;
+  question: string;
+  /** Feature/part ids the question is pinned to — never free labels. */
+  tags: string[];
+  /** How many personal conversations the answer drew on — a count, never text. */
+  conversationCount: number;
+  /** Whether any personal conversation was used. */
+  usedConversation: boolean;
+  /** The explanation. */
+  answer: string;
+  verdict?: QaVerdict;
+  /** A teammate's reply to the answer. */
+  reply?: string;
+  sources: QaSource[];
+  /** How many code facts this answer recorded through `blueprint observe`. */
+  factsLearned: number;
+  /** Set when this entry is a follow-up: the id of the entry it follows. */
+  parentId?: string;
+  /** True when the answer is incomplete (e.g. the code check did not finish). */
+  partial: boolean;
+  /** "in progress on branch X" — unmerged work is context, never a fact. */
+  branchInProgress?: string;
+  /**
+   * Set ONLY on a pointer read back from a project's log: the answer itself is
+   * saved in the Workspace repository (`<workspace>/qa.jsonl`) under
+   * `entryId`, and this project holds only its question and tags. `answer` is
+   * empty on such an entry — read the Workspace record for the rest.
+   */
+  workspaceAnswer?: QaWorkspaceRef;
+}
+
+/** Where a pointer's full answer lives. */
+export interface QaWorkspaceRef {
+  /** The Workspace's slug. */
+  workspace: string;
+  /** The Workspace record's id (`wqa-…`) — also the pointer's own id. */
+  entryId: string;
+}
+
+/**
+ * The line a Workspace answer leaves in each cited local project's own
+ * `qa.jsonl`. It has no `answer` field on purpose, so an older reader skips it
+ * instead of listing an empty answer; the current reader lists it as a thread
+ * with `workspaceAnswer` set. Written ONLY by `appendWorkspaceQaEntry`.
+ */
+export interface QaPointerEntry {
+  kind: 'workspace-pointer';
+  /** The Workspace record's id — a follow-up's pointer folds under its parent's. */
+  id: string;
+  ts: string;
+  workspace: string;
+  author: string;
+  question: string;
+  /** The Workspace tags that concern this project (its features, itself, its connections). */
+  tags: string[];
+  /** This project's feature-backed sources, without files (staleness is the Workspace record's). */
+  sources: QaSource[];
+  parentId?: string;
+}
+
+/** What a caller hands `appendQaEntry`: the record without writer-minted fields. */
+export interface QaRecordInput {
+  author: string;
+  question: string;
+  tags?: string[];
+  conversationCount?: number;
+  usedConversation?: boolean;
+  answer: string;
+  verdict?: QaVerdict;
+  reply?: string;
+  sources?: Array<Omit<QaSource, 'hashStamp'>>;
+  factsLearned?: number;
+  parentId?: string;
+  partial?: boolean;
+  branchInProgress?: string;
+}
+
+/** A root entry with its follow-ups attached (the folded read). */
+export interface QaThread extends QaEntry {
+  /** Follow-ups to this entry (and to its follow-ups), oldest first. */
+  followUps: QaEntry[];
+}
+
+/** One answer to "has the code under this saved entry changed?". */
+export interface QaStaleness {
+  stale: boolean;
+  /** Stamped files whose content no longer matches the stamp. */
+  changedFiles: string[];
+  /** Stamped files that are gone (or escape the repo root). */
+  missingFiles: string[];
+}
+
+// ── Ask the Blueprint at Workspace level (`<workspace>/qa.jsonl`) ──────────
+// One line per Workspace answer (or follow-up) at the Workspace repository's
+// root, beside `links.jsonl`, written ONLY by `appendWorkspaceQaEntry`, which
+// also leaves a `QaPointerEntry` in each cited local project's own log.
+
+/**
+ * One project of the Workspace as the writer sees it: where its knowledge is
+ * shared and, when it is on this computer, its checkout.
+ */
+export interface WorkspaceQaProject {
+  slug: string;
+  name: string;
+  /** This machine's checkout, or null when the project is not on this computer. */
+  localPath: string | null;
+  /** The project's knowledge folder inside the Workspace repository. */
+  flowPath: string;
+}
+
+/** Every project of the Workspace, by slug. */
+export type WorkspaceQaProjects = Readonly<Record<string, WorkspaceQaProject>>;
+
+/** One saved Workspace answer (or follow-up). Sources always name their project. */
+export interface WorkspaceQaEntry extends QaEntry {
+  /** Minted by the writer: `wqa-<yyyymmddThhmmss>-<hex>`. */
+  id: string;
+  /** The Workspace's slug. */
+  workspace: string;
+  /** Projects whose code was read for this answer (all on this computer at the time). */
+  projectsRead: string[];
+  /** Projects in scope answered from shared knowledge only (not read, or not on this computer). */
+  knowledgeOnly: string[];
+  /** Every project the tags or sources name, in Workspace order. */
+  cited: string[];
+}
+
+/** What a caller hands `appendWorkspaceQaEntry`. */
+export interface WorkspaceQaRecordInput extends Omit<QaRecordInput, 'sources'> {
+  sources?: Array<Omit<QaSource, 'hashStamp'>>;
+  projectsRead?: string[];
+  knowledgeOnly?: string[];
+}
+
+/** A Workspace root entry with its follow-ups attached. */
+export interface WorkspaceQaThread extends WorkspaceQaEntry {
+  followUps: WorkspaceQaEntry[];
+}
+
+/**
+ * "Has the code under this Workspace answer changed?", per project. Files are
+ * written `<project>/<path>`. A project whose stamped files cannot be checked
+ * here (not on this computer, or no longer in the Workspace) is listed in
+ * `notChecked` and never counted as fresh evidence.
+ */
+export interface WorkspaceQaStaleness extends QaStaleness {
+  notChecked: string[];
 }

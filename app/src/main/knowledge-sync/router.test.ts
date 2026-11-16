@@ -140,6 +140,10 @@ function harness(options: { linked?: readonly string[] } = {}) {
     now: () => 0,
     timers,
     onStatus: () => undefined,
+    // Promotion is the engine's own concern (its suite covers it): here it decides nothing.
+    runPromotionCli: async () => ({ ok: true, stdout: '{"action":"promote","totals":{"checked":0,"solid":0,"stale":0,"abandoned":0,"unknown":0},"projects":[]}\n' }),
+    mergeIntent: async () => null,
+    onIntentMerged: () => undefined,
     log: () => undefined,
   })
   const router = createKnowledgeRouter({

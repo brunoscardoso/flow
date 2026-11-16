@@ -50,6 +50,8 @@ import { readProjectImportIndex, storylineCacheDir, type ImportIndexReadOptions 
 import { StorylineReaders } from './storyline-reader.js';
 import { computeStaleEdges, staleEdgeKeys } from './stale-check.js';
 import { BLUEPRINT_DIRNAME } from './store.js';
+import { defaultBranchOf } from '../state/knowledge-provenance.js';
+import { branchDisplayName, createKnowledgeStatusReader } from '../state/knowledge-status-read.js';
 
 /**
  * Read every feature's parts, fail-soft PER FEATURE.
@@ -189,7 +191,16 @@ export function readProjectFeatureGraph(
     // WHERE EACH NODE LIVES — derived on every read, never stored; nothing to
     // read without a checkout, so absent then (FR-12).
     host === null || repoRoot === null ? undefined : folderRowsFor(host, imports, features),
+    // DRAFT OR SOLID — the status log and provenance records, read once for
+    // the whole graph (`knowledge-status-read.ts`, the readers' one door).
+    createKnowledgeStatusReader(flowDir),
   );
+  // What a draft merges INTO, named for the tag — asked of git only when a
+  // node is draft, so a graph with nothing in progress pays no git call.
+  if (repoRoot !== null && graph.nodes.some((node) => node.status === 'draft')) {
+    const ref = defaultBranchOf(repoRoot);
+    if (ref !== null) graph.defaultBranch = branchDisplayName(ref);
+  }
   const importIndex: ImportIndexState = imports === null ? 'none' : imports.complete === false ? 'partial' : 'complete';
   return { graph, limitations, features, partsBySlug, importIndex };
 }

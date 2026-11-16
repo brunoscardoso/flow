@@ -416,23 +416,3 @@ export function derivedCap(
     where: 'the derived level',
   }
 }
-
-/**
- * The brain query's own limit (Phase 7).
- *
- * `brain:query` returns hits and no total, so how many matched beyond the limit
- * is genuinely unknowable from here. What IS knowable is that the answer came
- * back FULL, which is the only honest thing to say: there may be more, and the
- * reader is told that rather than shown a top-12 presented as everything.
- */
-export function brainQueryCap(hitCount: number, limit: number): AppliedCap | null {
-  if (limit <= 0 || hitCount < limit) return null
-  return {
-    noun: { one: 'match', many: 'matches' },
-    hidden: 0,
-    of: hitCount,
-    cap: limit,
-    where: 'the brain query',
-    unquantified: true,
-  }
-}

@@ -26,7 +26,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { addressPartNames, edgeKey, featureHome, featureLearnedRole, featureRole, featureSummary, parseLearnings, resolveFeatureRef, slugifyFeatureName, splitLearned } from './feature-store.js';
+import { addressPartNames, edgeKey, featureHome, featureLearnedRole, featureRole, featureSummary, learningsKnowledgeStatus, parseLearnings, partLearningScope, resolveFeatureRef, resolveLearnings, slugifyFeatureName, splitLearned } from './feature-store.js';
+import type { Learning } from './feature-store.js';
+import type { KnowledgeStatusReader } from '../state/knowledge-status-fold.js';
 import type { FeatureNode, FeaturePart } from './feature-store.js';
 import type { BlueprintGraph } from './types.js';
 import { resolveFeatureRole, type FeatureRole, type FeatureRoleSource } from './feature-role.js';
@@ -103,6 +105,16 @@ export interface FeatureGraphNode {
   role?: FeatureRole;
   /** Who answered `role`: a person, a learn pass, or the guess (drawn in grey). */
   roleSource?: FeatureRoleSource;
+  /**
+   * WHETHER WHAT IT SAYS HAS MERGED (discovery `workspace_knowledge_draft_solid`,
+   * FR-10): `draft` when every live learning was learned on a branch that has
+   * not reached the default branch, `solid` otherwise (any solid learning, or
+   * nothing stamped). On features and parts, and only when the graph was built
+   * with a status reader — absent means "not asked", never "draft".
+   */
+  status?: 'solid' | 'draft';
+  /** The branch a `draft` node's knowledge was learned on, when known. */
+  draftBranch?: string;
 }
 
 /** A `relates` edge between two features. Undirected in meaning, stored once. */
@@ -121,6 +133,11 @@ export interface FeatureGraphEdge {
 export interface FeatureGraph {
   nodes: FeatureGraphNode[];
   edges: FeatureGraphEdge[];
+  /**
+   * The default branch's name (`main`) — what a draft tag says the knowledge
+   * merges into. Present only when a node is draft and the checkout could say.
+   */
+  defaultBranch?: string;
 }
 
 /** What no feature covers — computed, never stored. */
@@ -378,6 +395,28 @@ export function addressableParts(
   return named.map((part, index) => ({ id: ids[index], name: part.name.trim(), part }));
 }
 
+/** Lay a node's knowledge status onto it — nothing when no reader was given. */
+function withKnowledgeStatus(
+  node: FeatureGraphNode,
+  learnings: readonly Learning[],
+  ref: { kind: 'learning' | 'part-learning'; scope: string },
+  knowledge: KnowledgeStatusReader | undefined,
+): void {
+  if (knowledge === undefined) return;
+  const { status, draftBranch } = learningsKnowledgeStatus(resolveLearnings(learnings, ref, knowledge));
+  node.status = status;
+  if (status === 'draft' && draftBranch !== null) node.draftBranch = draftBranch;
+}
+
+/** A feature's own `## Learned` entries; none when the boundary is ambiguous. */
+function ownLearnings(feature: FeatureNode): Learning[] {
+  try {
+    return parseLearnings(splitLearned(feature.body).learned);
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Build the part nodes for one feature, in DOCUMENT ORDER.
  *
@@ -400,6 +439,7 @@ function buildPartNodes(
   activeAnchors: ReadonlySet<string>,
   measure: AnchorMeasurer | undefined,
   folders: FolderRowsFor | undefined,
+  knowledge?: KnowledgeStatusReader,
 ): FeatureGraphNode[] {
   const nodes: FeatureGraphNode[] = [];
   for (const { id, name, part } of addressableParts(feature.id, parts)) {
@@ -410,7 +450,7 @@ function buildPartNodes(
         ? null
         : folders({ slug: id.slice(id.lastIndexOf('/') + 1), anchors: part.anchors, home: part.home ?? null });
     const resolved = resolveFeatureRole({ role: part.role, learnedRole: part.learnedRole, anchors: part.anchors });
-    nodes.push({
+    const partNode: FeatureGraphNode = {
       id,
       slug: feature.slug,
       name,
@@ -425,7 +465,9 @@ function buildPartNodes(
       summary: part.summary.trim(),
       role: resolved.role,
       roleSource: resolved.source,
-    });
+    };
+    withKnowledgeStatus(partNode, part.learnings, { kind: 'part-learning', scope: partLearningScope(id) }, knowledge);
+    nodes.push(partNode);
   }
   return nodes;
 }
@@ -456,6 +498,7 @@ export function buildFeatureGraph(
   staleEdges: ReadonlySet<string> = new Set(),
   measure?: AnchorMeasurer,
   folders?: FolderRowsFor,
+  knowledge?: KnowledgeStatusReader,
 ): FeatureGraph {
   const byId = new Set(features.map((feature) => feature.id));
   const nodes: FeatureGraphNode[] = [...features]
@@ -468,8 +511,12 @@ export function buildFeatureGraph(
         understanding: understandingOf(feature, moduleLearning, viewedSlugs),
         active: feature.anchors.some((anchor) => activeAnchors.has(anchor)),
         anchorCount: feature.anchors.length,
-        summary: featureSummary(feature.body),
+        summary: featureSummary(feature.body, knowledge === undefined ? undefined : { slug: feature.slug, reader: knowledge }),
       };
+      // DRAFT OR SOLID — features only: a change is a record, not knowledge.
+      if (feature.kind === 'core') {
+        withKnowledgeStatus(node, ownLearnings(feature), { kind: 'learning', scope: feature.slug }, knowledge);
+      }
       // SIZE IS MEASURED, NEVER STORED: the feature file owns its anchors, the
       // disk owns how much code they reach, and this function stays I/O-free
       // by taking the measurer the way it takes the parts.
@@ -516,6 +563,7 @@ export function buildFeatureGraph(
         activeAnchors,
         measure,
         folders,
+        knowledge,
       ),
     ]);
 

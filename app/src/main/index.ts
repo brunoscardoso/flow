@@ -68,6 +68,7 @@ import {
 } from './blueprint/blueprint-observer'
 import { deriveBasicGraph } from './blueprint/basic-derive'
 import { registerBrainChannels } from './brain/ipc'
+import { registerAskChannels } from './blueprint/ask-ipc'
 import { registerLoopsChannels } from './loops/loops-handler'
 import { makeBrainCaptureOnTurnComplete, threadWorkingSet } from './brain/capture'
 import { resolveChatLearnAsk } from './learn/chat-learn-trigger'
@@ -117,7 +118,8 @@ import {
   shouldAskBasicDiscovery,
   type BasicDiscovery,
 } from './learn/basic-discovery'
-import { createWorkspacePauseNotifier } from './knowledge-sync/pause-notice'
+import { createWorkspacePauseNotifier, workspaceIntentMergeNotification } from './knowledge-sync/pause-notice'
+import { intentMergePrompt } from './knowledge-sync/intent-merge'
 import { appEntryFor, isAppEntryUrl, opensExternally, shouldBlockNavigation, type AppEntry } from './share/app-entry'
 import { createProjectIds } from './share/share-project-id'
 import { createFileShareRecords } from './share/share-records'
@@ -137,6 +139,7 @@ import { GIT_CHANGED_EVENT, type GitChangedEvent } from './git/git-manager'
 import { createInvariantService, type InvariantService } from './review/invariant-service'
 import {
   loadFeatureRoster,
+  rankModuleFiles,
   runBundledCliCapturing,
   runFeatureLearnPass,
   writeLearnedRoleViaCli,
@@ -246,6 +249,7 @@ import {
   isPreviouslyLearned,
   shouldAutoRelearn,
 } from './learn/learn-triggers'
+import { makeDriftReasons, makeProjectStaleCheck } from './learn/drift-reasons'
 import { LearnRunTriggers } from './learn/learn-run-triggers'
 import {
   PROJECT_LIST_CHANGED_EVENT,
@@ -556,6 +560,7 @@ let disposeArtifactIpc: (() => void) | null = null
 let disposeWalkthroughPages: (() => void) | null = null
 let disposeBlueprintIpc: (() => void) | null = null
 let disposeBrainIpc: (() => void) | null = null
+let disposeAskIpc: (() => void) | null = null
 let disposeShareIpc: (() => void) | null = null
 let disposeWorkspacesIpc: (() => void) | null = null
 /** Which Workspace's sync carries a project's knowledge. Quit runs the engine's bounded last commit through it. */
@@ -934,8 +939,42 @@ function bootstrapMainProcess(): void {
   // the CLI's `workspace sync`. A pause (a decision, a merged version) or an
   // error raises ONE notification on the transition; retries raise nothing.
   const workspacePauseNotifier = createWorkspacePauseNotifier()
+  /** A root of this Workspace open here — the account an agent merge runs under; the home folder when none is. */
+  const rootOfWorkspace = async (slug: string): Promise<string> => {
+    const roots = (projectRegistry?.getRoots() ?? []).filter((root) => root.available !== false).map((root) => root.rootPath)
+    if (roots.length === 0) return app.getPath('home')
+    const answer = await workspaces.membershipOf(roots).catch(() => null)
+    const found = answer !== null && answer.ok ? answer.roots.find((entry) => entry.workspace === slug)?.root : undefined
+    return found ?? app.getPath('home')
+  }
   const workspaceSync = createWorkspaceSync({
     runCli: (cwd, args, options) => runBundledCliCapturing(bundledCli, cwd, args, options),
+    // `workspace promote` asks the code host's own tool (`gh`) itself: its child
+    // gets the person's PATH — the same resolution the host tools use, so it
+    // finds the same `gh` binary (a GUI-launched app cannot see Homebrew's folder).
+    runPromotionCli: async (cwd, args, options) => {
+      const userEnv = process.env['FLOW_E2E'] === '1' ? null : await userPathEnv().catch(() => null)
+      const path = userEnv?.['PATH']
+      return runBundledCliCapturing(bundledCli, cwd, args, {
+        ...options,
+        ...(path === undefined ? {} : { env: { PATH: path } }),
+      })
+    },
+    // The brief model through the agent manager's one-shot path; a hidden run
+    // answers it only through its seam, so no hidden run reaches a real model.
+    mergeIntent: async ({ slug, kind, title, base, ours, theirs, signal }) => {
+      const prompt = intentMergePrompt({ kind, title, base, ours, theirs })
+      if (process.env['FLOW_E2E'] === '1') {
+        const standIn = e2eSeams()?.mergeIntent
+        return standIn === undefined ? null : standIn({ projectRoot: app.getPath('home'), prompt, signal })
+      }
+      if (agentManager === null) return null
+      return agentManager.askMergeModel({ projectRoot: await rootOfWorkspace(slug), prompt, signal })
+    },
+    onIntentMerged: (_slug, name, set) => {
+      const notice = workspaceIntentMergeNotification(set, new Date().toISOString(), name)
+      if (notice !== null) broadcastNotification(notice)
+    },
     cwd: app.getPath('home'),
     lastSynced: {
       get: (slug) => appSettings.getKnowledgeLastSyncedAt('workspace', slug),
@@ -2448,7 +2487,19 @@ function bootstrapMainProcess(): void {
           ),
         )
         const files = entries.flatMap((entry) => entry.files)
-        phase(`${String(files.length)} file(s) ranked · finding plan docs`)
+        // A FEATURE THAT IS DOCUMENTATION (user, 2026-11-16: "Architecture: this
+        // feature claims no readable files or documents" on a feature anchored
+        // on a docs folder). The walk found its documents and the pass dropped
+        // them, because only code was handed on. With no code at all, the
+        // folder's own documents are the material — capped like code, and
+        // labelled in the prompt as claims to check, never as ground truth.
+        const ownDocs =
+          files.length === 0
+            ? rankModuleFiles(
+                entries.flatMap((entry) => entry.claimFiles).filter((file) => /\.(md|mdx|rst|txt)$/i.test(file.path)),
+              ).map((file) => file.path)
+            : []
+        phase(`${String(files.length)} file(s) ranked · ${String(ownDocs.length)} own doc(s) · finding plan docs`)
         const planDocs = findFeatureDocs(request.rootId, request.featureRef)
         phase(`${String(planDocs.length)} plan doc(s) · resolving credentials`)
         const authEnv = await resolveLearnAuthEnv(request.rootId)
@@ -2530,6 +2581,7 @@ function bootstrapMainProcess(): void {
             featureName: request.featureName,
             files,
             ...(roster.length > 0 ? { roster } : {}),
+            ...(ownDocs.length > 0 ? { ownDocs } : {}),
             ...(planDocs.length > 0
               ? { planDocs, provenance: `plan:${planDocs[0].replace(/^.*\/plan_|\.md$/g, '')}` }
               : {}),
@@ -2893,6 +2945,11 @@ function bootstrapMainProcess(): void {
 const FEATURE_PASS_DEADLINE_MS = 10 * 60 * 1000
 const FEATURE_PASS_SILENCE_MS = 3 * 60 * 1000
 
+// The Drifted group's reasons ("24 files changed"): one async whole-project
+// stale-check, cached briefly, never per row (learn/drift-reasons.ts).
+const driftReasons = makeDriftReasons(
+  makeProjectStaleCheck((cwd, args, options) => runBundledCliCapturing(bundledCli, cwd, args, options)),
+)
 const understandFeature = async (request: {
     rootId: string
     featureRef: string
@@ -3029,6 +3086,7 @@ const understandFeature = async (request: {
       broadcast('learn:pausedChanged', { paused: orchestrator.isPaused(), pausedRoots: orchestrator.pausedRootPaths() })
     },
     learnCancel: (rootPath) => orchestrator.cancelRoot(rootPath),
+    learnDriftReasons: driftReasons,
     // RESET MEANS FORGET. It used to clear the status table alone, leaving
     // every artifact the learning produced — the module docs, the notes and
     // their heat, the generated views, each feature's learned sections — so the
@@ -3337,6 +3395,17 @@ const understandFeature = async (request: {
   // Brain: the single knowledge store's read/write interface (#52).
   disposeBrainIpc = registerBrainChannels({
     roots: rootsProviderFrom(projectRegistry),
+  })
+  // Ask the Blueprint: the fast pass and the bounded dig run caged and
+  // read-only; facts and answers are written through the bundled CLI's one
+  // writer each. State streams on ask:state, sent only when it changes.
+  disposeAskIpc = registerAskChannels({
+    roots: rootsProviderFrom(projectRegistry),
+    bundledCli,
+    threadStore,
+    routing: () => appSettings.getModelRouting(),
+    authEnv: resolveLearnAuthEnv,
+    broadcast: (event) => broadcast('ask:state', event),
   })
   // Feature view sharing (feature-view-sharing Phase 5). The client reads the
   // signed-in person's session token HERE, in main, at the moment of each
@@ -4279,6 +4348,8 @@ async function disposeMainProcess(): Promise<void> {
   disposeBlueprintIpc = null
   disposeBrainIpc?.()
   disposeBrainIpc = null
+  disposeAskIpc?.()
+  disposeAskIpc = null
   disposeShareIpc?.()
   disposeShareIpc = null
   disposeLoopsIpc?.()

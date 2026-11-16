@@ -76,7 +76,7 @@ import { deriveBasicGraph } from './basic-derive'
 import { BlueprintDeriveRunner, ensureProjectInitialized, type BundledCli } from './derive-runner'
 import { runBrief } from './brief-runner'
 import { runFeatureIndexing, runFeatureDiscovery, runFeatures } from './feature-runner'
-import { alignLocalPaths, runWorkspaceGraph } from './workspace-graph-runner'
+import { alignLocalPaths, rememberWorkspaceGraph, runWorkspaceGraph } from './workspace-graph-runner'
 import { runFeatureMap } from './feature-map-runner'
 import { runFeatureRelations } from './feature-relations-runner'
 import { runReconcile } from './reconcile-runner'
@@ -1123,6 +1123,8 @@ interface ParsedInvestigationNote {
   provenance: string
   anchors: BlueprintAnchor[]
   supersedes?: string
+  /** Where it was learned — a provenance reference the CLI's writer stamped. */
+  learnedAt?: string
 }
 
 /**
@@ -1161,6 +1163,9 @@ function parseInvestigationNoteLine(line: string): ParsedInvestigationNote | nul
   }
   if (typeof record.supersedes === 'string') {
     note.supersedes = record.supersedes
+  }
+  if (typeof record.learnedAt === 'string' && /^[0-9a-f]{16}$/.test(record.learnedAt)) {
+    note.learnedAt = record.learnedAt
   }
   return note
 }
@@ -2229,7 +2234,10 @@ export function registerBlueprintChannels(deps: BlueprintChannelDeps): () => voi
       return { available: false, reason: 'unknown root', workspace: null, projects: [], links: null, linksError: null }
     }
     const graph = await runWorkspaceGraph(deps.bundledCli ?? null, rootId)
-    return alignLocalPaths(graph, deps.roots.getRoots().map((root) => root.rootPath))
+    const aligned = await alignLocalPaths(graph, deps.roots.getRoots().map((root) => root.rootPath))
+    // A Workspace question asked from the sheet reuses this read (ask-ipc).
+    rememberWorkspaceGraph(rootId, aligned)
+    return aligned
   })
   // Feature code map (#1533): one feature's file/import graph, computed on
   // demand by the bundled CLI. Same rootId validation; fail-soft so an unknown

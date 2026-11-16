@@ -395,7 +395,9 @@ test('a clicked-open diagram shows what comes in and goes out; a port follows it
     .poll(() => page.evaluate(async () => (await (window as unknown as { flow: { project: { active(): Promise<{ rootPath: string } | null> } } }).flow.project.active())?.rootPath ?? null), { timeout: 60_000 })
     .toBe(sibling)
   // The board stands IN Billing: its own level, named.
-  await expect(page.getByRole('button', { name: "Open Billing's feature view" })).toBeVisible({ timeout: 60_000 })
+  // (The trail names the level, and offers its Blocks · Diagram switch — mockup J3.)
+  await expect(page.locator('.flow-board-root .fb-float-trail')).toHaveAttribute('data-where', 'Billing', { timeout: 60_000 })
+  await expect(page.locator('.flow-board-root .fb-float-trail .fb-view-switch')).toBeVisible()
   // The sibling's first activation opens its own settings once (per-project onboarding).
   await dismissFlowOverlay(page)
   await page.waitForTimeout(1_000)

@@ -18,6 +18,7 @@ import { basename, join, resolve } from 'node:path'
 import type { Locator, Page } from '@playwright/test'
 
 import { expect, test } from '../fixtures/electron'
+import { chooseLayer, CRUMBS, KNOWLEDGE, LAYERS_BUTTON, offeredLayers, openKnowledgePanel } from './fixtures/board-chrome'
 import { activateProject, cleanupSeeds, seedProject } from './fixtures/seed'
 import { expectOnScreen } from '../fixtures/workspaces'
 
@@ -199,24 +200,24 @@ test('the board opens at the Workspace: a coloured country per project, connecti
   await expect(page.locator('.fb-ws-cell')).toHaveCount(6)
   await expect(app.locator('.fb-ws-meta')).toContainText('2 features')
   await expect(app.locator('.fb-ws-meta')).toContainText('50% understood')
-  // The header carries no facts — the counts live on the map.
-  await expect(page.locator('.fb-ws-title .fb-terr-title-understood')).toBeHidden()
+  // No header rows over the map (mockup J3) — the counts live on the map.
+  await expect(page.locator('.fb-ws-title, .fb-terr-title-understood')).toHaveCount(0)
 
   // ── CONNECTIONS ARE HIDDEN BY DEFAULT: only a count per project. ──
   await expect(page.locator('svg.fb-ws-links')).toHaveCount(0)
-  // No per-project chip — the Workspace's count is on the Connections control,
-  // each project's on its header's hover.
+  // No per-project chip — the Workspace's count is on the Layers menu's
+  // Connections row, each project's on its header's hover.
   await expect(page.locator('.fb-ws-chip')).toHaveCount(0)
   await expect(core.locator('.fb-ws-band')).toHaveAttribute('title', /· 3 connections$/)
-  const toggle = page.locator('.fb-ws-title [data-ws-connections="toggle"]')
-  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
-  // Connections recorded, pairs never checked: the toggle carries an Update.
-  await expect(page.locator('.fb-ws-title [data-ws-update]')).toHaveText('Update')
+  await expect(page.locator(LAYERS_BUTTON)).toHaveAttribute('data-layer', 'map')
+  expect(await offeredLayers(page)).toEqual(['map', 'connections', 'learning'])
+  // Connections recorded, pairs never checked: the Knowledge pill says an update is due.
+  await expect(page.locator(KNOWLEDGE)).toContainText('Connections need an update')
 
-  // ── SHOWN ON TOGGLE, QUIETLY (2026-10-06: "only when hover the mouse"): no
+  // ── SHOWN AS A LAYER, QUIETLY (2026-10-06: "only when hover the mouse"): no
   // lines at rest — the features that have connections are outlined. ──
-  await toggle.click()
-  await expect(page.locator('.fb-ws-title [data-ws-connections="toggle"]')).toHaveAttribute('aria-pressed', 'true')
+  await chooseLayer(page, 'connections')
+  await page.mouse.move(2, 2)
   await expect(page.locator('[data-ws-ribbon]')).toHaveCount(0)
   await expect(page.locator('.fb-ws-link-hit')).toHaveCount(0)
   await expect(page.locator('.fb-ws-cell.fb-ws-linked')).toHaveCount(5)
@@ -230,7 +231,11 @@ test('the board opens at the Workspace: a coloured country per project, connecti
   // diagram, we should not make the selected bigger, only show the edges"):
   // the hovered cell keeps its rectangle and draws no diagram.
   const chatsCell = page.locator('.fb-ws-cell', { hasText: 'Chats' })
+  // Choosing a layer repaints the sheet: measure the cell that is drawn now.
+  await expect(chatsCell).toBeVisible()
+  await page.waitForTimeout(300)
   const restingBox = await chatsCell.boundingBox()
+  expect(restingBox).not.toBeNull()
   await chatsCell.hover()
   await expect(page.locator('.fb-ws-feature-link[marker-end]')).toHaveCount(1)
   await page.waitForTimeout(900) // well past the hover pause and the slide
@@ -240,7 +245,7 @@ test('the board opens at the Workspace: a coloured country per project, connecti
   await expect(page.locator('.fb-ws-link-hit title')).toHaveText(/^Chats in .+ consumes Chat Engine in .+ \(chat stream\)$/)
   await expect(page.locator('.fb-ws-cell.fb-ws-hot', { hasText: 'Chat Engine' })).toHaveCount(1)
   await screenshot(page, 'hover-connections-light')
-  await page.locator('.fb-ws-title').hover()
+  await page.mouse.move(2, 2)
   await expect(page.locator('.fb-ws-feature-link')).toHaveCount(0)
 
   // SHIFT+PRESS KEEPS them, and the foot says them in words.
@@ -255,14 +260,14 @@ test('the board opens at the Workspace: a coloured country per project, connecti
   await theme(page, 'dark')
   await screenshot(page, 'selected-dark')
   await page.locator('.fb-ws-cell', { hasText: 'Chats' }).click({ modifiers: ['Shift'] }) // deselect
-  await page.locator('.fb-ws-title').hover()
+  await page.mouse.move(2, 2)
   await expect(page.locator('.fb-ws-link-hit')).toHaveCount(0)
   await screenshot(page, 'root-connections-dark')
   await theme(page, 'light')
 
   // ── A DOUBLE-CLICK ZOOMS INTO THE FEATURE (2026-10-08: a single click opens
   // it in place, a double-click goes in); Shift+press shows its connections. ──
-  await page.locator('.fb-ws-title [data-ws-connections="toggle"]').click() // Connections off
+  await chooseLayer(page, 'map') // Connections off
   await expect(page.locator('.fb-ws-link-hit')).toHaveCount(0)
   await page.locator('.fb-ws-cell', { hasText: 'Chats' }).click({ modifiers: ['Shift'] })
   await expect(page.locator('.fb-ws-cell.fb-ws-selected', { hasText: 'Chats' })).toHaveCount(1)
@@ -270,14 +275,14 @@ test('the board opens at the Workspace: a coloured country per project, connecti
   await page.locator('.fb-ws-cell', { hasText: 'Chats' }).click({ modifiers: ['Shift'] }) // deselect
   await page.locator('.fb-ws-cell', { hasText: 'Chat Engine' }).dblclick()
   await expect(page.locator('.fb-ws-country')).toHaveCount(0, { timeout: 30_000 })
-  await expect(page.locator('.fb-terr-foot .fb-terr-crumbs')).toContainText('Chat Engine')
+  await expect(page.locator(CRUMBS)).toContainText('Chat Engine')
   await screenshot(page, 'zoomed-feature-dark')
   // BACK GOES TO WHERE THE READER CAME FROM — the Workspace, not the project's top.
   await page.locator('.fb-nav-btn').first().click()
   await expect(page.locator('.fb-ws-country')).toHaveCount(3, { timeout: 30_000 })
   // …and Backspace does the same.
   await page.locator('.fb-ws-cell', { hasText: 'Chat Engine' }).dblclick()
-  await expect(page.locator('.fb-terr-foot .fb-terr-crumbs')).toContainText('Chat Engine', { timeout: 30_000 })
+  await expect(page.locator(CRUMBS)).toContainText('Chat Engine', { timeout: 30_000 })
   await page.locator('.flow-board-root').press('Backspace')
   await expect(page.locator('.fb-ws-country')).toHaveCount(3, { timeout: 30_000 })
   // ONE MARK FOR ONE FACT: a cell printing its percentage drops its learn dot.
@@ -330,7 +335,7 @@ test('the board opens at the Workspace: a coloured country per project, connecti
   await page.locator('.fb-nav-btn').first().click()
   await expect(page.locator('.fb-story')).toHaveCount(0)
   await expect(page.locator('.fb-ws-country')).toHaveCount(3, { timeout: 30_000 })
-  await page.locator('.fb-ws-title [data-ws-connections="toggle"]').click() // Connections back on
+  await chooseLayer(page, 'connections') // Connections back on
 
   // ── ZOOM IN: the app's board, as it always was, inside its Workspace. ──
   await app.locator('.fb-ws-name').click()
@@ -338,9 +343,9 @@ test('the board opens at the Workspace: a coloured country per project, connecti
   await expect(page.locator('.fb-ws-country')).toHaveCount(0)
   // THE PROJECT'S OWN BOARD, not a read-only picture of it: Ask the brain is there.
   await expect(page.locator('.fb-ws-open')).toHaveCount(0)
-  // (Ask the brain is hidden until its design pass — the Connections toggle is the project's own control here.)
-  await expect(page.locator('.fb-head-strip [data-ws-connections="toggle"]')).toBeVisible()
-  const trail = page.locator('.fb-terr-foot .fb-terr-crumbs')
+  // The layer chosen on the Workspace is still the layer inside the project.
+  await expect(page.locator(LAYERS_BUTTON)).toHaveAttribute('data-layer', 'connections')
+  const trail = page.locator(CRUMBS)
   await expect(trail.locator('.fb-ws-crumb')).toBeVisible()
   await expect(trail).toContainText(/\/\s*flow-ux-wsb-app-/i)
   // A DESCRIPTION IS PROSE; provenance is a path at the foot, never a description.
@@ -382,10 +387,10 @@ test('the board opens at the Workspace: a coloured country per project, connecti
   await expect(backArrow).toBeEnabled()
   await backArrow.click()
   await expect(page.locator('.fb-ws-country')).toHaveCount(3, { timeout: 30_000 })
-  // 2. The Workspace's name leads the project's title as a link back up.
+  // 2. Backspace (the title strip that led with the Workspace's name is gone, mockup J3).
   await app.locator('.fb-ws-name').click()
   await expect(page.locator('.fb-terr-cell', { hasText: 'Chats' })).toBeVisible({ timeout: 120_000 })
-  await page.locator('.fb-ws-title-up').click()
+  await page.locator('.flow-board-root').press('Backspace')
   await expect(page.locator('.fb-ws-country')).toHaveCount(3, { timeout: 30_000 })
   // 3. The breadcrumb.
   await app.locator('.fb-ws-name').click()
@@ -513,37 +518,32 @@ test('Learn connections: code finds one, the model suggests one, the map draws b
   await expect(page.locator('.fb-ws-country')).toHaveCount(3, { timeout: 120_000 })
   await theme(page, 'light')
 
-  // BEFORE: nothing recorded, nothing checked.
-  const kicker = page.locator('.fb-ws-title .fb-terr-title-kicker')
-  // A quiet strip: what the Workspace holds; connections live on their control.
-  await expect(kicker).toBeHidden()
-  // ONE CONTROL: with nothing to draw it is Learn connections, and no toggle.
-  const control = page.locator('.fb-ws-title [data-ws-control]')
-  await expect(control).toHaveAttribute('data-ws-control', 'learn')
-  await expect(control.locator('[data-ws-connections]')).toHaveCount(1)
-  // THE HEADER PATTERN: every control is the app's own ghost button.
-  await expect(control.locator('fl-button.fb-head-btn')).toHaveCount(1)
-  await expect(control.locator('[data-ws-connections]')).toHaveText('Learn connections')
-  await expect(control.locator('[data-ws-connections]')).toHaveAttribute('title', /0 of 3 pairs checked/)
+  // BEFORE: nothing recorded, nothing checked. No Connections layer — there
+  // is nothing to draw — and the Knowledge pill says so.
+  expect(await offeredLayers(page)).toEqual(['map', 'learning'])
+  await expect(page.locator(KNOWLEDGE)).toContainText('Connections not learned yet')
+  // ONE CONTROL, in the Learning panel's Connections section: Learn connections.
+  await openKnowledgePanel(page)
+  const section = page.locator('.flow-board-root .fb-lp-connections')
+  await expect(section).toHaveAttribute('data-lp-connections', 'learn')
+  const learn = section.locator('[data-learn-connections="learn"]')
+  await expect(learn).toHaveText('Learn connections')
+  await expect(learn).toHaveAttribute('title', /0 of 3 pairs checked/)
 
-  // LEARN: it counts the run, then it IS the Connections toggle — already on,
-  // because what a person asked to learn they want to see — and every pair is
-  // up to date, so no Update is attached.
-  await control.locator('[data-ws-connections]').click()
+  // LEARN: it counts the run, then the Connections layer is on — what a person
+  // asked to learn they want to see — and every pair is up to date.
+  await learn.click()
   // WHILE IT RUNS, IT SAYS SO — and how far it has got.
-  await expect(page.locator('.fb-ws-title [data-ws-control]')).toHaveAttribute('data-ws-control', 'learning', { timeout: 5_000 })
-  await expect(page.locator('.fb-ws-title [data-ws-control] [data-ws-connections]')).toHaveText(/^(\d+%|…)$/)
-  await expect(page.locator('.fb-ws-title > .fb-ws-learning-line')).toBeVisible()
-  // …and once pairs are being checked, a percentage and the pair it is on.
-  await expect(page.locator('.fb-ws-title [data-ws-control] [data-ws-connections]')).toHaveText(/^\d+%$/, { timeout: 30_000 })
-  await expect(page.locator('.fb-ws-title [data-ws-control] [data-ws-connections]')).toHaveAttribute('title', /^Learning connections — checking .+ ↔ .+, \d of 3 pairs done$/)
+  await expect(page.locator('.flow-board-root .fb-lp-connections')).toHaveAttribute('data-lp-connections', 'learning', { timeout: 5_000 })
+  await expect(page.locator('.flow-board-root .fb-lp-connections-line')).toHaveText(/^Learning connections( · \d+%|…)$/)
+  await expect(page.locator(KNOWLEDGE)).toContainText('Learning connections')
   await screenshot(page, 'learning-connections-dark')
-  await expect(page.locator('.fb-ws-title [data-ws-connections="toggle"]')).toHaveAttribute('title', /3 of 3 pairs checked/, { timeout: 120_000 })
-  await expect(page.locator('.fb-ws-title > .fb-ws-learning-line')).toBeHidden()
-  await expect(page.locator('.fb-ws-title [data-ws-connections="toggle"]')).toHaveText('Connections · 2')
-  await expect(page.locator('.fb-ws-title [data-ws-control]')).toHaveAttribute('data-ws-control', 'toggle')
-  await expect(page.locator('.fb-ws-title [data-ws-connections="toggle"]')).toHaveAttribute('aria-pressed', 'true')
-  await expect(page.locator('.fb-ws-title [data-ws-update]')).toHaveCount(0)
+  await expect(page.locator('.flow-board-root .fb-lp-connections')).toHaveAttribute('data-lp-connections', 'status', { timeout: 120_000 })
+  await expect(page.locator('.flow-board-root .fb-lp-connections-line')).toHaveText(/^2 connections/)
+  await expect(page.locator('.flow-board-root [data-learn-connections]')).toHaveCount(0)
+  await expect(page.locator(LAYERS_BUTTON)).toHaveAttribute('data-layer', 'connections')
+  await page.locator(KNOWLEDGE).click() // close the panel
+  await page.mouse.move(2, 2)
 
   // The model was asked ONCE — only app ↔ core showed a sign — and its invented feature went nowhere.
   const prompts = await app.evaluate(() => (globalThis as Record<string, unknown>)['__connectionPrompts'] as string[])
@@ -574,15 +574,15 @@ test('Learn connections: code finds one, the model suggests one, the map draws b
   // A press goes in — here a feature of a sibling project, which becomes the
   // active one and opens on it.
   await page.locator('.fb-ws-cell', { hasText: 'Chats' }).click()
-  await expect(page.locator('.fb-terr-foot .fb-terr-crumbs')).toContainText('Chats', { timeout: 60_000 })
-  await expect(page.locator('.fb-terr-foot .fb-terr-crumbs')).toContainText(basename(roots.app))
+  await expect(page.locator(CRUMBS)).toContainText('Chats', { timeout: 60_000 })
+  await expect(page.locator(CRUMBS)).toContainText(basename(roots.app))
   // Back returns to the Workspace, not to that project's top level.
   await page.locator('.fb-nav-btn').first().click()
   await expect(page.locator('.fb-ws-country')).toHaveCount(3, { timeout: 30_000 })
   // A SIBLING'S FEATURE WITH PARTS (core is the sibling now) zooms in there
   // too — the cell's diagram is its hover card's; one Back home.
   await page.locator('.fb-ws-cell', { hasText: 'Chat Engine' }).click()
-  await expect(page.locator('.fb-terr-foot .fb-terr-crumbs')).toContainText('Chat Engine', { timeout: 60_000 })
+  await expect(page.locator(CRUMBS)).toContainText('Chat Engine', { timeout: 60_000 })
   await expect(page.locator('.fb-ws-country')).toHaveCount(0)
   await expect(page.locator('.fb-nav-btn').first()).toBeEnabled({ timeout: 30_000 })
   await page.waitForTimeout(500)
@@ -614,7 +614,7 @@ test('the Learning panel lists every project of the Workspace, the thread’s ow
   await page.locator('[data-view-action="blueprint"]').click()
   await expect(page.locator('.fb-ws-country')).toHaveCount(3, { timeout: 120_000 })
 
-  await page.locator('.fb-header fl-button[title="Show learning progress"]').click()
+  await openKnowledgePanel(page)
   const rows = page.locator('.fb-lp-project')
   await expect(rows).toHaveCount(3, { timeout: 30_000 })
   await expect(page.locator('.fb-lp-overall .fb-lp-headline')).toBeVisible()

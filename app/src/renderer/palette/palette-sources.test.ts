@@ -6,7 +6,11 @@
 
 import type { SlashCommand, ThreadSummary } from '../../shared/ipc-contract'
 import type { PaletteCommand } from './palette-commands'
+import { ASK_BLUEPRINT_EVENT } from '../../shared/ask-contract'
+import { ASK_COMMAND_ID } from './palette-commands'
 import {
+  askCandidate,
+  withoutPlainAsk,
   commandCandidates,
   fileCandidates,
   loadCommandList,
@@ -187,5 +191,30 @@ describe('loadCommandList', () => {
     const list = await loadCommandList('/root', deps, () => true)
     expect(list.some((c) => c.id === 'cmd:new-thread')).toBe(true)
     expect(list.some((c) => c.id === 'slash:review')).toBe(false) // stale fold discarded
+  })
+})
+
+describe('askCandidate / withoutPlainAsk', () => {
+  it('carries the typed text into the Ask panel through the one door', () => {
+    const emit = jest.fn()
+    const row = askCandidate('  where do secrets live?  ', emit)
+    expect(row).toMatchObject({ kind: 'command', id: 'cmd:ask-blueprint-text', label: 'Ask the Blueprint: "where do secrets live?"' })
+    expect(emit).not.toHaveBeenCalled()
+    void row?.run()
+    expect(emit).toHaveBeenCalledWith(ASK_BLUEPRINT_EVENT, { text: 'where do secrets live?' })
+  })
+
+  it('offers no row for an empty term', () => {
+    expect(askCandidate('   ', jest.fn())).toBeNull()
+  })
+
+  it('drops the plain Ask command only once something is typed', () => {
+    const { deps } = makeDeps()
+    const all = commandCandidates('', staticCommandList(deps))
+    expect(all.some((c) => c.id === ASK_COMMAND_ID)).toBe(true)
+    expect(withoutPlainAsk(all, '')).toEqual(all)
+    const typed = withoutPlainAsk(all, 'ask')
+    expect(typed.some((c) => c.id === ASK_COMMAND_ID)).toBe(false)
+    expect(typed).toHaveLength(all.length - 1)
   })
 })

@@ -8,7 +8,6 @@
 import type { BlueprintFeatureLimitations } from '../../shared/ipc-contract'
 
 import {
-  brainQueryCap,
   buildLimitationsReport,
   derivedCap,
   limitationsLabel,
@@ -251,21 +250,6 @@ describe('applied caps (Task 8.4) — every cap says what it hid', () => {
 
   it('reports no derived cap when there is no derived level', () => {
     expect(derivedCap(null)).toBeNull()
-  })
-
-  it('says nothing about the brain query while it is under its limit', () => {
-    expect(brainQueryCap(3, 12)).toBeNull()
-    expect(brainQueryCap(0, 12)).toBeNull()
-  })
-
-  it('discloses a FULL brain answer without inventing a hidden count', () => {
-    const cap = brainQueryCap(12, 12)
-    expect(cap?.unquantified).toBe(true)
-    expect(cap?.hidden).toBe(0)
-    const report = buildLimitationsReport({ limitations: limits(), caps: [cap as AppliedCap] })
-    const row = (report.sections.find((s) => s.id === 'capped')?.rows ?? [])[0]
-    expect(row.label).toBe('matches beyond the cap are not shown in the brain query')
-    expect(row.detail).toContain('not knowable from here')
   })
 
   it('pluralises from the given words, never by appending an s', () => {

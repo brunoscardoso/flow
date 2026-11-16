@@ -1610,3 +1610,61 @@ describe('runFeatureLearnPass — edges', () => {
     expect(result.edges).toBeUndefined()
   })
 })
+
+// ── Extra read roots and read containment (ask_the_blueprint_workspace note 4) ──
+
+describe('caged read roots', () => {
+  const invokeHook = (matcher: { hooks: Array<(...args: never[]) => Promise<unknown>> }, input: Record<string, unknown>): Promise<unknown> =>
+    (matcher.hooks[0] as unknown as (i: unknown, t: unknown, o: unknown) => Promise<unknown>)(input, undefined, { signal: new AbortController().signal })
+
+  it('without readRoots the options are exactly the single-root cage (one Read observer, no containment)', () => {
+    const options = buildCagedOptions({ cwd: '/repo', abortController: new AbortController() })
+    expect(options.hooks?.PreToolUse).toHaveLength(1)
+    expect(options.hooks?.PreToolUse?.[0]?.matcher).toBe('Read')
+  })
+
+  it('with readRoots a containment hook runs first and refuses a read outside cwd and every root', async () => {
+    const options = buildCagedOptions({ cwd: '/work/backend', abortController: new AbortController(), readRoots: ['/work/frontend'] })
+    const hooks = options.hooks?.PreToolUse ?? []
+    expect(hooks).toHaveLength(2)
+    expect(hooks[0]?.matcher).toBe('Read|Grep|Glob')
+    const containment = hooks[0] as never
+    // The positive first: reads inside either checkout, and a search naming no path, pass.
+    await expect(invokeHook(containment, { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: '/work/frontend/src/a.ts' } })).resolves.toEqual({})
+    await expect(invokeHook(containment, { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: 'src/b.ts' } })).resolves.toEqual({})
+    await expect(invokeHook(containment, { hook_event_name: 'PreToolUse', tool_name: 'Grep', tool_input: { pattern: 'x' } })).resolves.toEqual({})
+    for (const input of [
+      { tool_name: 'Read', tool_input: { file_path: '/etc/passwd' } },
+      { tool_name: 'Read', tool_input: { file_path: '/work/frontend-evil/a.ts' } },
+      { tool_name: 'Read', tool_input: { file_path: '../mobile/src/a.ts' } },
+      { tool_name: 'Grep', tool_input: { pattern: 'x', path: '/work/mobile' } },
+      { tool_name: 'Glob', tool_input: { pattern: '*', path: '/' } },
+    ]) {
+      await expect(invokeHook(containment, { hook_event_name: 'PreToolUse', ...input })).resolves.toMatchObject({
+        hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny' },
+      })
+    }
+  })
+
+  it('canUseTool applies the same containment when given roots, and none without', async () => {
+    const opts = { signal: new AbortController().signal, toolUseID: 'tu-1', requestId: 'rq-1' }
+    const contained = createCagedCanUseTool({ cwd: '/work/backend', roots: ['/work/frontend'] })
+    await expect(contained('Read', { file_path: '/work/frontend/x.ts' }, opts)).resolves.toMatchObject({ behavior: 'allow' })
+    await expect(contained('Read', { file_path: '/work/mobile/x.ts' }, opts)).resolves.toMatchObject({ behavior: 'deny' })
+    await expect(createCagedCanUseTool()('Read', { file_path: '/work/mobile/x.ts' }, opts)).resolves.toMatchObject({ behavior: 'allow' })
+  })
+
+  it('runCagedSession passes the roots through as additional directories', async () => {
+    let seen: Record<string, unknown> | null = null
+    const queryFn = ((args: { options: Record<string, unknown> }) => {
+      seen = args.options
+      return (async function* () {
+        yield { type: 'result', subtype: 'success', result: 'ok' }
+      })()
+    }) as never
+    await expect(runCagedSession({ cwd: '/work/backend', prompt: 'p', queryFn, readRoots: ['/work/frontend'] })).resolves.toBe('ok')
+    expect((seen as Record<string, unknown> | null)?.additionalDirectories).toEqual(['/work/frontend'])
+    await runCagedSession({ cwd: '/work/backend', prompt: 'p', queryFn })
+    expect('additionalDirectories' in ((seen as Record<string, unknown> | null) ?? {})).toBe(false)
+  })
+})

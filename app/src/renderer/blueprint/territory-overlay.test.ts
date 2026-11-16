@@ -17,6 +17,7 @@ function cell(id: string, rect: { x: number; y: number; w: number; h: number }):
     hasControl: true,
     controlTitle: null,
     stale: false,
+    draftBranch: null,
     role: null,
     roleSource: null,
     showRoleIcon: false,

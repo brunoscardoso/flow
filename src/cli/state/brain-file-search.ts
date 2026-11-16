@@ -560,6 +560,12 @@ export interface FileSearchOptions {
   flowDir?: string;
   /** Which corpus roots to walk. Defaults to `CORPUS_ROOTS`. */
   roots?: readonly string[];
+  /**
+   * A multiplier on each chunk's score — how much the caller TRUSTS it, not
+   * how well it matches. 0 hides the chunk. Absent = 1 for every chunk. Brain
+   * search passes the knowledge-status weigher (`brain-search-status.ts`).
+   */
+  weightOf?: (chunk: { file: string; text: string }) => number;
 }
 
 /** The file-search result, ready for `mergeLayers`. */
@@ -624,9 +630,12 @@ export function fileSearchLegs(
   return {
     chunks: rank(
       chunks,
-      (chunk) =>
-        scoreChunkText(chunk.text, stems, weights) +
-        TITLE_WEIGHT * scoreChunkText(titleOf(chunk), stems, weights),
+      (chunk) => {
+        const match =
+          scoreChunkText(chunk.text, stems, weights) + TITLE_WEIGHT * scoreChunkText(titleOf(chunk), stems, weights);
+        // Weighed only when it matched — the weigher may read a file.
+        return match > 0 && options.weightOf !== undefined ? match * options.weightOf(chunk) : match;
+      },
       LEG_CAP,
     ),
     via,

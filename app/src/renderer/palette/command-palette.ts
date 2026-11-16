@@ -21,7 +21,9 @@ import { parseQuery } from './palette-query'
 import { rankCandidates, emptyStateResults } from './palette-rank'
 import { readPrimaryRoot } from '../primary-root'
 import {
+  askCandidate,
   commandCandidates,
+  withoutPlainAsk,
   fileCandidates,
   threadCandidates,
   loadCommandList,
@@ -324,7 +326,7 @@ class CommandPalette {
     const isStale = (): boolean => gen !== this.#generation || !this.#open
 
     if (mode === 'command') {
-      this.#setItems(rankCandidates(commandCandidates(term, this.#commands)))
+      this.#setItems(this.#withAsk(rankCandidates(withoutPlainAsk(commandCandidates(term, this.#commands), term)), term))
       return
     }
 
@@ -339,8 +341,14 @@ class CommandPalette {
       root ? threadCandidates(root, term, this.#deps, isStale) : Promise.resolve([]),
     ])
     if (isStale()) return
-    const commands = commandCandidates(term, this.#commands)
-    this.#setItems(rankCandidates([...files, ...threads, ...commands]))
+    const commands = withoutPlainAsk(commandCandidates(term, this.#commands), term)
+    this.#setItems(this.#withAsk(rankCandidates([...files, ...threads, ...commands]), term))
+  }
+
+  /** The typed text as a question, last so Enter never leaves a file match for it. */
+  #withAsk(ranked: PaletteCandidate[], term: string): PaletteCandidate[] {
+    const ask = askCandidate(term, emitEvent)
+    return ask === null ? ranked : [...ranked, ask]
   }
 
   /** Recents (open tabs + recent threads) + suggested actions for an empty term. */

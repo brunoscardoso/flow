@@ -21,6 +21,7 @@ const {
   PersonalFilesRefusal,
   assertNoPersonalFiles,
   classifyKnowledgePath,
+  classifyKnowledgePathDetailed,
   findPersonalFiles,
   knowledgeRepoLocalEntries,
   matchesKnowledgePattern,
@@ -110,6 +111,23 @@ describe('classifyKnowledgePath', () => {
     expect(classifyKnowledgePath('merges/2026-10-06-abc.md', { root: 'workspace' })).toBe('authored');
     // A personal file dropped at the root by hand is still recognised.
     expect(classifyKnowledgePath('.scratchpad.md', { root: 'workspace' })).toBe('personal');
+  });
+
+  it('keeps every Ask the Blueprint question personal, while the knowledge stores beside it still sync', () => {
+    // Positives first: the shared stores next to the logs keep their classes,
+    // so "personal" below is the qa rows talking, not a broken table.
+    expect(classifyKnowledgePath('links.jsonl', { root: 'workspace' })).toBe('append-only');
+    expect(classifyKnowledgePath('brain/.structure/annotations.jsonl')).toBe('append-only');
+    expect(classifyKnowledgePath('brain/.structure/investigations.jsonl')).toBe('append-only');
+    // The questions — Workspace level and project level — never leave the machine.
+    expect(classifyKnowledgePath('qa.jsonl', { root: 'workspace' })).toBe('personal');
+    expect(classifyKnowledgePathDetailed('qa.jsonl', { root: 'workspace' }).row?.pattern).toBe('/qa.jsonl');
+    expect(classifyKnowledgePath('brain/.structure/qa.jsonl')).toBe('personal');
+    expect(classifyKnowledgePath('projects/jupiter-app/brain/.structure/qa.jsonl', { root: 'workspace' })).toBe('personal');
+    // …and the pre-push guard names one that was staged.
+    expect(findPersonalFiles(['projects/jupiter-app/brain/.structure/qa.jsonl']).map((hit) => hit.path)).toEqual([
+      'projects/jupiter-app/brain/.structure/qa.jsonl',
+    ]);
   });
 
   /**
@@ -447,12 +465,13 @@ describe('the Workspace README', () => {
     const readme = workspaceReadme('Default');
     expect(readme).toContain('# Default — a Flow Workspace');
     // The sections a teammate opening this in a browser needs.
-    for (const heading of ['## What is in it', '## How the index works', '## What syncs', '## Drafts stay out', '## Editing it', '## Joining it']) {
+    for (const heading of ['## What is in it', '## How the index works', '## What syncs', '## Drafts are shared, and marked', '## Editing it', '## Joining it']) {
       expect(readme).toContain(heading);
     }
-    // It must not promise the opposite of the gate that exists.
+    // It must describe the draft model that exists, not the retired hold gate.
     expect(readme).toContain('status: draft');
-    expect(readme).toContain('landed_by');
+    expect(readme).toContain('branch: feat/orders');
+    expect(readme).not.toContain('landed_by');
   });
 
   it('is wrapped in HTML comments, so no marker renders as a heading', () => {

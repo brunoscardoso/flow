@@ -440,8 +440,11 @@ export async function onStripeEvent(event: Stripe.Event) {
   // the changeset fingerprint) for the decorated review.
   await openBoard(window)
   await setSidebar(false)
-  const dismissChip = window.locator('.fb-changeset-chip-dismiss')
-  if (await dismissChip.isVisible()) await dismissChip.click()
+  // The changeset is a map layer (mockup J3): choosing Just the map dismisses it.
+  if ((await window.locator('.fb-layers-btn').getAttribute('data-layer').catch(() => null)) === 'changes') {
+    await window.locator('.fb-layers-btn').click()
+    await window.locator('.fb-layers-item[data-layer="map"]').click()
+  }
   await window.waitForTimeout(300)
   await shoot(`${OUT}/story-2-map.png`)
 
@@ -467,7 +470,7 @@ export async function onStripeEvent(event: Stripe.Event) {
   // per-module learning state (learned / learning / stale).
   await openBoard(window)
   await setSidebar(false)
-  await window.locator('.fb-learn-chip').click()
+  await window.locator('.fb-knowledge-pill').click()
   await expect(window.locator('.fb-learn-panel')).toBeVisible()
   await window.waitForTimeout(700)
   {
@@ -530,7 +533,7 @@ export async function onStripeEvent(event: Stripe.Event) {
   await app.evaluate(({ BrowserWindow }, payload) => {
     BrowserWindow.getAllWindows()[0]?.webContents.send('git:changed', payload)
   }, { rootId: root })
-  await expect(window.locator('.fb-changeset-chip')).toBeVisible({ timeout: 15_000 })
+  await expect(window.locator('.fb-layers-btn[data-layer="changes"]')).toBeVisible({ timeout: 15_000 })
   await window.waitForTimeout(400)
   // The checker's verdicts, pushed over the real IPC event the service uses.
   await app.evaluate(({ BrowserWindow }, payload) => {
@@ -570,7 +573,7 @@ export async function onStripeEvent(event: Stripe.Event) {
     },
   })
   await window.waitForTimeout(600)
-  await expect(window.locator('.fb-changeset-chip')).toBeVisible()
+  await expect(window.locator('.fb-layers-btn[data-layer="changes"]')).toBeVisible()
   await expect(
     window.locator('.fb-node[data-node-id="module:payments"] .fb-invariant-flag'),
   ).toBeVisible()

@@ -125,6 +125,20 @@ export const ICON_PATHS = {
   // star with a smaller companion spark.
   sparkles:
     'M8 2.2 L9.1 6.1 L13 7.2 L9.1 8.3 L8 12.2 L6.9 8.3 L3 7.2 L6.9 6.1 Z M12.3 10.8 L12.7 12.1 L14 12.5 L12.7 12.9 L12.3 14.2 L11.9 12.9 L10.6 12.5 L11.9 12.1 Z',
+  // ── THE BLUEPRINT HEADER'S TILES (plan ask_the_blueprint_workspace, mockup
+  // G + D, 2026-11-15) ────────────────────────────────────────────────────────
+  //
+  // One spark — Ask. The sparkles' big star alone, a little larger, so it
+  // reads at 14px in a search field without the companion spark crowding it.
+  spark: 'M8 1.8 L9.3 6.7 L14.2 8 L9.3 9.3 L8 14.2 L6.7 9.3 L1.8 8 L6.7 6.7 Z',
+  // Linked dots — Connections: one node joined to two others. Each circle is
+  // two arcs, because this renderer takes path data only.
+  connections:
+    'M3.5 10 A2 2 0 1 0 3.5 6 A2 2 0 0 0 3.5 10 M12.5 5.5 A2 2 0 1 0 12.5 1.5 A2 2 0 0 0 12.5 5.5 M12.5 14.5 A2 2 0 1 0 12.5 10.5 A2 2 0 0 0 12.5 14.5 M5.3 7.1 L10.7 4.4 M5.3 8.9 L10.7 11.6',
+  // A two-lobe brain — Learn: the central fissure, two bumpy hemispheres and
+  // a fold in each. Drawn for the 16px tile; `brain` stays the tool-call glyph.
+  'brain-lobes':
+    'M8 3.4 V12.8 M8 3.4 C7.4 2.5 5.6 2.3 4.9 3.5 C3.7 3.5 3 4.7 3.4 5.7 C2.4 6.3 2.4 7.9 3.3 8.5 C2.8 9.6 3.6 10.9 4.8 10.8 C5.2 12.1 7 12.5 8 11.7 M8 3.4 C8.6 2.5 10.4 2.3 11.1 3.5 C12.3 3.5 13 4.7 12.6 5.7 C13.6 6.3 13.6 7.9 12.7 8.5 C13.2 9.6 12.4 10.9 11.2 10.8 C10.8 12.1 9 12.5 8 11.7 M5.4 6.2 C6.2 6.2 6.7 6.7 6.7 7.4 M10.6 6.2 C9.8 6.2 9.3 6.7 9.3 7.4 M5.6 9.1 C6.1 8.8 6.7 8.8 7.1 9.1 M10.4 9.1 C9.9 8.8 9.3 8.8 8.9 9.1',
   // A pane split down the middle — "split terminal" (#1133): the frame with a
   // divider, the right half kept clear so it reads as the NEW pane.
   'split-horizontal': 'M2 3 H14 V13 H2 Z M8 3 V13',

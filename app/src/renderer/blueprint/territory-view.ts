@@ -71,7 +71,6 @@ import {
   type FocusFit,
   type Rect,
 } from './territory-layout'
-import { queryAvailableAtDepth } from './brain-query-model'
 import { cellFolders, folderSlice, type CellFolders } from './folder-rows-model'
 import { relationsOf } from './feature-relations'
 import { understoodBySlug } from './learn-progress-model'
@@ -91,11 +90,15 @@ import { roleIconShownAt } from './role-icon-model'
  */
 
 /** The title strip's band across the top of the stage. */
-// The title strip lives in the board's header now (2026-10-06); the sheet
-// keeps only a little air above its first row.
-export const TITLE_STRIP_H = 8
-/** The title block's band across the foot of it. */
-export const TITLE_BLOCK_H = 32
+// No header rows over a territory: the top glass island (user pick B,
+// 2026-11-15) sits 10px down and is 48px tall, so it ends at 58. The first
+// band or card lands 12px below it (user, 2026-11-15: "reduce it to 12px") —
+// the sheet's own top margin supplies the rest, and nothing sits under the
+// island at scroll 0.
+export const TITLE_STRIP_H = 63
+/** The band across the foot: the bottom glass island (44px, 10px up) and a
+ *  12px gap, so the last cards sit clear of it. */
+export const TITLE_BLOCK_H = 66
 /** Breathing room between the sheet and the stage's left/right edges. */
 export const SHEET_MARGIN = 6
 /** How far a domain group is drawn inside the rectangle it was given. */
@@ -165,22 +168,18 @@ export function corpusControlTitle(name: string): string {
   return `Open ${name}'s changes & discoveries`
 }
 
-/* ── ASK THE BRAIN ──────────────────────────────────────────────────────────
+/* ── ASK THE BLUEPRINT ──────────────────────────────────────────────────────
  *
- * The affordance moved from inside the ring's centre to the right end of the
- * title strip; its WORDS did not change, and they are restated here rather
- * than carried over from the retired ring's view module, for the
- * same reason the control sentences are. The sentence still promises what
- * happens on the sheet, because that promise is the whole reason the field is
- * on the map at all rather than in a panel beside it.
+ * The strip's Ask button opens the Ask panel at EVERY depth (plan
+ * ask_the_blueprint): the keyword field it replaced was root-only because it
+ * could reach only the whole-project brain, and a tagged question has no such
+ * limit — so there is no depth gate left to carry on the title.
  */
 
-/** The field's own label. */
-export const BRAIN_FIELD_LABEL = 'Ask the brain'
-/** The mark that opens it. */
-export const BRAIN_FIELD_GLYPH = '⌕'
+/** The Ask button's own label (plan ask_the_blueprint). */
+export const ASK_FIELD_LABEL = 'Ask'
 /** Its tooltip AND its accessible name — one sentence, in one place. */
-export const BRAIN_FIELD_TITLE = 'Ask the brain — matches light up on the map'
+export const ASK_FIELD_TITLE = 'Ask the Blueprint how something works, or whether it can be built (/)'
 
 /* ── WHAT THE SHEET IS MADE OF ──────────────────────────────────────────────*/
 
@@ -266,6 +265,14 @@ export interface TerritoryCell {
   /** This cell's knowledge has drifted past the code it describes. */
   stale: boolean
   /**
+   * WORK IN PROGRESS (discovery `workspace_knowledge_draft_solid`, FR-10): the
+   * branch this feature's or part's knowledge was learned on when ALL of it is
+   * a draft — not merged to the default branch yet. Null when its knowledge is
+   * solid, and for a domain, a change and a ghost. The board draws a dashed
+   * outline and a `draft · <branch>` tag (`draftTagLabel`, `draftTagTitle`).
+   */
+  draftBranch: string | null
+  /**
    * WHAT KIND OF THING IT IS (plan feature-type-icons) — the node's role and
    * who answered it, copied as the CLI resolved them. Null for a domain, a
    * ghost, a change and a node from a bundle that predates roles: nothing to
@@ -332,9 +339,6 @@ export interface TerritoryTitleView {
    *  part's changes are its owner's, so a door on either could only mislead. */
   showCorpusControl: boolean
   corpusControlTitle: string
-  /** Ask the brain — ROOT ONLY, via `queryAvailableAtDepth`, which is the one
-   *  place that rule lives. */
-  showBrainField: boolean
   /** The drafting title block: one line, foot of the sheet. */
   block: string
 }
@@ -641,6 +645,33 @@ export function summaryParts(raw: string | undefined): { about: string | null; p
   return { about: null, path: module === null ? null : (module[1] ?? null) }
 }
 
+/** What a draft tag names when the CLI could not say which branch. */
+export const UNKNOWN_DRAFT_BRANCH = 'another branch'
+
+/** A typed node's draft branch, or null when its knowledge is solid (or unsaid). */
+export function draftBranchOf(typed: boolean, source: Pick<FeatureGraphNodeInput, 'status' | 'draftBranch'> | undefined): string | null {
+  if (!typed || source?.status !== 'draft') return null
+  const branch = source.draftBranch?.trim() ?? ''
+  return branch === '' ? UNKNOWN_DRAFT_BRANCH : branch
+}
+
+/** The tag's words: `draft · <branch>` (the branch is drawn in monospace). */
+export function draftTagLabel(branch: string): { lead: string; branch: string } {
+  return { lead: 'draft · ', branch }
+}
+
+/**
+ * The tag's hover text — what a draft means, in the reader's terms. The
+ * default branch comes from the graph payload; without it, "the main branch".
+ */
+export function draftTagTitle(branch: string, defaultBranch: string | null | undefined): string {
+  const target = typeof defaultBranch === 'string' && defaultBranch.trim() !== '' ? defaultBranch.trim() : 'the main branch'
+  return (
+    `Learned on ${branch}, not merged yet. This becomes part of the map once the branch is merged to ${target}. ` +
+    'Until then agents and Ask treat it as work in progress.'
+  )
+}
+
 /** Build one cell from a placed rectangle. The single place a cell's grammar
  *  lives — the board never assembles one itself. */
 function cellFor(
@@ -704,6 +735,7 @@ function cellFor(
     hasControl,
     controlTitle: hasControl ? controlTitle(node.name, anchorCount > 0) : null,
     stale: understanding === 'stale',
+    draftBranch: draftBranchOf(typed, source),
     role,
     roleSource,
     showRoleIcon: role !== null && roleIconShownAt(labelClass),
@@ -1024,7 +1056,6 @@ function titleFor(
     controlTitle: showControl ? controlTitle(name, anchorCount > 0) : '',
     showCorpusControl,
     corpusControlTitle: showCorpusControl ? corpusControlTitle(name) : '',
-    showBrainField: queryAvailableAtDepth(stack.length),
     block: [BLOCK_SHEET, blockMeasure(unit), project, source.length > 0 ? source : DEFAULT_SOURCE]
       .filter((part) => part.length > 0)
       .join(' · '),
@@ -1041,6 +1072,11 @@ function titleFor(
  *
  * One function, so no overlay invents its own (allowed-pattern #14).
  */
+
+/** Class the board puts on a lit cell (and on the country holding one). */
+export const LIT_CLASS = 'fb-terr-lit'
+/** Class the board puts on every cell an overlay did not name. */
+export const DIM_CLASS = 'fb-terr-dim'
 
 export interface DecorateOptions {
   /** The ids to light. Anything not drawn at this level is ignored — an

@@ -15,6 +15,8 @@ decided_by: {git config user.name of the person who answered the questions}
 
 **Project**: [[{project-name}]]
 
+**Feature**: [slug of the existing feature this changes — `none` for a new capability]
+
 ## Context
 
 [Why this discovery is needed. What triggered it? What problem are we solving?]

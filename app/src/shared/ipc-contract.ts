@@ -63,9 +63,25 @@ export type {
 } from './browser-capture-types'
 import type { ShareAccess, ShareRefusalReason, ShareSummary, ShareView } from './share-contract'
 import type {
+  AskListRequest,
+  AskListResponse,
+  AskRequest,
+  AskSaveConnectionRequest,
+  AskSaveConnectionResponse,
+  AskStaleRequest,
+  AskStaleResponse,
+  AskStartResponse,
+  AskStateEvent,
+  AskStopResponse,
+} from './ask-contract'
+import type {
   WorkspaceAnswer,
   WorkspaceResolveRequest,
   WorkspaceResolveResult,
+  WorkspaceIntentMergeSet,
+  WorkspaceIntentMergesRequest,
+  WorkspaceKeepIntentRequest,
+  WorkspaceKeepIntentResult,
   WorkspaceCreateRemoteRequest,
   WorkspaceHostTools,
   WorkspaceRemoteResult,
@@ -2132,6 +2148,8 @@ export interface FlowNotification {
    *  Workspace's slug) — and, when `openLearning` is set, also
    *  `flow:open-learning-panel`. An actionable toast is persistent. */
   action?: { label: string; event: string; detail?: Record<string, string>; openLearning?: boolean }
+  /** A second, quiet button beside `action` (drawn before it) — same dispatch rule. Only with `action`. */
+  secondaryAction?: { label: string; event: string; detail?: Record<string, string> }
 }
 
 // ── flow/ artifact watching (blueprint-interaction #563+#568) ────────────
@@ -3184,6 +3202,14 @@ export interface BlueprintFeatureNode {
   role?: FeatureRole
   /** Who answered `role`: a person, a learn pass, or the guess. Present exactly when `role` is. */
   roleSource?: FeatureRoleSource
+  /**
+   * WHETHER WHAT IT SAYS HAS MERGED: `draft` when every live learning was
+   * learned on a branch not yet merged to the default branch. Mirrors the
+   * CLI's `FeatureGraphNode.status`; absent from an older bundle (read as solid).
+   */
+  status?: 'solid' | 'draft'
+  /** The branch a `draft` node was learned on, when known. */
+  draftBranch?: string
 }
 
 /** One folder a feature or part lives in. Mirrors the CLI's `FolderRow`. */
@@ -3282,6 +3308,8 @@ export interface BlueprintFeatureGraph {
    * `none` without a checkout. Absent from an older CLI.
    */
   importIndex?: 'complete' | 'partial' | 'none'
+  /** The default branch's name, sent when a node is draft — what a draft tag says it merges into. */
+  defaultBranch?: string
 }
 
 // ── The Workspace map (decision workspace-blueprint, 2026-10-06) ─────────────
@@ -6813,6 +6841,16 @@ export interface IpcInvokeMap {
    */
   'workspaces:resolve': { request: WorkspaceResolveRequest; response: WorkspaceResolveResult }
   /**
+   * The documents Flow merged in one sync (the "merged two edits"
+   * notification names it) — null when this computer no longer holds it.
+   */
+  'workspaces:intentMerges': { request: WorkspaceIntentMergesRequest; response: WorkspaceIntentMergeSet | null }
+  /**
+   * Put a merged document (or all of one sync's) to one text: `ours` is Undo.
+   * A new commit through the CLI, then a sync — never a force push.
+   */
+  'workspaces:keepIntent': { request: WorkspaceKeepIntentRequest; response: WorkspaceKeepIntentResult }
+  /**
    * Connecting a Workspace to a shared repository. `hostTools`: which hosts
    * this computer's own signed-in tools can create a repository on, and where
    * (owners, organizations and their projects) — no credential is held or
@@ -6976,6 +7014,18 @@ export interface IpcInvokeMap {
     request: { rootId: string; query: string; limit?: number }
     response: BrainQueryResult
   }
+
+  // Ask the Blueprint (plan `ask_the_blueprint`). rootId === absolute rootPath.
+  /** Start one question. Answers its id at once; the work streams on `ask:state`. */
+  'ask:start': { request: AskRequest; response: AskStartResponse }
+  /** Stop here — end the dig and keep the best answer so far, marked partial. */
+  'ask:stop': { request: { askId: string }; response: AskStopResponse }
+  /** Saved answers for one or more features or parts, through the CLI's `qa list`. */
+  'ask:list': { request: AskListRequest; response: AskListResponse }
+  /** Which saved answers have code that changed since, through the CLI's `qa stale`. */
+  'ask:stale': { request: AskStaleRequest; response: AskStaleResponse }
+  /** Save as connection — record one suggested connection through the Workspace's one link writer. */
+  'ask:saveConnection': { request: AskSaveConnectionRequest; response: AskSaveConnectionResponse }
 
   // project (projects are addressed by absolute rootPath, matching main)
   'project:list': { request: Record<string, never>; response: RegisteredProject[] }
@@ -7350,6 +7400,18 @@ export interface IpcInvokeMap {
     request: { paused: boolean }
     response: { ok: true }
   }
+  /**
+   * Why each drifted module drifted — the files the project's staleness check
+   * (the read-only re-hash of every learned note's stamped files) found
+   * changed or missing under it. Asked once when the Drifted group is shown;
+   * main runs one whole-project check asynchronously and caches it briefly.
+   * `files` omits a module no stale note resolves under; `ok: false` when the
+   * check could not run (the panel then shows no reasons).
+   */
+  'learn:driftReasons': {
+    request: { rootId: string; modules: string[] }
+    response: { ok: boolean; files: Record<string, string[]> }
+  }
   /** Pause or resume ONE project's learning; the others keep going. */
   'learn:pauseRoot': {
     request: { rootId: string; paused: boolean }
@@ -7628,6 +7690,9 @@ export interface IpcEventMap {
   /** Live learn-progress tick — the caged learner just read `file` for `module`
    *  under `rootId` (throttled per module in main). `rootId` === absolute rootPath. */
   'learn:progress': { rootId: string; module: string; file: string }
+  /** One question's phase and best answer changed (Ask the Blueprint). Sent
+   *  only when the step list or the answer changes — never per activity. */
+  'ask:state': AskStateEvent
   /** The global learn pause state flipped (learn:pause) — panels toggle their
    *  Pause/Resume label live (mirrors learn:progress's event pattern). */
   'learn:pausedChanged': { paused: boolean; pausedRoots?: string[] }
@@ -7888,6 +7953,8 @@ export const IPC_INVOKE_CHANNELS = [
   'workspaces:syncStatus',
   'workspaces:syncNow',
   'workspaces:resolve',
+  'workspaces:intentMerges',
+  'workspaces:keepIntent',
   'workspaces:hostTools',
   'workspaces:learnConnections',
   'workspaces:connectionsLearningStatus',
@@ -7959,6 +8026,11 @@ export const IPC_INVOKE_CHANNELS = [
   'loops:forget',
   'loops:owner',
   'brain:query',
+  'ask:start',
+  'ask:stop',
+  'ask:list',
+  'ask:stale',
+  'ask:saveConnection',
   'project:list',
   'project:addressableRoots',
   'project:add',
@@ -8015,6 +8087,7 @@ export const IPC_INVOKE_CHANNELS = [
   'learn:log',
   'learn:pause',
   'learn:pauseRoot',
+  'learn:driftReasons',
   'learn:cancel',
   'learn:reset',
   'learn:narrate',
@@ -8080,6 +8153,7 @@ export const IPC_EVENT_CHANNELS = [
   'learn:basicDiscoveryAsk',
   'learn:chatLearnAsk',
   'learn:progress',
+  'ask:state',
   'learn:pausedChanged',
   'learn:featureLearned',
   'learn:featureParts',
@@ -8460,6 +8534,16 @@ export interface FlowBrainApi {
   /** Search the trusted brain tiers. The feature map's title strip is the
    *  first caller. */
   query(request: IpcRequest<'brain:query'>): Promise<IpcResponse<'brain:query'>>
+}
+
+/** Ask the Blueprint: one question at a time, its state streamed back. */
+export interface FlowAskApi {
+  start(request: IpcRequest<'ask:start'>): Promise<IpcResponse<'ask:start'>>
+  stop(request: IpcRequest<'ask:stop'>): Promise<IpcResponse<'ask:stop'>>
+  list(request: IpcRequest<'ask:list'>): Promise<IpcResponse<'ask:list'>>
+  stale(request: IpcRequest<'ask:stale'>): Promise<IpcResponse<'ask:stale'>>
+  saveConnection(request: IpcRequest<'ask:saveConnection'>): Promise<IpcResponse<'ask:saveConnection'>>
+  onState(listener: (event: IpcEventPayload<'ask:state'>) => void): Unsubscribe
 }
 
 /**
@@ -8851,6 +8935,7 @@ export interface FlowLearnApi {
   log?(): Promise<IpcResponse<'learn:log'>>
   pause(request: IpcRequest<'learn:pause'>): Promise<IpcResponse<'learn:pause'>>
   pauseRoot(request: IpcRequest<'learn:pauseRoot'>): Promise<IpcResponse<'learn:pauseRoot'>>
+  driftReasons(request: IpcRequest<'learn:driftReasons'>): Promise<IpcResponse<'learn:driftReasons'>>
   /** Stop a root's learning — abort active + drop queue; entries flip stale. */
   cancel(request: IpcRequest<'learn:cancel'>): Promise<IpcResponse<'learn:cancel'>>
   /** Wipe a root's learning-state — all modules read never-learned again. */
@@ -9031,6 +9116,8 @@ export interface FlowWorkspacesApi {
   syncStatus(request: IpcRequest<'workspaces:syncStatus'>): Promise<IpcResponse<'workspaces:syncStatus'>>
   syncNow(request: IpcRequest<'workspaces:syncNow'>): Promise<IpcResponse<'workspaces:syncNow'>>
   resolve(request: IpcRequest<'workspaces:resolve'>): Promise<IpcResponse<'workspaces:resolve'>>
+  intentMerges(request: IpcRequest<'workspaces:intentMerges'>): Promise<IpcResponse<'workspaces:intentMerges'>>
+  keepIntent(request: IpcRequest<'workspaces:keepIntent'>): Promise<IpcResponse<'workspaces:keepIntent'>>
   hostTools(): Promise<IpcResponse<'workspaces:hostTools'>>
   createRemote(request: IpcRequest<'workspaces:createRemote'>): Promise<IpcResponse<'workspaces:createRemote'>>
   setRemote(request: IpcRequest<'workspaces:setRemote'>): Promise<IpcResponse<'workspaces:setRemote'>>
@@ -9074,6 +9161,8 @@ export interface FlowApi {
   /** Agent loops (Phase 7). Optional: an older preload predates the channels. */
   loops?: FlowLoopsApi
   brain: FlowBrainApi
+  /** Ask the Blueprint. Optional: an older preload predates the channels. */
+  ask?: FlowAskApi
   project: FlowProjectApi
   accounts: FlowAccountsApi
   review: FlowReviewApi

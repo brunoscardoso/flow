@@ -464,6 +464,16 @@ const flowApi: FlowApi = {
   brain: {
     query: (request) => invoke('brain:query', request),
   },
+  // Ask the Blueprint: start, Stop here, the saved log and its staleness — the
+  // writes (facts, answers) happen in main through the CLI's one writer each.
+  ask: {
+    start: (request) => invoke('ask:start', request),
+    stop: (request) => invoke('ask:stop', request),
+    list: (request) => invoke('ask:list', request),
+    stale: (request) => invoke('ask:stale', request),
+    saveConnection: (request) => invoke('ask:saveConnection', request),
+    onState: (listener) => subscribe('ask:state', listener),
+  },
   // Feature view sharing: share STATE only. The session token that authorises
   // these calls is read in main and has no route through here.
   share: {
@@ -497,6 +507,8 @@ const flowApi: FlowApi = {
     syncStatus: (request) => invoke('workspaces:syncStatus', request),
     syncNow: (request) => invoke('workspaces:syncNow', request),
     resolve: (request) => invoke('workspaces:resolve', request),
+    intentMerges: (request) => invoke('workspaces:intentMerges', request),
+    keepIntent: (request) => invoke('workspaces:keepIntent', request),
     hostTools: () => invoke('workspaces:hostTools', {}),
     createRemote: (request) => invoke('workspaces:createRemote', request),
     setRemote: (request) => invoke('workspaces:setRemote', request),
@@ -589,6 +601,7 @@ const flowApi: FlowApi = {
     log: () => invoke('learn:log', {}),
     pause: (request) => invoke('learn:pause', request),
     pauseRoot: (request) => invoke('learn:pauseRoot', request),
+    driftReasons: (request) => invoke('learn:driftReasons', request),
     cancel: (request) => invoke('learn:cancel', request),
     reset: (request) => invoke('learn:reset', request),
     narrate: (request) => invoke('learn:narrate', request),

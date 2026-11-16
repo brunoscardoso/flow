@@ -22,6 +22,7 @@ import { basename, join } from 'node:path';
 
 import { atomicWriteFile } from '../utils/atomic-write.js';
 import { featureExclusion, featureSummary } from '../blueprint/feature-store.js';
+import { createKnowledgeStatusReader, type KnowledgeStatusReader } from './knowledge-status-read.js';
 
 export const BRAIN_INDEX_RELPATH = join('brain', 'index.md');
 
@@ -88,12 +89,13 @@ function firstHeading(body: string): string {
   return match === null ? '' : match[1].replace(/\[\[(.+?)\]\]/g, '$1').trim();
 }
 
-function summaryOf(note: Note): string {
+function summaryOf(note: Note, reader?: KnowledgeStatusReader): string {
   const described = note.fm.get('description');
   if (described !== undefined && described.length > 0) return oneLine(described);
   let summary = '';
   try {
-    summary = featureSummary(note.body);
+    // Solid learnings first, abandoned ones never (`featureSummary`, FR-9).
+    summary = featureSummary(note.body, reader === undefined ? undefined : { slug: note.slug, reader });
   } catch {
     summary = '';
   }
@@ -145,6 +147,7 @@ export interface BuildBrainIndexOptions {
 export function buildBrainIndex(flowDir: string, options: BuildBrainIndexOptions = {}): string {
   const now = options.now ?? new Date();
   const { live, archived } = artifactStatus(flowDir);
+  const reader = createKnowledgeStatusReader(flowDir);
   // A thread's working set is scratch, not a feature (same rule as the board).
   const features = readNotes(join(flowDir, 'brain', 'features')).filter((note) => featureExclusion(note.raw) !== 'working-set');
 
@@ -176,10 +179,10 @@ export function buildBrainIndex(flowDir: string, options: BuildBrainIndexOptions
     '## Active Features',
   ];
   for (const note of active) {
-    lines.push(`- ${note.slug} [${note.fm.get('status') ?? 'active'}] - ${summaryOf(note)}`);
+    lines.push(`- ${note.slug} [${note.fm.get('status') ?? 'active'}] - ${summaryOf(note, reader)}`);
   }
   for (const { note, status } of done.slice(0, MAX_ARCHIVED)) {
-    lines.push(`- ~~${note.slug}~~ [${status}] - ${summaryOf(note)}`);
+    lines.push(`- ~~${note.slug}~~ [${status}] - ${summaryOf(note, reader)}`);
   }
   if (capabilities.length > 0) {
     const shown = capabilities.slice(0, MAX_CAPABILITIES).map((note) => `[[${note.slug}]]`);

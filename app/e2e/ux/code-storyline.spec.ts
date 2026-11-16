@@ -272,7 +272,7 @@ test('a file reads as a story: entry at the left, real code in every box, wires 
   // THE STORY REPLACED THE CODE MAP. The board's header IS up with its own
   // controls (Back, the story's strip) — and among them there is no Code map
   // entry any more. Positive first, so the absence below is evidence.
-  const header = page.locator('.flow-board-root .fb-header')
+  const header = page.locator('.flow-board-root .fb-head-island')
   await expect(header).toBeVisible()
   await expect(header.locator('.fb-nav-btn').first()).toBeVisible()
   await expect(header.locator('.fb-story-head')).toBeVisible()
@@ -394,6 +394,22 @@ test('a file reads as a story: entry at the left, real code in every box, wires 
 
   // ── STARTS AT: another way in redraws the story from there. ──
   const select = page.locator('.fb-story-select')
+  // A PERSON CAN PRESS IT (user, 2026-11-16: "I'm not able to click"):
+  // selectOption below bypasses the pointer, so first prove the control is
+  // what sits under the cursor and is not rebuilt while someone reaches for it.
+  const reach = await select.evaluate(async (el) => {
+    const r = el.getBoundingClientRect()
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+    ;(el as HTMLElement).dataset['probe'] = 'kept'
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    const still = document.querySelector<HTMLElement>('.fb-story-select')
+    return {
+      hit: hit === null ? 'none' : hit === el || el.contains(hit) ? 'select' : `${hit.tagName}.${String(hit.className)}`,
+      kept: still?.dataset['probe'] === 'kept',
+      connected: el.isConnected,
+    }
+  })
+  expect(reach).toEqual({ hit: 'select', kept: true, connected: true })
   const before = await select.inputValue()
   const options = await select.locator('option').evaluateAll((els) => els.map((el) => (el as HTMLOptionElement).value))
   const other = options.find((value) => value !== before)

@@ -45,13 +45,33 @@
  *    (allowed-pattern #17).
  *  · `lastSyncedAt` survives a restart: it is written through the injected
  *    store (app settings rows — no schema change).
+ *  · PROMOTION BEFORE SYNC (FR-7). `open`, "Sync now" and a 10-minute timer
+ *    per opened Workspace run the CLI's `workspace promote` first, inside the
+ *    Workspace's queue — so it never overlaps a sync, at most one is in
+ *    flight, and a cooldown keeps open + timer from running it twice. Never
+ *    while the sync waits for a person. A failure is logged and the sync runs
+ *    anyway; a promotion that decided anything is carried by a sync (the
+ *    status log is append-only and synced like every other file).
+ *  · A PAUSE MADE ONLY OF INTENT DOCUMENTS IS MERGED BY AN AGENT (FR-12,
+ *    intent-merge.ts): every text first, then every resolve, then one
+ *    notification with Undo. Anything the agent cannot merge stays a pause.
+ *    Undo and "keep yours / theirs" put a document back as a NEW commit
+ *    through the CLI (`--put-back`), then sync — never a force push.
  *
  * Nothing here throws to its caller: every failure becomes a status.
  */
 
 import { RETRY_BASE_MS, RETRY_MAX_MS, OPEN_SYNC_COOLDOWN_MS, PUSH_DEBOUNCE_MS, QUIT_PUSH_TIMEOUT_MS, commitMessage, type EngineTimers } from './sync-timing'
+import { createHash } from 'node:crypto'
+
 import { lastJsonLine } from '../workspaces/cli-json'
+import { settleIntentAsks, type IntentItem, type IntentMergeDeps } from './intent-merge'
 import type {
+  IntentMergeKeep,
+  WorkspaceIntentMergeSet,
+  WorkspaceIntentMergesRequest,
+  WorkspaceKeepIntentRequest,
+  WorkspaceKeepIntentResult,
   WorkspaceResolveRequest,
   WorkspaceResolveResult,
   WorkspaceSyncAsk,
@@ -76,12 +96,22 @@ export const QUIT_SYNC_TIMEOUT_MS = QUIT_PUSH_TIMEOUT_MS
  * leave git's index lock behind.
  */
 export const COMMIT_ONLY_TIMEOUT_MS = 60_000
+/** `workspace promote`: one fetch per project with drafts plus host questions — bounded well below a sync. */
+export const PROMOTE_TIMEOUT_MS = 2 * 60_000
+/** While a Workspace is open, promotion runs this often (FR-7). */
+export const PROMOTE_INTERVAL_MS = 10 * 60_000
+/** A promotion started this recently is not started again by an open or the timer. */
+export const PROMOTE_COOLDOWN_MS = 5 * 60_000
+/** How many merge sets per Workspace this computer keeps for Undo / "See both". */
+const KEPT_MERGE_SETS = 5
 
 const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const MAX_SLUG_LENGTH = 64
 
 const OPEN_LABEL = 'changes since the last sync'
 const SYNC_NOW_LABEL = 'sync requested'
+const PROMOTE_LABEL = 'knowledge status checked'
+const PUT_BACK_LABEL = 'a merged document put back'
 const QUIT_LABEL = 'changes before closing'
 /** How many turn labels one commit message names before it just counts them. */
 const MAX_NAMED_TURNS = 3
@@ -140,6 +170,16 @@ export interface WorkspaceSyncEngineDeps {
   /** A Workspace's status changed. Called only on a real change. */
   /** `name` is null until the Workspace's name is known — never its folder slug. */
   onStatus: (slug: string, name: string | null, status: WorkspaceSyncStatus) => void
+  /**
+   * Runs the bundled CLI's `workspace promote`. Separate from `runCli` because
+   * the promotion asks the code host's own tool (`gh`) itself, so its child
+   * needs the person's PATH (a GUI-launched app cannot see Homebrew's folder).
+   */
+  runPromotionCli: WorkspaceSyncCliRunner
+  /** REQUIRED (allowed-pattern #26): the one-shot agent that merges an intent document. */
+  mergeIntent: IntentMergeDeps['merge']
+  /** An agent merged a pause away: raise ONE notification for the set. */
+  onIntentMerged: (slug: string, name: string | null, set: WorkspaceIntentMergeSet) => void
   /** Diagnostics only (the CLI's own words); never UI. */
   log: (message: string, detail?: Record<string, unknown>) => void
 }
@@ -153,6 +193,10 @@ export interface WorkspaceSyncEngine {
   syncNow(slug: string): Promise<WorkspaceSyncStatus>
   /** Apply a person's decision about one paused item, then sync again. */
   resolve(request: WorkspaceResolveRequest): Promise<WorkspaceResolveResult>
+  /** The documents one agent merge settled, while this computer holds them. */
+  intentMerges(request: WorkspaceIntentMergesRequest): WorkspaceIntentMergeSet | null
+  /** Put merged documents to one text (`ours` = Undo): a new commit each, then a sync. */
+  keepIntent(request: WorkspaceKeepIntentRequest): Promise<WorkspaceKeepIntentResult>
   /** The Workspace's current status. Reading it starts nothing. */
   status(slug: string): WorkspaceSyncStatus
   /** The Workspace left this computer: clear its timers and drop its record. */
@@ -204,14 +248,26 @@ function readAsk(value: unknown): WorkspaceSyncAsk {
   }
   const anchors = value['anchors']
   if (Array.isArray(anchors)) ask.anchors = anchors.filter((anchor): anchor is string => typeof anchor === 'string')
+  if (value['agentMergeable'] === true) {
+    ask.agentMergeable = true
+    ask.base = typeof value['base'] === 'string' ? value['base'] : null
+    ask.theirAuthor = authorOf(value['theirAuthor'])
+  }
   return ask
+}
+
+/** A git author name for a sentence: one plain line, or null. */
+function authorOf(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const name = value.replace(/[\r\n\t]+/g, ' ').trim()
+  return name === '' ? null : name.slice(0, 80)
 }
 
 function readReview(value: unknown): WorkspaceSyncReview {
   if (!isRecord(value)) throw new MalformedAnswer('review')
   const kind = value['kind']
   if (!(REVIEW_KINDS as readonly unknown[]).includes(kind)) throw new MalformedAnswer('review.kind')
-  return {
+  const review: WorkspaceSyncReview = {
     id: text(value['id'], 'review.id'),
     kind: kind as WorkspaceSyncReview['kind'],
     path: text(value['path'], 'review.path'),
@@ -222,6 +278,11 @@ function readReview(value: unknown): WorkspaceSyncReview {
     truncated: value['truncated'] === true,
     options: takes(value['options']),
   }
+  if (value['agentMergeable'] === true) {
+    review.agentMergeable = true
+    review.theirAuthor = authorOf(value['theirAuthor'])
+  }
+  return review
 }
 
 const CLI_STATES = ['synced', 'local-only', 'nothing-to-do', 'ask', 'review', 'behind', 'offline', 'no-access', 'committed'] as const
@@ -321,6 +382,14 @@ export const WORKSPACE_SYNC_SENTENCES = {
   unrelatedHistory: (name: string) =>
     `The shared repository for ${name} already holds a different history, so Flow won't mix the two. Connect ${name} to an empty repository, or join the Workspace it holds instead.`,
   invalidTake: 'That choice can\'t settle this item.',
+  keptOurs: (title: string) => `Flow put back your version of "${title}".`,
+  keptOursMany: (count: number) => `Flow put back your versions of ${count} documents.`,
+  keptTheirs: (title: string, who: string) => `Flow kept ${who}'s version of "${title}".`,
+  keptTheirsMany: (count: number) => `Flow kept your teammates' versions of ${count} documents.`,
+  keptMerged: (title: string) => `Flow kept the merged version of "${title}".`,
+  keptMergedMany: (count: number) => `Flow kept the merged versions of ${count} documents.`,
+  intentChanged: (title: string) => `Someone changed "${title}" since Flow merged it, so Flow left it as it is.`,
+  intentGone: 'Flow no longer has that merge on this computer.',
   unknownWorkspace: "That Workspace isn't on this computer.",
 } as const
 
@@ -420,6 +489,13 @@ interface WorkspaceRecord {
   retryAttempt: number
   lastEmitted: string
   forgotten: boolean
+  /** When the last promotion started (epoch ms), or null. */
+  promotedAt: number | null
+  promoteInFlight: boolean
+  /** The 10-minute promotion timer — armed on the first open, cleared only on forget/quit. */
+  promoteTimer: unknown
+  /** The last few agent merges, newest last — what Undo and "See both" read. */
+  mergeSets: WorkspaceIntentMergeSet[]
 }
 
 interface RunOptions {
@@ -428,6 +504,13 @@ interface RunOptions {
   resolve?: { path: string; id: string; take: string }
   /** `--commit-only`: commit, nothing else. */
   commitOnly?: boolean
+  /** `--put-back`: one intent document to a chosen text, over exactly the text last seen. */
+  putBack?: { path: string; expect: string; take: string }
+}
+
+/** sha256 hex of a text's UTF-8 bytes — what the CLI's `--expect` compares. */
+function textHash(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex')
 }
 
 const IDLE_STATUS = (lastSyncedAt: number | null): WorkspaceSyncStatus => ({
@@ -473,6 +556,10 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
         retryAttempt: 0,
         lastEmitted: '',
         forgotten: false,
+        promotedAt: null,
+        promoteInFlight: false,
+        promoteTimer: null,
+        mergeSets: [],
       }
       rec.lastEmitted = JSON.stringify(statusOf(rec))
       records.set(slug, rec)
@@ -570,6 +657,9 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
       // The item's id pins the decision to exactly what the person saw.
       args.push(`--resolve=${options.resolve.path}`, `--id=${options.resolve.id}`, `--take=${options.resolve.take}`)
     }
+    if (options.putBack !== undefined) {
+      args.push(`--put-back=${options.putBack.path}`, `--expect=${options.putBack.expect}`, `--take=${options.putBack.take}`)
+    }
     args.push('--json')
     const run = await deps.runCli(deps.cwd, args, { timeoutMs: options.timeoutMs })
     const payload = lastJsonLine(run.stdout)
@@ -615,8 +705,85 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
     rec.retryTimer = clearTimer(rec.retryTimer)
     const carried = rec.turnLabels.length
     set(rec, 'syncing', null, { asks: rec.asks, reviews: rec.reviews })
-    const outcome = await callCli(rec, options)
+    let outcome = await callCli(rec, options)
     if (rec.forgotten) return outcome
+    // A pause nobody has looked at yet, made only of intent documents: an agent
+    // merges it before it ever reaches a person. Never on a person's own
+    // decision or put-back — those are a person's choice already.
+    let mergedSet: WorkspaceIntentMergeSet | null = null
+    if (
+      outcome.kind === 'result' &&
+      (outcome.result.state === 'ask' || outcome.result.state === 'review') &&
+      options.resolve === undefined &&
+      options.putBack === undefined &&
+      options.commitOnly !== true
+    ) {
+      const settled = await settleByAgent(rec, outcome.result, options)
+      if (rec.forgotten) return outcome
+      if (settled.outcome !== null) outcome = settled.outcome
+      mergedSet = settled.set
+    }
+    try {
+      return fold(rec, outcome, carried, retryOnce)
+    } finally {
+      if (mergedSet !== null) {
+        try {
+          deps.onIntentMerged(rec.slug, rec.name, mergedSet)
+        } catch (error) {
+          deps.log('intent merge listener failed', { error: String(error) })
+        }
+      }
+    }
+  }
+
+  /**
+   * Ask the agent for every intent document of a pause, then resolve each
+   * through the CLI (intent-merge.ts). `outcome` is the last CLI answer when
+   * anything was resolved (it says where things stand now); `set` is the
+   * merge set when every item was merged.
+   */
+  async function settleByAgent(
+    rec: WorkspaceRecord,
+    result: CliResult,
+    options: RunOptions,
+  ): Promise<{ outcome: CliOutcome | null; set: WorkspaceIntentMergeSet | null }> {
+    const items: IntentItem[] = [...result.asks, ...result.reviews]
+    const seen: { last: CliOutcome | null } = { last: null }
+    const merged = await settleIntentAsks(rec.slug, items, {
+      merge: deps.mergeIntent,
+      timers: deps.timers,
+      log: deps.log,
+      resolve: async (item, mergedText) => {
+        const temp = await deps.writeTempText(mergedText)
+        try {
+          const answer = await callCli(rec, {
+            message: options.message,
+            timeoutMs: WORKSPACE_SYNC_TIMEOUT_MS,
+            resolve: { path: item.path, id: item.id, take: `file:${temp.path}` },
+          })
+          if (answer.kind !== 'result') return false
+          seen.last = answer
+          return true
+        } finally {
+          await temp.dispose().catch(() => undefined)
+        }
+      },
+    })
+    if (merged.kind !== 'settled') return { outcome: seen.last, set: null }
+    const at = deps.now()
+    const set: WorkspaceIntentMergeSet = {
+      slug: rec.slug,
+      mergeId: `m${at.toString(36)}${rec.mergeSets.length}`,
+      at: new Date(at).toISOString(),
+      documents: merged.documents,
+    }
+    rec.mergeSets.push(set)
+    if (rec.mergeSets.length > KEPT_MERGE_SETS) rec.mergeSets.splice(0, rec.mergeSets.length - KEPT_MERGE_SETS)
+    return { outcome: seen.last, set }
+  }
+
+  /** Fold one CLI answer into the record. */
+  function fold(rec: WorkspaceRecord, outcome: CliOutcome, carried: number, retryOnce: boolean): CliOutcome {
     if (outcome.kind === 'unavailable') {
       set(rec, 'error', WORKSPACE_SYNC_SENTENCES.failed(nameIn(rec)))
       return outcome
@@ -689,6 +856,69 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
     await sync(rec, { message, timeoutMs: WORKSPACE_SYNC_TIMEOUT_MS }, retryOnce)
   }
 
+  // ── Promotion (FR-7) ──
+
+  /**
+   * Run `workspace promote` once. Inside the Workspace's queue (the callers
+   * enqueue it), so it never overlaps a sync. Answers whether it decided
+   * anything (solid, stale or abandoned) — the status lines a sync should
+   * carry. Never throws; a failure is logged and the sync goes on.
+   */
+  async function promote(rec: WorkspaceRecord, force: boolean): Promise<boolean> {
+    if (!mayRun(rec) || waitsForPerson(rec) || rec.promoteInFlight) return false
+    if (!force && rec.promotedAt !== null && deps.now() - rec.promotedAt < PROMOTE_COOLDOWN_MS) return false
+    rec.promoteInFlight = true
+    rec.promotedAt = deps.now()
+    try {
+      const run = await deps.runPromotionCli(deps.cwd, ['workspace', 'promote', '--workspace', rec.slug, '--json'], {
+        timeoutMs: PROMOTE_TIMEOUT_MS,
+      })
+      const payload = lastJsonLine(run.stdout)
+      if (!run.ok || payload === null || payload['action'] !== 'promote' || !isRecord(payload['totals'])) {
+        deps.log('workspace promote gave no usable answer', {
+          slug: rec.slug,
+          refused: payload?.['refused'],
+          error: run.error,
+          stderr: run.stderr,
+        })
+        return false
+      }
+      const projects = payload['projects']
+      if (Array.isArray(projects)) {
+        for (const project of projects) {
+          if (isRecord(project) && project['state'] === 'failed') {
+            deps.log('workspace promote could not check a project', { slug: rec.slug, project: project['project'], detail: project['detail'] })
+          }
+        }
+      }
+      const totals = payload['totals']
+      const count = (key: string): number => {
+        const value = totals[key]
+        return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
+      }
+      return count('solid') + count('stale') + count('abandoned') > 0
+    } catch (error) {
+      deps.log('workspace promote failed', { slug: rec.slug, error: String(error) })
+      return false
+    } finally {
+      rec.promoteInFlight = false
+    }
+  }
+
+  /** While a Workspace is open, promotion runs every PROMOTE_INTERVAL_MS — never over a pause. */
+  function armPromoteTimer(rec: WorkspaceRecord): void {
+    if (closed || rec.forgotten || rec.promoteTimer !== null) return
+    rec.promoteTimer = deps.timers.setTimeout(() => {
+      rec.promoteTimer = null
+      if (!mayRun(rec)) return
+      armPromoteTimer(rec)
+      if (waitsForPerson(rec)) return
+      void enqueue(rec, async () => {
+        if (await promote(rec, false)) await background(rec, PROMOTE_LABEL)
+      })
+    }, PROMOTE_INTERVAL_MS)
+  }
+
   // ── Public API ──
 
   function recentlySynced(rec: WorkspaceRecord): boolean {
@@ -698,9 +928,14 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
   function open(slug: string): Promise<void> {
     if (closed || !isWorkspaceSlug(slug)) return Promise.resolve()
     const rec = record(slug)
+    armPromoteTimer(rec)
     if (rec.openInFlight !== null) return rec.openInFlight
     const run = enqueue(rec, async () => {
-      if (waitsForPerson(rec) || recentlySynced(rec)) return
+      if (waitsForPerson(rec)) return
+      // Promotion first (its own cooldown); a promotion that decided anything
+      // is carried by a sync even inside the open cooldown.
+      const promoted = await promote(rec, false)
+      if (recentlySynced(rec) && !promoted) return
       await background(rec, OPEN_LABEL, true)
     }).finally(() => {
       if (rec.openInFlight === run) rec.openInFlight = null
@@ -731,6 +966,8 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
       if (closed || rec.forgotten) return
       clearTimers(rec)
       rec.retryAttempt = 0
+      // A person asked: promotion runs whatever its cooldown — but never over a pause.
+      await promote(rec, true)
       const message = rec.turnLabels.length > 0 ? turnsMessage(rec.turnLabels) : commitMessage(SYNC_NOW_LABEL)
       await sync(rec, { message, timeoutMs: WORKSPACE_SYNC_TIMEOUT_MS }, true)
     })
@@ -803,6 +1040,89 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
     return answer ?? { ok: false, reason: 'failed', detail: WORKSPACE_SYNC_SENTENCES.failed(nameIn(rec)), status: statusOf(rec) }
   }
 
+  // ── Intent merges: Undo and "See both" ──
+
+  function copySet(set: WorkspaceIntentMergeSet): WorkspaceIntentMergeSet {
+    return { ...set, documents: set.documents.map((document) => ({ ...document })) }
+  }
+
+  function intentMerges(request: WorkspaceIntentMergesRequest): WorkspaceIntentMergeSet | null {
+    if (!isWorkspaceSlug(request.slug)) return null
+    const set = records.get(request.slug)?.mergeSets.find((candidate) => candidate.mergeId === request.mergeId)
+    return set === undefined ? null : copySet(set)
+  }
+
+  function keptSentence(keep: IntentMergeKeep, documents: readonly WorkspaceIntentMergeSet['documents'][number][]): string {
+    const s = WORKSPACE_SYNC_SENTENCES
+    const [only] = documents
+    if (documents.length === 1 && only !== undefined) {
+      if (keep === 'ours') return s.keptOurs(only.title)
+      if (keep === 'theirs') return s.keptTheirs(only.title, only.theirName ?? 'your teammate')
+      return s.keptMerged(only.title)
+    }
+    if (keep === 'ours') return s.keptOursMany(documents.length)
+    if (keep === 'theirs') return s.keptTheirsMany(documents.length)
+    return s.keptMergedMany(documents.length)
+  }
+
+  async function keepIntent(request: WorkspaceKeepIntentRequest): Promise<WorkspaceKeepIntentResult> {
+    if (!isWorkspaceSlug(request.slug)) {
+      return { ok: false, reason: 'not-found', detail: WORKSPACE_SYNC_SENTENCES.intentGone, status: IDLE_STATUS(null) }
+    }
+    const rec = record(request.slug)
+    let answer: WorkspaceKeepIntentResult | null = null
+    await enqueue(rec, async () => {
+      const set = rec.mergeSets.find((candidate) => candidate.mergeId === request.mergeId)
+      const chosen =
+        set === undefined
+          ? []
+          : set.documents.filter((document) => request.documentId === undefined || document.id === request.documentId)
+      if (set === undefined || chosen.length === 0 || closed || rec.forgotten) {
+        answer = { ok: false, reason: 'not-found', detail: WORKSPACE_SYNC_SENTENCES.intentGone, status: statusOf(rec) }
+        return
+      }
+      const textOf = (document: (typeof chosen)[number], which: IntentMergeKeep): string =>
+        which === 'ours' ? document.ours : which === 'theirs' ? document.theirs : document.merged
+      for (const document of chosen) {
+        if (document.current === request.keep) continue
+        let temp: TempText | null = null
+        try {
+          temp = await deps.writeTempText(textOf(document, request.keep))
+          const message = rec.turnLabels.length > 0 ? turnsMessage(rec.turnLabels) : commitMessage(PUT_BACK_LABEL)
+          const outcome = await sync(
+            rec,
+            {
+              message,
+              timeoutMs: WORKSPACE_SYNC_TIMEOUT_MS,
+              // Only over exactly the text this computer put there: a teammate's later edit is never overwritten.
+              putBack: { path: document.path, expect: textHash(textOf(document, document.current)), take: `file:${temp.path}` },
+            },
+            true,
+          )
+          if (outcome.kind === 'refused' && (outcome.reason === 'stale-decision' || outcome.reason === 'invalid-resolution')) {
+            // Read where things stand, so the status is not left mid-sync.
+            await sync(rec, { message, timeoutMs: WORKSPACE_SYNC_TIMEOUT_MS }, true)
+            answer = { ok: false, reason: 'stale', detail: WORKSPACE_SYNC_SENTENCES.intentChanged(document.title), status: statusOf(rec) }
+            return
+          }
+          if (outcome.kind !== 'result') {
+            answer = { ok: false, reason: 'failed', detail: rec.detail ?? WORKSPACE_SYNC_SENTENCES.failed(nameIn(rec)), status: statusOf(rec) }
+            return
+          }
+          document.current = request.keep
+        } catch (error) {
+          deps.log('putting a merged document back failed', { slug: rec.slug, error: String(error) })
+          answer = { ok: false, reason: 'failed', detail: WORKSPACE_SYNC_SENTENCES.failed(nameIn(rec)), status: statusOf(rec) }
+          return
+        } finally {
+          if (temp !== null) await temp.dispose().catch(() => undefined)
+        }
+      }
+      answer = { ok: true, detail: keptSentence(request.keep, chosen), set: copySet(set), status: statusOf(rec) }
+    })
+    return answer ?? { ok: false, reason: 'failed', detail: WORKSPACE_SYNC_SENTENCES.failed(nameIn(rec)), status: statusOf(rec) }
+  }
+
   function status(slug: string): WorkspaceSyncStatus {
     if (!isWorkspaceSlug(slug)) return IDLE_STATUS(null)
     const rec = records.get(slug)
@@ -814,6 +1134,7 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
     const rec = records.get(slug)
     if (rec === undefined) return
     clearTimers(rec)
+    rec.promoteTimer = clearTimer(rec.promoteTimer)
     rec.forgotten = true
     records.delete(slug)
   }
@@ -833,6 +1154,7 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
       // Only uncommitted work: commits already made wait for the next open to be sent.
       const waiting = rec.turnLabels.length > 0 || rec.turnTimer !== null
       clearTimers(rec)
+      rec.promoteTimer = clearTimer(rec.promoteTimer)
       if (!waiting) continue
       // Local and safe in every state — a pause, refused access or an error included.
       attempts.push(enqueue(rec, () => commitBeforeClosing(rec)))
@@ -857,5 +1179,5 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
     silenced = true
   }
 
-  return { open, commitAfterTurn, syncNow, resolve, status, forget, quit }
+  return { open, commitAfterTurn, syncNow, resolve, intentMerges, keepIntent, status, forget, quit }
 }

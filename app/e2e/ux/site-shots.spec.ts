@@ -342,7 +342,7 @@ flowTest('act 02 — the changeset on the map', async ({ window, app }) => {
   await openTerritory(window)
   await setSidebar(window, false)
   await nudgeGit(app, root)
-  await expect(window.locator('.fb-changeset-chip')).toBeVisible({ timeout: 20_000 })
+  await expect(window.locator('.fb-layers-btn[data-layer="changes"]')).toBeVisible({ timeout: 20_000 })
   await window.waitForTimeout(700)
   await shoot(app, join(OUT, 'story-2-map.png'))
 })
@@ -408,7 +408,7 @@ flowTest('act 05 — the board is the review', async ({ window, app }) => {
   await app.evaluate(({ BrowserWindow }, payload) => {
     BrowserWindow.getAllWindows()[0]?.webContents.send('git:changed', payload)
   }, { rootId: root })
-  await expect(window.locator('.fb-changeset-chip')).toBeVisible({ timeout: 20_000 })
+  await expect(window.locator('.fb-layers-btn[data-layer="changes"]')).toBeVisible({ timeout: 20_000 })
 
   // The checker's advisory verdicts, over the real IPC event the service uses.
   await app.evaluate(({ BrowserWindow }, payload) => {

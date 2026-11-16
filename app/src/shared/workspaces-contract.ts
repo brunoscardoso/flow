@@ -341,6 +341,12 @@ export interface WorkspaceSyncAsk {
   /** Git's clean merge of the two, when there is one. */
   merged: string | null
   anchors?: string[]
+  /** An intent document (decision, discovery) an agent may merge from `base`, `existing` and `incoming`. */
+  agentMergeable?: true
+  /** agentMergeable only: the common ancestor's text (null when new on both sides). */
+  base?: string | null
+  /** agentMergeable only: git's name for whoever last changed the Workspace side, or null. */
+  theirAuthor?: string | null
   truncated: boolean
   options: WorkspaceSyncTake[]
 }
@@ -355,6 +361,10 @@ export interface WorkspaceSyncReview {
   incoming: string | null
   /** The working copy with conflict lines, when there is one. */
   conflicted: string | null
+  /** An intent document (plan, discovery, decision) an agent may merge. */
+  agentMergeable?: true
+  /** agentMergeable only: git's name for whoever last changed the Workspace side, or null. */
+  theirAuthor?: string | null
   truncated: boolean
   options: WorkspaceSyncTake[]
 }
@@ -420,6 +430,71 @@ export type WorkspaceResolveRefusal = 'unknown-workspace' | 'not-waiting' | 'inv
 export type WorkspaceResolveResult =
   | { ok: true; status: WorkspaceSyncStatus }
   | { ok: false; reason: WorkspaceResolveRefusal; detail: string; status: WorkspaceSyncStatus }
+
+// ── Intent merges — Flow merged two edits to a decision, plan or discovery ──
+
+/** What kind of intent document Flow merged — the word a sentence uses. */
+export type IntentDocumentKind = 'decision' | 'plan' | 'discovery'
+
+/** Which text an intent document holds: Flow's merge, or one of the two originals. */
+export type IntentMergeKeep = 'ours' | 'theirs' | 'merged'
+
+/** One document Flow merged — what "See both" shows and "Undo" puts back. */
+export interface WorkspaceIntentMergeDocument {
+  /** The paused item's id this merge settled. */
+  id: string
+  /** Workspace-relative path — data for main, never shown as text. */
+  path: string
+  kind: IntentDocumentKind
+  /** The document's own title (its first heading), for sentences. */
+  title: string
+  /** The teammate's name from git, or null (the UI says "a teammate"). */
+  theirName: string | null
+  /** This computer's version. */
+  ours: string
+  /** The teammate's version. */
+  theirs: string
+  base: string | null
+  /** The agent's merged text. */
+  merged: string
+  /** Which text the document holds now. */
+  current: IntentMergeKeep
+}
+
+/** One sync's merges — one notification. */
+export interface WorkspaceIntentMergeSet {
+  slug: string
+  /** Names this set; the notification's buttons carry it. */
+  mergeId: string
+  /** ISO time the merge was made. */
+  at: string
+  documents: WorkspaceIntentMergeDocument[]
+}
+
+/** `workspaces:intentMerges` — the merge set a notification names (null when this computer no longer has it). */
+export interface WorkspaceIntentMergesRequest {
+  slug: string
+  mergeId: string
+}
+
+/**
+ * `workspaces:keepIntent` — put documents of a merge set to one text: `ours`
+ * is Undo. Each change is a new commit through the CLI, then a sync; never a
+ * force push. `documentId` omitted → every document of the set.
+ */
+export interface WorkspaceKeepIntentRequest {
+  slug: string
+  mergeId: string
+  documentId?: string
+  keep: IntentMergeKeep
+}
+
+export type WorkspaceKeepIntentRefusal = 'not-found' | 'stale' | 'failed'
+
+/** `detail` is a plain sentence either way. */
+export type WorkspaceKeepIntentResult =
+  | { ok: true; detail: string; set: WorkspaceIntentMergeSet; status: WorkspaceSyncStatus }
+  | { ok: false; reason: WorkspaceKeepIntentRefusal; detail: string; status: WorkspaceSyncStatus }
 
 // ── Connecting a Workspace to a shared repository ───────────────────────────
 

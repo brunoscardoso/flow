@@ -1,5 +1,5 @@
 /**
- * `planflow-ai workspace <create|link|join|status|link-knowledge|links|describe|sync|move-flow-folder|migrate|rename|move-project|delete|set-default|set-remote|unset-remote>` — the ONE door onto
+ * `planflow-ai workspace <create|link|join|status|link-knowledge|links|describe|sync|move-flow-folder|migrate|rename|move-project|delete|set-default|set-remote|unset-remote|promote>` — the ONE door onto
  * Workspaces, used by the terminal, the app and the heartbeat daemon alike.
  *
  * THIN ON PURPOSE. Every decision — where a Workspace lives, which project a
@@ -42,6 +42,11 @@
  * learns how the Workspace's projects talk, one pair at a time
  * (`handlers/workspace-connections.ts`): without `--pair` it is the plan (and
  * the fast model's dossiers) and writes nothing.
+ *
+ * `promote --workspace <w> | --target <repo>` runs the draft promotion checker
+ * for every project of the Workspace checked out on this machine
+ * (`handlers/workspace-promote.ts`): one bounded fetch per project with drafts,
+ * counts per project, abandoned plans and discoveries archived.
  *
  * `set-remote --workspace <w> --remote <url> [--replace]` / `unset-remote
  * --workspace <w>` connect a Workspace to a shared repository after it was
@@ -98,6 +103,7 @@ import {
   type LinkKnowledgeResult,
   type LinksListResult,
 } from '../handlers/workspace-links.js';
+import { promoteWorkspace, type PromoteResult } from '../handlers/workspace-promote.js';
 import {
   describeLearnConnections,
   learnConnections,
@@ -132,6 +138,7 @@ export const WORKSPACE_ACTIONS = [
   'branches',
   'set-branch',
   'learn-connections',
+  'promote',
 ] as const;
 
 export type WorkspaceAction = (typeof WORKSPACE_ACTIONS)[number];
@@ -185,8 +192,12 @@ export interface WorkspaceCommandOptions {
   resolve?: string;
   /** sync: the id of the ask/review to decide — the decision applies only to exactly that content. */
   id?: string;
-  /** sync --resolve / --id: ours | theirs | merged | file:<path>. */
+  /** sync --resolve / --id: ours | theirs | merged | file:<path>. sync --put-back: file:<path>. */
   take?: string;
+  /** sync: put this intent document back to the text in --take (an Undo of an agent's merge). */
+  putBack?: string;
+  /** sync --put-back: sha256 of the text the document holds now, as last seen. */
+  expect?: string;
   /** set-remote: a person chose to change the shared repository the Workspace already has. */
   replace?: boolean;
   /** set-branch (required), set-remote, join: the branch the Workspace syncs on. */
@@ -231,7 +242,8 @@ type WorkspaceResult =
   | BranchesResult
   | SetBranchResult
   | LearnConnectionsPlanResult
-  | LearnConnectionsPairResult;
+  | LearnConnectionsPairResult
+  | PromoteResult;
 
 function oneLine(value: string): string {
   const collapsed = value.replace(/\s+/g, ' ').trim();
@@ -372,6 +384,14 @@ function dispatch(action: WorkspaceAction, options: WorkspaceCommandOptions, run
         workspace: required(options.workspace, 'workspace', action),
         ...(options.remote === undefined ? {} : { remote: options.remote }),
       });
+    case 'promote':
+      // The Flow folder is resolved HERE, explicitly: the handler takes no default (forbidden-pattern #15).
+      return promoteWorkspace({
+        flowFolder: runtime.flowFolder ?? resolveFlowFolder(),
+        ...(options.workspace === undefined ? {} : { workspace: options.workspace }),
+        ...(options.target === undefined ? {} : { target: options.target }),
+        ...(runtime.deps?.git === undefined ? {} : { deps: { git: runtime.deps.git } }),
+      });
     case 'set-branch':
       return setWorkspaceBranch({
         ...context,
@@ -408,14 +428,28 @@ function dispatchSync(options: WorkspaceCommandOptions, runtime: WorkspaceRuntim
     ...(options.commitOnly === true ? { commitOnly: true } : {}),
   };
   const deciding = options.resolve !== undefined || options.id !== undefined;
+  const puttingBack = options.putBack !== undefined;
   if (options.all === true) {
-    if (options.workspace !== undefined || deciding) {
+    if (options.workspace !== undefined || deciding || puttingBack) {
       throw new WorkspaceRefusalLine('sync --all syncs every Workspace — it takes neither --workspace nor --resolve/--id');
     }
     return syncAllWorkspaces(shared);
   }
   if (options.commitOnly === true && deciding) {
     throw new WorkspaceRefusalLine('sync --commit-only commits and nothing else — it takes no --resolve/--id');
+  }
+  if (puttingBack) {
+    if (deciding || options.commitOnly === true) {
+      throw new WorkspaceRefusalLine('sync --put-back is its own sync — it takes no --resolve/--id and no --commit-only');
+    }
+    if (options.take === undefined || options.expect === undefined) {
+      throw new WorkspaceRefusalLine('sync --put-back <path> needs --take file:<path> and --expect <sha256 of the text there now>');
+    }
+    return syncWorkspace({
+      ...shared,
+      ...(options.workspace === undefined ? {} : { workspace: options.workspace }),
+      putBack: { path: options.putBack as string, expect: options.expect, take: options.take },
+    });
   }
   if (deciding !== (options.take !== undefined)) {
     throw new WorkspaceRefusalLine('sync --resolve <path> needs --take ours|theirs|merged|file:<path>, and --take needs --resolve or --id');
@@ -550,6 +584,18 @@ function renderHuman(result: WorkspaceResult): string {
       return disconnected.changed
         ? `workspace: ${disconnected.workspace.name} no longer shares through ${disconnected.previous ?? 'a repository'}. ${disconnected.detail}`
         : `workspace: ${disconnected.workspace.name} has no shared repository`;
+    }
+    case 'promote': {
+      const promoted = result as PromoteResult;
+      const here = promoted.projects.filter((project) => project.state !== 'no-checkout');
+      if (here.length === 0) return `workspace: ${promoted.workspace.name} — no project is checked out on this machine`;
+      return here
+        .map((project) =>
+          project.state === 'failed'
+            ? `workspace: ${project.project} could not be checked — ${project.detail ?? 'unknown error'}`
+            : `workspace: ${project.project} — ${project.counts.checked} draft(s) checked: ${project.counts.solid} solid, ${project.counts.stale} stale, ${project.counts.abandoned} abandoned, ${project.counts.unknown} unknown${project.archived.length === 0 ? '' : `; archived ${project.archived.join(', ')}`}`
+        )
+        .join('\n');
     }
     case 'move-flow-folder': {
       const moved = result as MoveFlowFolderResult;

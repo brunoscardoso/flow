@@ -246,3 +246,26 @@ export async function alignLocalPaths(
   )
   return { ...graph, projects }
 }
+
+// ── The last map each root read, for readers that may reuse it ──────────────
+//
+// The board reads the Workspace map whenever its Workspace sheet draws; a
+// Workspace question asked from that sheet moments later needs the same map
+// (which projects exist, which are on this computer, their feature graphs).
+// Walking every checkout again for it would cost what the board just paid, so
+// the board's read is remembered here and Ask reuses one younger than its
+// window. Only available maps are kept; nothing here ever reads by itself.
+
+const recentMaps = new Map<string, { at: number; graph: BlueprintWorkspaceGraph }>()
+
+/** Remember the map `rootId` just read (aligned to Flow's roots). An unavailable map is not kept. */
+export function rememberWorkspaceGraph(rootId: string, graph: BlueprintWorkspaceGraph, now: number = Date.now()): void {
+  if (graph.available) recentMaps.set(rootId, { at: now, graph })
+  else recentMaps.delete(rootId)
+}
+
+/** The map `rootId` read within `maxAgeMs`, or null. */
+export function recentWorkspaceGraph(rootId: string, maxAgeMs: number, now: number = Date.now()): BlueprintWorkspaceGraph | null {
+  const hit = recentMaps.get(rootId)
+  return hit !== undefined && now - hit.at < maxAgeMs ? hit.graph : null
+}

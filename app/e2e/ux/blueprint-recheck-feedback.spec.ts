@@ -202,7 +202,7 @@ async function openBoard(window: Page, prefix: string): Promise<string> {
   await expect(window.locator('.flow-board-root')).toBeVisible()
   // The board is live once its header's permanent "Learn" door is up (this
   // used to wait for a module card of the retired code map).
-  await expect(window.locator(LEARN_BUTTON)).toBeVisible({ timeout: 30_000 })
+  await expect(window.locator(LEARN_BUTTON).first()).toBeVisible({ timeout: 30_000 })
   return root
 }
 
@@ -230,13 +230,12 @@ test('the header offers no Refresh — the Learning panel ⟳ is the manual re-d
   // "New Blueprint" is GONE outright — it ran plain derive(), the same call the
   // board already makes itself, under a label promising something else.
   await expect(window.getByText('Refresh', { exact: false })).toHaveCount(0)
-  await expect(window.locator('.fb-header fl-button', { hasText: 'New Blueprint' })).toHaveCount(0)
+  await expect(window.locator('.fb-head-island fl-button', { hasText: 'New Blueprint' })).toHaveCount(0)
 
   // Its slot is now the permanent way into the Learning panel — reachable even
   // when the learn chip has nothing to report and hides itself.
-  await expect(
-    window.locator('.fb-header fl-button', { hasText: 'Learn' }).first(),
-  ).toBeVisible()
+  // On a territory that door is the Knowledge pill (mockup J3).
+  await expect(window.locator(LEARN_BUTTON).first()).toBeVisible()
 
   const recheck = await openLearnPanel(window)
   await expect(recheck).toHaveAttribute(

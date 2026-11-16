@@ -380,10 +380,12 @@ test('7.1 — the ring under Chats carries its ten PARTS, readable, and no chang
   // 3. THE KICKER SAYS WHAT THEY ARE. "2 PARTS" over two change records was
   //    half the report; the centre must now count the real ten and call them
   //    parts.
+  // (The title strip is gone, mockup J3: the trail under the Ask field carries
+  //  the level's kicker.)
   await expect(
-    window.locator('.fb-terr-title-kicker'),
-    'the centre kicker does not report ten parts',
-  ).toContainText('10 parts', { ignoreCase: true })
+    window.locator('.flow-board-root .fb-float-trail'),
+    'the level kicker does not report ten parts',
+  ).toHaveAttribute('data-kicker', /10 parts/i)
 
   // 4. READABLE, MEASURED. A DOM of ten correctly-named nodes proves nothing
   //    about what is on screen — see the header. Every name is typeset, painted

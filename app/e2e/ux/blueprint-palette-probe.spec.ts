@@ -146,7 +146,7 @@ test.describe('the board palette, on glass', () => {
     // 2.5s and caught "Deriving blueprint…" — a screenshot of the loader,
     // which says nothing about the palette.
     await expect(window.locator('.fb-terr-cell').first()).toBeAttached({ timeout: 45_000 })
-    await expect(window.locator('.fb-terr-title')).toBeAttached({ timeout: 45_000 })
+    await expect(window.locator('.fb-float-trail')).toBeAttached({ timeout: 45_000 })
     await window.waitForTimeout(1200)
 
     for (const theme of ['dark', 'light'] as const) {
@@ -217,7 +217,10 @@ test.describe('the board palette, on glass', () => {
     expect(errors).toEqual([])
   })
 
-  test('the level control: a diagram, at the size it is actually drawn', async ({ window }) => {
+  // RETIRED 2026-11-15: the one-way diagram glyph was replaced by the trail's
+  // two-state Blocks · Diagram switch (view-switch-model.ts), which is words, not
+  // a drawn mark — there is no glyph left to measure. Kept for its history.
+  test.skip('the level control: a diagram, at the size it is actually drawn', async ({ window }) => {
     const root = await seedProject(window, 'flow-ux-glyph-')
     // Ingest has a PART, so it can be dived into: the level control rides the
     // dived level's title strip now (a cell has no door of its own — plan

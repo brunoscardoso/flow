@@ -68,6 +68,19 @@ import {
   wouldCreateSupersedeCycle,
 } from '../blueprint/investigation-store.js';
 import { promoteRunRecords } from '../blueprint/promote.js';
+import {
+  appendQaEntry,
+  appendWorkspaceQaEntry,
+  listQaForFeature,
+  listWorkspaceQa,
+  QaRefusal,
+  qaStaleness,
+  readQaThreads,
+  resolveWorkspaceQaScope,
+  workspaceQaFilterOf,
+  workspaceQaPointedProjects,
+  workspaceQaStaleness,
+} from '../blueprint/qa-store.js';
 import { computeBriefDelta, computeFeatureBrief } from '../blueprint/brief-model.js';
 import { bootstrapFeatures, confirmCandidate, describeBootstrap } from '../blueprint/feature-bootstrap.js';
 import {
@@ -122,6 +135,7 @@ import { resolveStoryAnchors } from '../blueprint/anchors.js';
 import { readRoundsEntries } from '../state/rounds-reader.js';
 import { hashPlanContent } from '../state/run-compiler.js';
 import { parsePlan } from '../state/plan-parser.js';
+import { LEARNED_AT_FIELD } from '../state/knowledge-provenance.js';
 import {
   appendProposalEvent,
   attachProposals,
@@ -185,6 +199,8 @@ import type {
   HeatCounter,
   InvestigationEntry,
   InvestigationStatus,
+  QaRecordInput,
+  WorkspaceQaRecordInput,
 } from '../blueprint/types.js';
 import { validateCanonicalGraph } from '../blueprint/validate.js';
 
@@ -1004,8 +1020,15 @@ export interface BlueprintCommandOptions {
   runId?: string;
   /** workspace graph: the repo whose Workspace to map (default: the working directory). */
   target?: string;
-  /** workspace graph: which Workspace, when the repo is in more than one. */
-  workspace?: string;
+  /**
+   * workspace graph / features ports: which Workspace, when the repo is in
+   * more than one. qa: passed at all (bare = `true`) switches to Workspace
+   * mode — the answer log of the target repo's Workspace; a value also names
+   * which Workspace.
+   */
+  workspace?: string | boolean;
+  /** qa list/stale --workspace: the scope, in the Workspace tag grammar — repeatable. */
+  tag?: string[];
   /** derive: overwrite a non-empty graph even when the scan saw zero files. */
   force?: boolean;
   note?: string;
@@ -1084,6 +1107,8 @@ export interface BlueprintCommandOptions {
   learned?: string;
   /** storyline --plan: the plan's starting commit, when the caller names it. */
   base?: string;
+  /** qa record/follow-up: the JSON input file, or `-` for stdin. */
+  input?: string;
 }
 
 /** How the new entry relates to any existing notes on its anchors. */
@@ -1172,6 +1197,9 @@ function requestFromJson(payload: string, options: BlueprintCommandOptions): Obs
   const record = parsed as Record<string, unknown>;
   if (typeof record.text !== 'string' || record.text.length === 0) {
     return 'invalid --json payload — a non-empty "text" is required';
+  }
+  if (Object.prototype.hasOwnProperty.call(record, LEARNED_AT_FIELD)) {
+    return 'invalid --json payload — "learnedAt" is stamped by the writer from this checkout — a caller cannot supply it';
   }
 
   const anchors: Anchor[] = [];
@@ -1518,7 +1546,7 @@ function runObserve(repoRoot: string, options: BlueprintCommandOptions): number 
   if (supersedes !== undefined) {
     entry.supersedes = supersedes;
   }
-  appendInvestigationNote(flowDir, entry);
+  appendInvestigationNote(flowDir, entry, { repoRoot });
   for (const anchor of request.anchors) {
     appendHeatTick(flowDir, { ts, anchorRef: anchor.ref, visitor: 'agent' });
   }
@@ -2034,6 +2062,14 @@ function runFeaturesDiscover(repoRoot: string, options: BlueprintCommandOptions)
       `${existing.length} · ${result.candidates.length} new candidate(s) ` +
       `(${cores.length} core, ${children.length} child)\n`,
   );
+  const links = result.corpusLinks;
+  if (links.docs > 0) {
+    // Said every run, so a project whose docs stop linking shows it here first.
+    process.stdout.write(
+      `features: ${links.docs - links.unlinked} of ${links.docs} plan/discovery doc(s) linked to a feature ` +
+        `(${links.declared} declared, ${links.name} by name, ${links.code} by files) · ${links.unlinked} unlinked\n`,
+    );
+  }
   if (cores.length > 0) {
     process.stdout.write(`features: core candidates — ${cores.map((c) => c.slug).join(', ')}\n`);
   }
@@ -2164,6 +2200,12 @@ function runFeaturesLearned(repoRoot: string, options: BlueprintCommandOptions):
     if (typeof candidate.text !== 'string' || candidate.text.trim().length === 0) {
       return refuseFeatures('every --entry needs a non-empty "text"');
     }
+    // Where a learning was learned is the writer's to say (FR-1 of
+    // `workspace_knowledge_draft_solid`): a stamp a caller chooses is a stamp
+    // a caller can forge.
+    if (Object.prototype.hasOwnProperty.call(candidate, LEARNED_AT_FIELD)) {
+      return refuseFeatures('"learnedAt" is stamped by the writer from this checkout — a caller cannot supply it');
+    }
     if (typeof candidate.provenance !== 'string' || candidate.provenance.length === 0) {
       return refuseFeatures('every --entry needs a "provenance" (code | human | plan:<name>)');
     }
@@ -2186,7 +2228,7 @@ function runFeaturesLearned(repoRoot: string, options: BlueprintCommandOptions):
 
   if (entries.length > 0) {
     try {
-      writeLearned(flowDir, feature.slug, entries);
+      writeLearned(flowDir, feature.slug, entries, { repoRoot });
     } catch (error) {
       // The refusal text already explains itself (see AmbiguousLearnedSectionError).
       return refuseFeatures(error instanceof Error ? error.message : String(error));
@@ -2474,6 +2516,10 @@ function runFeaturesParts(repoRoot: string, options: BlueprintCommandOptions): n
       ? (record['learnings'] as unknown[]).flatMap((raw) => {
           if (typeof raw !== 'object' || raw === null) return [];
           const item = raw as Record<string, unknown>;
+          if (Object.prototype.hasOwnProperty.call(item, LEARNED_AT_FIELD)) {
+            errors.push(`part '${name}': ${'"learnedAt" is stamped by the writer from this checkout — a caller cannot supply it'}`);
+            return [];
+          }
           const text = typeof item['text'] === 'string' ? item['text'].trim() : '';
           if (text.length === 0) return [];
           return [
@@ -2514,7 +2560,7 @@ function runFeaturesParts(repoRoot: string, options: BlueprintCommandOptions): n
   }
 
   try {
-    writeParts(flowDir, feature.slug, parts);
+    writeParts(flowDir, feature.slug, parts, { repoRoot });
   } catch (error) {
     return refuseFeatures(error instanceof Error ? error.message : String(error));
   }
@@ -2541,6 +2587,13 @@ function runFeaturesView(repoRoot: string, options: BlueprintCommandOptions): nu
       parsed = JSON.parse(write);
     } catch {
       return refuseFeatures('--write is not valid JSON');
+    }
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      Object.prototype.hasOwnProperty.call(parsed, LEARNED_AT_FIELD)
+    ) {
+      return refuseFeatures('"learnedAt" is stamped by the writer from this checkout — a caller cannot supply it');
     }
     const candidate = { ...(parsed as Record<string, unknown>), feature: feature.slug } as FeatureView;
     const result = writeFeatureView(flowDir, candidate, repoRoot);
@@ -4391,6 +4444,219 @@ function runWorkspaceGraph(target: string | undefined, options: BlueprintCommand
   }
 }
 
+/** Print a qa refusal: the JSON payload, then the one refusal line (allowed-pattern #21). */
+function refuseQa(action: string, refusal: QaRefusal, extra: Record<string, unknown> = {}): number {
+  process.stdout.write(`${JSON.stringify({ action: `qa-${action}`, ...extra, ...refusal.payload })}\n`);
+  process.stdout.write(`qa refused: ${refusal.reason} — ${refusal.sentence}\n`);
+  return 1;
+}
+
+/** Read the record input named by `--input` (a file, or `-` for stdin). */
+function readQaInput(inputFlag: string | undefined): unknown {
+  if (typeof inputFlag !== 'string' || inputFlag.trim() === '') {
+    throw new QaRefusal('missing-input', '--input', 'record and follow-up read their JSON from --input <file> or --input - (stdin)');
+  }
+  let raw: string;
+  try {
+    raw = inputFlag === '-' ? readFileSync(0, 'utf-8') : readFileSync(resolve(inputFlag), 'utf-8');
+  } catch (error) {
+    throw new QaRefusal('unreadable-input', '--input', `cannot read the input: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new QaRefusal('bad-input', '--input', 'the input is not parseable JSON');
+  }
+}
+
+/**
+ * `blueprint qa record | follow-up | list | stale` — the only way the app and
+ * skills reach the saved-answer log (`qa-store.ts` holds the one writer).
+ */
+function runQa(repoRoot: string, sub: string | undefined, options: BlueprintCommandOptions): number {
+  if (options.workspace !== undefined && options.workspace !== false) return runWorkspaceQa(repoRoot, sub, options);
+  // Not named `action`: blueprint-help-drift.test.ts takes the first switch on `action` in this file as the top-level dispatch.
+  const subAction = sub ?? '';
+  const action = subAction;
+  const json = options.json === true;
+  try {
+    switch (subAction) {
+      case 'record':
+      case 'follow-up': {
+        const input = readQaInput(options.input);
+        const hasParent =
+          typeof input === 'object' && input !== null && !Array.isArray(input) && 'parentId' in input;
+        if (action === 'record' && hasParent) {
+          throw new QaRefusal('bad-field', 'parentId', 'a follow-up is recorded with `qa follow-up`, not `qa record`');
+        }
+        if (action === 'follow-up' && !hasParent) {
+          throw new QaRefusal('bad-field', 'parentId', 'a follow-up names the id of the entry it follows');
+        }
+        const entry = appendQaEntry(repoRoot, input as QaRecordInput);
+        const stamped = entry.sources.filter((source) => source.hashStamp !== undefined).length;
+        process.stdout.write(
+          json
+            ? `${JSON.stringify({ action: `qa-${action}`, entry })}\n`
+            : `qa: ${action === 'record' ? 'recorded' : 'follow-up recorded'} ${entry.id} · ${entry.tags.length} tag(s) · ${stamped} source file(s) stamped\n`,
+        );
+        return 0;
+      }
+      case 'list': {
+        // `--all`: every saved question of this checkout in ONE read — the
+        // board's per-feature question markers, read once per board load
+        // rather than one spawn per feature.
+        if (options.all === true) {
+          const all = readQaThreads(repoRoot);
+          if (json) process.stdout.write(`${JSON.stringify({ action: 'qa-list', all: true, threads: all })}\n`);
+          else if (all.length === 0) process.stdout.write('qa: no saved answers\n');
+          else process.stdout.write(`${all.map((thread) => `${thread.id}  ${thread.ts}  ${thread.question}`).join('\n')}\n`);
+          return 0;
+        }
+        if (typeof options.feature !== 'string' || options.feature.trim() === '') {
+          throw new QaRefusal('missing-feature', '--feature', 'list needs --feature <id> (or --all) — the feature or part whose saved answers to read');
+        }
+        const threads = listQaForFeature(repoRoot, options.feature);
+        if (json) {
+          process.stdout.write(`${JSON.stringify({ action: 'qa-list', feature: options.feature, threads })}\n`);
+        } else if (threads.length === 0) {
+          process.stdout.write(`qa: no saved answers for ${options.feature}\n`);
+        } else {
+          const lines = threads.map(
+            (thread) =>
+              `${thread.id}  ${thread.ts}  ${thread.question}${thread.followUps.length > 0 ? `  (+${thread.followUps.length} follow-up(s))` : ''}`,
+          );
+          process.stdout.write(`${lines.join('\n')}\n`);
+        }
+        return 0;
+      }
+      case 'stale': {
+        const threads =
+          typeof options.feature === 'string' && options.feature.trim() !== ''
+            ? listQaForFeature(repoRoot, options.feature)
+            : readQaThreads(repoRoot);
+        const entries = threads.flatMap((thread) => {
+          const { followUps, ...root } = thread;
+          return [root, ...followUps];
+        });
+        const staleness = qaStaleness(repoRoot, entries);
+        const results = entries.map((entry) => ({ id: entry.id, ...(staleness.get(entry.id) ?? { stale: false, changedFiles: [], missingFiles: [] }) }));
+        const stale = results.filter((result) => result.stale);
+        if (json) {
+          process.stdout.write(`${JSON.stringify({ action: 'qa-stale', checked: results.length, staleCount: stale.length, results })}\n`);
+        } else {
+          const lines = [`qa: ${results.length} checked · ${stale.length} stale`];
+          for (const result of stale) {
+            lines.push(`  ${result.id}: ${[...result.changedFiles.map((file) => `changed ${file}`), ...result.missingFiles.map((file) => `missing ${file}`)].join(', ')}`);
+          }
+          process.stdout.write(`${lines.join('\n')}\n`);
+        }
+        return 0;
+      }
+      default:
+        throw new QaRefusal('unknown-action', null, `expected \`blueprint qa record | follow-up | list | stale\`, got '${action}'`);
+    }
+  } catch (error) {
+    if (error instanceof QaRefusal) return refuseQa(action || 'unknown', error);
+    return refuseQa(action || 'unknown', new QaRefusal('error', null, error instanceof Error ? error.message : String(error)));
+  }
+}
+
+/**
+ * `blueprint qa <record | follow-up | list | stale> --workspace [<w>] [--target <repo>]`
+ * — the Workspace answer log of the target repo's Workspace
+ * (`<workspace>/qa.jsonl`), reached only here; `appendWorkspaceQaEntry` is its
+ * one writer and also leaves a pointer in each cited local project's log.
+ * list/stale take the scope as repeatable `--tag` values in the Workspace tag
+ * grammar (`feature:<project>::<slug>[/<part>]`, `project:<p>`,
+ * `link:<a>::<b>`); none = the whole Workspace. Same refusal contract as the
+ * project mode, with `scope: "workspace"` in the payload.
+ */
+function runWorkspaceQa(repoRoot: string, sub: string | undefined, options: BlueprintCommandOptions): number {
+  const subAction = sub ?? '';
+  const json = options.json === true;
+  const scopeTag = { scope: 'workspace' };
+  try {
+    if (!['record', 'follow-up', 'list', 'stale'].includes(subAction)) {
+      throw new QaRefusal('unknown-action', null, `expected \`blueprint qa record | follow-up | list | stale\`, got '${subAction}'`);
+    }
+    const scope = resolveWorkspaceQaScope({
+      target: typeof options.target === 'string' && options.target !== '' ? resolve(options.target) : repoRoot,
+      ...(typeof options.workspace === 'string' && options.workspace !== '' ? { workspace: options.workspace } : {}),
+    });
+    const workspace = { name: scope.workspace.name, slug: scope.workspace.slug };
+    const tags = [...(options.tag ?? []), ...(typeof options.feature === 'string' && options.feature.trim() !== '' ? [options.feature] : [])];
+    switch (subAction) {
+      case 'record':
+      case 'follow-up': {
+        const input = readQaInput(options.input);
+        const hasParent = typeof input === 'object' && input !== null && !Array.isArray(input) && 'parentId' in input;
+        if (subAction === 'record' && hasParent) {
+          throw new QaRefusal('bad-field', 'parentId', 'a follow-up is recorded with `qa follow-up`, not `qa record`');
+        }
+        if (subAction === 'follow-up' && !hasParent) {
+          throw new QaRefusal('bad-field', 'parentId', 'a follow-up names the id of the entry it follows');
+        }
+        const entry = appendWorkspaceQaEntry(scope.workspace.path, scope.projects, input as WorkspaceQaRecordInput);
+        const pointers = workspaceQaPointedProjects(entry, scope.projects);
+        const stamped = entry.sources.filter((source) => source.hashStamp !== undefined).length;
+        process.stdout.write(
+          json
+            ? `${JSON.stringify({ action: `qa-${subAction}`, ...scopeTag, workspace, entry, pointers })}\n`
+            : `qa: ${subAction === 'record' ? 'recorded' : 'follow-up recorded'} ${entry.id} in Workspace ${workspace.name} · ${entry.tags.length} tag(s) · ${stamped} source file(s) stamped · pointers in ${pointers.length === 0 ? 'no project' : pointers.join(', ')}\n`,
+        );
+        return 0;
+      }
+      case 'list': {
+        const filter = workspaceQaFilterOf(tags);
+        const threads = listWorkspaceQa(scope.workspace.path, filter);
+        if (json) {
+          process.stdout.write(`${JSON.stringify({ action: 'qa-list', ...scopeTag, workspace, filter, threads })}\n`);
+        } else if (threads.length === 0) {
+          process.stdout.write(`qa: no saved Workspace answers${tags.length > 0 ? ` for ${tags.join(', ')}` : ''}\n`);
+        } else {
+          const lines = threads.map(
+            (thread) =>
+              `${thread.id}  ${thread.ts}  [${thread.cited.join(', ')}]  ${thread.question}${thread.followUps.length > 0 ? `  (+${thread.followUps.length} follow-up(s))` : ''}`,
+          );
+          process.stdout.write(`${lines.join('\n')}\n`);
+        }
+        return 0;
+      }
+      default: {
+        const threads = listWorkspaceQa(scope.workspace.path, workspaceQaFilterOf(tags));
+        const entries = threads.flatMap((thread) => {
+          const { followUps, ...root } = thread;
+          return [root, ...followUps];
+        });
+        const staleness = workspaceQaStaleness(scope.projects, entries);
+        const results = entries.map((entry) => ({
+          id: entry.id,
+          ...(staleness.get(entry.id) ?? { stale: false, changedFiles: [], missingFiles: [], notChecked: [] }),
+        }));
+        const stale = results.filter((result) => result.stale);
+        if (json) {
+          process.stdout.write(`${JSON.stringify({ action: 'qa-stale', ...scopeTag, workspace, checked: results.length, staleCount: stale.length, results })}\n`);
+        } else {
+          const lines = [`qa: ${results.length} checked · ${stale.length} stale`];
+          for (const result of results) {
+            const parts = [
+              ...result.changedFiles.map((file) => `changed ${file}`),
+              ...result.missingFiles.map((file) => `missing ${file}`),
+              ...result.notChecked.map((project) => `not checked ${project} (not on this computer)`),
+            ];
+            if (parts.length > 0) lines.push(`  ${result.id}: ${parts.join(', ')}`);
+          }
+          process.stdout.write(`${lines.join('\n')}\n`);
+        }
+        return 0;
+      }
+    }
+  } catch (error) {
+    if (error instanceof QaRefusal) return refuseQa(subAction || 'unknown', error, scopeTag);
+    return refuseQa(subAction || 'unknown', new QaRefusal('error', null, error instanceof Error ? error.message : String(error)), scopeTag);
+  }
+}
+
 export async function runBlueprint(
   action: string,
   target: string | undefined,
@@ -4466,6 +4732,14 @@ export async function runBlueprint(
         process.stderr.write(`propose refused: ${message}\n`);
         process.exitCode = 1;
       }
+      return;
+    }
+
+    case 'qa': {
+      // Ask the Blueprint's saved-answer log — the ONE door to `qa.jsonl`
+      // (record | follow-up | list | stale). Refusals: a JSON payload line,
+      // then `qa refused: <reason> — <sentence>`, exit 1, nothing written.
+      process.exitCode = runQa(repoRoot, target, options);
       return;
     }
 
@@ -4813,7 +5087,7 @@ export async function runBlueprint(
 
     default:
       process.stdout.write(
-        `Unknown blueprint action: "${action}". Valid actions: derive, context, render, observe, propose, sweep, narrate, gate-check, brief, feature-map, features, coverage, reconcile, stale-check, drift-check, drift-reset, drift-ack, tiers, adjudicate, index\n`,
+        `Unknown blueprint action: "${action}". Valid actions: derive, context, render, observe, propose, qa, sweep, narrate, gate-check, brief, feature-map, features, coverage, reconcile, stale-check, drift-check, drift-reset, drift-ack, tiers, adjudicate, index\n`,
       );
       process.exitCode = 1;
   }

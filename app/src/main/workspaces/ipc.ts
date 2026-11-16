@@ -19,6 +19,10 @@ import type {
   WorkspacePlacementState,
   WorkspaceResolveRequest,
   WorkspaceResolveResult,
+  WorkspaceIntentMergeSet,
+  WorkspaceIntentMergesRequest,
+  WorkspaceKeepIntentRequest,
+  WorkspaceKeepIntentResult,
   WorkspacesChangedEvent,
   WorkspaceSyncStatus,
 } from '../../shared/workspaces-contract'
@@ -70,6 +74,8 @@ export interface WorkspaceChannelDependencies {
     status(slug: string): WorkspaceSyncStatus
     syncNow(slug: string): Promise<WorkspaceSyncStatus>
     resolve(request: WorkspaceResolveRequest): Promise<WorkspaceResolveResult>
+    intentMerges(request: WorkspaceIntentMergesRequest): WorkspaceIntentMergeSet | null
+    keepIntent(request: WorkspaceKeepIntentRequest): Promise<WorkspaceKeepIntentResult>
   }
   /**
    * REQUIRED (allowed-pattern #26): connecting a Workspace to a shared
@@ -354,6 +360,32 @@ export function registerWorkspaceChannels(deps: WorkspaceChannelDependencies): (
     }
     // Rebuilt field by field: a `file:` take or any other field is never passed on.
     return deps.sync.resolve({ slug, ...(id === undefined ? {} : { id }), path, take: take as 'ours' | 'theirs' | 'merged' })
+  })
+
+  handle('workspaces:intentMerges', (request) => {
+    const channel = 'workspaces:intentMerges'
+    const body = record(request, channel)
+    return deps.sync.intentMerges({
+      slug: requiredString(body['slug'], channel, 'slug'),
+      mergeId: requiredString(body['mergeId'], channel, 'mergeId'),
+    })
+  })
+
+  handle('workspaces:keepIntent', (request) => {
+    const channel = 'workspaces:keepIntent'
+    const body = record(request, channel)
+    const keep = body['keep']
+    if (keep !== 'ours' && keep !== 'theirs' && keep !== 'merged') {
+      throw new WorkspaceRequestError(channel, 'keep must be ours, theirs or merged')
+    }
+    const documentId = optionalString(body['documentId'], channel, 'documentId')
+    // Rebuilt field by field: no text and no path is ever taken from the renderer.
+    return deps.sync.keepIntent({
+      slug: requiredString(body['slug'], channel, 'slug'),
+      mergeId: requiredString(body['mergeId'], channel, 'mergeId'),
+      ...(documentId === undefined ? {} : { documentId }),
+      keep,
+    })
   })
 
   // ── Connecting a Workspace to a shared repository ──

@@ -150,7 +150,7 @@ interface NavState {
   titleName: string
   /** Its count line: `25 features · 5 domains`, `7 features`, `5 parts · …`. */
   titleKicker: string
-  /** Ask the brain is ROOT ONLY, so its presence is a depth signal. */
+  /** The header Ask field is on every sheet; it is no longer a depth signal. */
   hasBrainField: boolean
   /** The drilled node's own open-level control — never at the root. */
   hasTitleControl: boolean
@@ -189,10 +189,10 @@ async function readNav(win: Page): Promise<NavState> {
       currentCrumb: crumbs.find((c) => c.classList.contains('on'))?.textContent ?? '',
       currentCrumbDisabled: crumbs.find((c) => c.classList.contains('on'))?.disabled ?? false,
       disabledCrumbs: crumbs.filter((c) => c.disabled).map((c) => c.textContent ?? ''),
-      titleName: document.querySelector('.fb-terr-title-name')?.textContent ?? '',
-      titleKicker: document.querySelector('.fb-terr-title-kicker')?.textContent ?? '',
-      hasBrainField: document.querySelector('.fb-terr-ask') !== null,
-      hasTitleControl: document.querySelector('.fb-terr-title .fb-terr-control') !== null,
+      titleName: document.querySelector<HTMLElement>('.fb-float-trail')?.dataset['where'] ?? '',
+      titleKicker: document.querySelector<HTMLElement>('.fb-float-trail')?.dataset['kicker'] ?? '',
+      hasBrainField: document.querySelector('[data-ask="field"]') !== null,
+      hasTitleControl: document.querySelector('.fb-float-trail .fb-view-switch') !== null,
       cellCount: cells.length,
       cellIds: cells.map((c) => c.dataset['featureId'] ?? ''),
       groupIds: q<HTMLElement>('.fb-terr-group').map((g) => g.dataset['featureId'] ?? ''),
@@ -222,7 +222,8 @@ async function readNav(win: Page): Promise<NavState> {
 function assertDepthAgreement(state: NavState, depth: number, where: string): void {
   expect(state.crumbNames.length - 1, `${where}: the crumb trail disagrees about depth`).toBe(depth)
   expect(state.backDisabled, `${where}: the back arrow disagrees about depth`).toBe(depth === 0)
-  expect(state.hasBrainField, `${where}: Ask the brain disagrees about depth`).toBe(depth === 0)
+  // The Ask field lives in the board HEADER now, so it is there at every depth (it used to sit on the root strip only).
+  expect(state.hasBrainField, `${where}: the header's Ask field is missing`).toBe(true)
   expect(
     state.titleName,
     `${where}: the title strip does not name the crumb trail's last step`,
@@ -476,7 +477,7 @@ test.fixme('back then forward re-enters exactly what was left, and a new dive cl
  * case where the map genuinely cannot show a record has moved to the ungrouped
  * store below, which is the only fixture here that seeds one.)
  */
-// FIXME (unrelated to plan cell-hover-diagram): .fb-terr-ask moved into the board header and is not visible where the spec presses it (header restyle, 7437b0f9/f670162d)
+// FIXME: the keyword Ask box (.fb-terr-ask / .fb-terr-query-*) was retired; Ask is the header's [data-ask="field"] and answers in a panel. Rewrite as a panel-source press once a model-free fixture exists.
 test.fixme('a search result lights what the sheet already draws, in place, and all four still agree', async ({
   window,
 }) => {
@@ -515,7 +516,7 @@ test.fixme('a search result lights what the sheet already draws, in place, and a
   })
 
   const ask = async (term: string): Promise<void> => {
-    await window.locator('.fb-terr-ask').click()
+    await window.locator('[data-ask="field"] textarea').click()
     const input = window.locator('.fb-terr-query-input')
     await expect(input).toBeVisible()
     await input.fill(term)
@@ -659,7 +660,7 @@ test.fixme('an on-sheet search hit lights in place, and a record the sheet canno
   })
 
   const ask = async (term: string): Promise<string> => {
-    await window.locator('.fb-terr-ask').click()
+    await window.locator('[data-ask="field"] textarea').click()
     const input = window.locator('.fb-terr-query-input')
     await expect(input).toBeVisible()
     await input.fill(term)
@@ -888,8 +889,13 @@ test('readability at every awkward shape: how many provinces keep their names', 
   test.setTimeout(240_000)
   await openBoard(window, 'flow-navstress-read-')
 
-  const measure = async (): Promise<Record<string, unknown>> =>
-    window.evaluate(() => {
+  const measure = async (): Promise<Record<string, unknown>> => {
+    // A cell under the resting pointer GROWS IN PLACE and its neighbours make
+    // room (plan cell-hover-diagram) — move off the sheet so the reading is of
+    // the resting layout, not of one hovered cell.
+    await window.mouse.move(0, 0)
+    await window.waitForTimeout(500)
+    return window.evaluate(() => {
       const cells = [...document.querySelectorAll<HTMLElement>('.fb-terr-cell')]
       const sheet = document.querySelector('.fb-terr-sheet')!.getBoundingClientRect()
       const classOf = (cell: HTMLElement): string => {
@@ -925,6 +931,7 @@ test('readability at every awkward shape: how many provinces keep their names', 
         sheetHeight: Math.round(sheet.height),
       }
     })
+  }
 
   const readings: Record<string, unknown> = {}
   readings['root(4 countries)'] = await measure()
@@ -966,7 +973,7 @@ test('readability at every awkward shape: how many provinces keep their names', 
     const box = (sel: string): DOMRect | null =>
       document.querySelector(sel)?.getBoundingClientRect() ?? null
     const sheet = box('.fb-terr-sheet')
-    const strip = box('.fb-terr-title')
+    const strip = box('.fb-float-tl') // the floating top row (mockup J3)
     const block = box('.fb-terr-block')
     const crumbs = box('.fb-terr-crumbs')
     const cells = [...document.querySelectorAll<HTMLElement>('.fb-terr-cell')].map((c) =>

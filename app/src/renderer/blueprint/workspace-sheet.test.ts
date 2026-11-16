@@ -15,8 +15,10 @@ import {
   WS_GUTTER, connectionsControlView, pairsChecked } from './workspace-sheet'
 import { understoodFraction } from './learn-progress-model'
 import type { Rect } from './territory-layout'
+import { TITLE_BLOCK_H, TITLE_STRIP_H } from './territory-view'
 
-const STAGE = { width: 1200, height: 700 }
+// The floating chrome's bands grew (mockup J3); the fixture keeps the sheet it was written for.
+const STAGE = { width: 1200, height: 700 + TITLE_STRIP_H + TITLE_BLOCK_H - 40 }
 
 function core(id: string, lines: number | undefined, understanding: BlueprintFeatureNode['understanding'] = 'none'): BlueprintFeatureNode {
   return {

@@ -36,6 +36,8 @@ import { withFileLock, type FileLockLimits } from '../loop/file-lock.js';
 import { atomicWriteFile } from '../utils/atomic-write.js';
 import { FEATURE_ROLES, isFeatureRole, type FeatureRole } from './feature-role.js';
 import { BLUEPRINT_DIRNAME } from './store.js';
+import { LEARNED_AT_FIELD, LEARNED_AT_RE, repoRootOfFlowDir, stampLearnedAt } from '../state/knowledge-provenance.js';
+import { nodeKnowledgeStatus, type KnowledgeStatusReader, type ResolvedItemStatus } from '../state/knowledge-status-fold.js';
 
 /** Directory holding the feature store, relative to `flow/`. */
 export const FEATURES_DIRNAME = join('brain', 'features');
@@ -1038,6 +1040,13 @@ export interface Learning {
   pinned?: boolean;
   /** Why this learning was replaced. Present ⇒ superseded, retained, demoted. */
   supersededReason?: string;
+  /**
+   * Where it was learned — a reference into the provenance records
+   * (`knowledge-provenance.ts`). Stamped ONLY by the writer (`writeLearned`,
+   * `writeParts`); whatever a caller puts here is ignored. Absent on every
+   * learning written before stamping existed, which therefore reads as solid.
+   */
+  learnedAt?: string;
 }
 
 /** A body cut into its human region and its machine-owned section. */
@@ -1109,9 +1118,18 @@ export function splitLearned(body: string): SplitBody {
   };
 }
 
-/** `- text <!-- learned: <provenance> <date>[ pinned][ superseded: <why>] -->` */
+/**
+ * `- text [<!-- learnedAt: <16 hex> --> ]<!-- learned: <provenance> <date>[ pinned][ superseded: <why>] -->`
+ *
+ * The optional `learnedAt` comment sits BEFORE the `learned:` comment, not
+ * after it, on purpose. Older builds match `-->\s*$` at the end of the line and
+ * treat anything that does not parse as hand-written content they refuse to
+ * overwrite — a trailing field would have frozen every stamped feature for
+ * them. In front, an older build reads it as part of the text and writes it
+ * back untouched, so the stamp survives a round trip through any build.
+ */
 const LEARNING_LINE_RE =
-  /^-\s+(.*?)\s*<!--\s*learned:\s*(\S+)\s+(\d{4}-\d{2}-\d{2})(\s+pinned)?(?:\s+superseded:\s*(.*?))?\s*-->\s*$/;
+  /^-\s+(.*?)\s*(?:<!--\s*learnedAt:\s*([0-9a-f]{16})\s*-->\s*)?<!--\s*learned:\s*(\S+)\s+(\d{4}-\d{2}-\d{2})(\s+pinned)?(?:\s+superseded:\s*(.*?))?\s*-->\s*$/;
 
 /**
  * Parse a `## Learned` section back into entries.
@@ -1129,9 +1147,10 @@ export function parseLearnings(section: string | null): Learning[] {
   for (const line of section.replace(/\r\n/g, '\n').split('\n')) {
     const match = LEARNING_LINE_RE.exec(line.trim());
     if (match === null) continue;
-    const entry: Learning = { text: match[1], provenance: match[2], date: match[3] };
-    if (match[4] !== undefined) entry.pinned = true;
-    if (match[5] !== undefined) entry.supersededReason = match[5];
+    const entry: Learning = { text: match[1], provenance: match[3], date: match[4] };
+    if (match[5] !== undefined) entry.pinned = true;
+    if (match[6] !== undefined) entry.supersededReason = match[6];
+    if (match[2] !== undefined) entry.learnedAt = match[2];
     out.push(entry);
   }
   return out;
@@ -1168,7 +1187,9 @@ export function serializeLearnings(entries: readonly Learning[]): string {
       entry.pinned === true ? ' pinned' : '',
       entry.supersededReason !== undefined ? ` superseded: ${entry.supersededReason}` : '',
     ].join('');
-    return `- ${entry.text} <!-- learned: ${entry.provenance} ${entry.date}${flags} -->`;
+    const learnedAt =
+      entry.learnedAt !== undefined && LEARNED_AT_RE.test(entry.learnedAt) ? `<!-- ${LEARNED_AT_FIELD}: ${entry.learnedAt} --> ` : '';
+    return `- ${entry.text} ${learnedAt}<!-- learned: ${entry.provenance} ${entry.date}${flags} -->`;
   };
   const byRecency = (a: Learning, b: Learning): number => b.date.localeCompare(a.date);
   const current = entries.filter((entry) => entry.supersededReason === undefined);
@@ -1200,10 +1221,69 @@ export function serializeLearnings(entries: readonly Learning[]): string {
  * by the next learn, which is the very thing the HUMAN-OWNED rule exists to
  * prevent.
  */
+/** Where a stamping writer reads its checkout from. */
+export interface StampingWriteOptions {
+  /** The checkout the knowledge was learned in. Defaults to the folder `flow/` sits in. */
+  repoRoot?: string;
+}
+
+/** Identity of a learning across a rewrite: what a caller passes back unchanged. */
+function learningKey(entry: Pick<Learning, 'text' | 'provenance' | 'date'>): string {
+  return `${entry.text}\u0000${entry.provenance}\u0000${entry.date}`;
+}
+
+/**
+ * Give each entry its `learnedAt`: an entry already on disk keeps the one on
+ * disk (or stays unstamped — knowledge written before stamping is not
+ * re-stamped onto whatever branch is checked out now, FR-13); an entry that is
+ * new gets `stamp()`, computed at most once. A caller's own `learnedAt` is
+ * never used.
+ */
+function stampEntries(
+  entries: readonly Learning[],
+  onDisk: readonly Learning[],
+  stamp: () => string | null,
+): Learning[] {
+  const known = new Map<string, string | undefined>();
+  for (const entry of onDisk) {
+    const key = learningKey(entry);
+    if (!known.has(key) || known.get(key) === undefined) known.set(key, entry.learnedAt);
+  }
+  let fresh: string | null | undefined;
+  return entries.map((entry) => {
+    const rest: Learning = { ...entry };
+    delete rest.learnedAt;
+    const key = learningKey(entry);
+    if (known.has(key)) {
+      const kept = known.get(key);
+      return kept === undefined ? rest : { ...rest, learnedAt: kept };
+    }
+    if (fresh === undefined) fresh = stamp();
+    return fresh === null ? rest : { ...rest, learnedAt: fresh };
+  });
+}
+
+/**
+ * The files a feature's (or part's) anchors name — what its learnings cite.
+ * Feature anchors are `kind:ref` (`file:src/a.ts`, `module:src/orders`); part
+ * anchors are plain repo paths. Only a `file:` ref or a plain path can be a
+ * file; the stamper skips any that turn out to be directories.
+ */
+function citedFilesOf(anchors: readonly string[]): string[] {
+  return anchors.flatMap((raw) => {
+    if (typeof raw !== 'string') return [];
+    const anchor = raw.trim();
+    const kinded = /^([a-z][a-z-]*):(.+)$/.exec(anchor);
+    if (kinded === null) return anchor === '' ? [] : [anchor];
+    return kinded[1] === 'file' ? [kinded[2].trim()] : [];
+  });
+}
+
 export function writeLearned(
   flowDir: string,
   slug: string,
   entries: readonly Learning[],
+  options: StampingWriteOptions = {},
 ): void {
   const filePath = join(featuresDir(flowDir), `${slug}.md`);
   return withFeatureStoreLock(flowDir, () => {
@@ -1221,12 +1301,67 @@ export function writeLearned(
       );
     }
 
+    // Stamped HERE, by the writer, from the checkout this process runs in —
+    // never from the caller (discovery `workspace_knowledge_draft_solid`, FR-1).
+    const repoRoot = options.repoRoot ?? repoRootOfFlowDir(flowDir);
+    const stamped = stampEntries(entries, parseLearnings(split.learned), () =>
+      stampLearnedAt(flowDir, repoRoot, citedFilesOf(node.anchors)),
+    );
+
     const human = split.learned === null ? node.body.replace(/\s*$/, '\n') : `${split.human.replace(/\s*$/, '')}\n`;
-    const body = `${human}\n${LEARNED_HEADING}\n${serializeLearnings(entries)}`;
+    const body = `${human}\n${LEARNED_HEADING}\n${serializeLearnings(stamped)}`;
     persistFeatureNode(flowDir, { ...node, body });
   });
 }
 
+
+/** A learning with its status, as `resolveLearnings` answers it. */
+export interface ResolvedLearning extends Learning {
+  status: ResolvedItemStatus['status'];
+  stale: boolean;
+  /** The branch it was learned on, when known — what a draft tag names. */
+  branch: string | null;
+}
+
+/**
+ * Each learning's status through THE resolver (`knowledge-status-fold.ts`).
+ * `scope` is the feature's slug for `## Learned`, `<feature slug>/<part
+ * address>` for a part (`partLearningScope`). No reader → every learning reads
+ * solid, which is what a caller with no store to consult has always seen.
+ */
+export function resolveLearnings(
+  learnings: readonly Learning[],
+  ref: { kind: 'learning' | 'part-learning'; scope: string },
+  reader?: KnowledgeStatusReader,
+): ResolvedLearning[] {
+  return learnings.map((entry) => {
+    const resolved =
+      reader === undefined
+        ? { status: 'solid' as const, stale: false, branch: null }
+        : reader.of({ kind: ref.kind, scope: ref.scope, text: entry.text, learnedAt: entry.learnedAt ?? null });
+    return { ...entry, ...resolved };
+  });
+}
+
+/**
+ * The status scope of a part's learnings: `<feature slug>/<part slug>` — the
+ * part's address (`addressPartNames`) without its `feature:` prefix, so the id
+ * names the same part the board and every part verb name.
+ */
+export function partLearningScope(partAddress: string): string {
+  return partAddress.replace(/^feature:/, '');
+}
+
+/**
+ * What the board tags a node with: draft only when every live (current, not
+ * abandoned) learning is a draft. Superseded learnings do not count — they are
+ * not what the card says.
+ */
+export function learningsKnowledgeStatus(
+  resolved: readonly ResolvedLearning[],
+): { status: 'solid' | 'draft'; draftBranch: string | null } {
+  return nodeKnowledgeStatus(resolved.filter((entry) => entry.supersededReason === undefined));
+}
 
 /**
  * ONE LINE saying what a feature is — for a card, where counts do not help.
@@ -1236,8 +1371,14 @@ export function writeLearned(
  * learning (a human chose it), the newest current learning, or the lead of the
  * human prose. Empty when the feature genuinely says nothing about itself —
  * the card then falls back to scale rather than inventing meaning.
+ *
+ * With `knowledge` (discovery `workspace_knowledge_draft_solid`, FR-9): an
+ * ABANDONED learning is dropped, and SOLID learnings are preferred over drafts
+ * before the pinned/newest choice — a card must not present a branch's work in
+ * progress as how the code works while a merged sentence exists. A feature
+ * whose only learnings are drafts still says something; the board tags it.
  */
-export function featureSummary(body: string): string {
+export function featureSummary(body: string, knowledge?: { slug: string; reader: KnowledgeStatusReader }): string {
   let learned: Learning[] = [];
   let human = body;
   try {
@@ -1247,10 +1388,16 @@ export function featureSummary(body: string): string {
   } catch {
     // Ambiguous boundary — read the whole body as human, claim no learnings.
   }
-  const current = learned.filter((entry) => entry.supersededReason === undefined);
+  const current = resolveLearnings(
+    learned.filter((entry) => entry.supersededReason === undefined),
+    { kind: 'learning', scope: knowledge?.slug ?? '' },
+    knowledge?.reader,
+  ).filter((entry) => entry.status !== 'abandoned');
+  const solid = current.filter((entry) => entry.status === 'solid');
+  const pool = solid.length > 0 ? solid : current;
   const chosen =
-    current.find((entry) => entry.pinned === true) ??
-    [...current].sort((a, b) => b.date.localeCompare(a.date))[0];
+    pool.find((entry) => entry.pinned === true) ??
+    [...pool].sort((a, b) => b.date.localeCompare(a.date))[0];
   if (chosen !== undefined) return chosen.text;
 
   // Lead prose only: everything from the first section heading on is reference
@@ -1743,7 +1890,12 @@ export function serializeParts(parts: readonly FeaturePart[]): string {
  * may be minutes old, and a learn pass running against a stale body would drop
  * whatever was written in between.
  */
-export function writeParts(flowDir: string, slug: string, parts: readonly FeaturePart[]): void {
+export function writeParts(
+  flowDir: string,
+  slug: string,
+  parts: readonly FeaturePart[],
+  options: StampingWriteOptions = {},
+): void {
   const filePath = join(featuresDir(flowDir), `${slug}.md`);
   return withFeatureStoreLock(flowDir, () => {
     if (!existsSync(filePath)) {
@@ -1764,9 +1916,15 @@ export function writeParts(flowDir: string, slug: string, parts: readonly Featur
     for (const part of parseParts(split.parts)) {
       onDisk.set(slugifyFeatureName(part.name.trim()), part);
     }
+    // Each part's NEW learnings are stamped against that part's own anchors;
+    // learnings already on disk keep their stamp (see `stampEntries`).
+    const repoRoot = options.repoRoot ?? repoRootOfFlowDir(flowDir);
     const written = parts.map((part) => {
-      const kept: FeaturePart = { name: part.name, summary: part.summary, anchors: part.anchors, learnings: part.learnings };
       const disk = onDisk.get(slugifyFeatureName(part.name.trim()));
+      const learnings = stampEntries(part.learnings, disk?.learnings ?? [], () =>
+        stampLearnedAt(flowDir, repoRoot, citedFilesOf(part.anchors)),
+      );
+      const kept: FeaturePart = { name: part.name, summary: part.summary, anchors: part.anchors, learnings };
       const learnedRole = part.learnedRole ?? disk?.learnedRole;
       return {
         ...kept,

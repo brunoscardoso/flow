@@ -325,6 +325,23 @@ export function createNotificationCenter(
       if (action) {
         const actions = document.createElement('div')
         actions.className = 'fl-flow-prompt-actions'
+        // A second, quiet choice ("See both") sits before the main one.
+        const secondary = notification.secondaryAction
+        if (secondary) {
+          const quiet = document.createElement('fl-button')
+          quiet.setAttribute('variant', 'ghost')
+          quiet.setAttribute('small', '')
+          quiet.textContent = secondary.label
+          quiet.addEventListener('click', () => {
+            for (const spec of notificationActionEvents(secondary)) {
+              document.dispatchEvent(
+                spec.detail === undefined ? new CustomEvent(spec.type) : new CustomEvent(spec.type, { detail: spec.detail }),
+              )
+            }
+            removeToast(card)
+          })
+          actions.appendChild(quiet)
+        }
         const btn = document.createElement('fl-button')
         btn.setAttribute('variant', 'primary')
         btn.setAttribute('small', '')

@@ -16,6 +16,7 @@
  * Auto-scroll follows the stream while the user is at the bottom; scrolling
  * up locks the viewport (scroll-lock-on-user-scroll) until they return.
  */
+import { ASK_BLUEPRINT_EVENT, type AskBlueprintOpenDetail } from '../../shared/ask-contract'
 import '../components'
 import { backgroundActivityLabel } from './background-task-rows'
 import type {
@@ -1523,7 +1524,9 @@ export class ConversationPane {
       fileName: attachment.fileName,
       dataUrl: attachmentDataUrl(attachment),
     }))
-    const entry = entryWrapper('user', userBubble(content, thumbs))
+    const echo = userBubble(content, thumbs)
+    if (content.trim() !== '') echo.appendChild(this.#askAction(content))
+    const entry = entryWrapper('user', echo)
     entry.classList.add('fl-conv-enter')
     this.#feed.appendChild(entry)
     // A new message is a new request: its work gets its own row below it.
@@ -2734,7 +2737,9 @@ export class ConversationPane {
     }
     const { message } = entry
     if (message.role === 'user') {
-      return entryWrapper('user', userBubble(message.content, message.attachments))
+      const bubble = userBubble(message.content, message.attachments)
+      if (message.content.trim() !== '') bubble.appendChild(this.#askAction(message.content))
+      return entryWrapper('user', bubble)
     }
     if (message.role === 'system') {
       // #1056: persisted artifact markers (main writes them when the watcher
@@ -2782,15 +2787,25 @@ export class ConversationPane {
       return this.#conflictProposalPlaceholder()
     }
     const body = renderMarkdown(message.content)
-    if (!message.model || this.#density !== 'detailed') return body
     const wrap = document.createElement('div')
     wrap.className = 'fl-conv-assistant'
-    const badge = document.createElement('span')
-    badge.className = 'fl-conv-model-badge'
-    badge.textContent = modelLabel(message.model)
-    badge.title = message.model
-    wrap.append(body, badge)
+    wrap.appendChild(body)
+    if (message.model && this.#density === 'detailed') {
+      const badge = document.createElement('span')
+      badge.className = 'fl-conv-model-badge'
+      badge.textContent = modelLabel(message.model)
+      badge.title = message.model
+      wrap.appendChild(badge)
+    }
+    wrap.appendChild(this.#askAction(message.content))
     return wrap
+  }
+
+  /** The quiet "Ask the Blueprint" action under a message. It sends the ONE
+   *  app event; the Blueprint opens its panel with the text pasted and this
+   *  conversation tagged. */
+  #askAction(text: string): HTMLElement {
+    return askAction(text, this.#threadId, this.#bannerThread?.title)
   }
 
   /** The compact stand-in shown in place of a raw conflict-proposals reply
@@ -4754,6 +4769,23 @@ function entryWrapper(kind: string, content: HTMLElement): HTMLElement {
  *  can re-highlight it (the feed renders before the list is fetched). */
 const userBodyText = new WeakMap<HTMLElement, string>()
 
+function askAction(text: string, threadId: string | null, threadTitle: string | undefined): HTMLElement {
+  const action = document.createElement('button')
+  action.type = 'button'
+  action.className = 'fl-conv-ask'
+  action.textContent = 'Ask the Blueprint'
+  action.title = 'Ask the Blueprint about this message'
+  action.addEventListener('click', () => {
+    const detail: AskBlueprintOpenDetail = {
+      text,
+      ...(threadId !== null ? { threadId } : {}),
+      ...(threadTitle !== undefined && threadTitle !== '' ? { threadTitle } : {}),
+    }
+    document.dispatchEvent(new CustomEvent(ASK_BLUEPRINT_EVENT, { detail }))
+  })
+  return action
+}
+
 function userBubble(
   content: string,
   attachments?: readonly { id: string; fileName?: string; dataUrl?: string }[],
@@ -4977,6 +5009,24 @@ function injectConversationStyles(): void {
      * (No backticks in here: this block lives inside a template literal.)
      */
     .fl-conv-assistant > * { max-width: 100%; min-width: 0; }
+    /* The quiet per-message action: invisible until the message is hovered or
+       something inside it has focus. */
+    .fl-conv-ask {
+      align-self: flex-start;
+      background: none;
+      border: 0;
+      padding: 0;
+      font: inherit;
+      font-size: var(--fl-text-caption-size);
+      color: var(--fl-color-text-secondary);
+      cursor: pointer;
+      opacity: 0;
+    }
+    .fl-conv-user .fl-conv-ask { margin-top: var(--fl-space-xs); }
+    .fl-conv-assistant:hover .fl-conv-ask,
+    .fl-conv-user:hover .fl-conv-ask,
+    .fl-conv-ask:focus-visible { opacity: 0.85; }
+    .fl-conv-ask:hover { color: var(--fl-color-text); text-decoration: underline; }
     .fl-conv-model-badge {
       align-self: flex-start;
       font-size: var(--fl-text-caption-size);
