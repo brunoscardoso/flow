@@ -119,7 +119,7 @@ test.describe('PR #585 — Source Control status badges (single-letter, #581)', 
     expect(errors).toEqual([])
   })
 
-  test('a merge conflict shows a single `C` badge in Merge Changes', async ({ window }) => {
+  test('a merge conflict shows a single `!` badge in Merge Changes', async ({ window }) => {
     const dir = await seedProject(window, 'flow-git-conflict-')
     configure(dir)
 
@@ -152,10 +152,11 @@ test.describe('PR #585 — Source Control status badges (single-letter, #581)', 
       window.locator(`${sel.gitPanelRoot} .gp-name`, { hasText: 'shared.txt' }),
     ).toBeVisible({ timeout: 6000 })
 
-    // ...badged with the single conflict letter `C` (was a colliding `U` pre-#581).
+    // ...badged with VS Code's single conflict mark `!` (was a colliding `U`
+    // pre-#581, then `C`; the Source Control redesign follows VS Code).
     const conflictBadge = window.locator(
       `${sel.gitPanelRoot} .gp-letter.gp-state-conflicted`,
     )
-    await expect(conflictBadge.first()).toHaveText('C')
+    await expect(conflictBadge.first()).toHaveText('!')
   })
 })
