@@ -570,7 +570,7 @@ export class MonacoHost {
         if (!text) return
         document.dispatchEvent(
           new CustomEvent('flow:add-to-chat', {
-            detail: { source: 'file', text, label: fileChatLabel(this.#activePath) },
+            detail: { source: 'file', text, label: fileChatLabel(this.#activePath), path: this.#activePath },
           }),
         )
       },

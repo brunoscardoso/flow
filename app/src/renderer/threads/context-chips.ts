@@ -23,8 +23,20 @@ export interface ContextChipRef {
   source: 'terminal' | 'file' | 'task' | 'browser'
   /** Human label for the badge/header (e.g. "Terminal" or a file path). */
   label: string
-  /** The full selected text — sent verbatim on send, previewed in the badge. */
+  /** The full selected text — sent verbatim on send, previewed in the badge.
+   *  For a `reference` chip it is the path the agent is told. */
   text: string
+  /**
+   * Absolute path of the file a `file` chip came from, when known (⌘L in the
+   * editor sends it). Lets the automatic open-file chip skip a file whose
+   * selection is already attached (active-file-chip.ts).
+   */
+  filePath?: string
+  /**
+   * A reference to a path only — no content, no fence. The automatic
+   * open-file chip is the one producer. Absent = an ordinary selection.
+   */
+  reference?: boolean
 }
 
 /** Deterministic id from source + text, so attaching the same selection twice dedups. */
@@ -78,7 +90,8 @@ function fenceFor(text: string): string {
 
 /**
  * Fold context chips into the outgoing message content: one labeled fenced block
- * per chip (insertion order), a blank line, then the user's text.
+ * per chip (insertion order), a blank line, then the user's text. A `reference`
+ * chip (the open file) is a single line naming the path, with no content.
  *   - no chips → userText unchanged
  *   - empty userText → just the blocks (no dangling separator)
  */
@@ -89,6 +102,8 @@ export function serializeContextChips(
   if (chips.length === 0) return userText
   const blocks = chips
     .map((chip) => {
+      // A path reference is one line: the agent reads the file if it needs it.
+      if (chip.reference === true) return `Open in the editor (path only, not attached): ${chip.text}`
       const fence = fenceFor(chip.text)
       return `Context from ${chip.label}:\n${fence}\n${chip.text}\n${fence}`
     })

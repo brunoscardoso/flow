@@ -479,7 +479,28 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
     for (const listener of tabsChangedListeners) {
       listener()
     }
+    announceActiveFile(false)
   }
+
+  // ── The open file rides along with the chat (active-file-chip.ts) ─────────
+  // The composer shows the active tab's file as an automatic chip. Announced on
+  // TAB changes only (emitTabsChanged), deduped, so typing and streaming cost
+  // nothing. A view tab, a scratch note or no tab at all announces null.
+  let announcedActiveFile: string | null | undefined
+  function announceActiveFile(force: boolean): void {
+    const active = tabs.activeId
+    const info = active !== null && !views.has(active) && !isUntitledPath(active) ? openFiles.get(active) : undefined
+    const key = info ? info.path : null
+    if (!force && key === announcedActiveFile) return
+    announcedActiveFile = key
+    document.dispatchEvent(
+      new CustomEvent('flow:active-editor-file', {
+        detail: info ? { rootPath: info.rootPath, relPath: info.relPath } : null,
+      }),
+    )
+  }
+  // A composer mounted after the last tab change asks once.
+  document.addEventListener('flow:request-active-editor-file', () => announceActiveFile(true))
 
   // Start hidden — the editor opens with no tabs.
   refreshTabStrip()

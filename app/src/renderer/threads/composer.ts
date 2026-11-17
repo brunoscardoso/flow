@@ -61,6 +61,16 @@ import {
   type ContextChipRef,
 } from './context-chips'
 import {
+  activeEditorFileFrom,
+  activeFileChip,
+  activeFileReference,
+  dismissActiveFile,
+  focusActiveFile,
+  NO_ACTIVE_FILE,
+  type ActiveFileChip,
+  type ActiveFileState,
+} from './active-file-chip'
+import {
   addAttachmentWithOutcome,
   attachmentDataUrl,
   removeAttachment,
@@ -267,6 +277,8 @@ export class Composer {
   #subtaskTarget: SubtaskTargetRef | null = null
   /** Context selections attached via cmd+L (terminal/file) — #152. */
   #contextChips: readonly ContextChipRef[] = []
+  /** The editor's focused file — the automatic chip (active-file-chip.ts). */
+  #activeFile: ActiveFileState = NO_ACTIVE_FILE
   /** Pending image attachments (paste/drag/picker/capture) — #456. */
   #attachments: readonly MessageAttachmentInput[] = []
   #shell: HTMLDivElement | null = null
@@ -355,8 +367,9 @@ export class Composer {
     // A selection dispatched via `flow:add-to-chat` attaches as a BADGE (preview
     // only); the full text folds into the message content on send, like Cursor.
     document.addEventListener('flow:add-to-chat', (event) => {
-      const detail = (event as CustomEvent<{ source?: unknown; text?: unknown; label?: unknown }>)
-        .detail
+      const detail = (
+        event as CustomEvent<{ source?: unknown; text?: unknown; label?: unknown; path?: unknown }>
+      ).detail
       if (!detail || typeof detail.text !== 'string' || detail.text.trim().length === 0) return
       const source: ContextChipRef['source'] =
         detail.source === 'file' ? 'file' : detail.source === 'task' ? 'task' : detail.source === 'browser' ? 'browser' : 'terminal'
@@ -374,11 +387,28 @@ export class Composer {
           source,
           label,
           text: detail.text,
+          // The editor's ⌘L names its file, so the automatic open-file chip
+          // does not repeat a file whose selection is already attached.
+          ...(source === 'file' && typeof detail.path === 'string' && detail.path.length > 0
+            ? { filePath: detail.path }
+            : {}),
         }),
       )
       this.#toastAttachedIfHidden(label)
       this.#textarea.focus() // ready to type the question about the pasted context
     })
+
+    // ── The open file rides along (active-file-chip.ts) ──────────────────
+    // The editor announces its focused file on TAB changes only — never per
+    // keystroke or streaming batch — so this repaints the chip row at most
+    // once per tab switch. Asked once at mount, for a tab opened before.
+    document.addEventListener('flow:active-editor-file', (event) => {
+      const next = focusActiveFile(this.#activeFile, activeEditorFileFrom((event as CustomEvent<unknown>).detail))
+      if (next === this.#activeFile) return
+      this.#activeFile = next
+      this.#renderChips()
+    })
+    queueMicrotask(() => document.dispatchEvent(new CustomEvent('flow:request-active-editor-file')))
 
     // ── Programmatic image attach (embedded browser screenshot, #embedded-browser) ──
     // A producer with an already-materialized MessageAttachmentInput (the browser
@@ -775,6 +805,8 @@ export class Composer {
         // The scope's root set changed — cached listings may span dropped
         // roots, and open results may point into them.
         this.#dirCache.clear()
+        // …and the open file may have joined or left the thread's roots.
+        this.#renderChips()
       }
       projectApi.onThreadScopeChanged(applyScope)
       void projectApi
@@ -927,6 +959,9 @@ export class Composer {
     // The thread's runtime decides mid-run sends; re-asked only when the
     // project changes, never per threads:updated batch (forbidden #14).
     if (thread?.projectRoot !== this.#threadProviderRoot) this.#resolveThreadProvider()
+    // The open-file chip depends on the thread's roots — repaint on a switch
+    // or a new project only, never on a same-thread refresh (forbidden #14).
+    if (switched || thread?.projectRoot !== previous?.projectRoot) this.#renderChips()
     // A different thread's resolved model doesn't carry over — clear it until
     // the new thread's turn reports one (#129).
     if (switched) {
@@ -1296,6 +1331,11 @@ export class Composer {
     const chips = this.#chips
     const contextChips = this.#contextChips
     const attachments = this.#attachments
+    // The open file travels as a path reference, FIRST, through the same
+    // serialization as every context chip. It is not cleared on send: the
+    // file is still open, so it still rides along with the next message.
+    const activeChip = this.#currentActiveFileChip()
+    const outgoingContext = activeChip ? [activeFileReference(activeChip), ...contextChips] : contextChips
     // Record for ArrowUp recall (#776) — the TYPED text (not the serialized
     // chip content), covering both the live and queued paths below.
     this.#history = pushEntry(this.#history, text)
@@ -1306,7 +1346,7 @@ export class Composer {
     // A steered message is addressed to its subtask; the agent forwards it.
     const content = serializeSubtaskTarget(
       subtaskTarget,
-      serializeChips(chips, serializeContextChips(contextChips, text)),
+      serializeChips(chips, serializeContextChips(outgoingContext, text)),
     )
     // The agent is busy — one turn at a time. Instead of refusing, QUEUE the message
     // (#472): it auto-sends when the turn finishes; the user can remove it or send it
@@ -1623,6 +1663,46 @@ export class Composer {
     )
   }
 
+  /** The automatic open-file chip for this thread, or null (active-file-chip.ts). */
+  #currentActiveFileChip(): ActiveFileChip | null {
+    const thread = this.#thread
+    if (!thread) return null
+    return activeFileChip(
+      this.#activeFile,
+      mentionRoots(this.#scope, thread.id, thread.projectRoot),
+      this.#contextChips,
+    )
+  }
+
+  /** The open file's chip — the hand-added chip's markup, marked `auto`. */
+  #renderActiveFileChip(chip: ActiveFileChip): void {
+    const pill = document.createElement('span')
+    pill.className = 'fl-composer-chip auto'
+    pill.dataset.activeFile = chip.absolutePath
+    pill.title = chip.title
+    const kind = document.createElement('span')
+    kind.className = 'fl-composer-chip-kind'
+    kind.textContent = 'Open file'
+    const label = document.createElement('span')
+    label.className = 'fl-composer-chip-label'
+    label.textContent = chip.label
+    const dismiss = document.createElement('button')
+    dismiss.type = 'button'
+    dismiss.className = 'fl-composer-chip-dismiss'
+    dismiss.setAttribute('aria-label', `Don't send ${chip.label} with this message`)
+    dismiss.title = `Don't send ${chip.label}`
+    const icon = document.createElement('fl-icon')
+    icon.setAttribute('name', 'close')
+    icon.setAttribute('size', '10')
+    dismiss.appendChild(icon)
+    dismiss.addEventListener('click', () => {
+      this.#activeFile = dismissActiveFile(this.#activeFile)
+      this.#renderChips()
+    })
+    pill.append(kind, label, dismiss)
+    this.#chipBar.appendChild(pill)
+  }
+
   #renderContextChips(): void {
     for (const chip of this.#contextChips) {
       const pill = document.createElement('span')
@@ -1920,14 +2000,18 @@ export class Composer {
 
   #renderChips(): void {
     this.#chipBar.textContent = ''
+    const activeChip = this.#currentActiveFileChip()
     this.#chipBar.hidden =
+      activeChip === null &&
       this.#chips.length === 0 &&
       this.#contextChips.length === 0 &&
       this.#attachments.length === 0 &&
       this.#subtaskTarget === null
     // A chip is sendable content, so chip add/remove must refresh Send (#430).
+    // The automatic open-file chip is NOT — it only rides along with a message.
     this.#syncEnabled()
     this.#renderSubtaskTarget()
+    if (activeChip) this.#renderActiveFileChip(activeChip)
     for (const chip of this.#chips) {
       const pill = document.createElement('span')
       pill.className = 'fl-composer-chip'
@@ -2939,6 +3023,8 @@ function injectComposerStyles(): void {
       font-size: var(--fl-text-caption-size);
       color: var(--fl-color-text-secondary);
     }
+    /* The open file (automatic): the same chip, quieter — no fill, muted text. */
+    .fl-composer-chip.auto { background: transparent; color: var(--fl-color-text-secondary); }
     .fl-composer-chip-kind {
       flex: none;
       font-family: var(--fl-font-mono);
