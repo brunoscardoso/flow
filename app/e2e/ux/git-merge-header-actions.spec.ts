@@ -1,8 +1,8 @@
 import type { Page } from '@playwright/test'
 import { test, expect } from '../fixtures/electron'
-import { activateProject } from './fixtures/seed'
+import { activateProject, removeTempDir } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -79,7 +79,9 @@ async function openGitPanel(window: Page, dir: string): Promise<void> {
 }
 
 test.afterAll(() => {
-  for (const dir of seededDirs) rmSync(dir, { recursive: true, force: true })
+  // removeTempDir, not a bare rmSync: the provisioner's background init can
+  // still be writing .claude/ here, which threw ENOTEMPTY (see seed.ts).
+  for (const dir of seededDirs) removeTempDir(dir)
 })
 
 test('merge header keeps the primary resolve action visible, with every keep-all option reachable', async ({
