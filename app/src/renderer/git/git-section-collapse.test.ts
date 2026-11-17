@@ -1,5 +1,7 @@
 import {
   dropLegacySectionKeys,
+  keepOneGroupOpen,
+  openOneGroup,
   parseCollapsedSections,
   sectionCollapseKey,
   serializeCollapsedSections,
@@ -83,5 +85,31 @@ describe('git-section-collapse', () => {
 
     const removed = toggleSection(added, 'staged')
     expect(removed).toEqual(new Set(['commits']))
+  })
+})
+
+describe('one repository open at a time (2026-11-17)', () => {
+  const keys = ['root:/a', 'root:/b', 'root:/c']
+
+  it('opening a folded repository folds every other one', () => {
+    const next = openOneGroup(new Set(['root:/b', 'root:/c', 'section:/a:changes']), keys, 'root:/b')
+    expect([...next].sort()).toEqual(['root:/a', 'root:/c', 'section:/a:changes'])
+  })
+
+  it('pressing the open repository folds it, leaving none open', () => {
+    const next = openOneGroup(new Set(['root:/b', 'root:/c']), keys, 'root:/a')
+    expect(keys.every((key) => next.has(key))).toBe(true)
+  })
+
+  it('keeps only the first open repository from older state', () => {
+    const next = keepOneGroupOpen(new Set(['root:/a']), keys)
+    expect([...next].sort()).toEqual(['root:/a', 'root:/c'])
+  })
+
+  it('returns the same set when at most one is open', () => {
+    const one = new Set(['root:/a', 'root:/c'])
+    expect(keepOneGroupOpen(one, keys)).toBe(one)
+    const none = new Set(keys)
+    expect(keepOneGroupOpen(none, keys)).toBe(none)
   })
 })

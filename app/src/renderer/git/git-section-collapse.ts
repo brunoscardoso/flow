@@ -63,3 +63,39 @@ export function dropLegacySectionKeys(sections: ReadonlySet<string>): Set<string
   const legacy = new Set<string>(['merge', 'staged', 'changes', 'commits'])
   return new Set([...sections].filter((key) => !legacy.has(key)))
 }
+
+/**
+ * One repository open at a time (user decision 2026-11-17).
+ *
+ * Several repositories open at once cut every one of them to a slice of the
+ * pane, the graph included. So opening a folded repository folds every other
+ * one; pressing the open one folds it, which may leave none open.
+ * `groupKeys` are the `root:` keys of the repositories on screen.
+ */
+export function openOneGroup(
+  sections: ReadonlySet<string>,
+  groupKeys: readonly string[],
+  key: string,
+): Set<string> {
+  const next = new Set(sections)
+  if (!next.has(key)) {
+    next.add(key)
+    return next
+  }
+  for (const other of groupKeys) next.add(other)
+  next.delete(key)
+  return next
+}
+
+/**
+ * Fold all but the first open repository — for state saved before the
+ * one-at-a-time rule, and for a repository newly added to the scope (it starts
+ * open, since nothing has folded it). Returns the SAME set when nothing changes.
+ */
+export function keepOneGroupOpen(sections: ReadonlySet<string>, groupKeys: readonly string[]): ReadonlySet<string> {
+  const open = groupKeys.filter((key) => !sections.has(key))
+  if (open.length <= 1) return sections
+  const next = new Set(sections)
+  for (const key of open.slice(1)) next.add(key)
+  return next
+}

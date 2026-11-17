@@ -312,7 +312,11 @@ test('multi-root thread: sectioned tree, per-repo git groups + independent commi
   await expect(alphaGroup.locator('.gp-branch-name')).toHaveText(alphaBranch)
   await expect(betaGroup.locator('.gp-branch-name')).toHaveText(betaBranch)
 
-  // Stage beta's modified file inside BETA's group and commit there.
+  // Stage beta's modified file inside BETA's group and commit there. One
+  // repository is open at a time (2026-11-17): opening beta folds alpha.
+  await betaGroup.locator('.gp-group-head').click()
+  await expect(betaGroup.locator('.gp-group-head')).toHaveAttribute('aria-expanded', 'true')
+  await expect(alphaGroup.locator('.gp-group-head')).toHaveAttribute('aria-expanded', 'false')
   const betaRow = betaGroup
     .locator('.gp-row', { has: window.locator('.gp-name', { hasText: 'beta-change.txt' }) })
     .first()

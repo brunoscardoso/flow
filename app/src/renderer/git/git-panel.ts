@@ -66,6 +66,8 @@ import {
   sectionCollapseKey,
   serializeCollapsedSections,
   toggleSection,
+  keepOneGroupOpen,
+  openOneGroup,
 } from './git-section-collapse'
 import {
   hasResolvableConflicts,
@@ -458,6 +460,7 @@ export class GitPanel {
         if (frame !== null) return
         frame = requestAnimationFrame(() => {
           frame = null
+          this.#fitGraphToPanel()
           const rows = this.#visibleChangeRows()
           // Only repaint when the row budget actually changed — a 1px drag must
           // not rebuild the DOM under the user's cursor.
@@ -475,6 +478,8 @@ export class GitPanel {
   /** Repaints the lists when the panel's height changes the row budget (#1184). */
   #resizeObserver: ResizeObserver | null = null
   #lastRowBudget = 0
+  /** The `root:` fold keys of the repositories on screen, in order. */
+  #groupKeys: string[] = []
 
   /**
    * How many rows the Changes/Commits lists may show (#1184).
@@ -503,6 +508,43 @@ export class GitPanel {
   #visibleCommitRows(): number {
     const rows = Math.floor((this.#availableListHeight() * 0.4) / ROW_HEIGHT)
     return Math.max(MIN_VISIBLE_COMMIT_ROWS, rows)
+  }
+
+  /** Open one repository and fold the rest, or fold the open one (2026-11-17). */
+  #toggleGroup(key: string): void {
+    this.#collapsedSections = openOneGroup(this.#collapsedSections, this.#groupKeys, key)
+    safeWriteStorage(COLLAPSED_SECTIONS_KEY, serializeCollapsedSections(this.#collapsedSections))
+    this.#rerender()
+  }
+
+  /**
+   * The graph takes the height the rest of the pane leaves (user report
+   * 2026-11-17: it stopped at half the pane, with empty space below). Only one
+   * graph is on screen once one repository is open at a time, so it gets ALL
+   * the slack: it grows into empty space and shrinks (to its floor) when the
+   * pane overflows, which keeps the folded repositories below it in view.
+   * Heights only — no rebuild, so a drag never re-creates rows under the cursor.
+   */
+  #fitGraphToPanel(): void {
+    const lists = this.#container.querySelectorAll<HTMLElement>('fl-list.gp-graph-list')
+    if (lists.length !== 1) return
+    const list = lists[0] as FlList<unknown>
+    const paneHeight = this.#container.clientHeight
+    if (!Number.isFinite(paneHeight) || paneHeight <= 0) return
+    const full = (list.items?.length ?? 0) * ROW_HEIGHT
+    const current = list.getBoundingClientRect().height
+    // scrollHeight never reads below clientHeight, so it cannot show EMPTY
+    // space: measure the content's own bottom instead.
+    const last = this.#container.lastElementChild
+    if (last === null) return
+    const top = this.#container.getBoundingClientRect().top - this.#container.scrollTop
+    const padding = parseFloat(getComputedStyle(this.#container).paddingBottom) || 0
+    const contentHeight = last.getBoundingClientRect().bottom - top + padding
+    const slack = paneHeight - contentHeight
+    const floor = Math.min(full, MIN_VISIBLE_COMMIT_ROWS * ROW_HEIGHT)
+    const wanted = Math.floor((current + slack) / ROW_HEIGHT) * ROW_HEIGHT
+    const target = Math.max(floor, Math.min(full, wanted))
+    if (Math.abs(target - current) >= 1) list.style.height = `${target}px`
   }
 
   /** Fold/unfold a Source Control section, persist the change, and re-render. */
@@ -726,10 +768,18 @@ export class GitPanel {
     this.#container.textContent = ''
     const groups = deriveGitGroups(views, this.#scope)
     this.#groupedRender = groups.some((group) => group.header !== null)
+    this.#groupKeys = groups.flatMap((group) => (group.header === null ? [] : [groupCollapseKey(group.header.rootPath)]))
+    // One repository open at a time — old state and newly added ones included.
+    const single = keepOneGroupOpen(this.#collapsedSections, this.#groupKeys)
+    if (single !== this.#collapsedSections) {
+      this.#collapsedSections = new Set(single)
+      safeWriteStorage(COLLAPSED_SECTIONS_KEY, serializeCollapsedSections(this.#collapsedSections))
+    }
     this.#closeHoverCard()
     for (const group of groups) {
       this.#container.appendChild(this.#renderGroup(group))
     }
+    this.#fitGraphToPanel()
     this.#restoreListState(listState)
     this.#restoreCommitFocus(focus)
   }
@@ -932,7 +982,7 @@ export class GitPanel {
       head.appendChild(count)
     }
 
-    const toggle = (): void => this.#toggleSection(key)
+    const toggle = (): void => this.#toggleGroup(key)
     head.addEventListener('click', toggle)
     head.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' || event.key === ' ') {

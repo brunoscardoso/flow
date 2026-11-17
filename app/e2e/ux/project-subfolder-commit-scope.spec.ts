@@ -144,6 +144,13 @@ async function openOverlappingProjects(win: Page): Promise<{ mono: string; child
 const groupFor = (win: Page, dir: string) =>
   win.locator('.gp-group', { has: win.locator('.gp-group-name', { hasText: basename(dir) }) })
 
+/** One repository group is open at a time (2026-11-17): open this one. */
+async function openGroup(win: Page, dir: string): Promise<void> {
+  const head = groupFor(win, dir).locator('.gp-group-head')
+  if ((await head.getAttribute('aria-expanded')) !== 'true') await head.click()
+  await expect(head).toHaveAttribute('aria-expanded', 'true')
+}
+
 /** Stage one row via its per-row Stage button (rows live in an open shadow DOM,
  *  so locate by `.gp-name` — `querySelectorAll` never sees them). */
 async function stageRow(scope: ReturnType<typeof groupFor> | Page, win: Page, name: string) {
@@ -234,16 +241,20 @@ test.describe('two projects in one repo — Source Control group scope', () => {
     const gMono = groupFor(window, mono)
     const gApp = groupFor(window, child)
 
+    await openGroup(window, mono)
     await expect(gMono.locator('.gp-name', { hasText: 'README.md' })).toHaveCount(1)
     await expect(gMono.locator('.gp-name', { hasText: 'main.ts' })).toHaveCount(1)
+    await openGroup(window, child)
     await expect(gApp.locator('.gp-name', { hasText: 'main.ts' })).toHaveCount(1)
     await expect(gApp.locator('.gp-name', { hasText: 'README.md' })).toHaveCount(0)
 
+    await openGroup(window, mono)
     await stageRow(gMono, window, 'README.md')
     await expect(gMono.locator('.gp-section-head', { hasText: 'STAGED CHANGES (1)' })).toHaveCount(
       1,
       { timeout: 15_000 },
     )
+    await openGroup(window, child)
     await gApp.locator('.gp-commit-msg').fill('fix: app only')
     await expect(gApp.locator('.gp-commit-btn')).toContainText('Commit All')
     await expect(gApp.locator('.gp-section-head', { hasText: 'STAGED' })).toHaveCount(0)
@@ -263,11 +274,13 @@ test.describe('two projects in one repo — Source Control group scope', () => {
       const gMono = groupFor(window, mono)
       const gApp = groupFor(window, child)
 
+      await openGroup(window, mono)
       await stageRow(gMono, window, 'README.md')
       await expect(gMono.locator('.gp-section-head', { hasText: 'STAGED CHANGES (1)' })).toHaveCount(
         1,
         { timeout: 15_000 },
       )
+      await openGroup(window, child)
       await stageRow(gApp, window, 'main.ts')
       await expect(gApp.locator('.gp-section-head', { hasText: 'STAGED CHANGES (1)' })).toHaveCount(
         1,
