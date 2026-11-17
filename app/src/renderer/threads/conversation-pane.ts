@@ -133,6 +133,8 @@ import {
   type LearningFirstState,
 } from '../../shared/basic-discovery'
 import { parseArtifactMarker, type ArtifactMarker } from '../../shared/artifact-marker'
+import { chatLearnKey, parseChatLearnMarker, type ChatLearnMarker } from '../../shared/chat-learn-marker'
+import { chatLearnCard } from './chat-learn-card'
 import { parseFolderBehindMarker } from '../../shared/folder-behind-marker'
 import { FolderBehindCard } from './folder-behind-card'
 import { isWalkthroughBeingWritten } from '../../shared/walkthrough-page'
@@ -756,6 +758,9 @@ export class ConversationPane {
   #markerCards = new Map<string, ArtifactCard>()
   /** Live folder-behind cards, so a feed rebuild can stop them painting. */
   #folderBehindCards = new Set<FolderBehindCard>()
+  /** Chat-learn rows by area: the newest marker, and the id of the first row. */
+  #chatLearnLatest = new Map<string, ChatLearnMarker>()
+  #chatLearnFirst = new Map<string, string>()
   /** Doc paths with a persisted marker row ANYWHERE in the current thread's
    *  history — including rows still collapsed behind "Show earlier". These
    *  never render a bottom (feed-end) card: the marker position owns them. */
@@ -1880,6 +1885,19 @@ export class ConversationPane {
     }
     this.#markerHosts = artifactCardHosts(markers)
 
+    // Chat-learn rows (2026-11-17): main writes one when learning starts and
+    // one when it ends. ONE card per area, at the first row, showing the newest.
+    this.#chatLearnLatest.clear()
+    this.#chatLearnFirst.clear()
+    for (const entry of entries) {
+      if (entry.kind !== 'message' || entry.message.role !== 'system') continue
+      const learn = parseChatLearnMarker(entry.message.content)
+      if (learn === null) continue
+      const key = chatLearnKey(learn)
+      if (!this.#chatLearnFirst.has(key)) this.#chatLearnFirst.set(key, entry.message.id)
+      this.#chatLearnLatest.set(key, learn)
+    }
+
     // #1049: mirror the live tool-start/tool-end flag from the persisted
     // records — a restored tool call that is still running is its own progress
     // indicator, so a seeded busy state (setThread) must not stack the loader
@@ -2753,6 +2771,8 @@ export class ConversationPane {
       // it began (user, 2026-10-12). Main writes the row; the card reads the
       // LIVE comparison, so a folder somebody has since pulled reads as up to
       // date rather than repeating a count that has expired.
+      const learn = parseChatLearnMarker(message.content)
+      if (learn !== null) return this.#chatLearnEntry(learn, message)
       const behind = parseFolderBehindMarker(message.content)
       if (behind !== null) {
         return entryWrapper('folder-behind', this.#folderBehindCard(behind.branch))
@@ -3773,6 +3793,29 @@ export class ConversationPane {
    * element is detached would paint into an orphan, and the next feed builds
    * fresh cards from the same rows anyway.
    */
+  /** The area's card at its first row; every later row about it draws nothing. */
+  #chatLearnEntry(row: ChatLearnMarker, message: ThreadMessage): HTMLElement {
+    const key = chatLearnKey(row)
+    const first = this.#chatLearnFirst.get(key)
+    if (first !== undefined && first !== message.id) {
+      const hidden = entryWrapper('chat-learn', document.createElement('div'))
+      hidden.hidden = true
+      return hidden
+    }
+    const marker = this.#chatLearnLatest.get(key) ?? row
+    const threadId = this.#threadId
+    return entryWrapper(
+      'chat-learn',
+      chatLearnCard(marker, {
+        openBoard: () => document.dispatchEvent(new CustomEvent('flow:open-blueprint')),
+        retry: async () => {
+          if (threadId === null) return
+          await window.flow.learn.retryChatLearn({ threadId, rootId: marker.root, modulePath: marker.module })
+        },
+      }),
+    )
+  }
+
   #clearFolderBehindCards(): void {
     for (const card of this.#folderBehindCards) card.dispose()
     this.#folderBehindCards.clear()

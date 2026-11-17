@@ -565,6 +565,13 @@ export interface ModuleFileEntries {
 }
 
 /** Options for enqueueing a single module. */
+/**
+ * The job reason of a learn a conversation started (user decision 2026-11-17:
+ * learning from chat is automatic). Its outcome is told in that conversation,
+ * so a failure raises no toast.
+ */
+export const CHAT_LEARN_REASON = 'chat'
+
 export interface EnqueueModuleOptions {
   /** Origin label recorded on the job (e.g. 'manual', 'stale'). */
   reason: string
@@ -725,6 +732,12 @@ export interface LearnOrchestratorDeps {
    * shares it without waiting for a chat turn. Best-effort: a throw is logged.
    */
   onKnowledgeWritten?: (rootPath: string) => void
+  /**
+   * A job that RAN reached its end: learned (`ok`) or failed. Not raised for a
+   * job dropped unrun or stopped by a teardown — those have no outcome yet.
+   * Best-effort: a throw is logged.
+   */
+  onModuleSettled?: (event: { rootPath: string; modulePath: string; ok: boolean; reason: string }) => void
   /** Runs one learn pass. Default: runLearnPass (the real executor). */
   runPass?: (params: LearnPassParams) => Promise<LearnPassResult>
   /** Run the bundled CLI and capture stdout. Default: runBundledCliCapturing.
@@ -1811,6 +1824,18 @@ export class LearnOrchestrator {
       const wasBasicDiscovery = outcome.job.reason === 'basic-discovery'
       this.noteMovement()
       const verdict = await this.runJob(outcome.job)
+      if (verdict !== null) {
+        try {
+          this.deps.onModuleSettled?.({
+            rootPath: outcome.job.rootPath,
+            modulePath: outcome.job.modulePath,
+            ok: verdict,
+            reason: outcome.job.reason,
+          })
+        } catch (error) {
+          this.onError(`learn outcome listener failed for ${outcome.job.rootPath}`, error)
+        }
+      }
       this.state = completeActive(this.state)
       this.noteMovement()
       if (verdict !== null) this.announceKnowledge(outcome.job.rootPath)
@@ -1957,7 +1982,9 @@ export class LearnOrchestrator {
       await this.transition(rootPath, modulePath, 'stale')
       // No graph is the PROJECT's problem, said once by its basic discovery —
       // not a toast per queued module.
-      if (!noGraph) this.deps.notify(this.failureToast(rootPath, modulePath, 'could not read the module'))
+      if (!noGraph && job.reason !== CHAT_LEARN_REASON) {
+        this.deps.notify(this.failureToast(rootPath, modulePath, 'could not read the module'))
+      }
       this.recordBasicDiscovery(job, false)
       return false
     }
@@ -2043,7 +2070,7 @@ export class LearnOrchestrator {
       const why = stalled ? 'went quiet and was stopped' : 'took too long and was stopped'
       recordLearnEvent({ at: Date.now(), kind: 'stopped', module: modulePath, detail: why })
       await this.transition(rootPath, modulePath, 'stale')
-      this.deps.notify(this.failureToast(rootPath, modulePath, why))
+      if (job.reason !== CHAT_LEARN_REASON) this.deps.notify(this.failureToast(rootPath, modulePath, why))
       this.recordBasicDiscovery(job, false)
       this.recordOutcome(false, rootPath)
       return false
@@ -2078,7 +2105,9 @@ export class LearnOrchestrator {
         ...(result.reason === undefined ? {} : { detail: result.reason }),
       })
       await this.transition(rootPath, modulePath, 'stale')
-      this.deps.notify(this.failureToast(rootPath, modulePath, result.reason ?? 'unknown error'))
+      if (job.reason !== CHAT_LEARN_REASON) {
+        this.deps.notify(this.failureToast(rootPath, modulePath, result.reason ?? 'unknown error'))
+      }
     }
     this.recordBasicDiscovery(job, result.ok)
     return result.ok

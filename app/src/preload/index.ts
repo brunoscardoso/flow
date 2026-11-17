@@ -597,7 +597,7 @@ const flowApi: FlowApi = {
   },
   learn: {
     answerBasicDiscovery: (request) => invoke('learn:answerBasicDiscovery', request),
-    answerChatLearn: (request) => invoke('learn:answerChatLearn', request),
+    retryChatLearn: (request) => invoke('learn:retryChatLearn', request),
     learnModule: (request) => invoke('learn:learnModule', request),
     learnFeature: (request) => invoke('learn:learnFeature', request),
     generateFeatureView: (request) => invoke('learn:generateFeatureView', request),
@@ -613,7 +613,6 @@ const flowApi: FlowApi = {
     classifyRoles: (request) => invoke('learn:classifyRoles', request),
     onClassifyRolesProgress: (listener) => subscribe('learn:classifyRolesProgress', listener),
     onBasicDiscoveryAsk: (listener) => subscribe('learn:basicDiscoveryAsk', listener),
-    onChatLearnAsk: (listener) => subscribe('learn:chatLearnAsk', listener),
     onProgress: (listener) => subscribe('learn:progress', listener),
     onPausedChanged: (listener) => subscribe('learn:pausedChanged', listener),
     onFeatureLearned: (listener) => subscribe('learn:featureLearned', listener),

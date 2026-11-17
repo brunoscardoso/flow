@@ -64,16 +64,14 @@ export function initLearn(): () => void {
   // window, still naming the deleted folder and still offering to spend an
   // agent run on it. Tie it to the root it names.
   //
-  // This guards BOTH asks: the chat-learn card names a root the same way, and
-  // deleting that project makes its offer just as dead.
   const unsubscribeRoots = api.project.onListChanged?.((roots) => {
     const rootId = current?.dataset['rootId']
     if (rootId === undefined) return
     if (!roots.some((root) => root.rootPath === rootId)) dismiss()
   })
 
-  /** One card shape, two asks — the chat-learn prompt is the same affordance
-   *  with different copy, so it must not become a second card implementation.
+  /** The ask's card. (The chat-learn prompt shared it until 2026-11-17, when
+   *  learning from chat became automatic.)
    *  `rootId` is part of the spec because every ask belongs to a project: it
    *  names that project on the card (#1170) and is what ties the card to the
    *  root whose removal dismisses it (#1358). */
@@ -150,30 +148,11 @@ export function initLearn(): () => void {
     }),
   )
 
-  // Chat-learn: raised when a conversation worked in an area the blueprint does
-  // not understand. Main decides WHETHER to ask (once per thread, unlearned
-  // areas only) — the renderer only presents it.
-  const unsubscribeChat = api.learn.onChatLearnAsk?.(
-    ({ rootId, modulePath, fileCount, parentName }) =>
-      show({
-        rootId,
-        title: 'Learn what you just worked on?',
-        body:
-          `This conversation touched ${fileCount} file(s) in ${modulePath}, which the ` +
-          `blueprint hasn't learned yet. Learning it adds it to the board` +
-          (parentName === null ? '.' : ` under ${parentName}.`),
-        yesLabel: 'Learn it',
-        onAnswer: (value) => {
-          void api.learn
-            .answerChatLearn({ rootId, modulePath, answer: value })
-            .catch((error: unknown) => console.error('flow: chat-learn answer failed', error))
-        },
-      }),
-  )
+  // Chat-learn no longer asks (user decision 2026-11-17): it learns by itself
+  // and the conversation that did the work says so (chat-learn-card.ts).
 
   return () => {
     unsubscribeBasic()
-    unsubscribeChat?.()
     unsubscribeRoots?.()
     dismiss()
   }

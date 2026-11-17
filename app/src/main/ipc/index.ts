@@ -287,15 +287,10 @@ export interface IpcDependencies {
     answer: import('../../shared/ipc-contract').BasicDiscoveryAnswer,
   ) => void
   /**
-   * Answer the chat-learn ask — 'yes' learns the area the conversation worked
-   * in and re-levels the store so it hangs under the feature that owns it.
+   * Try a failed chat-learn again — the conversation row's Try again.
    * Optional so tests/headless harnesses can omit it.
    */
-  answerChatLearn?: (
-    rootPath: string,
-    modulePath: string,
-    answer: import('../../shared/ipc-contract').BasicDiscoveryAnswer,
-  ) => void
+  retryChatLearn?: (threadId: string, rootPath: string, modulePath: string) => void
   /**
    * Learn (or re-learn) a single module (#513 phase 6) — the board's "Learn"
    * button. Enqueues a deliberate learn pass on the main-side orchestrator.
@@ -587,7 +582,7 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
     forgetKnowledgeRoot,
     provisionRoot,
     answerBasicDiscovery,
-    answerChatLearn,
+    retryChatLearn,
     learnModule,
     learnFeature,
     generateFeatureView,
@@ -1483,8 +1478,8 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
   handle('learn:answerBasicDiscovery', ({ rootId, answer }) => {
     answerBasicDiscovery?.(rootId, answer)
   })
-  handle('learn:answerChatLearn', ({ rootId, modulePath, answer }) => {
-    answerChatLearn?.(rootId, modulePath, answer)
+  handle('learn:retryChatLearn', ({ threadId, rootId, modulePath }) => {
+    retryChatLearn?.(threadId, rootId, modulePath)
   })
   handle('learn:generateFeatureView', (request) => {
     generateFeatureView?.(request)

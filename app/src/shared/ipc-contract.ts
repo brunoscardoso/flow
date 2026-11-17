@@ -7407,13 +7407,11 @@ export interface IpcInvokeMap {
     request: { rootId: string; answer: BasicDiscoveryAnswer }
     response: void
   }
-  /** Answer the chat-learn ask — the prompt raised when a conversation worked
-   *  in an area the blueprint does not understand yet. 'yes' enqueues a learn
-   *  pass for `modulePath` and re-levels the store so the result hangs under
-   *  the feature that owns it; 'no' does nothing (the thread is never asked
-   *  again either way — main holds the asked set). */
-  'learn:answerChatLearn': {
-    request: { rootId: string; modulePath: string; answer: BasicDiscoveryAnswer }
+  /** Try a failed chat-learn again (the conversation row's Try again). Learning
+   *  from chat is automatic (2026-11-17); main refuses an area the thread was
+   *  never told about, or one whose last outcome was not a failure. */
+  'learn:retryChatLearn': {
+    request: { threadId: string; rootId: string; modulePath: string }
     response: void
   }
   /** Learn (or re-learn) a single module — the board's "Learn" button. Enqueues
@@ -7780,19 +7778,6 @@ export interface IpcEventMap {
    *  (#513 phase 2) — fired on the root's first provisioning-ready when it has
    *  never been answered. `rootId` === absolute rootPath. */
   'learn:basicDiscoveryAsk': { rootId: string }
-  /** Ask whether to learn the area a conversation just worked in. Raised at
-   *  most ONCE per thread, only for an area that is not already learned, and
-   *  only when the turn touched enough of it to be evidence (see
-   *  `chat-learn-trigger.ts`). `parentName` is the feature the result will hang
-   *  under, or null when nothing claims the module yet. `rootId` === absolute
-   *  rootPath. */
-  'learn:chatLearnAsk': {
-    rootId: string
-    threadId: string
-    modulePath: string
-    fileCount: number
-    parentName: string | null
-  }
   /** Live learn-progress tick — the caged learner just read `file` for `module`
    *  under `rootId` (throttled per module in main). `rootId` === absolute rootPath. */
   'learn:progress': { rootId: string; module: string; file: string }
@@ -8188,7 +8173,7 @@ export const IPC_INVOKE_CHANNELS = [
   'diagnostics:record',
   'diagnostics:report',
   'learn:answerBasicDiscovery',
-  'learn:answerChatLearn',
+  'learn:retryChatLearn',
   'learn:learnModule',
   'learn:basicDiscoveryState',
   'learn:learnFeature',
@@ -8261,7 +8246,6 @@ export const IPC_EVENT_CHANNELS = [
   'workspaces:syncChanged',
   'updater:status',
   'learn:basicDiscoveryAsk',
-  'learn:chatLearnAsk',
   'learn:progress',
   'ask:state',
   'learn:pausedChanged',
@@ -9037,7 +9021,7 @@ export interface FlowLearnApi {
    *  the discovery; the Settings action re-fires with 'yes'). */
   answerBasicDiscovery(request: IpcRequest<'learn:answerBasicDiscovery'>): Promise<void>
   /** Answer the chat-learn ask ('yes' learns the area and re-levels the store). */
-  answerChatLearn(request: IpcRequest<'learn:answerChatLearn'>): Promise<void>
+  retryChatLearn(request: IpcRequest<'learn:retryChatLearn'>): Promise<void>
   /** Learn (or re-learn) a single module — the board's "Learn"/"Re-learn" action. */
   learnModule(request: IpcRequest<'learn:learnModule'>): Promise<void>
   learnFeature(request: IpcRequest<'learn:learnFeature'>): Promise<void>
@@ -9070,7 +9054,6 @@ export interface FlowLearnApi {
     listener: (event: IpcEventPayload<'learn:basicDiscoveryAsk'>) => void,
   ): Unsubscribe
   /** Show the chat-learn ask when a conversation worked in an unlearned area. */
-  onChatLearnAsk(listener: (event: IpcEventPayload<'learn:chatLearnAsk'>) => void): Unsubscribe
   /** Subscribe to live learn-progress ticks (throttled per module in main). */
   onProgress(listener: (event: IpcEventPayload<'learn:progress'>) => void): Unsubscribe
   /** Subscribe to global pause-state flips (drives the Pause/Resume label). */

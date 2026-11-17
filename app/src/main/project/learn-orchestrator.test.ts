@@ -19,6 +19,7 @@ import type {
 import type { BundledCli } from '../blueprint/derive-runner'
 import type { LearnPassParams, LearnPassResult, ModuleFile } from '../agent/learn-session'
 import {
+  CHAT_LEARN_REASON,
   LearnOrchestrator,
   defaultEnumerateModuleEntries,
   LARGE_PAYLOAD_BYTES,
@@ -457,6 +458,8 @@ function makeHarness(options: {
   projectReadFails?: boolean
   /** Wired as the orchestrator's knowledge-sync hook. */
   onKnowledgeWritten?: (rootPath: string) => void
+  /** Wired as the orchestrator's outcome hook. */
+  onModuleSettled?: LearnOrchestratorDeps['onModuleSettled']
 } = {}): Harness {
   // ONE in-memory store, shared by every suite that fakes this seam — the
   // orchestrator gets a single read-modify-write function, never a read and a
@@ -520,6 +523,7 @@ function makeHarness(options: {
     budget: options.budget ?? 10,
     onError: (message, error) => errors.push({ message, error }),
     ...(options.onKnowledgeWritten !== undefined ? { onKnowledgeWritten: options.onKnowledgeWritten } : {}),
+    ...(options.onModuleSettled !== undefined ? { onModuleSettled: options.onModuleSettled } : {}),
     ...(options.learnIgnore !== undefined
       ? {
           readLearnIgnore:
@@ -555,6 +559,39 @@ async function flush(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve))
   await new Promise((resolve) => setImmediate(resolve))
 }
+
+describe('LearnOrchestrator → a learn started from chat (2026-11-17)', () => {
+  it('reports each outcome with the job reason, so the conversation that started it can say so', async () => {
+    const settled: Array<{ rootPath: string; modulePath: string; ok: boolean; reason: string }> = []
+    const ok = makeHarness({
+      passResult: { ok: true, docPath: '/repo/doc.md', noteFingerprint: 'fp' },
+      onModuleSettled: (event) => settled.push(event),
+    })
+    ok.orchestrator.enqueueModule('/repo', 'src/a', { reason: CHAT_LEARN_REASON, deliberate: true })
+    await flush()
+    expect(ok.passCalls).toHaveLength(1)
+    const failed = makeHarness({ passResult: { ok: false, reason: 'boom' }, onModuleSettled: (event) => settled.push(event) })
+    failed.orchestrator.enqueueModule('/other', 'src/b', { reason: CHAT_LEARN_REASON, deliberate: true })
+    await flush()
+    expect(settled).toEqual([
+      { rootPath: '/repo', modulePath: 'src/a', ok: true, reason: CHAT_LEARN_REASON },
+      { rootPath: '/other', modulePath: 'src/b', ok: false, reason: CHAT_LEARN_REASON },
+    ])
+  })
+
+  it('a failed chat learn raises no toast — the conversation tells it; any other failure still does', async () => {
+    const chat = makeHarness({ passResult: { ok: false, reason: 'boom' } })
+    chat.orchestrator.enqueueModule('/repo', 'src/a', { reason: CHAT_LEARN_REASON, deliberate: true })
+    await flush()
+    expect(chat.passCalls).toHaveLength(1)
+    expect(chat.notifications).toEqual([])
+
+    const manual = makeHarness({ passResult: { ok: false, reason: 'boom' } })
+    manual.orchestrator.enqueueModule('/repo', 'src/a', { reason: 'manual', deliberate: true })
+    await flush()
+    expect(manual.notifications.length).toBeGreaterThan(0)
+  })
+})
 
 describe('LearnOrchestrator → knowledge sync', () => {
   it('announces each job that RAN — learned or failed — so its knowledge is shared without a chat turn', async () => {

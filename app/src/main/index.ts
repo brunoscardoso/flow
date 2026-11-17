@@ -72,6 +72,12 @@ import { registerAskChannels } from './blueprint/ask-ipc'
 import { registerLoopsChannels } from './loops/loops-handler'
 import { makeBrainCaptureOnTurnComplete, threadWorkingSet } from './brain/capture'
 import { resolveChatLearnAsk } from './learn/chat-learn-trigger'
+import {
+  chatLearnKey,
+  formatChatLearnMarker,
+  parseChatLearnMarker,
+  type ChatLearnMarker,
+} from '../shared/chat-learn-marker'
 import { sweepBrainRoots } from './brain/compaction'
 import { AppSettingsStore } from './store/app-settings-store'
 import {
@@ -235,6 +241,7 @@ import { Provisioner, runBundledCli } from './project/provisioner'
 import { awaitProvisioningSettled } from './worktree/provision-gate'
 import {
   defaultEnumerateModuleEntries,
+  CHAT_LEARN_REASON,
   LearnOrchestrator,
   selectAllModulePaths,
   type LearnProjectState,
@@ -1302,23 +1309,39 @@ function bootstrapMainProcess(): void {
         console.warn('[KnowledgeSync] commit after turn failed', { error: String(error) })
       })
   }
-  // Chat-learn ask: threads already prompted (one ask per thread, ever) and the
-  // module each pending ask refers to, so the renderer's answer cannot name a
-  // module the user was never shown.
+  // Chat-learn (user decision 2026-11-17): learning the area a conversation
+  // worked in is AUTOMATIC — no ask. The conversation that did the work says
+  // so with a row when learning starts and one when it ends
+  // (shared/chat-learn-marker.ts). `chatLearnAsked` keeps it to one area per
+  // thread, as the ask was; `chatLearnPending` remembers which threads wait on
+  // each (root, module) so the outcome is told where it was started.
   const chatLearnAsked = new Set<string>()
+  const chatLearnPending = new Map<string, Map<string, number>>()
+  const writeChatLearnRow = (threadId: string, marker: ChatLearnMarker): void => {
+    try {
+      if (threadStore.getThread(threadId) === null) return
+      threadStore.appendMessage(threadId, 'system', formatChatLearnMarker(marker))
+    } catch {
+      // Best-effort: the learn itself is unaffected.
+    }
+  }
+  const startChatLearn = (threadId: string, rootPath: string, modulePath: string, files: number): void => {
+    if (learnOrchestrator === null) return
+    const key = chatLearnKey({ root: rootPath, module: modulePath })
+    const waiting = chatLearnPending.get(key) ?? new Map<string, number>()
+    waiting.set(threadId, files)
+    chatLearnPending.set(key, waiting)
+    writeChatLearnRow(threadId, { root: rootPath, module: modulePath, files, phase: 'learning' })
+    learnOrchestrator.enqueueModule(rootPath, modulePath, { reason: CHAT_LEARN_REASON, deliberate: true })
+  }
   /**
-   * Offer to learn the area a conversation just worked in.
+   * Learn the area a conversation just worked in.
    *
    * Everything here is best-effort and silent on failure: this rides on the end
    * of a turn the user asked for, and must never cost them anything. The
    * decision itself is pure (`resolveChatLearnAsk`) — this only gathers inputs.
-   *
-   * KNOWN GAP: `cores` is empty, so the prompt cannot yet NAME the feature the
-   * work will hang under (`features graph --json` exposes anchorCount, not
-   * anchors). Attachment still happens — `features reclass` re-levels the store
-   * after the learn — the dialog just doesn't preview the parent's name.
    */
-  const maybeAskChatLearn = async (threadId: string): Promise<void> => {
+  const maybeLearnFromChat = async (threadId: string): Promise<void> => {
     try {
       if (chatLearnAsked.has(threadId)) return
       const thread = threadStore.getThread(threadId)
@@ -1344,40 +1367,45 @@ function bootstrapMainProcess(): void {
       })
       if (ask === null) return
       chatLearnAsked.add(threadId)
-      for (const window of BrowserWindow.getAllWindows()) {
-        if (!window.isDestroyed()) {
-          window.webContents.send('learn:chatLearnAsk', {
-            rootId: projectRoot,
-            threadId,
-            modulePath: ask.modulePath,
-            fileCount: ask.fileCount,
-            parentName: ask.parentName,
-          })
-        }
-      }
+      startChatLearn(threadId, projectRoot, ask.modulePath, ask.fileCount)
     } catch {
       // Best-effort: a turn must never fail because we tried to learn from it.
     }
   }
+  /** The row's Try again: the same learn, started again in the same thread. */
+  const retryChatLearn = (threadId: string, rootPath: string, modulePath: string): void => {
+    const marker = threadStore
+      .listMessages(threadId)
+      .map((message) => (message.role === 'system' ? parseChatLearnMarker(message.content) : null))
+      .filter((found): found is ChatLearnMarker => found !== null && found.root === rootPath && found.module === modulePath)
+      .pop()
+    // Only an area this conversation was told about, and only after it failed.
+    if (marker === undefined || marker.phase !== 'failed') return
+    startChatLearn(threadId, rootPath, modulePath, marker.files)
+  }
   /**
-   * The user's answer. 'yes' enqueues a DELIBERATE learn pass (they asked for
-   * it, so the session budget must not drop it) and then re-levels the store so
-   * the result hangs under the feature that owns it — `features reclass` is the
-   * existing one-writer path for that, not a new verb.
+   * A learn ended: tell every conversation waiting on it, then re-level the
+   * store so the result hangs under the feature that owns it
+   * (`features reclass`, the existing one-writer path).
    */
-  const answerChatLearn = (
-    rootPath: string,
-    modulePath: string,
-    answer: BasicDiscoveryAnswer,
-  ): void => {
-    if (answer !== 'yes') return
-    learnOrchestrator?.enqueueModule(rootPath, modulePath, {
-      reason: 'basic-discovery',
-      deliberate: true,
-    })
-    void runBundledCliCapturing(bundledCli, rootPath, ['blueprint', 'features', 'reclass']).catch(
-      () => undefined,
-    )
+  const onChatLearnSettled = (event: { rootPath: string; modulePath: string; ok: boolean }): void => {
+    const key = chatLearnKey({ root: event.rootPath, module: event.modulePath })
+    const waiting = chatLearnPending.get(key)
+    if (waiting === undefined) return
+    chatLearnPending.delete(key)
+    for (const [threadId, files] of waiting) {
+      writeChatLearnRow(threadId, {
+        root: event.rootPath,
+        module: event.modulePath,
+        files,
+        phase: event.ok ? 'learned' : 'failed',
+      })
+    }
+    if (event.ok) {
+      void runBundledCliCapturing(bundledCli, event.rootPath, ['blueprint', 'features', 'reclass']).catch(
+        () => undefined,
+      )
+    }
   }
   // Brain-usage counters (brain-first-retrieval Phase 4): per-thread tally of
   // brain searches / hit freshness / grep-fallback misses, folded per turn into
@@ -1970,8 +1998,8 @@ function bootstrapMainProcess(): void {
         // …then commit the knowledge it produced, after that capture settles.
         commitKnowledgeAfterTurn(threadId, lastBrainWork)
         // Keep learning consistent with the work: if this turn concentrated on
-        // an area the blueprint does not understand, offer to learn it.
-        if (success) void maybeAskChatLearn(threadId)
+        // an area the blueprint does not understand, learn it (no ask).
+        if (success) void maybeLearnFromChat(threadId)
         // Count the turn's brain-search usage (success or not — the tool
         // calls happened either way). Best-effort, never blocks the turn.
         brainUsageTracker.onTurnComplete(threadId)
@@ -2173,6 +2201,9 @@ function bootstrapMainProcess(): void {
     },
     // Learning writes knowledge outside any chat turn: share it the same way a
     // turn does (the sync engine folds a burst of jobs into one sync).
+    onModuleSettled: (event) => {
+      if (event.reason === CHAT_LEARN_REASON) onChatLearnSettled(event)
+    },
     onKnowledgeWritten: (rootPath) => {
       void knowledgeRoutes.commitAfterTurn(rootPath, [], (root) => learningLabelFor(root)).catch((error: unknown) => {
         console.warn('[KnowledgeSync] commit after learning failed', { error: String(error) })
@@ -3038,7 +3069,7 @@ const understandFeature = async (request: {
     notifyUnreachableRoot: (rootPath) => notifyUnreachableProject(rootPath),
     provisionRoot,
     answerBasicDiscovery,
-    answerChatLearn,
+    retryChatLearn,
     // Board "Learn" button (#513 phase 6/7) — a deliberate re-learn of one module.
     learnModule: (rootPath, modulePath) =>
       orchestrator.enqueueModule(rootPath, modulePath, { reason: 'manual', deliberate: true }),
