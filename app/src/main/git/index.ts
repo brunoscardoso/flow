@@ -234,11 +234,14 @@ export function registerGitChannels(deps: GitChannelDeps): () => void {
   handle('git:log', ({ rootId, limit, before }) =>
     gitManager.log(rootId, before === undefined ? { limit } : { limit, before }),
   )
-  handle('git:diff', ({ rootId, filePath, commit, staged, against }) =>
+  handle('git:diff', ({ rootId, filePath, commit, staged, against, hunks }) =>
     staged && !commit
-      ? gitManager.stagedDiff(rootId, filePath)
-      : gitManager.diff(rootId, filePath, commit, against),
+      ? gitManager.stagedDiff(rootId, filePath, { hunks: hunks === true })
+      : gitManager.diff(rootId, filePath, commit, against, { hunks: hunks === true }),
   )
+  // The graph's expanded commit row and hover card. Read-only; the revision is
+  // validated in the manager before it reaches argv.
+  handle('git:commitFiles', ({ rootId, commit }) => gitManager.commitFiles(rootId, commit))
   if (changeReview) {
     // The change-review read model (#1906). GitManager is the ChangeReviewGit
     // structurally (status + changeCounts); the injected `threads` slice answers
@@ -285,10 +288,37 @@ export function registerGitChannels(deps: GitChannelDeps): () => void {
   handle('git:stage', ({ rootId, filePaths }) => gitManager.stage(rootId, filePaths))
   handle('git:unstage', ({ rootId, filePaths }) => gitManager.unstage(rootId, filePaths))
   handle('git:discardFile', ({ rootId, filePath }) => gitManager.discardWorktreeChanges(rootId, filePath))
-  handle('git:commitIndex', async ({ rootId, message }) => {
-    const hash = await gitManager.commitIndex(rootId, message)
+  // `amend` and `confirmed` are RELAYED, never defaulted (forbidden #15): the
+  // flag is set in the click handler of the menu item a person chose.
+  handle('git:commitIndex', async ({ rootId, message, amend, confirmed }) => {
+    const hash = await gitManager.commitIndex(
+      rootId,
+      message,
+      amend === true ? { amend: true, confirmed: confirmed === true } : {},
+    )
     announceReviewChanged(rootId)
     return { hash }
+  })
+  // One hunk, staged / unstaged / reverted. A write to the index or the working
+  // tree, so the root goes through the same address gate as the other writes.
+  // `confirmed` is relayed as-is; the manager refuses a revert without it.
+  handle('git:applyHunk', async (request) => {
+    assertKnownRoot(gitManager, request.rootId, addressableRoots)
+    const result = await gitManager.applyHunk(request.rootId, {
+      filePath: request.filePath,
+      action: request.action,
+      hunkIndex: request.hunkIndex,
+      expectedHeader: request.expectedHeader,
+      expectedDigest: request.expectedDigest,
+      ...(request.confirmed === true ? { confirmed: true } : {}),
+    })
+    if (result.status === 'applied') announceReviewChanged(request.rootId)
+    return result
+  })
+  // Fetch talks to a remote from this root's directory — gated like publish.
+  handle('git:fetch', ({ rootId }) => {
+    assertKnownRoot(gitManager, rootId, addressableRoots)
+    return gitManager.fetch(rootId)
   })
   if (publish) {
     // Publish the branch under review. `rootId` arrives from the renderer and

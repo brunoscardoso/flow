@@ -34,8 +34,11 @@ import { runInCliHost } from '../cli-host/client'
 import { recordSlow } from '../ipc/slow-handler'
 
 import type {
+  GitApplyHunkResult,
   GitBranchRenameResult,
   GitCommit,
+  GitCommitFile,
+  GitFetchResult,
   GitConflictResolution,
   GitDiff,
   GitFileChange,
@@ -64,6 +67,8 @@ import {
   containsConflictMarkers,
   stageConflictRefusal,
 } from './conflict-markers'
+import { buildCommitFiles, parseDecorations } from './commit-parse'
+import { parseSingleFileDiff, publicHunks, selectHunk } from './hunks'
 import {
   assembleConflictContext,
   defaultConflictContextDeps,
@@ -224,6 +229,8 @@ export interface ParsedPorcelainStatus {
   detached?: boolean
   /** The commit HEAD is on — what a detached state has instead of a branch. */
   headCommit?: string
+  /** `# branch.upstream`, when the branch tracks one. */
+  upstream?: string
 }
 
 /**
@@ -275,6 +282,8 @@ export function parsePorcelainV2Status(output: string): ParsedPorcelainStatus {
       result.branch = result.detached ? '' : head
     } else if (token.startsWith('# branch.oid ')) {
       result.headCommit = token.slice('# branch.oid '.length)
+    } else if (token.startsWith('# branch.upstream ')) {
+      result.upstream = token.slice('# branch.upstream '.length)
     } else if (token.startsWith('# branch.ab ')) {
       const match = token.match(/^# branch\.ab \+(\d+) -(\d+)$/)
       if (match) {
@@ -391,7 +400,15 @@ function stateFromXY(xy: string): GitFileState {
 const LOG_FIELD_SEP = ''
 /** Record separator between commits. */
 const LOG_RECORD_SEP = ''
-const LOG_FORMAT = `%H${LOG_FIELD_SEP}%s${LOG_FIELD_SEP}%an${LOG_FIELD_SEP}%aI${LOG_RECORD_SEP}`
+// Parents (%P) and decorations (%D, full ref names via --decorate=full) feed
+// the Source Control graph. Both trail the original four fields, so a record
+// from an older format still parses.
+const LOG_FORMAT = `%H${LOG_FIELD_SEP}%s${LOG_FIELD_SEP}%an${LOG_FIELD_SEP}%aI${LOG_FIELD_SEP}%P${LOG_FIELD_SEP}%D${LOG_RECORD_SEP}`
+
+/** The most files a commit's expanded graph row lists. */
+const COMMIT_FILES_CAP = 300
+/** The most hunks one diff hands the renderer. */
+const DIFF_HUNKS_CAP = 500
 
 /**
  * Single-file author lookup format (`git log -1 -- <path>`): commit hash,
@@ -430,9 +447,17 @@ export function parseLogOutput(output: string): GitCommit[] {
   for (const record of output.split(LOG_RECORD_SEP)) {
     const trimmed = record.replace(/^\n+/, '')
     if (!trimmed) continue
-    const [hash, subject, author, date] = trimmed.split(LOG_FIELD_SEP)
+    const [hash, subject, author, date, parents, decorations] = trimmed.split(LOG_FIELD_SEP)
     if (hash && date !== undefined) {
-      commits.push({ hash, subject: subject ?? '', author: author ?? '', date })
+      const commit: GitCommit = { hash, subject: subject ?? '', author: author ?? '', date: date.trim() }
+      if (parents !== undefined) {
+        commit.parents = parents.trim().split(' ').filter((parent) => parent.length > 0)
+      }
+      if (decorations !== undefined) {
+        const refs = parseDecorations(decorations.trim())
+        if (refs.length > 0) commit.refs = refs
+      }
+      commits.push(commit)
     }
   }
   return commits
@@ -749,6 +774,7 @@ export class GitManager extends EventEmitter {
       // git's `(detached)` placeholder as though it were a branch name.
       ...(parsed.detached === true ? { detached: true } : {}),
       ...(parsed.headCommit !== undefined ? { headCommit: parsed.headCommit } : {}),
+      ...(parsed.upstream !== undefined ? { upstream: parsed.upstream } : {}),
     }
   }
 
@@ -1017,7 +1043,7 @@ export class GitManager extends EventEmitter {
   async log(rootPath: string, options: GitLogOptions = {}): Promise<GitCommit[]> {
     const root = resolve(rootPath)
     const limit = clampLimit(options.limit)
-    const args = ['log', `--max-count=${limit}`, `--format=${LOG_FORMAT}`]
+    const args = ['log', `--max-count=${limit}`, '--decorate=full', `--format=${LOG_FORMAT}`]
     if (options.before) {
       assertValidRevision(options.before) // SEC-2: untrusted cursor → argv
       args.push('--skip=1', options.before)
@@ -1196,7 +1222,8 @@ export class GitManager extends EventEmitter {
     rootPath: string,
     filePath: string,
     commit?: string,
-    against?: 'upstream',
+    against?: 'upstream' | 'index',
+    options: { hunks?: boolean } = {},
   ): Promise<GitDiff> {
     const ctx = await this.repoContext(rootPath)
 
@@ -1243,6 +1270,23 @@ export class GitManager extends EventEmitter {
         this.showFileBytes(ctx.gitCwd, 'HEAD', repoPath),
       ])
       return buildGitDiff(wsPath, before, after)
+    }
+
+    // THE WORKING TREE AGAINST THE INDEX - what VS Code calls "(Working Tree)".
+    // A file staged and then edited again shows only the edits that are not
+    // staged yet, which is what its row in Changes means and what the diff
+    // tab's Stage hunk / Revert hunk buttons act on. An untracked file has no
+    // index entry, so it reads as all-added (and git offers no hunks for it).
+    if (against === 'index') {
+      const subprojectIndex = await this.#subprojectDiff(ctx, wsPath, repoPath)
+      if (subprojectIndex) return subprojectIndex
+      const [before, after] = await Promise.all([
+        this.showFileBytes(ctx.gitCwd, '', repoPath),
+        readWorkingTreeFileBytes(ctx.gitCwd, repoPath),
+      ])
+      const diff = buildGitDiff(wsPath, before, after)
+      if (options.hunks !== true || diff.binary === true) return diff
+      return { ...diff, ...(await this.#hunksFor(ctx.gitCwd, repoPath, false)) }
     }
 
     // A submodule is a COMMIT POINTER, not content (#1479). Reading it as bytes
@@ -1345,7 +1389,11 @@ export class GitManager extends EventEmitter {
    * commit-message generator so its suggestion matches exactly the staged changes,
    * even for partially-staged or staged-then-re-edited files (#694).
    */
-  async stagedDiff(rootPath: string, filePath: string): Promise<GitDiff> {
+  async stagedDiff(
+    rootPath: string,
+    filePath: string,
+    options: { hunks?: boolean } = {},
+  ): Promise<GitDiff> {
     const ctx = await this.repoContext(rootPath)
     if (!filePath) {
       throw new Error('[Git] stagedDiff requires a filePath')
@@ -1360,7 +1408,158 @@ export class GitManager extends EventEmitter {
       this.showFileBytes(ctx.gitCwd, 'HEAD', repoPath),
       this.showFileBytes(ctx.gitCwd, '', repoPath), // `:<path>` = the staged (index, stage 0) blob
     ])
-    return buildGitDiff(wsPath, before, after)
+    const diff = buildGitDiff(wsPath, before, after)
+    if (options.hunks !== true || diff.binary === true) return diff
+    return { ...diff, ...(await this.#hunksFor(ctx.gitCwd, repoPath, true)) }
+  }
+
+  /**
+   * git's own `-U0` diff of one file - the index against the working tree, or
+   * (`cached`) HEAD against the index. The one read both the hunk list and the
+   * hunk apply parse, so they can never disagree about what hunk N is.
+   */
+  async #rawHunkDiff(gitCwd: string, repoPath: string, cached: boolean): Promise<string> {
+    return this.git(gitCwd, [
+      '-c',
+      'core.quotepath=off',
+      'diff',
+      '--no-color',
+      '--no-ext-diff',
+      '--no-textconv',
+      '-U0',
+      ...(cached ? ['--cached'] : []),
+      '--',
+      repoPath,
+    ])
+  }
+
+  /** The hunk list for the diff tab. Fail-soft: a read that fails offers no hunk buttons. */
+  async #hunksFor(
+    gitCwd: string,
+    repoPath: string,
+    cached: boolean,
+  ): Promise<{ hunks: GitDiff['hunks']; hunksTruncated?: boolean }> {
+    try {
+      const parsed = parseSingleFileDiff(await this.#rawHunkDiff(gitCwd, repoPath, cached))
+      const { hunks, truncated } = publicHunks(parsed, DIFF_HUNKS_CAP)
+      return truncated ? { hunks, hunksTruncated: true } : { hunks }
+    } catch (error) {
+      console.warn('[Git] hunk list failed', { repoPath, error })
+      return { hunks: [] }
+    }
+  }
+
+  /**
+   * Stage, unstage or revert ONE hunk (the diff tab's hunk buttons).
+   *
+   * The hunk is re-read here, never trusted from the renderer: main picks hunk
+   * `hunkIndex` out of a FRESH diff and refuses unless its header and digest are
+   * the ones the renderer was shown - a file edited in between is refused in
+   * words and nothing is applied.
+   *
+   * `revert` writes the working tree and cannot be undone, so it runs only with
+   * `confirmed: true` - a flag a test must say on purpose (forbidden #15). With
+   * anything else it returns `unconfirmed` and touches nothing.
+   */
+  async applyHunk(
+    rootPath: string,
+    request: {
+      filePath: string
+      action: 'stage' | 'unstage' | 'revert'
+      hunkIndex: number
+      expectedHeader: string
+      expectedDigest: string
+      confirmed?: boolean
+    },
+  ): Promise<GitApplyHunkResult> {
+    const { action } = request
+    if (action !== 'stage' && action !== 'unstage' && action !== 'revert') {
+      return { status: 'failed', detail: 'That is not something Flow can do to a hunk.' }
+    }
+    if (action === 'revert' && request.confirmed !== true) {
+      return {
+        status: 'unconfirmed',
+        detail: 'Reverting a hunk needs an explicit confirmation. Nothing was changed.',
+      }
+    }
+    const ctx = await this.repoContext(rootPath)
+    const { repoPath } = this.anchorPath(ctx, request.filePath)
+    const cached = action === 'unstage'
+    let raw: string
+    try {
+      raw = await this.#rawHunkDiff(ctx.gitCwd, repoPath, cached)
+    } catch (error) {
+      return { status: 'failed', detail: `Flow couldn't read this file's changes: ${firstLine(errorText(error))}` }
+    }
+    const selection = selectHunk(
+      parseSingleFileDiff(raw),
+      request.hunkIndex,
+      request.expectedHeader,
+      request.expectedDigest,
+    )
+    if (!selection.ok) {
+      return selection.reason === 'binary'
+        ? { status: 'failed', detail: selection.detail }
+        : { status: 'stale', detail: selection.detail }
+    }
+    const args =
+      action === 'stage'
+        ? ['apply', '--cached', '--unidiff-zero', '--whitespace=nowarn']
+        : action === 'unstage'
+          ? ['apply', '--cached', '-R', '--unidiff-zero', '--whitespace=nowarn']
+          : ['apply', '-R', '--unidiff-zero', '--whitespace=nowarn']
+    const patchPath = join(
+      tmpdir(),
+      `flow-hunk-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.patch`,
+    )
+    try {
+      await fsPromises.writeFile(patchPath, selection.patch, 'utf8')
+      await this.git(ctx.gitCwd, [...args, patchPath])
+      return { status: 'applied' }
+    } catch (error) {
+      return { status: 'failed', detail: `Git would not apply that hunk: ${firstLine(errorText(error))}` }
+    } finally {
+      await fsPromises.rm(patchPath, { force: true }).catch(() => undefined)
+    }
+  }
+
+  /**
+   * The files one commit changed, with line counts (graph row + hover card).
+   * A merge commit lists nothing of its own - exactly what `diff-tree` says
+   * without `-m`, and what the graph tells the reader. Bounded at
+   * COMMIT_FILES_CAP; the revision is validated before it reaches argv (SEC-2).
+   */
+  async commitFiles(
+    rootPath: string,
+    commit: string,
+  ): Promise<{ files: GitCommitFile[]; total: number; truncated: boolean }> {
+    assertValidRevision(commit)
+    const ctx = await this.repoContext(rootPath)
+    const base = ['-c', 'core.quotepath=off', 'diff-tree', '--no-commit-id', '-r', '-M', '--root', '-z']
+    const [nameStatus, numstat] = await Promise.all([
+      this.git(ctx.gitCwd, [...base, '--name-status', commit, '--']),
+      this.git(ctx.gitCwd, [...base, '--numstat', commit, '--']),
+    ])
+    return buildCommitFiles(nameStatus, numstat, ctx.prefix, COMMIT_FILES_CAP)
+  }
+
+  /**
+   * `git fetch` - brings the remote's commits in without merging anything.
+   * A failure is a sentence about the repository (forbidden #12), never git's
+   * own advice to run something.
+   */
+  async fetch(rootPath: string): Promise<GitFetchResult> {
+    const ctx = await this.repoContext(rootPath)
+    try {
+      const remotes = (await this.git(ctx.gitCwd, ['remote'])).trim()
+      if (remotes.length === 0) {
+        return { status: 'failed', detail: 'This repository has no remote to fetch from.' }
+      }
+      await this.git(ctx.gitCwd, ['fetch', '--quiet'])
+      return { status: 'fetched' }
+    } catch (error) {
+      return { status: 'failed', detail: `The fetch did not finish: ${firstLine(errorText(error))}` }
+    }
   }
 
   /** Preview a new untracked directory as a listing of its files (#247) — there
@@ -1484,12 +1683,17 @@ export class GitManager extends EventEmitter {
    * which stages+commits a specific file set; commitIndex trusts the index.
    * SEC-2: the message rides `-m <message>` as a single argv element.
    */
-  async commitIndex(rootPath: string, message: string): Promise<string> {
+  async commitIndex(
+    rootPath: string,
+    message: string,
+    options: { amend?: boolean; confirmed?: boolean } = {},
+  ): Promise<string> {
     const ctx = await this.repoContext(rootPath)
     if (typeof message !== 'string' || message.trim().length === 0) {
       throw new Error('[Git] commitIndex requires a non-empty message')
     }
     await this.#refuseConflictedCommit(ctx)
+    if (options.amend === true) return this.#amendCommit(ctx, message, options.confirmed === true)
     // #1209: scope the commit to the PROJECT. The listing has been scoped to the
     // project subtree since #1040, but this ran at the repo toplevel with no
     // pathspec — so everything in the shared index went in, including files the
@@ -1508,6 +1712,47 @@ export class GitManager extends EventEmitter {
     }
     const pathspec = scoped === null ? [] : ['--', ...scoped]
     await this.git(ctx.gitCwd, ['commit', '-m', message, ...pathspec])
+    const hash = await this.git(ctx.gitCwd, ['rev-parse', '--short', 'HEAD'])
+    return hash.trim()
+  }
+
+  /**
+   * Rewrite the last commit with the staged index and `message`.
+   *
+   * Amend replaces a commit, so it is refused unless the caller says a person
+   * asked (`confirmed`, forbidden #15), and refused outright when that commit
+   * is already on the branch's upstream - rewriting published history makes
+   * the next push diverge, which is not something one menu item should do.
+   * Also refused mid-merge, on an unborn branch, and in a project that is a
+   * subfolder of a bigger repository (the amend could not be scoped to it).
+   */
+  async #amendCommit(ctx: RepoContext, message: string, confirmed: boolean): Promise<string> {
+    if (!confirmed) {
+      throw new Error('Amending the last commit needs an explicit confirmation. Nothing was changed.')
+    }
+    if (ctx.prefix) {
+      throw new Error('This project shares its repository with others, so its last commit can’t be amended from here.')
+    }
+    const state = await this.getMergeState(ctx.root)
+    if (state.op !== 'none') {
+      throw new Error('A merge or rebase is in progress, so there is no last commit to amend.')
+    }
+    try {
+      await this.git(ctx.gitCwd, ['rev-parse', '--verify', 'HEAD'])
+    } catch {
+      throw new Error('This branch has no commit to amend yet.')
+    }
+    let published = false
+    try {
+      await this.git(ctx.gitCwd, ['merge-base', '--is-ancestor', 'HEAD', '@{upstream}'])
+      published = true
+    } catch {
+      published = false // no upstream, or HEAD not on it - both mean unpublished
+    }
+    if (published) {
+      throw new Error('The last commit is already published, so it was not amended. Make a new commit instead.')
+    }
+    await this.git(ctx.gitCwd, ['commit', '--amend', '-m', message])
     const hash = await this.git(ctx.gitCwd, ['rev-parse', '--short', 'HEAD'])
     return hash.trim()
   }
@@ -3214,6 +3459,13 @@ async function readGitStateFile(filePath: string): Promise<string> {
 }
 
 /** First non-empty line of a multi-line state file (MERGE_HEAD may be octopus). */
+/** The most useful text an exec error carries: its stderr, else its message. */
+function errorText(error: unknown): string {
+  const stderr = (error as { stderr?: unknown } | null)?.stderr
+  if (typeof stderr === 'string' && stderr.trim().length > 0) return stderr.trim()
+  return error instanceof Error ? error.message : String(error)
+}
+
 function firstLine(text: string): string {
   return text.split('\n')[0]?.trim() ?? ''
 }

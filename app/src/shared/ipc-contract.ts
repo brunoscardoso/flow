@@ -1621,6 +1621,10 @@ export interface GitStatus {
   detached?: boolean
   /** The commit HEAD is on, when detached. */
   headCommit?: string
+  /** The branch's upstream (`origin/main`), when it tracks one. Additive —
+   *  absent means no upstream, which is when the commit button offers to
+   *  publish rather than to sync. */
+  upstream?: string
 }
 
 export interface GitCommit {
@@ -1628,7 +1632,63 @@ export interface GitCommit {
   subject: string
   author: string
   date: string
+  /** Parent hashes, first parent first — what the Source Control graph draws its
+   *  lanes from. Additive: absent on payloads from before the graph. */
+  parents?: string[]
+  /** Branches, remote branches, tags and HEAD pointing at this commit. Bounded
+   *  (at most 8). Additive: absent or empty when nothing points here. */
+  refs?: GitCommitRef[]
 }
+
+/** One label the graph draws beside a commit. */
+export interface GitCommitRef {
+  /** `head` is a detached HEAD; an attached HEAD marks its branch `current`. */
+  kind: 'head' | 'branch' | 'remote' | 'tag'
+  /** Short name: `main`, `origin/main`, `v1.2`. */
+  name: string
+  /** True on the branch HEAD is on. */
+  current?: boolean
+}
+
+/** One file a commit changed, for the graph's expanded commit row. */
+export interface GitCommitFile {
+  /** Project-relative path (the same addressing as `GitFileChange.filePath`). */
+  filePath: string
+  state: GitFileState
+  renamedFrom?: string
+  /** Lines added / deleted; null for a binary file. */
+  added: number | null
+  deleted: number | null
+}
+
+/**
+ * One change region of a file's diff, as git itself splits it (`-U0`). The diff
+ * tab draws its Stage / Unstage / Revert hunk buttons from these, and echoes
+ * `index`, `header` and `digest` back so main can prove the hunk it applies is
+ * the one the person was looking at.
+ */
+export interface GitDiffHunk {
+  index: number
+  header: string
+  oldStart: number
+  oldLines: number
+  /** First line on the MODIFIED side (1-based); for a pure deletion, the line it follows. */
+  newStart: number
+  newLines: number
+  digest: string
+}
+
+/** What applying one hunk did. Refusals are states, not errors. */
+export type GitApplyHunkResult =
+  | { status: 'applied' }
+  /** The file changed since the diff was shown — nothing was applied. */
+  | { status: 'stale'; detail: string }
+  /** A revert arrived without `confirmed: true` — nothing ran (forbidden #15). */
+  | { status: 'unconfirmed'; detail: string }
+  | { status: 'failed'; detail: string }
+
+/** What a fetch did. `detail` is a sentence about the repository, never a command. */
+export type GitFetchResult = { status: 'fetched' } | { status: 'failed'; detail: string }
 
 // ── Thread change review (Cursor-style, #1906) ────────────────────────────
 //
@@ -2043,7 +2103,11 @@ export interface GitDiffRequest {
    * arriving from the renderer is an untrusted value one argv away from git
    * (the reason `commit` is revision-validated at all). Main resolves the word.
    */
-  against?: 'upstream'
+  against?: 'upstream' | 'index'
+  /** Also return the diff's hunks (`GitDiff.hunks`) — the diff tab's Stage /
+   *  Revert hunk buttons. Honoured for a working-tree diff against the index and
+   *  for a staged diff; ignored elsewhere. */
+  hunks?: boolean
 }
 
 export interface GitDiff {
@@ -2075,6 +2139,10 @@ export interface GitDiff {
    * what changed.
    */
   note?: string
+  /** The diff's hunks, when the request asked for them (bounded at 500). */
+  hunks?: GitDiffHunk[]
+  /** True when the file has more hunks than were returned. */
+  hunksTruncated?: boolean
 }
 
 // ── flow/ observation (read-only in v1) ─────────────────────────────────
@@ -6028,8 +6096,39 @@ export interface IpcInvokeMap {
   /** Unstage files from the index — `git restore --staged` (#335). */
   'git:unstage': { request: { rootId: string; filePaths: string[] }; response: void }
   'git:discardFile': { request: { rootId: string; filePath: string }; response: void }
-  /** Commit the staged index — `git commit -m <message>`, no pathspec (#335). */
-  'git:commitIndex': { request: { rootId: string; message: string }; response: { hash: string } }
+  /** Commit the staged index — `git commit -m <message>`, no pathspec (#335).
+   *  `amend` rewrites the last commit instead, and only with `confirmed: true`
+   *  and only while that commit has not been published (main refuses otherwise). */
+  'git:commitIndex': {
+    request: { rootId: string; message: string; amend?: boolean; confirmed?: boolean }
+    response: { hash: string }
+  }
+  /** The files one commit changed, with line counts — the graph's expanded row
+   *  and hover card. Bounded at 300 files; `commit` is revision-validated. */
+  'git:commitFiles': {
+    request: { rootId: string; commit: string }
+    response: { files: GitCommitFile[]; total: number; truncated: boolean }
+  }
+  /**
+   * Stage, unstage or revert ONE hunk of one file (the diff tab's hunk buttons).
+   * Main recomputes the file's diff, picks hunk `hunkIndex`, and refuses unless
+   * its header and digest still match what the renderer was shown. `revert`
+   * discards working-tree lines and runs only with `confirmed: true`.
+   */
+  'git:applyHunk': {
+    request: {
+      rootId: string
+      filePath: string
+      action: 'stage' | 'unstage' | 'revert'
+      hunkIndex: number
+      expectedHeader: string
+      expectedDigest: string
+      confirmed?: boolean
+    }
+    response: GitApplyHunkResult
+  }
+  /** Fetch from the branch's remote — `git fetch`, nothing merged. */
+  'git:fetch': { request: { rootId: string }; response: GitFetchResult }
   /**
    * Publish this checkout's branch — `worktree push` and nothing else (#1906
    * follow-on). No pull, no rebase, no force, and no pull request: one press,
@@ -7901,6 +8000,9 @@ export const IPC_INVOKE_CHANNELS = [
   'git:unstage',
   'git:discardFile',
   'git:commitIndex',
+  'git:commitFiles',
+  'git:applyHunk',
+  'git:fetch',
   'git:publish',
   'git:mergeState',
   'git:readConflicted',
@@ -8385,6 +8487,9 @@ export interface FlowGitApi {
   unstage(request: IpcRequest<'git:unstage'>): Promise<IpcResponse<'git:unstage'>>
   discardFile(request: IpcRequest<'git:discardFile'>): Promise<IpcResponse<'git:discardFile'>>
   commitIndex(request: IpcRequest<'git:commitIndex'>): Promise<IpcResponse<'git:commitIndex'>>
+  commitFiles(request: IpcRequest<'git:commitFiles'>): Promise<IpcResponse<'git:commitFiles'>>
+  applyHunk(request: IpcRequest<'git:applyHunk'>): Promise<IpcResponse<'git:applyHunk'>>
+  fetch(request: IpcRequest<'git:fetch'>): Promise<IpcResponse<'git:fetch'>>
   publish(request: IpcRequest<'git:publish'>): Promise<IpcResponse<'git:publish'>>
   mergeState(request: IpcRequest<'git:mergeState'>): Promise<IpcResponse<'git:mergeState'>>
   readConflicted(
