@@ -36,6 +36,16 @@ describe('chat-learn marker rows (2026-11-17)', () => {
     }
   })
 
+  it('asks once with two answers, and says where to change a no', () => {
+    expect(parseChatLearnMarker(formatChatLearnMarker({ ...marker, phase: 'ask' }))?.phase).toBe('ask')
+    expect(parseChatLearnMarker(formatChatLearnMarker({ ...marker, phase: 'declined' }))?.phase).toBe('declined')
+    const ask = chatLearnCopy({ ...marker, phase: 'ask' })
+    expect(ask.title).toBe('Learn CoworkerPanel for the blueprint?')
+    expect(ask.detail).toMatch(/tokens/)
+    expect(ask.action).toEqual({ kind: 'ask', yes: 'Learn automatically', no: 'Not now' })
+    expect(chatLearnCopy({ ...marker, phase: 'declined' })).toMatchObject({ detail: 'You can turn it on in Settings.', action: null })
+  })
+
   it('is a status line: only a failed run offers Try again', () => {
     expect(chatLearnCopy(marker).action).toBeNull()
     expect(chatLearnCopy({ ...marker, phase: 'learned' }).action).toBeNull()

@@ -1317,6 +1317,8 @@ function bootstrapMainProcess(): void {
   // thread, as the ask was; `chatLearnPending` remembers which threads wait on
   // each (root, module) so the outcome is told where it was started.
   const chatLearnAsked = new Set<string>()
+  /** The not-yet-answered question went out this run (asked once, not per thread). */
+  let chatLearnQuestionAsked = false
   const chatLearnPending = new Map<string, Map<string, number>>()
   const writeChatLearnRow = (threadId: string, marker: ChatLearnMarker): void => {
     try {
@@ -1346,8 +1348,12 @@ function bootstrapMainProcess(): void {
     try {
       if (chatLearnAsked.has(threadId)) return
       // A learn is an extra agent run: only after the person said yes, in
-      // onboarding or Settings (2026-11-17). Not asked is off.
-      if (!learnFromChatEnabled(appSettings.getLearnFromChat())) return
+      // onboarding or Settings (2026-11-17). A no is a no. NOT ASKED — someone
+      // who finished onboarding before the question existed — is asked in the
+      // conversation, the first time there is something to learn, once per run.
+      const answer = appSettings.getLearnFromChat()
+      if (answer === false) return
+      if (answer === null && chatLearnQuestionAsked) return
       // One area per thread, AND across restarts: `chatLearnAsked` is memory,
       // so a relaunch used to learn the same area in the same thread again
       // and draw its row a second time. The thread's own rows are the record.
@@ -1381,10 +1387,31 @@ function bootstrapMainProcess(): void {
       })
       if (ask === null) return
       chatLearnAsked.add(threadId)
+      if (!learnFromChatEnabled(answer)) {
+        chatLearnQuestionAsked = true
+        writeChatLearnRow(threadId, { root: projectRoot, module: ask.modulePath, files: ask.fileCount, phase: 'ask' })
+        return
+      }
       startChatLearn(threadId, projectRoot, ask.modulePath, ask.fileCount)
     } catch {
       // Best-effort: a turn must never fail because we tried to learn from it.
     }
+  }
+  /**
+   * The in-chat question's answer: saved as the app-wide setting, then acted
+   * on for the area it was asked about — learned now, or marked off. Only an
+   * area this thread was ASKED about, and only while that is its last row.
+   */
+  const answerChatLearnAsk = (threadId: string, rootPath: string, modulePath: string, enabled: boolean): void => {
+    const marker = threadStore
+      .listMessages(threadId)
+      .map((message) => (message.role === 'system' ? parseChatLearnMarker(message.content) : null))
+      .filter((found): found is ChatLearnMarker => found !== null && chatLearnKey(found) === chatLearnKey({ root: rootPath, module: modulePath }))
+      .pop()
+    if (marker === undefined || marker.phase !== 'ask') return
+    appSettings.setLearnFromChat(enabled)
+    if (enabled) startChatLearn(threadId, marker.root, marker.module, marker.files)
+    else writeChatLearnRow(threadId, { ...marker, phase: 'declined' })
   }
   /** The row's Try again: the same learn, started again in the same thread. */
   const retryChatLearn = (threadId: string, rootPath: string, modulePath: string): void => {
@@ -3084,6 +3111,7 @@ const understandFeature = async (request: {
     provisionRoot,
     answerBasicDiscovery,
     retryChatLearn,
+    answerChatLearnAsk,
     // Board "Learn" button (#513 phase 6/7) — a deliberate re-learn of one module.
     learnModule: (rootPath, modulePath) =>
       orchestrator.enqueueModule(rootPath, modulePath, { reason: 'manual', deliberate: true }),

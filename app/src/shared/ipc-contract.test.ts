@@ -283,6 +283,7 @@ const INVOKE_MAP_KEYS: Record<IpcInvokeChannel, true> = {
   'learn:answerBasicDiscovery': true,
   'learn:basicDiscoveryState': true,
   'learn:retryChatLearn': true,
+  'learn:answerChatLearnAsk': true,
   'learn:learnModule': true,
   'learn:learnFeature': true,
   'learn:generateFeatureView': true,

@@ -7417,6 +7417,12 @@ export interface IpcInvokeMap {
     request: { threadId: string; rootId: string; modulePath: string }
     response: void
   }
+  /** The in-chat "learn from conversations?" answer: saves the app-wide
+   *  setting, then learns the area asked about (yes) or marks it off (no). */
+  'learn:answerChatLearnAsk': {
+    request: { threadId: string; rootId: string; modulePath: string; enabled: boolean }
+    response: void
+  }
   /** Learn (or re-learn) a single module — the board's "Learn" button. Enqueues
    *  a deliberate learn pass on the main-side orchestrator; the resulting
    *  learning-state transitions surface via the blueprint watcher. */
@@ -8179,6 +8185,7 @@ export const IPC_INVOKE_CHANNELS = [
   'diagnostics:report',
   'learn:answerBasicDiscovery',
   'learn:retryChatLearn',
+  'learn:answerChatLearnAsk',
   'learn:learnModule',
   'learn:basicDiscoveryState',
   'learn:learnFeature',
@@ -9029,6 +9036,7 @@ export interface FlowLearnApi {
   answerBasicDiscovery(request: IpcRequest<'learn:answerBasicDiscovery'>): Promise<void>
   /** Answer the chat-learn ask ('yes' learns the area and re-levels the store). */
   retryChatLearn(request: IpcRequest<'learn:retryChatLearn'>): Promise<void>
+  answerChatLearnAsk(request: IpcRequest<'learn:answerChatLearnAsk'>): Promise<void>
   /** Learn (or re-learn) a single module — the board's "Learn"/"Re-learn" action. */
   learnModule(request: IpcRequest<'learn:learnModule'>): Promise<void>
   learnFeature(request: IpcRequest<'learn:learnFeature'>): Promise<void>

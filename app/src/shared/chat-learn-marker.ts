@@ -16,7 +16,13 @@
 /** Machine-parseable prefix of a persisted chat-learn system row. */
 export const CHAT_LEARN_MARKER_PREFIX = '[chat-learn]'
 
-export type ChatLearnPhase = 'learning' | 'learned' | 'failed'
+/**
+ * `ask` / `declined` (2026-11-17): a person who finished onboarding before the
+ * question existed was never asked whether learning may spend tokens. The
+ * first time a conversation would learn an area, it asks in place instead —
+ * once — and the answer is the app-wide setting.
+ */
+export type ChatLearnPhase = 'learning' | 'learned' | 'failed' | 'ask' | 'declined'
 
 export interface ChatLearnMarker {
   /** The project root the area belongs to (absolute). */
@@ -28,7 +34,7 @@ export interface ChatLearnMarker {
   phase: ChatLearnPhase
 }
 
-const PHASES: readonly ChatLearnPhase[] = ['learning', 'learned', 'failed']
+const PHASES: readonly ChatLearnPhase[] = ['learning', 'learned', 'failed', 'ask', 'declined']
 
 /** Serialize a row's content: `[chat-learn] {json}`. */
 export function formatChatLearnMarker(marker: ChatLearnMarker): string {
@@ -72,7 +78,10 @@ export interface ChatLearnCopy {
   /** Only a failed run offers something to do: try again. A learned area is
    *  a status, not a door (user, 2026-11-17: "don't need that show on the
    *  board action, this is just a component to indicate the learning"). */
-  action: { kind: 'retry'; label: string } | null
+  action:
+    | { kind: 'retry'; label: string }
+    | { kind: 'ask'; yes: string; no: string }
+    | null
 }
 
 /** What the row says in each phase. Plain words, no paths (forbidden-pattern #12). */
@@ -89,6 +98,18 @@ export function chatLearnCopy(marker: ChatLearnMarker): ChatLearnCopy {
         title: `Could not learn ${area}`,
         detail: 'nothing was added',
         action: { kind: 'retry', label: 'Try again' },
+      }
+    case 'ask':
+      return {
+        title: `Learn ${area} for the blueprint?`,
+        detail: 'Flow can do this after each conversation. It uses more tokens.',
+        action: { kind: 'ask', yes: 'Learn automatically', no: 'Not now' },
+      }
+    case 'declined':
+      return {
+        title: 'Not learning from conversations',
+        detail: 'You can turn it on in Settings.',
+        action: null,
       }
   }
 }

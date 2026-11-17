@@ -12,6 +12,8 @@ import { chatLearnCopy, type ChatLearnMarker } from '../../shared/chat-learn-mar
 
 export interface ChatLearnCardDeps {
   retry: () => Promise<void>
+  /** The in-chat question's answer (app-wide setting + this area). */
+  answer: (enabled: boolean) => Promise<void>
 }
 
 /** Paint one marker into the row — first draw and every later phase. */
@@ -37,18 +39,25 @@ export function paintChatLearnCard(row: HTMLElement, marker: ChatLearnMarker, de
   detail.textContent = copy.detail
   const nodes: Node[] = [mark, title, detail]
 
-  if (copy.action !== null) {
+  const actionButton = (label: string, run: () => Promise<void>, primary = false): HTMLButtonElement => {
     const button = document.createElement('button')
     button.type = 'button'
-    button.className = 'fl-chat-learn-action'
-    button.textContent = copy.action.label
+    button.className = primary ? 'fl-chat-learn-action primary' : 'fl-chat-learn-action'
+    button.textContent = label
     button.addEventListener('click', () => {
-      button.disabled = true
-      void deps.retry().catch(() => {
-        button.disabled = false
+      for (const sibling of row.querySelectorAll<HTMLButtonElement>('.fl-chat-learn-action')) sibling.disabled = true
+      void run().catch(() => {
+        for (const sibling of row.querySelectorAll<HTMLButtonElement>('.fl-chat-learn-action')) sibling.disabled = false
       })
     })
-    nodes.push(button)
+    return button
+  }
+  if (copy.action?.kind === 'retry') nodes.push(actionButton(copy.action.label, deps.retry))
+  if (copy.action?.kind === 'ask') {
+    nodes.push(
+      actionButton(copy.action.yes, () => deps.answer(true), true),
+      actionButton(copy.action.no, () => deps.answer(false)),
+    )
   }
   row.replaceChildren(...nodes)
 }
@@ -100,7 +109,11 @@ function injectStyles(): void {
     '  .fl-chat-learn[data-phase="learning"] .fl-chat-learn-mark::before { animation: none; }',
     '}',
     '.fl-chat-learn-title { color: var(--fl-color-text); overflow: hidden; text-overflow: ellipsis; }',
-    '.fl-chat-learn-detail { flex: none; }',
+    '.fl-chat-learn-detail { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }',
+    '.fl-chat-learn[data-phase="ask"] { height: auto; min-height: 24px; padding: 3px 4px 3px 10px; border-radius: 14px; flex-wrap: wrap; white-space: normal; }',
+    '.fl-chat-learn[data-phase="ask"] .fl-chat-learn-mark { display: none; }',
+    '.fl-chat-learn-action.primary { padding: 2px 8px; border-radius: 999px; background: var(--fl-color-accent-muted); }',
+    '.fl-chat-learn-action.primary:hover:not(:disabled) { text-decoration: none; background: var(--fl-color-accent-soft); }',
     '.fl-chat-learn-action {',
     '  flex: none;',
     '  margin-left: 2px;',

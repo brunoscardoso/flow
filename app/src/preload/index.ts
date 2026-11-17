@@ -600,6 +600,7 @@ const flowApi: FlowApi = {
   learn: {
     answerBasicDiscovery: (request) => invoke('learn:answerBasicDiscovery', request),
     retryChatLearn: (request) => invoke('learn:retryChatLearn', request),
+    answerChatLearnAsk: (request) => invoke('learn:answerChatLearnAsk', request),
     learnModule: (request) => invoke('learn:learnModule', request),
     learnFeature: (request) => invoke('learn:learnFeature', request),
     generateFeatureView: (request) => invoke('learn:generateFeatureView', request),

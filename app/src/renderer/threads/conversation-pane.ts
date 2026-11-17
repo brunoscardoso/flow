@@ -3806,6 +3806,11 @@ export class ConversationPane {
         const marker = this.#chatLearnLatest.get(key) ?? row
         await window.flow.learn.retryChatLearn({ threadId, rootId: marker.root, modulePath: marker.module })
       },
+      answer: async (enabled: boolean): Promise<void> => {
+        if (threadId === null) return
+        const marker = this.#chatLearnLatest.get(key) ?? row
+        await window.flow.learn.answerChatLearnAsk({ threadId, rootId: marker.root, modulePath: marker.module, enabled })
+      },
     }
     // ONCE PER AREA, EVER, in a thread (user, 2026-11-17: "we should not keep
     // showing the same component with the same information"). The history

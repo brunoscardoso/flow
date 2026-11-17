@@ -108,3 +108,69 @@ test('a learn started from chat shows one row in that conversation, through lear
 
   expect(errors, errors.join('\n')).toEqual([])
 })
+
+test('someone never asked is asked once in the chat, and the answer is the setting', async ({ app, window }) => {
+  const errors: string[] = []
+  window.on('pageerror', (error) => errors.push(error.message))
+  const root = await seedProject(window, 'flow-ux-chat-learn-ask-')
+  await activateProject(window, root)
+  type Api = {
+    flow: {
+      threads: { create(i: { projectRoot: string; title: string }): Promise<{ id: string }> }
+      messages: { append(i: { threadId: string; role: string; content: string }): Promise<unknown> }
+      settings: { getLearnFromChat(): Promise<{ enabled: boolean | null }> }
+    }
+  }
+  const create = (title: string) =>
+    window.evaluate(
+      async ({ root, title }) => (await (window as unknown as Api).flow.threads.create({ projectRoot: root, title })).id,
+      { root, title },
+    )
+  const append = (threadId: string, content: string) =>
+    window.evaluate(
+      async ({ threadId, content }) => {
+        await (window as unknown as Api).flow.messages.append({ threadId, role: 'system', content })
+      },
+      { threadId, content },
+    )
+  const setting = () =>
+    window.evaluate(async () => (await (window as unknown as Api).flow.settings.getLearnFromChat()).enabled)
+
+  // ── Not now: the REAL handler saves "off" and the chip says where to change it.
+  expect(await setting()).toBeNull()
+  const first = await create('Asked thread')
+  await openThreadByTitle(window, 'Asked thread')
+  await append(first, row(root, 'ask'))
+  const card = window.locator('.fl-chat-learn')
+  await expect(card).toHaveAttribute('data-phase', 'ask', { timeout: 15_000 })
+  await expect(card).toContainText('Learn CoworkerPanel for the blueprint?')
+  await expect(card).toContainText('tokens')
+  await expect(card.getByRole('button')).toHaveText(['Learn automatically', 'Not now'])
+  await window.screenshot({ path: join(__dirname, '__screens', 'learn-chat-row-ask.png') })
+  await card.getByRole('button', { name: 'Not now' }).click()
+  await expect(card).toHaveAttribute('data-phase', 'declined', { timeout: 15_000 })
+  await expect(card).toContainText('You can turn it on in Settings.')
+  await expect(card).toHaveCount(1)
+  expect(await setting()).toBe(false)
+
+  // ── Learn automatically sends this area's answer (answered in main, recorded —
+  //    a real learn would start an agent run).
+  await app.evaluate(({ ipcMain }) => {
+    const g = globalThis as unknown as { __qaAnswer?: unknown[] }
+    g.__qaAnswer = []
+    ipcMain.removeHandler('learn:answerChatLearnAsk')
+    ipcMain.handle('learn:answerChatLearnAsk', (_event, request) => {
+      ;(globalThis as unknown as { __qaAnswer: unknown[] }).__qaAnswer.push(request)
+    })
+  })
+  const second = await create('Yes thread')
+  await openThreadByTitle(window, 'Yes thread')
+  await append(second, row(root, 'ask'))
+  await expect(window.locator('.fl-chat-learn')).toHaveAttribute('data-phase', 'ask', { timeout: 15_000 })
+  await window.locator('.fl-chat-learn').getByRole('button', { name: 'Learn automatically' }).click()
+  await expect
+    .poll(() => app.evaluate(() => (globalThis as unknown as { __qaAnswer?: unknown[] }).__qaAnswer ?? []))
+    .toEqual([{ threadId: second, rootId: root, modulePath: 'src/components/modules/CoworkerPanel', enabled: true }])
+
+  expect(errors, errors.join('\n')).toEqual([])
+})

@@ -291,6 +291,7 @@ export interface IpcDependencies {
    * Optional so tests/headless harnesses can omit it.
    */
   retryChatLearn?: (threadId: string, rootPath: string, modulePath: string) => void
+  answerChatLearnAsk?: (threadId: string, rootPath: string, modulePath: string, enabled: boolean) => void
   /**
    * Learn (or re-learn) a single module (#513 phase 6) — the board's "Learn"
    * button. Enqueues a deliberate learn pass on the main-side orchestrator.
@@ -583,6 +584,7 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
     provisionRoot,
     answerBasicDiscovery,
     retryChatLearn,
+    answerChatLearnAsk,
     learnModule,
     learnFeature,
     generateFeatureView,
@@ -1480,6 +1482,9 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
   })
   handle('learn:retryChatLearn', ({ threadId, rootId, modulePath }) => {
     retryChatLearn?.(threadId, rootId, modulePath)
+  })
+  handle('learn:answerChatLearnAsk', ({ threadId, rootId, modulePath, enabled }) => {
+    answerChatLearnAsk?.(threadId, rootId, modulePath, enabled === true)
   })
   handle('learn:generateFeatureView', (request) => {
     generateFeatureView?.(request)
