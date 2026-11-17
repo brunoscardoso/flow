@@ -58,6 +58,13 @@ export interface DiffTabRequest {
   languagePath?: string
   /** The real file behind the diff — enables Open File. */
   openTarget?: { rootPath: string; relPath: string }
+  /**
+   * false: a LIVE REFRESH of the diff already open (#402). Its content is
+   * replaced in place and the tab is never brought forward — a file the
+   * person opened since must stay in front (#953). With no tab open it does
+   * nothing.
+   */
+  reveal?: boolean
 }
 
 export type HunkAction = 'stage' | 'unstage' | 'revert'
@@ -157,13 +164,17 @@ export class DiffTab {
     }
 
     // The tab first, so Monaco measures a visible host.
-    this.#host.openView({
-      id: DIFF_TAB_ID,
-      label: diffTabTitle(target),
-      icon: 'git-compare',
-      element: root,
-      preview: true,
-    })
+    if (request.reveal === false) {
+      if (!this.#host.hasTab(DIFF_TAB_ID)) return
+    } else {
+      this.#host.openView({
+        id: DIFF_TAB_ID,
+        label: diffTabTitle(target),
+        icon: 'git-compare',
+        element: root,
+        preview: true,
+      })
+    }
     this.#open = true
     this.#ensureEditor(monaco)
 

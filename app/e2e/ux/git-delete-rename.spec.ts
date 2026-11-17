@@ -22,6 +22,7 @@
  *      phantom row for the old path, and open its diff
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -109,7 +110,7 @@ test.describe('git deleted + renamed files', () => {
     // overlay, not an error toast. The file no longer exists on disk, so the
     // after side is empty and this renders as a pure deletion.
     await window.locator('.gp-name', { hasText: 'alpha.txt' }).first().click()
-    await expect(window.locator('.gd-overlay')).toBeVisible({ timeout: 12000 })
+    await expect(window.locator(sel.scmDiffTab)).toBeVisible({ timeout: 12000 })
     await expect(window.locator('.gd-body')).toContainText('alpha two', { timeout: 12000 })
     await window.screenshot({ path: join(SHOTS, 'git-del-1-diff.png') })
 
@@ -185,7 +186,7 @@ test.describe('git deleted + renamed files', () => {
 
     // Its diff opens with the file's content — not an empty/broken overlay.
     await window.locator('.gp-name', { hasText: 'renamed.txt' }).first().click()
-    await expect(window.locator('.gd-overlay')).toBeVisible({ timeout: 12000 })
+    await expect(window.locator(sel.scmDiffTab)).toBeVisible({ timeout: 12000 })
     await expect(window.locator('.gd-body')).toContainText('alpha two', { timeout: 12000 })
     await window.screenshot({ path: join(SHOTS, 'git-mv-2-diff.png') })
 

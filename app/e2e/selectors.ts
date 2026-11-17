@@ -70,10 +70,17 @@ export const sel = {
   scmFileRow: '.gp-file-row',
   scmGraphRow: '.gp-commit-row',
   scmGraphChild: '.gp-graph-child',
+  // A graph row's hover action that opens the WHOLE commit's diff (a click on
+  // the row itself expands its files).
+  scmOpenCommit: '.gp-action-open-commit',
   scmLanes: '.gp-lanes',
   // The diff, as an editor tab (the Review panel keeps its .gd-overlay).
   scmDiffTab: '.gd-diff-tab',
   scmDiffTabStrip: 'button.tab[data-id="flow://scm-diff"]',
+  scmDiffTabClose: 'button.tab[data-id="flow://scm-diff"] .close',
+  // The panel has loaded a repository: its commit box is up. (The branch is
+  // named in the status line, or in the repository row with several repos.)
+  scmReady: '.gp-commit-msg',
   scmHunkStage: '.gd-hunk-stage',
   scmHunkUnstage: '.gd-hunk-unstage',
   scmStatusBranch: '.fl-scm-branch',

@@ -40,6 +40,7 @@
  * precondition is created with real git commands before the project is attached.
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
@@ -61,7 +62,7 @@ async function openGitPanel(window: Page): Promise<void> {
   await window.locator('.fl-activity-bar .fl-rail-item[aria-label="Source Control"]').click()
   await window.locator('.fl-sc-viewbtn', { hasText: 'Changes' }).click()
   await expect(window.locator('.gp-root')).toBeVisible()
-  await expect(window.locator('.gp-branch-name')).toBeVisible({ timeout: 10000 })
+  await expect(window.locator(sel.scmReady)).toBeVisible({ timeout: 10000 })
 }
 
 /** A local-only repo (no remote, single branch) with one baseline commit.
@@ -110,7 +111,7 @@ test.describe('git — local-only repo (no remote, no upstream)', () => {
     // The commit-less repo renders its branch + an honest empty history, and
     // the untracked file as a change — no swallowed error, no "not a repo".
     const panel = window.locator('.gp-root')
-    await expect(panel).toContainText('Commits (0)', { timeout: 10000 })
+    await expect(panel).toContainText('Graph (0)', { timeout: 10000 })
     await expect(panel).toContainText('No commits')
     await expect(panel).not.toContainText('Not a git repository')
     const row = window.locator('.gp-row').filter({ hasText: 'alpha.txt' }).first()
@@ -144,7 +145,7 @@ test.describe('git — local-only repo (no remote, no upstream)', () => {
       )
       .toBe('chore: initial commit')
     await expect(panel).toContainText('Working tree clean', { timeout: 10000 })
-    await expect(panel).toContainText('Commits (1)')
+    await expect(panel).toContainText('Graph (1)')
 
     expect(errors).toEqual([])
   })

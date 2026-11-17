@@ -17,6 +17,7 @@
  * regression guard (the earlier test.fail() marker has been removed).
  */
 import { test, expect } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
@@ -47,8 +48,9 @@ function populateRepo(dir: string): void {
 }
 
 async function openGitPanel(window: import('@playwright/test').Page): Promise<string> {
-  const dir = await seedProject(window)
-  populateRepo(dir)
+  // Populated in `prepare`, BEFORE the root is added — the seed's own git
+  // writes must not depend on the tmp-dir file watcher firing afterwards.
+  const dir = await seedProject(window, undefined, populateRepo)
   await activateProject(window, dir)
   // Post-#674 activity-bar: "Source Control" rail item → "Changes" view (the
   // removed `.fl-sidetabs-tab 'Git'` silently broke this).
@@ -74,9 +76,9 @@ test.describe('git diff overlay staleness (#402)', () => {
       .locator('.gp-row', { has: window.locator('.gp-name', { hasText: 'alpha.txt' }) })
       .first()
       .click()
-    await expect(window.locator('.gd-overlay')).toBeVisible({ timeout: 5000 })
+    await expect(window.locator(sel.scmDiffTab)).toBeVisible({ timeout: 5000 })
     await expect(window.locator('.gd-title')).toHaveText('alpha.txt')
-    await expect(window.locator('.gd-subtitle')).toHaveText('Working tree vs HEAD')
+    await expect(window.locator('.gd-subtitle')).toHaveText('Working tree vs index')
 
     const NEW_LINE = 'FOURTH_ADDED_WHILE_DIFF_OPEN'
     // Edit the diffed file AND drop a brand-new file. The new file proves the

@@ -68,6 +68,7 @@
  * never race the seed on `.git/index.lock`.
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
@@ -105,14 +106,14 @@ async function openGitPanel(window: Page): Promise<void> {
     await window.locator('.fl-sc-viewbtn', { hasText: 'Changes' }).click()
   }
   await expect(window.locator('.gp-root')).toBeVisible()
-  await expect(window.locator('.gp-branch-name')).toBeVisible({ timeout: 15000 })
+  await expect(window.locator(sel.scmReady)).toBeVisible({ timeout: 15000 })
 }
 
-/** The commits section label as authored (textContent — CSS uppercases it). */
+/** The graph (was: commits) section label as authored (textContent — CSS uppercases it). */
 async function commitsHeaderText(window: Page): Promise<string> {
   return window.evaluate(() => {
     const head = [...document.querySelectorAll('.gp-section-head')].find((el) =>
-      /commits/i.test(el.textContent ?? ''),
+      /^graph/i.test((el.textContent ?? '').trim()),
     )
     return (head?.textContent ?? '').trim()
   })
@@ -124,8 +125,12 @@ async function commitSubjects(window: Page): Promise<string[]> {
     const list = [...document.querySelectorAll('fl-list')].find((l) =>
       l.getAttribute('data-list-key')?.endsWith('commits'),
     )
-    const items = (list as unknown as { items?: Array<{ subject?: string }> } | undefined)?.items
-    return (items ?? []).map((item) => item.subject ?? '')
+    // The graph's rows (2026-11): a commit row carries its commit; an
+    // expanded commit's file rows are not history.
+    const items = (
+      list as unknown as { items?: Array<{ kind?: string; commit?: { subject?: string } }> } | undefined
+    )?.items
+    return (items ?? []).filter((item) => item.kind === 'commit').map((item) => item.commit?.subject ?? '')
   })
 }
 

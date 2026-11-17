@@ -1284,7 +1284,14 @@ export class GitManager extends EventEmitter {
         this.showFileBytes(ctx.gitCwd, '', repoPath),
         readWorkingTreeFileBytes(ctx.gitCwd, repoPath),
       ])
-      const diff = buildGitDiff(wsPath, before, after)
+      const plain = buildGitDiff(wsPath, before, after)
+      // #1185 holds here too: a chmod not staged yet is a change whose two
+      // content sides are identical, so it is said in the note.
+      const note =
+        plain.beforeContent === plain.afterContent && plain.binary !== true
+          ? await this.#modeChangeNote(ctx, repoPath, 'index')
+          : null
+      const diff = note === null ? plain : { ...plain, note }
       if (options.hunks !== true || diff.binary === true) return diff
       return { ...diff, ...(await this.#hunksFor(ctx.gitCwd, repoPath, false)) }
     }
@@ -1369,9 +1376,13 @@ export class GitManager extends EventEmitter {
    * file mode, or null when the mode is unchanged / unknown. Reads git's own
    * `old mode` / `new mode` header, which the content-only diff never looked at.
    */
-  async #modeChangeNote(ctx: RepoContext, repoPath: string): Promise<string | null> {
+  async #modeChangeNote(
+    ctx: RepoContext,
+    repoPath: string,
+    base: 'HEAD' | 'index' = 'HEAD',
+  ): Promise<string | null> {
     try {
-      const raw = await this.git(ctx.gitCwd, ['diff', 'HEAD', '--', repoPath])
+      const raw = await this.git(ctx.gitCwd, base === 'HEAD' ? ['diff', 'HEAD', '--', repoPath] : ['diff', '--', repoPath])
       const oldMode = /^old mode (\d+)$/m.exec(raw)?.[1]
       const newMode = /^new mode (\d+)$/m.exec(raw)?.[1]
       if (oldMode === undefined || newMode === undefined || oldMode === newMode) return null

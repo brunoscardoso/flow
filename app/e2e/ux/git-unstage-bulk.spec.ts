@@ -113,15 +113,16 @@ test.describe('git unstage + bulk actions', () => {
     await msg.fill('chore: message typed while staged')
     await expect(window.locator('.gp-commit-btn')).toBeEnabled()
 
-    await window.locator('.gp-bulk-btn', { hasText: 'Unstage all' }).first().click()
+    await window.locator('.gp-bulk-btn.gp-bulk-unstage').first().click()
 
-    // Everything returns to Changes; Commit re-disables (nothing staged); the typed
-    // draft is preserved (VS Code parity — the message isn't lost by unstaging).
+    // Everything returns to Changes; the button re-gates from Commit to Commit
+    // All (nothing staged — 2026-11); the typed draft is preserved (VS Code
+    // parity — the message isn't lost by unstaging).
     await expectPanel(window, 'CHANGES (2)')
     await expect(async () => {
       expect(await panelText(window)).not.toContain('STAGED CHANGES')
     }).toPass({ timeout: 8000 })
-    await expect(window.locator('.gp-commit-btn')).toBeDisabled()
+    await expect(window.locator('.gp-commit-btn')).toContainText('Commit All')
     await expect(msg).toHaveValue('chore: message typed while staged')
     await window.screenshot({ path: join(SHOTS, 'git-unstage-4-unstageall.png') })
 

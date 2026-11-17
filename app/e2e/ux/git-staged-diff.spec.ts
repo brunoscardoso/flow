@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
@@ -67,14 +68,15 @@ test('a partially-staged file shows the STAGED diff in Staged Changes, working-t
   // Staged Changes → the STAGED diff: contains the staged line, NOT the later
   // unstaged edit (what a commit would actually include).
   await sectionRow(window, 'staged').click()
-  await expect(window.locator('.gd-overlay')).toBeVisible({ timeout: 5000 })
+  await expect(window.locator(sel.scmDiffTab)).toBeVisible({ timeout: 5000 })
   await expect(window.locator('.gd-subtitle')).toHaveText('Staged vs HEAD')
   await expect(window.locator('.gd-body')).toContainText('STAGED_v1')
   await expect(window.locator('.gd-body')).not.toContainText('UNSTAGED_v2')
 
   // Changes → the working-tree diff: includes the unstaged edit.
   await sectionRow(window, 'changes').click()
-  await expect(window.locator('.gd-subtitle')).toHaveText('Working tree vs HEAD')
+  // VS Code's "(Working Tree)" compares against the INDEX (2026-11).
+  await expect(window.locator('.gd-subtitle')).toHaveText('Working tree vs index')
   await expect(window.locator('.gd-body')).toContainText('UNSTAGED_v2')
 })
 
@@ -109,7 +111,7 @@ test('a newly-staged (added) file opens the STAGED diff in Staged Changes', asyn
   // Clicking it opens the staged (index-vs-HEAD) diff — an addition: empty before,
   // the staged content after.
   await row.click()
-  await expect(window.locator('.gd-overlay')).toBeVisible({ timeout: 5000 })
+  await expect(window.locator(sel.scmDiffTab)).toBeVisible({ timeout: 5000 })
   await expect(window.locator('.gd-subtitle')).toHaveText('Staged vs HEAD')
   await expect(window.locator('.gd-body')).toContainText('ADDED_CONTENT')
 })

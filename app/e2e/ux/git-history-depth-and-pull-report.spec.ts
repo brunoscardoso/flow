@@ -57,6 +57,7 @@
  * `.git/index.lock`.
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -94,12 +95,12 @@ async function openGitPanel(window: Page): Promise<void> {
     await window.locator('.fl-sc-viewbtn', { hasText: 'Changes' }).click()
   }
   await expect(window.locator('.gp-root')).toBeVisible()
-  await expect(window.locator('.gp-branch-name')).toBeVisible({ timeout: 10000 })
+  await expect(window.locator(sel.scmReady)).toBeVisible({ timeout: 10000 })
 }
 
 /** The `Commits (N)` header text. */
 function commitsHeader(window: Page) {
-  return window.locator('.gp-section-head', { hasText: 'COMMITS' }).first()
+  return window.locator('.gp-section-head', { hasText: 'Graph' }).first()
 }
 
 /** How many items the commits `fl-list` actually holds (it virtualizes rows). */
@@ -202,7 +203,7 @@ test.describe('Source Control — what the panel claims about git', () => {
     await openGitPanel(window)
 
     expect(git(dir, 'rev-list', '--count', 'HEAD').trim()).toBe('12')
-    await expect(commitsHeader(window)).toContainText('Commits (12)')
+    await expect(commitsHeader(window)).toContainText('Graph (12)')
     expect(await commitListSize(window)).toBe(12)
     // Newest first — the first rendered row is the last commit made.
     await expect(window.locator('.gp-subject').first()).toHaveText('commit number 12')

@@ -21,6 +21,7 @@
  * `if (diffView.isOpen)` — an in-flight request passes both gates and `show()`s.
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
@@ -133,7 +134,7 @@ test.describe('git diff in flight vs opening a file', () => {
       // The user's LAST action was "open beta.txt" — the late diff must not cover it.
       await window.waitForTimeout(4000)
       await window.screenshot({ path: join(SHOTS, 'git-inflight-e-covered.png') })
-      await expect(window.locator('.gd-overlay')).toBeHidden()
+      await expect(window.locator(sel.scmDiffTab)).toBeHidden()
     },
   )
 
@@ -148,7 +149,7 @@ test.describe('git diff in flight vs opening a file', () => {
       await expectPanelText(window, 'CHANGES (1)')
 
       await window.locator('.gp-name', { hasText: 'big.txt' }).first().click()
-      await expect(window.locator('.gd-overlay')).toBeVisible({ timeout: 20000 })
+      await expect(window.locator(sel.scmDiffTab)).toBeVisible({ timeout: 20000 })
 
       // The file changes again → the panel refreshes and RE-OPENS the diff
       // asynchronously (#402). Mid-flight, the user opens a file.
@@ -162,7 +163,7 @@ test.describe('git diff in flight vs opening a file', () => {
 
       await window.waitForTimeout(5000)
       await window.screenshot({ path: join(SHOTS, 'git-inflight-f-covered.png') })
-      await expect(window.locator('.gd-overlay')).toBeHidden()
+      await expect(window.locator(sel.scmDiffTab)).toBeHidden()
     },
   )
 })

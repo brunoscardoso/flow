@@ -15,6 +15,7 @@
  * refreshRoot in onAbortMerge (#507), not a working-tree watcher.
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { activateProject } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -89,7 +90,7 @@ test.describe('git merge abort recovery', () => {
     await window.locator('.fl-activity-bar .fl-rail-item[aria-label="Source Control"]').click()
     await window.locator('.fl-sc-viewbtn', { hasText: 'Changes' }).click()
     await expect(window.locator('.gp-root')).toBeVisible({ timeout: 15000 })
-    await expect(window.locator('.gp-branch-name')).toBeVisible({ timeout: 15000 })
+    await expect(window.locator(sel.scmReady)).toBeVisible({ timeout: 15000 })
     await expectPanel(window, 'Working tree clean')
 
     // Trigger the conflicting merge from a terminal — Source Control's Merge

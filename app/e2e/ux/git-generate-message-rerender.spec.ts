@@ -126,7 +126,10 @@ test.describe('git ✨ generate commit message vs. a mid-flight re-render', () =
   test.setTimeout(240_000)
 
   // ── Live guard 1 (account-independent) ─────────────────────────────────────
-  test('the wand is gated on having something staged', async ({ window }) => {
+  // 2026-11 (VS Code layout): the wand writes from the STAGED changes, or from
+  // all changes when nothing is staged — the same scope Commit All commits. It
+  // is live whenever there is any change to describe.
+  test('the wand is live whenever there is a change to describe, staged or not', async ({ window }) => {
     const errors: string[] = []
     window.on('pageerror', (e) => errors.push(String(e)))
 
@@ -137,19 +140,18 @@ test.describe('git ✨ generate commit message vs. a mid-flight re-render', () =
     await expect(wand).toBeVisible()
     await expect(wand).toHaveAttribute('aria-label', 'Generate commit message with AI')
 
-    // Nothing staged: there is no change to describe, so the wand must be dead
-    // by design (disabled), not a live button that quietly does nothing.
-    await expect(wand).toBeDisabled()
+    // Nothing staged, two changes: it describes the changes Commit All would take.
+    await expect(wand).toBeEnabled()
 
     // Staging gives it something to describe → live.
     await row(window, 'alpha.txt').locator('.gp-action-btn[title="Stage"]').click()
     await expectPanel(window, 'STAGED CHANGES (1)')
     await expect(wand).toBeEnabled()
 
-    // Unstaging takes it away again → back to disabled (the gate is not one-way).
+    // Unstaging leaves two changes to describe → still live.
     await row(window, 'alpha.txt').locator('.gp-action-btn[title="Unstage"]').click()
     await expectPanel(window, 'CHANGES (2)')
-    await expect(wand).toBeDisabled()
+    await expect(wand).toBeEnabled()
     await window.screenshot({ path: join(SHOTS, 'git-generate-gate.png') })
 
     expect(errors).toEqual([])

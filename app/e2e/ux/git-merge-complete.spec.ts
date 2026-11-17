@@ -33,6 +33,7 @@
  * own button.
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { activateProject } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -103,7 +104,7 @@ async function openSourceControl(window: Page): Promise<void> {
   await window.locator('.fl-activity-bar .fl-rail-item[aria-label="Source Control"]').click()
   await window.locator('.fl-sc-viewbtn', { hasText: 'Changes' }).click()
   await expect(window.locator('.gp-root')).toBeVisible({ timeout: 15000 })
-  await expect(window.locator('.gp-branch-name')).toBeVisible({ timeout: 15000 })
+  await expect(window.locator(sel.scmReady)).toBeVisible({ timeout: 15000 })
 }
 
 /** Monaco fires a benign "Canceled" rejection on model disposal — not an app error. */

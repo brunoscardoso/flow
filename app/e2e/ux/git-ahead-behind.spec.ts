@@ -29,6 +29,7 @@
  * whole scenario is deterministic and offline.
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, appendFileSync, rmSync } from 'node:fs'
@@ -53,7 +54,7 @@ async function openGitPanel(window: Page): Promise<void> {
   await window.locator('.fl-sc-viewbtn', { hasText: 'Changes' }).click()
   await expect(window.locator('.gp-root')).toBeVisible()
   // The branch header renders as soon as a git status resolves.
-  await expect(window.locator('.gp-branch-name')).toBeVisible({ timeout: 6000 })
+  await expect(window.locator(sel.scmReady)).toBeVisible({ timeout: 6000 })
 }
 
 test.afterAll(() => {
@@ -109,10 +110,14 @@ test.describe('git branch header — ahead/behind divergence indicator', () => {
     await activateProject(window, dir)
     await openGitPanel(window)
 
-    const badge = window.locator('.gp-ahead-behind')
-    await expect(badge).toBeVisible({ timeout: 6000 })
-    // ahead → ↑, behind → ↓, in that order.
-    await expect(badge).toHaveText('↑2 ↓1')
+    // VS Code's places for it (2026-11): the status line's sync item, and the
+    // commit button, which on a clean diverged tree IS Sync Changes.
+    const sync = window.locator(sel.scmStatusSync)
+    await expect(sync).toBeVisible({ timeout: 6000 })
+    // behind → ↓, ahead → ↑, in VS Code's order.
+    await expect(sync).toHaveText('1↓ 2↑')
+    await expect(window.locator(sel.scmCommitBtn)).toContainText('Sync Changes')
+    await expect(window.locator(sel.scmCommitBtn)).toContainText('1↓ 2↑')
     await window.screenshot({ path: join(SHOTS, 'git-ab-1-diverged.png') })
 
     expect(errors).toEqual([])
@@ -143,7 +148,9 @@ test.describe('git branch header — ahead/behind divergence indicator', () => {
     await openGitPanel(window)
 
     // The branch name + clean-tree marker render; the ↑/↓ badge must NOT.
-    await expect(window.locator('.gp-branch-name')).toHaveText('main')
+    await expect(window.locator(sel.scmStatusBranch)).toHaveText('main')
+    await expect(window.locator(sel.scmStatusSync)).toHaveText('0↓ 0↑')
+    await expect(window.locator(sel.scmCommitBtn)).not.toContainText('Sync')
     await expect(window.locator('.gp-ahead-behind')).toHaveCount(0)
     await window.screenshot({ path: join(SHOTS, 'git-ab-2-insync.png') })
 

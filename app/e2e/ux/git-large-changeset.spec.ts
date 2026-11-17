@@ -39,6 +39,7 @@
  * settle before any action so the seed's own writes can't race the watcher.
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { writeFileSync, chmodSync } from 'node:fs'
@@ -68,7 +69,7 @@ async function openGitPanel(window: Page): Promise<void> {
   await window.locator('.fl-activity-bar .fl-rail-item[aria-label="Source Control"]').click()
   await window.locator('.fl-sc-viewbtn', { hasText: 'Changes' }).click()
   await expect(window.locator('.gp-root')).toBeVisible()
-  await expect(window.locator('.gp-branch-name')).toBeVisible({ timeout: 15000 })
+  await expect(window.locator(sel.scmReady)).toBeVisible({ timeout: 15000 })
 }
 
 /** A repo with `count` tracked files, all committed. Every git call runs inside
@@ -127,7 +128,8 @@ test.describe('git — a real-sized changeset', () => {
 
     // The header counts the WHOLE changeset even though the box shows a slice.
     await expect(window.locator('.gp-root')).toContainText(`Changes (${BIG})`, { timeout: 20000 })
-    await expect(window.locator('.gp-dirty')).toHaveText(`${BIG} changed`)
+    // …and so does the section's count badge (VS Code's place for it, 2026-11).
+    await expect(window.locator('.gp-count-badge').first()).toHaveAttribute('data-count', String(BIG))
 
     const top = await changesListGeometry(window)
     console.log(
@@ -165,7 +167,7 @@ test.describe('git — a real-sized changeset', () => {
 
     // …and the row it reached is a REAL row: clicking it opens that file's diff.
     await window.locator('.gp-name', { hasText: name(BIG - 1) }).first().click()
-    const overlay = window.locator('.gd-overlay')
+    const overlay = window.locator(sel.scmDiffTab)
     await expect(overlay).toBeVisible({ timeout: 15000 })
     await expect(window.locator('.gd-title')).toHaveText(name(BIG - 1))
     await expect(overlay).toContainText(`v1 ${BIG - 1}`)
@@ -239,7 +241,7 @@ test.describe('git — a real-sized changeset', () => {
     await expect(window.locator('.gp-name', { hasText: 'script.sh' })).toBeVisible()
     await expect(window.locator('.gp-name', { hasText: 'empty.txt' })).toBeVisible()
 
-    const overlay = window.locator('.gd-overlay')
+    const overlay = window.locator(sel.scmDiffTab)
 
     // Clicking the mode-only row OPENS a diff — never the #192 silent-failure path.
     await window.locator('.gp-name', { hasText: 'script.sh' }).first().click()
@@ -258,20 +260,20 @@ test.describe('git — a real-sized changeset', () => {
     await window.screenshot({ path: join(SHOTS, 'git-large-changeset-mode-only-diff.png') })
 
     // Same for the empty new file.
-    await window.locator('.gd-close:not(.gd-open)').click()
+    await window.locator(sel.scmDiffTabClose).click()
     await expect(overlay).toBeHidden({ timeout: 10000 })
     await window.locator('.gp-name', { hasText: 'empty.txt' }).first().click()
     await expect(overlay).toBeVisible({ timeout: 15000 })
     await expect(window.locator('.gd-title')).toHaveText('empty.txt')
 
     // The mode change still COMMITS correctly — only its explanation is missing.
-    await window.locator('.gd-close:not(.gd-open)').click()
+    await window.locator(sel.scmDiffTabClose).click()
     await window.locator('.gp-name', { hasText: 'script.sh' }).first().hover()
-    await window.locator('.gp-row', { hasText: 'script.sh' }).locator('.gp-action-btn').first().click()
+    await window.locator('.gp-row', { hasText: 'script.sh' }).locator('.gp-action-btn[title="Stage"]').click()
     await expect(window.locator('.gp-root')).toContainText('Staged Changes (1)', { timeout: 15000 })
     await window.locator('.gp-commit-msg').fill('chore: make script executable')
     await window.locator('.gp-commit-btn').click()
-    await expect(window.locator('.gp-root')).toContainText('Commits (2)', { timeout: 20000 })
+    await expect(window.locator('.gp-root')).toContainText('Graph (2)', { timeout: 20000 })
     expect(git(dir, 'show', '--summary', '--format=%s', 'HEAD')).toContain('mode change 100644 => 100755')
 
     expect(errors).toEqual([])

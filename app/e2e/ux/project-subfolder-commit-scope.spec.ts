@@ -178,10 +178,11 @@ test.describe('a project that is a subfolder of its repo — commit scope', () =
       timeout: 15_000,
     })
 
-    // …and it does not arm Commit either: the button counts only what the panel
-    // shows. That is the panel's promise of project scope.
+    // …and it does not make the button "Commit" either: the button counts only
+    // what the panel shows, so with nothing staged HERE it is Commit All (which
+    // stages the panel's own rows). That is the panel's promise of project scope.
     await window.locator('.gp-commit-msg').fill('fix: package change')
-    await expect(window.locator('.gp-commit-btn')).toBeDisabled()
+    await expect(window.locator('.gp-commit-btn')).toContainText('Commit All')
 
     expect(errors, errors.join(', ')).toHaveLength(0)
   })
@@ -244,7 +245,7 @@ test.describe('two projects in one repo — Source Control group scope', () => {
       { timeout: 15_000 },
     )
     await gApp.locator('.gp-commit-msg').fill('fix: app only')
-    await expect(gApp.locator('.gp-commit-btn')).toBeDisabled()
+    await expect(gApp.locator('.gp-commit-btn')).toContainText('Commit All')
     await expect(gApp.locator('.gp-section-head', { hasText: 'STAGED' })).toHaveCount(0)
 
     expect(errors, errors.join(', ')).toHaveLength(0)

@@ -7,7 +7,9 @@
 // commit's short hash.
 
 export type DiffTarget =
-  | { kind: 'worktree'; rootPath: string; filePath: string }
+  /** `against: 'head'` — a conversation's diff, or an untracked path: the
+   *  working tree vs HEAD, with no index in between and no hunk actions. */
+  | { kind: 'worktree'; rootPath: string; filePath: string; against?: 'head' }
   | { kind: 'index'; rootPath: string; filePath: string }
   | { kind: 'commit'; rootPath: string; filePath: string; commit: string }
   /** A whole commit — every file it changed, concatenated. */
@@ -39,7 +41,7 @@ export function diffTabTitle(target: DiffTarget): string {
 export function diffSubtitle(target: DiffTarget): string {
   switch (target.kind) {
     case 'worktree':
-      return 'Working tree vs index'
+      return target.against === 'head' ? 'Working tree vs HEAD' : 'Working tree vs index'
     case 'index':
       return 'Staged vs HEAD'
     case 'commit':
@@ -55,7 +57,7 @@ export function diffFile(target: DiffTarget): string | null {
 
 /** The hunk buttons a diff offers: stage + revert on the working tree, unstage on the index. */
 export function hunkActions(target: DiffTarget): Array<'stage' | 'revert' | 'unstage'> {
-  if (target.kind === 'worktree') return ['stage', 'revert']
+  if (target.kind === 'worktree') return target.against === 'head' ? [] : ['stage', 'revert']
   if (target.kind === 'index') return ['unstage']
   return []
 }

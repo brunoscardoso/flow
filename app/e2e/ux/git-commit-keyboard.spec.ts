@@ -111,12 +111,15 @@ test.describe('git commit via keyboard (⌘/Ctrl+Enter)', () => {
     const before = commitCount(dir)
     expect(before).toBe(1) // the seed's single "feat: add alpha" — non-vacuous baseline
 
-    // (a) NOTHING staged + a real message → gate closed. ⌘/Ctrl+Enter must no-op.
-    await msg.fill('feat: keyboard fire with nothing staged')
+    // (a) NOTHING staged + a whitespace-only message → gate closed. With nothing
+    // staged the button is Commit All (2026-11), so the message is the gate.
+    // ⌘/Ctrl+Enter must no-op.
+    await msg.fill('   ')
+    await expect(window.locator('.gp-commit-btn')).toContainText('Commit All')
     await msg.press('ControlOrMeta+Enter')
     await msg.press('Control+Enter') // cover both modifiers the handler accepts
     // The message box must NOT be cleared (a commit would consume the draft)…
-    await expect(msg).toHaveValue('feat: keyboard fire with nothing staged')
+    await expect(msg).toHaveValue('   ')
     // …and NO commit may have landed.
     expect(commitCount(dir)).toBe(before)
 

@@ -21,6 +21,7 @@
  * so it is intentionally not asserted here — see flow/qa-sweep-runbook.md.)
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -135,11 +136,12 @@ test.describe('git untracked-folder expand (#615)', () => {
       .first()
       .locator('.gp-name')
       .click()
-    await expect(window.locator('.gd-overlay')).toBeVisible({ timeout: 5000 })
+    await expect(window.locator(sel.scmDiffTab)).toBeVisible({ timeout: 5000 })
     await expect(window.locator('.gd-body')).toContainText('file a', { timeout: 5000 })
 
-    await window.keyboard.press('Escape')
-    await expect(window.locator('.gd-overlay')).toBeHidden({ timeout: 4000 })
+    // The diff is an editor tab (2026-11): its close button closes it.
+    await window.locator(sel.scmDiffTabClose).click()
+    await expect(window.locator(sel.scmDiffTab)).toBeHidden({ timeout: 4000 })
 
     expect(appErrors(errors)).toEqual([])
   })

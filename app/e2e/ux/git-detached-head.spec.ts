@@ -45,6 +45,7 @@
  * Zero uncaught errors throughout.
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
@@ -66,7 +67,7 @@ async function openGitPanel(window: Page): Promise<void> {
   await window.locator('.fl-activity-bar .fl-rail-item[aria-label="Source Control"]').click()
   await window.locator('.fl-sc-viewbtn', { hasText: 'Changes' }).click()
   await expect(window.locator('.gp-root')).toBeVisible()
-  await expect(window.locator('.gp-branch-name')).toBeVisible({ timeout: 10000 })
+  await expect(window.locator(sel.scmReady)).toBeVisible({ timeout: 10000 })
 }
 
 /* NOTE: seed dir prefixes deliberately avoid the word "detached" — the panel's

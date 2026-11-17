@@ -11,6 +11,7 @@
  * guards that healthy behavior.
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { activateProject } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -67,7 +68,7 @@ async function openSourceControl(window: Page, dir: string): Promise<void> {
   // are generous: Electron boot + first git refresh is slow on a loaded machine
   // (many sequential app launches during a full sweep), and a durable guard must
   // not false-fail on that.
-  await expect(window.locator('.gp-branch-name')).toBeVisible({ timeout: 15000 })
+  await expect(window.locator(sel.scmReady)).toBeVisible({ timeout: 15000 })
   await expect(window.locator('.gp-subject').first()).toBeVisible({ timeout: 15000 })
 }
 async function panelText(window: Page): Promise<string> {

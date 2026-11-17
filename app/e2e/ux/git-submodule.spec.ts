@@ -70,6 +70,7 @@
  *    (`fl-button` hasText "Not now" — a plain `button` locator never matches).
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds, removeTempDir } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync } from 'node:fs'
@@ -149,7 +150,7 @@ async function openGitPanel(window: Page): Promise<void> {
   await window.locator('.fl-activity-bar .fl-rail-item[aria-label="Source Control"]').click()
   await window.locator('.fl-sc-viewbtn', { hasText: 'Changes' }).click()
   await expect(window.locator('.gp-root')).toBeVisible()
-  await expect(window.locator('.gp-branch-name')).toBeVisible({ timeout: 10000 })
+  await expect(window.locator(sel.scmReady)).toBeVisible({ timeout: 10000 })
 }
 
 /** The submodule's row in the panel (title carries the full repo-relative path). */
@@ -271,7 +272,7 @@ test.describe('git — submodule', () => {
       // .gd-overlay is the diff surface this panel actually opens (diff-view.ts).
       // The original selector named a class that exists nowhere — harmless while
       // this click could only ever produce an error toast, load-bearing now.
-      const overlay = window.locator('.gd-overlay')
+      const overlay = window.locator(sel.scmDiffTab)
       await expect(async () => {
         expect((await toast.count()) + (await overlay.count())).toBeGreaterThan(0)
       }).toPass({ timeout: 15000 })

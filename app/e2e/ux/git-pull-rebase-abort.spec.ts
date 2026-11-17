@@ -15,6 +15,7 @@
  * Abort are explicit user actions each followed by an explicit refreshRoot (#507).
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { activateProject } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -111,7 +112,7 @@ test.describe('git pull --rebase conflict → abort recovery', () => {
     await window.locator('.fl-activity-bar .fl-rail-item[aria-label="Source Control"]').click()
     await window.locator('.fl-sc-viewbtn', { hasText: 'Changes' }).click()
     await expect(window.locator('.gp-root')).toBeVisible({ timeout: 15000 })
-    await expect(window.locator('.gp-branch-name')).toBeVisible({ timeout: 15000 })
+    await expect(window.locator(sel.scmReady)).toBeVisible({ timeout: 15000 })
     await expectPanel(window, 'Working tree clean')
 
     // Pull → fetch + rebase local's commit onto the upstream tip → conflict.

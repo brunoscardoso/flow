@@ -8,6 +8,7 @@
  * populated and a file row is diff-able).
  */
 import { test, expect } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
@@ -51,7 +52,7 @@ test.describe('git side panel', () => {
     await openGitPanel(window)
 
     // Branch header, a populated Changes list, and the commit log all render.
-    await expect(window.locator('.gp-branch-name')).toBeVisible()
+    await expect(window.locator(sel.scmReady)).toBeVisible()
     await expect(window.locator('.gp-name', { hasText: 'alpha.txt' })).toBeVisible()
     await expect(window.locator('.gp-subject', { hasText: 'feat: add alpha' })).toBeVisible()
 
@@ -60,7 +61,7 @@ test.describe('git side panel', () => {
       .locator('.gp-row', { has: window.locator('.gp-name', { hasText: 'alpha.txt' }) })
       .first()
       .click()
-    await expect(window.locator('.gd-overlay')).toBeVisible({ timeout: 5000 })
+    await expect(window.locator(sel.scmDiffTab)).toBeVisible({ timeout: 5000 })
     await expect(window.locator('.gd-title')).toHaveText('alpha.txt')
 
     expect(errors).toEqual([])
@@ -79,7 +80,7 @@ test.describe('git side panel', () => {
       .locator('.gp-row', { has: window.locator('.gp-name', { hasText: 'alpha.txt' }) })
       .first()
       .click()
-    const diffOverlay = window.locator('.gd-overlay')
+    const diffOverlay = window.locator(sel.scmDiffTab)
     await expect(diffOverlay).toBeVisible({ timeout: 5000 })
     await expect(window.locator('.gd-title')).toHaveText('alpha.txt')
 

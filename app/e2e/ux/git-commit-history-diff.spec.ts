@@ -23,6 +23,7 @@
  * Confirmed-healthy this cycle (no user-facing defect found); the spec locks it in.
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import { execFileSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
@@ -95,13 +96,16 @@ test.describe('git commit-history diff', () => {
     // innerText), so assert the header count via panel text but the commit
     // subjects via shadow-piercing .gp-subject locators.
     await expectPanelText(window, 'Working tree clean')
-    await expectPanelText(window, 'COMMITS (2)')
+    await expectPanelText(window, 'GRAPH (2)')
     await expect(window.locator('.gp-subject', { hasText: 'feat: rework alpha' })).toBeVisible()
     await expect(window.locator('.gp-subject', { hasText: 'feat: seed alpha' })).toBeVisible()
 
     // Click the non-root commit → whole-commit diff overlay opens, titled by it.
-    await window.locator('.gp-subject', { hasText: 'feat: rework alpha' }).click()
-    await expect(window.locator('.gd-overlay')).toBeVisible({ timeout: 5000 })
+    await window
+      .locator(sel.scmGraphRow, { has: window.locator('.gp-subject', { hasText: 'feat: rework alpha' }) })
+      .locator(sel.scmOpenCommit)
+      .click()
+    await expect(window.locator(sel.scmDiffTab)).toBeVisible({ timeout: 5000 })
     await expect(window.locator('.gd-title')).toHaveText('feat: rework alpha')
 
     // The payoff: the diff shows the file's real BEFORE (parent) content next to
@@ -113,8 +117,8 @@ test.describe('git commit-history diff', () => {
     await expect(body).toContainText('remove-me', { timeout: 6000 })
     await expect(body).toContainText('add-me-now', { timeout: 6000 })
 
-    await window.keyboard.press('Escape')
-    await expect(window.locator('.gd-overlay')).toBeHidden()
+    await window.locator(sel.scmDiffTabClose).click()
+    await expect(window.locator(sel.scmDiffTab)).toBeHidden()
 
     expect(appErrors(errors)).toEqual([])
   })

@@ -64,7 +64,7 @@ test('Source Control sections collapse/expand and the fold state persists (#693)
   // All three sections render with counts, and their file rows are visible.
   await expect(sectionToggle(window, 'Staged Changes')).toBeVisible()
   await expect(sectionToggle(window, 'Changes')).toBeVisible()
-  await expect(sectionToggle(window, 'Commits')).toBeVisible()
+  await expect(sectionToggle(window, 'Graph')).toBeVisible()
   await expect(window.locator('.gp-root').getByText('staged.ts', { exact: true })).toBeVisible()
 
   // Collapse "Staged Changes" — its file row hides, but the header + count stay.

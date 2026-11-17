@@ -85,7 +85,10 @@ function alphaRow(window: Page) {
 test.afterAll(() => cleanupSeeds())
 
 test.describe('git commit gate-reason + draft survival', () => {
-  test('commit tooltip names the right gate: staged-count wins over an empty message', async ({
+  // 2026-11 (VS Code layout): with nothing staged the button is COMMIT ALL — it
+  // stages everything, so a message is the only gate left. The staged-count
+  // gate became the button's LABEL (Commit All vs Commit), not a refusal.
+  test('commit tooltip names the only gate (the message); the label follows what is staged', async ({
     window,
   }) => {
     const errors: string[] = []
@@ -97,17 +100,16 @@ test.describe('git commit gate-reason + draft survival', () => {
     const commit = window.locator('.gp-commit-btn')
     const msg = window.locator('.gp-commit-msg')
 
-    // Baseline: nothing staged, blank message → disabled, tooltip = staged gate.
+    // Baseline: nothing staged, blank message → Commit All, disabled on the message.
     await expect(commit).toBeDisabled()
-    await expect(commit).toHaveAttribute('title', 'Stage changes to commit')
+    await expect(commit).toContainText('Commit All')
+    await expect(commit).toHaveAttribute('title', 'Enter a commit message')
     await window.screenshot({ path: join(SHOTS, 'git-gatereason-1-nothing-staged.png') })
 
-    // Type a message with NOTHING staged. The stagedCount gate wins FIRST — the
-    // button must STAY disabled and the tooltip must STILL name the staged gate,
-    // NOT flip to "Enter a commit message" (that would tell the user the wrong fix).
+    // A message with NOTHING staged → Commit All is live (it stages everything).
     await msg.fill('feat: message typed before staging anything')
-    await expect(commit).toBeDisabled()
-    await expect(commit).toHaveAttribute('title', 'Stage changes to commit')
+    await expect(commit).toBeEnabled()
+    await expect(commit).toHaveAttribute('title', 'Commit All')
 
     // Clear the message and stage alpha → now the OTHER gate applies: staged but
     // blank message → disabled with the message-gate tooltip.
@@ -126,7 +128,7 @@ test.describe('git commit gate-reason + draft survival', () => {
     // A real message → enabled, tooltip flips to the ready state.
     await msg.fill('chore: commit alpha')
     await expect(commit).toBeEnabled()
-    await expect(commit).toHaveAttribute('title', 'Commit staged changes')
+    await expect(commit).toHaveAttribute('title', 'Commit')
 
     expect(errors).toEqual([])
   })
@@ -144,9 +146,9 @@ test.describe('git commit gate-reason + draft survival', () => {
     const msg = window.locator('.gp-commit-msg')
     const DRAFT = 'fix: draft I typed before I remembered to stage'
 
-    // Type the message FIRST, while nothing is staged (button still gated).
+    // Type the message FIRST, while nothing is staged (the button is Commit All).
     await msg.fill(DRAFT)
-    await expect(commit).toBeDisabled()
+    await expect(commit).toContainText('Commit All')
 
     // Now stage alpha. This is an async IPC round trip → git-status refresh → full
     // panel rebuild that RECREATES the commit textarea. The draft must survive.
@@ -155,8 +157,9 @@ test.describe('git commit gate-reason + draft survival', () => {
 
     // The recreated textarea still carries the typed draft — not wiped to empty.
     await expect(msg).toHaveValue(DRAFT)
-    // And with something now staged + a non-blank message, the button is live.
+    // And with something now staged + a non-blank message, the button is Commit.
     await expect(commit).toBeEnabled()
+    await expect(commit).toHaveText(/^Commit$/)
     await window.screenshot({ path: join(SHOTS, 'git-gatereason-3-draft-survived.png') })
 
     // Committing consumes the draft cleanly: alpha leaves the panel and the box clears.

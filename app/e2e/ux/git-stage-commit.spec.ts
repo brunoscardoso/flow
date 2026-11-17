@@ -76,9 +76,10 @@ test.describe('git stage/commit/discard lifecycle', () => {
     await expectPanel(window, 'CHANGES (2)')
     await window.screenshot({ path: join(SHOTS, 'git-stagecommit-1-dirty.png') })
 
-    // The ✨ generate button is disabled until something is staged.
-    await expect(window.locator('.gp-commit-generate')).toBeDisabled()
-    // Commit is gated too (nothing staged + no message).
+    // The wand describes the changes Commit All would take, so it is live with
+    // nothing staged (2026-11, VS Code layout). Commit All waits for a message.
+    await expect(window.locator('.gp-commit-generate')).toBeEnabled()
+    await expect(window.locator('.gp-commit-btn')).toContainText('Commit All')
     await expect(window.locator('.gp-commit-btn')).toBeDisabled()
 
     // Stage alpha via its inline (+) button. Scope to the alpha row.

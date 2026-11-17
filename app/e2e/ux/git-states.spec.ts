@@ -15,6 +15,7 @@
  * user-facing defect in the git flow); the spec locks that behavior in.
  */
 import { test, expect, type Page } from '../fixtures/electron'
+import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds, gitRetry } from './fixtures/seed'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -99,13 +100,17 @@ test.describe('git panel states + live sync', () => {
     await expectPanelText(window, 'Working tree clean')
 
     // The INITIAL (root, parentless) commit is diff-able — clicking it opens the
-    // whole-commit diff overlay (its "before" side renders empty, #289).
-    await window.locator('.gp-subject', { hasText: 'chore: initial commit' }).click()
-    await expect(window.locator('.gd-overlay')).toBeVisible({ timeout: 5000 })
+    // whole-commit diff (its "before" side renders empty, #289). Its row's Open
+    // Changes action opens it; a click on the row expands its files (2026-11).
+    await window
+      .locator(sel.scmGraphRow, { has: window.locator('.gp-subject', { hasText: 'chore: initial commit' }) })
+      .locator(sel.scmOpenCommit)
+      .click()
+    await expect(window.locator(sel.scmDiffTab)).toBeVisible({ timeout: 5000 })
     await expect(window.locator('.gd-title')).toHaveText('chore: initial commit')
 
-    await window.keyboard.press('Escape')
-    await expect(window.locator('.gd-overlay')).toBeHidden()
+    await window.locator(sel.scmDiffTabClose).click()
+    await expect(window.locator(sel.scmDiffTab)).toBeHidden()
 
     expect(appErrors(errors)).toEqual([])
   })
@@ -133,14 +138,14 @@ test.describe('git panel states + live sync', () => {
 
     // Open the diff; it must reflect the current working tree.
     await window.locator('.gp-name', { hasText: 'alpha.txt' }).first().click()
-    await expect(window.locator('.gd-overlay')).toBeVisible({ timeout: 5000 })
+    await expect(window.locator(sel.scmDiffTab)).toBeVisible({ timeout: 5000 })
     await expect(window.locator('.gd-body')).toContainText('one EDITED')
 
     // Edit again — the OPEN diff must live-refresh to the new content (#402),
     // never drift into a stale snapshot.
     writeFileSync(join(dir, 'alpha.txt'), 'one EDITED TWICE\ntwo\nthree\nfour\n')
     await expect(window.locator('.gd-body')).toContainText('one EDITED TWICE', { timeout: 6000 })
-    expect(await window.locator('.gd-overlay').isVisible()).toBe(true)
+    expect(await window.locator(sel.scmDiffTab).isVisible()).toBe(true)
 
     expect(appErrors(errors)).toEqual([])
   })
@@ -163,14 +168,14 @@ test.describe('git panel states + live sync', () => {
 
     // Open the working-tree diff for the changed file.
     await window.locator('.gp-name', { hasText: 'alpha.txt' }).first().click()
-    await expect(window.locator('.gd-overlay')).toBeVisible({ timeout: 5000 })
+    await expect(window.locator(sel.scmDiffTab)).toBeVisible({ timeout: 5000 })
 
     // Commit the file away — it leaves the CHANGES list, so its now-phantom diff
     // must close rather than keep showing a diff that no longer exists (#402).
     git(dir, 'add', '-A')
     git(dir, 'commit', '-q', '-m', 'chore: commit alpha')
     await expectPanelText(window, 'Working tree clean')
-    await expect(window.locator('.gd-overlay')).toBeHidden({ timeout: 6000 })
+    await expect(window.locator(sel.scmDiffTab)).toBeHidden({ timeout: 6000 })
 
     expect(appErrors(errors)).toEqual([])
   })

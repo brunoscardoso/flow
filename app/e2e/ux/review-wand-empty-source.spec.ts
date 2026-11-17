@@ -98,7 +98,7 @@ async function approveAll(win: Page): Promise<void> {
 
 test.afterAll(() => cleanupSeeds())
 
-test('CONTROL: the sibling "Changes" wand is offered only once something is staged', async ({
+test('CONTROL: the sibling "Changes" wand describes the changes, staged or not', async ({
   window,
 }) => {
   test.setTimeout(150_000) // seeds + provisions a repo before the panels paint
@@ -109,8 +109,9 @@ test('CONTROL: the sibling "Changes" wand is offered only once something is stag
   await openSourceControl(window, 'Changes')
   await expect(changesWand(window)).toBeAttached()
 
-  // Nothing staged → the generator has no content to describe, so it is gated.
-  await expect(changesWand(window)).toBeDisabled()
+  // Nothing staged → it describes every change, the scope Commit All takes
+  // (2026-11, VS Code layout), so it is live.
+  await expect(changesWand(window)).toBeEnabled()
 
   // Stage the file through the Phases ✓ (approve ↔ stage, #857) and come back:
   // the same wand is now enabled — the gate is state-driven, not a constant.

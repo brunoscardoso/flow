@@ -3,7 +3,7 @@
 // and a guarded amend.
 
 import { execFileSync } from 'child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
@@ -238,5 +238,28 @@ describe('GitManager.fetch and amend', () => {
     await manager.commitIndex(repo, 'second, amended', { amend: true, confirmed: true })
     expect(git(repo, 'log', '-1', '--format=%s').trim()).toBe('second, amended')
     expect(git(repo, 'rev-list', '--count', 'HEAD').trim()).toBe('2')
+  })
+})
+
+describe('GitManager.diff against the index (#1185 on the working-tree tab)', () => {
+  const manager = new GitManager(noopRoots)
+
+  it('names a chmod that is not staged yet, since both content sides are identical', async () => {
+    const repo = initRepo('flow-scm-mode-')
+    try {
+      writeFileSync(join(repo, 'run.sh'), '#!/bin/sh\necho hi\n')
+      git(repo, 'add', '.')
+      git(repo, 'commit', '-q', '-m', 'base')
+      chmodSync(join(repo, 'run.sh'), 0o755)
+      const diff = await manager.diff(repo, 'run.sh', undefined, 'index')
+      expect(diff.beforeContent).toBe(diff.afterContent)
+      expect(diff.note).toBe('Mode changed: 100644 → 100755 (no content changes)')
+      // Once staged, the working tree matches the index: nothing left to name.
+      git(repo, 'add', 'run.sh')
+      const after = await manager.diff(repo, 'run.sh', undefined, 'index')
+      expect(after.note).toBeUndefined()
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
   })
 })

@@ -291,25 +291,22 @@ test('multi-root thread: sectioned tree, per-repo git groups + independent commi
   )
   const betaTitle = (await betaGroup.locator('.gp-group-head').getAttribute('title')) ?? ''
   expect(betaTitle, 'a filesystem path reached the group tooltip').not.toContain('/')
-  // Beta's group head renders the user override as its LEFT ACCENT BORDER
-  // (live repaint via the shared CSS custom property — no reload between the
-  // IPC write and this paint). Same border grammar as the tree headers.
+  // Beta's repository row renders the user override as its DOT (2026-11, VS
+  // Code's repository row; it was a left border) — live repaint via the shared
+  // CSS custom property, no reload between the IPC write and this paint.
   await expect
     .poll(
       () =>
         betaGroup
-          .locator('.gp-group-head')
-          .evaluate((el) => getComputedStyle(el).borderLeftColor),
+          .locator('.gp-group-head .gp-group-dot')
+          .evaluate((el) => getComputedStyle(el).backgroundColor),
       { timeout: 15_000 },
     )
     .toBe(overrideRgb)
   // Branch shown per group — asserted against each repo's REAL branch name.
   //
-  // READ FROM THE SECTION, NOT THE HEADER. `.gp-group-branch` is the FOLDED
-  // summary: the header carries the branch only while a group is collapsed,
-  // because expanded it sat one line above the section's own branch line and
-  // printed the same value twice, adjacent, for every group on screen. These
-  // groups are expanded, so the section line is where the branch is.
+  // The repository row names its branch (2026-11): with several repositories
+  // on screen it is the one place a group's branch is shown.
   const alphaBranch = git(alpha, 'rev-parse', '--abbrev-ref', 'HEAD').trim()
   const betaBranch = git(beta, 'rev-parse', '--abbrev-ref', 'HEAD').trim()
   await expect(alphaGroup.locator('.gp-branch-name')).toHaveText(alphaBranch)

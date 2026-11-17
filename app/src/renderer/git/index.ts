@@ -281,10 +281,17 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
     change: GitFileChange,
     staged: boolean,
     owner: DiffOwner,
+    /** false for the #402 live refresh: update the open tab, never front it. */
+    reveal = true,
   ): Promise<void> {
     // A new untracked directory is one `dir/` entry; git:diff now returns a
     // listing of its files for it (#247), so it's previewable like any row.
     const gen = ++diffRequestSeq
+    // Which comparison the person asked for is recorded NOW, not when it
+    // settles: a live refresh landing in between re-opens the open diff with
+    // `diffStaged`, and must re-open what was just asked for — a Changes click
+    // right after a Staged one was being answered with the index diff.
+    if (reveal) diffStaged = staged
     // THE PANEL'S working-tree diff compares against the INDEX — VS Code's
     // "(Working Tree)": what a Changes row means, and what Stage hunk acts on.
     // An untracked path has no index entry (and a rolled-up folder is a
@@ -303,19 +310,21 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
       if (!diffCurrent(gen, owner)) return
       const target: DiffTarget = staged
         ? { kind: 'index', rootPath, filePath: diff.filePath }
-        : { kind: 'worktree', rootPath, filePath: diff.filePath }
+        : againstIndex
+          ? { kind: 'worktree', rootPath, filePath: diff.filePath }
+          : { kind: 'worktree', rootPath, filePath: diff.filePath, against: 'head' }
       await diffView.show({
         target,
         diff,
         languagePath: diff.filePath,
         // A file diff has a real file behind it — Open File opens it.
         openTarget: { rootPath, relPath: diff.filePath },
+        reveal,
       })
       // A staged diff reflects the INDEX, which worktree edits don't change, so it
       // must NOT live-refresh on file changes (like a commit diff → null). A
       // working-tree diff keeps its path so #402's refresh follows the file.
       settleOpenedDiff(gen, owner, rootPath, change.filePath)
-      diffStaged = staged
     } catch (error) {
       console.error('flow: git file diff failed', { rootPath, filePath: change.filePath, error })
       notify(fileDiffFailedToast(change.filePath, error))
@@ -1103,7 +1112,7 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
           const change = (status?.changes ?? []).find((c) => c.filePath === diffFilePath)
           // Re-opened under the SAME owner it already had — a live refresh must
           // not quietly hand a conversation's diff to the panel.
-          if (change && diffOwner !== null) void openFileDiff(rootPath, change, diffStaged, diffOwner)
+          if (change && diffOwner !== null) void openFileDiff(rootPath, change, diffStaged, diffOwner, false)
         }
       }
     } catch (error) {

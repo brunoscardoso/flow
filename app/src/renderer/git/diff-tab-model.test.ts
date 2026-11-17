@@ -21,11 +21,13 @@ describe('diff tab model', () => {
       'feat: x (abcdef1)',
     )
     expect(diffSubtitle(worktree)).toBe('Working tree vs index')
+    expect(diffSubtitle({ ...worktree, against: 'head' })).toBe('Working tree vs HEAD')
     expect(diffSubtitle(index)).toBe('Staged vs HEAD')
   })
 
   it('offers stage + revert on the working tree, unstage on the index, nothing on a commit', () => {
     expect(hunkActions(worktree)).toEqual(['stage', 'revert'])
+    expect(hunkActions({ ...worktree, against: 'head' })).toEqual([])
     expect(hunkActions(index)).toEqual(['unstage'])
     expect(hunkActions(commit)).toEqual([])
   })

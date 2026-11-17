@@ -158,7 +158,7 @@ test.describe('project root vs git repo root', () => {
     await expect(window.locator('.gp-empty', { hasText: 'Not a git repository' })).toBeVisible({
       timeout: 8000,
     })
-    await expect(window.locator('.gp-branch-name')).toHaveCount(0)
+    await expect(window.locator(sel.scmReady)).toHaveCount(0)
     await expect(window.locator('.gp-commit-box, .gp-commit-input')).toHaveCount(0)
     await window.screenshot({ path: `${SHOTS}/project-nongit-source-control.png` })
 
@@ -181,7 +181,7 @@ test.describe('project root vs git repo root', () => {
 
     await activateProject(window, repo)
     await openChanges(window)
-    await expect(window.locator('.gp-branch-name')).toBeVisible({ timeout: 10000 })
+    await expect(window.locator(sel.scmReady)).toBeVisible({ timeout: 10000 })
 
     // → non-repo project: the branch header must go, the notice must appear.
     // (Side-panel selection is per-project — #panels-per-project-persist — so
@@ -192,12 +192,12 @@ test.describe('project root vs git repo root', () => {
     await expect(window.locator('.gp-empty', { hasText: 'Not a git repository' })).toBeVisible({
       timeout: 8000,
     })
-    await expect(window.locator('.gp-branch-name')).toHaveCount(0)
+    await expect(window.locator(sel.scmReady)).toHaveCount(0)
 
     // → back to the repo project: the branch header must come back.
     await activateProject(window, repo)
     await openChanges(window)
-    await expect(window.locator('.gp-branch-name')).toBeVisible({ timeout: 10000 })
+    await expect(window.locator(sel.scmReady)).toBeVisible({ timeout: 10000 })
     await expect(window.locator('.gp-empty', { hasText: 'Not a git repository' })).toHaveCount(0)
 
     expect(errors, errors.join(', ')).toEqual([])
@@ -248,7 +248,7 @@ test.describe('project root vs git repo root', () => {
       // The diff must show the working-tree edit, not an empty/HEAD-only side.
       await window.locator('.gp-row', { hasText: 'inside.txt' }).first().click()
       await expect(window.locator('.gd-body')).toContainText('v1 edited', { timeout: 8000 })
-      await window.locator('.gd-close:not(.gd-open)').click()
+      await window.locator(sel.scmDiffTabClose).click()
 
       // Stage must actually stage — pre-#1040: "Couldn't stage … pathspec
       // 'app/inside.txt' did not match any files", and the index stayed empty.

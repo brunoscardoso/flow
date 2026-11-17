@@ -1046,10 +1046,7 @@ export const GP_STYLES = `
     .gp-section + .gp-section { border-top: none; margin-top: 0; padding-top: 0; }
     /* Inline on purpose: an absolutely positioned clip would read as its own
        line in the header text, splitting "Changes (2)" in two. */
-    .gp-visually-hidden {
-      display: inline-block; width: 1px; height: 1px; margin-right: -1px;
-      overflow: hidden; white-space: pre; vertical-align: bottom; opacity: 0;
-    }
+    .gp-visually-hidden { font-size: 0; white-space: pre; }
 
     /* Rows: full width, square, 22px — fl-list's own rule pads and rounds them. */
     .row { padding: 0 !important; border-radius: 0 !important; }
@@ -1086,11 +1083,21 @@ export const GP_STYLES = `
     .gp-state-untracked { color: var(--gp-state-untracked); }
     .gp-state-renamed { color: var(--gp-state-renamed); }
     .gp-state-conflicted { color: var(--gp-state-conflicted); }
-    .gp-row-actions { margin-left: 0; padding-left: 0; gap: 1px; display: none; }
+    /* Hover actions OVERLAY the row's right edge (before the letter) instead
+       of taking layout space, and fade in rather than appear: opacity keeps
+       them reachable by keyboard focus and by a pointer that lands on them
+       directly, which display:none would not. Conflict rows keep theirs in
+       the flow, always shown. */
+    .gp-row { position: relative; }
+    .gp-row-actions {
+      margin-left: 0; padding-left: 4px; gap: 1px; display: flex;
+      position: absolute; right: 26px; top: 0; height: 22px; align-items: center;
+      background: var(--fl-color-surface-raised); opacity: 0;
+    }
     .gp-row:hover .gp-row-actions,
     .row.selected .gp-row-actions,
-    .gp-row:focus-within .gp-row-actions,
-    .gp-row-conflict .gp-row-actions { display: flex; }
+    .gp-row:focus-within .gp-row-actions { opacity: 1; }
+    .gp-row-conflict .gp-row-actions { position: static; opacity: 1; background: transparent; margin-left: auto; }
     .gp-action-btn {
       width: 22px; height: 22px; min-width: 22px; padding: 0; border-radius: 4px;
       display: inline-grid; place-items: center;
@@ -1117,9 +1124,10 @@ export const GP_STYLES = `
       font: inherit; letter-spacing: inherit;
     }
     .gp-section-label { text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .gp-section-head .gp-bulk-actions { flex: none; display: none; gap: 1px; flex-wrap: nowrap; }
+    .gp-section-head .gp-bulk-actions { flex: none; display: flex; gap: 1px; flex-wrap: nowrap; opacity: 0; }
     .gp-section-head:hover .gp-bulk-actions,
-    .gp-section-head:focus-within .gp-bulk-actions { display: flex; }
+    .gp-section-head:focus-within .gp-bulk-actions,
+    .gp-merge-section .gp-section-head .gp-bulk-actions { opacity: 1; }
     .gp-icon-btn {
       width: 22px; height: 22px; padding: 0; display: inline-grid; place-items: center;
       border: none; border-radius: 4px; background: transparent;
@@ -1188,8 +1196,8 @@ export const GP_STYLES = `
     }
     .gp-group-head .gp-branch-name { font-size: 12px; color: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .gp-group-spacer { flex: 1 1 auto; }
-    .gp-group-actions { display: none; gap: 1px; }
-    .gp-group-head:hover .gp-group-actions, .gp-group-head:focus-within .gp-group-actions { display: flex; }
+    .gp-group-actions { display: flex; gap: 1px; opacity: 0; }
+    .gp-group-head:hover .gp-group-actions, .gp-group-head:focus-within .gp-group-actions { opacity: 1; }
     .gp-group-count { color: var(--fl-color-text-secondary); font-size: 12px; }
     .gp-group-boxed { padding-bottom: 4px; }
     .gp-group-boxed + .gp-group-boxed { border-top: none; padding-top: 0; margin-top: 0; }

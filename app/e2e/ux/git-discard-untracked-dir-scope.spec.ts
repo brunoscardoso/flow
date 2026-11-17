@@ -166,8 +166,9 @@ test.describe('Source Control — discard scope on untracked paths', () => {
         (await window.locator('.gp-name', { hasText: 'index.ts' }).count()) > 0
     );
 
-    const rows = await window.locator('.gp-row').allInnerTexts();
-    const listed = rows.filter((r) => r.includes('newapp'));
+    // A child row is indented under its folder and prints only its NAME
+    // (2026-11, VS Code layout), so read the names the panel lists.
+    const listed = await window.locator('.gp-row .gp-name').allInnerTexts();
     expect(listed.some((r) => r.includes('index.ts'))).toBe(true);
     expect(listed.some((r) => r.includes('.env'))).toBe(false);
     expect(listed.some((r) => r.includes('notes.local'))).toBe(false);
@@ -292,7 +293,7 @@ test.describe('Source Control — discard scope on untracked paths', () => {
       window,
       () =>
         window
-          .locator('button', { hasText: 'Revert all' })
+          .locator('.gp-bulk-revert')
           .first()
           .click({ timeout: 3000 }),
       async () => !existsSync(join(dir, 'newapp', 'index.ts'))

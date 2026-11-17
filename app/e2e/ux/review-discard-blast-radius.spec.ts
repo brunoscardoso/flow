@@ -253,11 +253,8 @@ test.describe('Review (Phases): what the destructive controls say vs what they d
     await dismissDiscoveryPrompt(win)
 
     const messages = captureDialogs(win)
-    await win
-      .locator('button')
-      .filter({ hasText: /Discard all|Revert all/ })
-      .first()
-      .click()
+    // The Changes view's Discard All is an icon button (2026-11), named by its title.
+    await win.locator('.gp-bulk-revert').first().click()
     await win.waitForTimeout(1200)
 
     expect(messages.length, 'the Changes bulk discard must confirm').toBeGreaterThan(0)
