@@ -46,7 +46,7 @@ function row(win: Page, title: string) {
   return sidebarList(win).getByText(title, { exact: true })
 }
 function searchBox(win: Page) {
-  return win.locator('input[aria-label="Search threads"]')
+  return win.locator('input[aria-label="Search threads and files"]')
 }
 
 async function seedAndFilter(win: Page): Promise<string> {
@@ -92,7 +92,7 @@ test('creating a THREAD under an active search filter clears the filter and reve
 
   // The toolbar "+" opens the new-thread PAGE (since 2026-09-04); its Create
   // makes the thread — the moment the list must reveal it.
-  await window.locator('fl-button[aria-label="New thread"]').click()
+  await window.locator('.fl-sidebar-new[aria-label="New thread"]').click()
   await expect(window.locator('.fl-newthread')).toBeVisible({ timeout: 10000 })
   await window.locator('.fl-newthread-body').fill('Look at the refunds')
   await window.locator('.fl-newthread-footer fl-button', { hasText: 'Create thread' }).click()

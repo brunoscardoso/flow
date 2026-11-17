@@ -15,7 +15,9 @@ export const sel = {
   brand: '.fl-brand-word',
 
   threadSidebar: '.fl-thread-sidebar',
-  threadSearch: '.fl-thread-search input, .fl-thread-search',
+  // One search for threads and files since the polish (2026-11-17); on the
+  // Threads tab it drives the thread list's own filter.
+  threadSearch: '.fl-sidebar-search input',
   threadList: '.fl-thread-list',
   threadEmpty: '.fl-thread-empty',
   addProject: 'fl-button[aria-label="Add project"]',
@@ -24,7 +26,9 @@ export const sel = {
   // every project count; the multi-project detail lives only in the tooltip,
   // #131). Distinct from the per-project "+" (aria-label "New thread or task in
   // <project>"), so this still resolves only the top button.
-  newThread: 'fl-button[aria-label="New thread"]',
+  // Since the polish (2026-11-17) the sidebar's New square makes the thread;
+  // on the Threads tab its aria-label is "New thread".
+  newThread: '.fl-sidebar-new[aria-label="New thread"]',
 
   conversation: '.fl-conversation',
   composer: '.fl-composer',

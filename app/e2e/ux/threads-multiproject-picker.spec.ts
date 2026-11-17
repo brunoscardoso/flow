@@ -27,7 +27,7 @@ import type { Page } from '@playwright/test'
 const SCREENS = 'e2e/ux/__screens'
 
 function newThreadBtn(win: Page) {
-  return win.locator('fl-button[aria-label="New thread"]')
+  return win.locator('.fl-sidebar-new[aria-label="New thread"]')
 }
 function chooser(win: Page) {
   // The overlay has no class; locate it by its heading text.

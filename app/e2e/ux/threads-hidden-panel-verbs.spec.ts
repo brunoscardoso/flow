@@ -44,8 +44,8 @@ const chat = (win: Page) => win.locator('.fl-conversation').first()
  */
 const hideBtn = (win: Page) => win.locator('.fl-conversation .fl-chat-hide').first()
 const newThreadBtn = (win: Page) =>
-  win.locator('.fl-thread-toolbar fl-button[aria-label="New thread"]').first()
-const searchBox = (win: Page) => win.locator('.fl-thread-search input').first()
+  win.locator('.fl-sidebar-new[aria-label="New thread"]').first()
+const searchBox = (win: Page) => win.locator('.fl-sidebar-search input').first()
 const restore = (win: Page) => win.locator('.fl-thread-restore')
 
 /** Thread titles straight from the store — the app's own truth, not the DOM. */

@@ -35,7 +35,7 @@ import type { ElectronApplication, Page } from '@playwright/test'
  */
 
 const SCREENS = 'e2e/ux/__screens'
-const CONTROL = 'input[placeholder="Search threads"]'
+const CONTROL = 'input[aria-label="Search threads and files"]'
 
 function appErrors(errors: string[]): string[] {
   return errors.filter((m) => m !== 'Canceled')
@@ -269,7 +269,7 @@ test('evidence: one Undo command, two surfaces, two answers', async ({ window, a
   // Blink groups typed characters into undo units at its own discretion, so a
   // long word can take more than one Undo to clear. Any number of them is fine
   // for the point being made: the control responds, the editor never does.
-  for (let i = 0; i < 8 && (await search.inputValue()) !== ''; i++) {
+  for (let i = 0; i < 24 && (await search.inputValue()) !== ''; i++) {
     await editCommand(app, 'undo')
     await window.waitForTimeout(300)
   }

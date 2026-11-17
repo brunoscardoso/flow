@@ -69,7 +69,7 @@ async function boardWith(window: Page, titles: string[]): Promise<string> {
 }
 
 const search = (window: Page): ReturnType<Page['locator']> =>
-  window.locator('input[aria-label="Search threads"]')
+  window.locator('input[aria-label="Search threads and files"]')
 
 /** The store's own view of the pair, read through the app's IPC bridge. */
 async function storedNames(

@@ -276,7 +276,7 @@ export async function startThreadInCheckout(
   message: string,
 ): Promise<string> {
   const before = new Set((await listThreads(win, projectRoot)).map((thread) => thread.id))
-  await win.locator('fl-button[aria-label="New thread"]').click()
+  await win.locator('.fl-sidebar-new[aria-label="New thread"]').click()
   await win.locator('.fl-newthread').waitFor({ state: 'visible', timeout: 20_000 })
   await win.locator('.fl-newthread-body').fill(message)
   await win.locator('.fl-newbranch-chip').click()

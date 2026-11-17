@@ -86,7 +86,7 @@ test('Escape closes the fresh first-run wizard after a Next click, and leaves an
 
     // The shell underneath must be live — not occluded by a lingering overlay.
     await expect(win.locator('.fl-thread-sidebar')).toBeVisible()
-    await expect(win.locator('fl-button[aria-label="New thread"]')).toBeEnabled()
+    await expect(win.locator('.fl-sidebar-new[aria-label="New thread"]')).toBeEnabled()
 
     await win.screenshot({ path: `${SCREENS}/onboarding-escape-closed.png` })
     expect(errors, errors.join(', ')).toHaveLength(0)

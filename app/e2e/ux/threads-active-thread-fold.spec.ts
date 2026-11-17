@@ -63,7 +63,7 @@ function threadRow(win: Page, title: string) {
   return sidebarList(win).getByText(title, { exact: true })
 }
 function searchBox(win: Page) {
-  return win.locator('input[aria-label="Search threads"]')
+  return win.locator('input[aria-label="Search threads and files"]')
 }
 function composer(win: Page) {
   return win.locator('.fl-composer')

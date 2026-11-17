@@ -65,7 +65,7 @@ const ASK = 'Rewrite the export pipeline'
 
 /** Open the new-thread page through the control a person presses. */
 async function openNewThreadPage(win: Page): Promise<void> {
-  await win.locator('fl-button[aria-label="New thread"]').click()
+  await win.locator('.fl-sidebar-new[aria-label="New thread"]').click()
   await expect(win.locator('.fl-newthread')).toBeVisible({ timeout: 20_000 })
 }
 

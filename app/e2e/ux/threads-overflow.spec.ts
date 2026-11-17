@@ -136,7 +136,7 @@ test('search: Escape inside the search box clears the query and restores the lis
   await newThread(window)
   await expect(threadRows(window).first()).toBeVisible({ timeout: 10000 })
 
-  const search = window.locator('.fl-thread-search input').first()
+  const search = window.locator('.fl-sidebar-search input').first()
   await search.fill('zzzz-no-such-thread-xyzzy')
 
   const emptyHint = window.locator('.fl-thread-empty')

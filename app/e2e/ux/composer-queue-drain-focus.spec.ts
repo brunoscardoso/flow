@@ -79,7 +79,7 @@ test.describe('composer — background queue drain vs. the user', () => {
 
     // The user is typing in the thread search box while a turn runs.
     await setStatus('working')
-    const search = window.locator('.fl-thread-search input').first()
+    const search = window.locator('.fl-sidebar-search input').first()
     await search.click()
     await window.keyboard.type('ab')
     expect(await focused(window)).toContain('INPUT')
@@ -161,7 +161,7 @@ test.describe('composer — background queue drain vs. the user', () => {
       await expect(window.locator(`${sel.composer} .fl-composer-queue-item`)).toHaveCount(1)
 
       // Back to work elsewhere: half a search query typed into the sidebar.
-      const search = window.locator('.fl-thread-search input').first()
+      const search = window.locator('.fl-sidebar-search input').first()
       await search.click()
       await window.keyboard.type('READ')
 

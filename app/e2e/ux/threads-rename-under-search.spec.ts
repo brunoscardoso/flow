@@ -32,7 +32,7 @@ const SCREENS = 'e2e/ux/__screens'
  * really sent, so the agent runs with no account (below).
  */
 async function createThreadViaPage(win: Page): Promise<void> {
-  await win.locator('fl-button[aria-label="New thread"]').click()
+  await win.locator('.fl-sidebar-new[aria-label="New thread"]').click()
   await expect(win.locator('.fl-newthread')).toBeVisible({ timeout: 10000 })
   await win.locator('.fl-newthread-body').fill('Look at the project')
   await win.locator('.fl-newthread-footer fl-button', { hasText: 'Create thread' }).click()
@@ -68,7 +68,7 @@ function threadRow(win: Page, title: string) {
   return sidebarList(win).getByText(title, { exact: true })
 }
 function search(win: Page) {
-  return win.locator('.fl-thread-search input')
+  return win.locator('.fl-sidebar-search input')
 }
 
 /** Open a row's ⋯ actions menu via right-click (same menu as the button). */

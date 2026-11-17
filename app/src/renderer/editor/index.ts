@@ -46,6 +46,7 @@ import { normalizeHighlightRange } from './range-highlight-model'
 import { renderMarkdown } from '../threads/markdown-renderer'
 import { isModalOverlayOpen } from '../modal-overlay'
 import { runInWantedScope } from '../tab-scope-gate'
+import { Breadcrumb } from './breadcrumb'
 import {
   contentHash,
   decideDirtyRestore,
@@ -250,15 +251,21 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
     'display:flex',
     'align-items:center',
     'gap:var(--fl-space-xs)',
-    'min-height:32px',
+    'min-height:36px',
     'padding-right:var(--fl-space-xs)',
-    'border-bottom:1px solid var(--fl-color-border-subtle, #232529)',
+    // A TRAY, NOT A BAR (polish, 2026-11-17): a shade under the editor's
+    // surface with no rule beneath it. The active tab takes the surface's fill
+    // and rounded top, so it reads as the top of the page below.
+    'background:var(--fl-color-bg)',
   ].join(';')
   tabsEl.style.flex = '1 1 auto'
   tabsEl.style.minWidth = '0'
   topBar.appendChild(tabsEl)
   topBar.appendChild(buildViewActions())
   editorWrap.appendChild(topBar)
+  // The open file's path, under the tabs (polish, 2026-11-17).
+  const breadcrumb = new Breadcrumb()
+  editorWrap.appendChild(breadcrumb.element)
   editorWrap.appendChild(bodyEl)
   surfaces.editor.replaceChildren(editorWrap)
 
@@ -476,6 +483,7 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
     // The markdown-preview toggle + pane follow the active tab (#575) — a view
     // or non-md tab hides both, an md tab reflects its own preview mode.
     syncPreviewChrome()
+    syncBreadcrumb()
     if (suppressTabsEvents) {
       return
     }
@@ -483,6 +491,14 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
       listener()
     }
     announceActiveFile(false)
+  }
+
+  /** The breadcrumb follows the active tab: a file shows its path, anything
+   *  else (a view, a scratch note, no tab) hides the row. */
+  function syncBreadcrumb(): void {
+    const active = tabs.activeId
+    const info = active !== null && !views.has(active) && !isUntitledPath(active) ? openFiles.get(active) : undefined
+    breadcrumb.update(info ? info.relPath : null)
   }
 
   // ── The open file rides along with the chat (active-file-chip.ts) ─────────

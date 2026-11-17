@@ -101,7 +101,7 @@ test.skip('a thread’s work lands on the project’s branch and its checkout go
   const baseTipBefore = git(project, 'rev-parse', 'main').trim()
 
   // A thread, and its first message.
-  await window.locator('fl-button[aria-label="New thread"]').click()
+  await window.locator('.fl-sidebar-new[aria-label="New thread"]').click()
   await window.getByText('New thread', { exact: true }).first().click()
   await expect(window.locator('.fl-composer')).toBeVisible()
   const threadId = (await listThreads(window, project))[0]?.id ?? ''

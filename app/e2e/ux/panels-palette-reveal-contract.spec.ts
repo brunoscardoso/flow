@@ -89,7 +89,7 @@ async function popupGeometry(win: Page): Promise<{
     const titlebar = document.querySelector<HTMLElement>('.fl-titlebar')?.getBoundingClientRect()
     // The sidebar's `+` is the task flow's anchor now (thread-sidebar.ts
     // `#taskAnchor`) — the separate "New task" button left that toolbar.
-    const anchor = document.querySelector<HTMLElement>('.fl-thread-sidebar fl-button[aria-label="New thread"]')
+    const anchor = document.querySelector<HTMLElement>('.fl-sidebar-new[aria-label="New thread"]')
     return {
       present: !!menu,
       top: rect ? Math.round(rect.top) : null,

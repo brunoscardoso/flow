@@ -215,6 +215,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
 
   const tabsEl = document.createElement('fl-tabs') as FlTabs
   tabsEl.classList.add('fl-term-tabs')
+  tabsEl.setAttribute('variant', 'pills')
 
   const takeoverButton = document.createElement('button')
   // fl-term-only: terminal controls, hidden while the Problems view is shown.
@@ -2146,11 +2147,11 @@ function injectPanelStyles(): void {
       display: flex;
       align-items: center;
       flex: none;
-      gap: var(--fl-space-xs);
-      padding-right: var(--fl-space-xs);
-      /* A region seam — the header's chrome against the terminal body below —
-         so it takes the separator token, not the object-edge one. */
-      border-bottom: var(--fl-border-width) solid var(--fl-color-separator);
+      gap: 2px;
+      height: 36px;
+      padding-right: 6px;
+      /* NO RULE BELOW (polish, 2026-11-17): the panel is its own rounded island
+         now, and the pills already read as a header. */
     }
     .fl-term-tabs {
       flex: 1;
@@ -2162,14 +2163,16 @@ function injectPanelStyles(): void {
       align-items: center;
       gap: var(--fl-space-xs);
       flex: none;
-      height: 22px;
-      padding: 0 var(--fl-space-sm);
+      height: 26px;
+      min-width: 26px;
+      justify-content: center;
+      padding: 0 6px;
       border: none;
-      border-radius: var(--fl-radius-sm);
+      border-radius: var(--fl-radius-row);
       background: transparent;
       color: var(--fl-color-text-secondary);
       font-family: var(--fl-font-ui);
-      font-size: var(--fl-text-caption-size);
+      font-size: 12px;
       cursor: pointer;
       user-select: none;
       white-space: nowrap;
@@ -2180,6 +2183,21 @@ function injectPanelStyles(): void {
     }
     .fl-term-tool.active {
       color: var(--fl-color-accent);
+    }
+    /* A hairline before hide: the panel's own controls, set apart from the
+       terminal's (polish, 2026-11-17). */
+    .fl-term-collapse {
+      margin-left: 9px;
+      position: relative;
+    }
+    .fl-term-collapse::before {
+      content: '';
+      position: absolute;
+      left: -6px;
+      top: 5px;
+      bottom: 5px;
+      width: 1px;
+      background: var(--fl-color-border);
     }
     .fl-term-hosts {
       position: relative;

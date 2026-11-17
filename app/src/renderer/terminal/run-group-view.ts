@@ -654,21 +654,22 @@ function injectRunStyles(): void {
     .fl-run-group[hidden] { display: none; }
     .fl-run-setup-entry {
       display: inline-flex; align-items: center; gap: var(--fl-space-xs);
-      height: 22px; padding: 0 var(--fl-space-sm);
-      border: var(--fl-border-width) dashed var(--fl-color-border);
-      border-radius: var(--fl-radius-sm);
+      height: 26px; padding: 0 8px;
+      border: none;
+      border-radius: var(--fl-radius-row);
       background: transparent; color: var(--fl-color-text-secondary);
-      font-family: var(--fl-font-ui); font-size: var(--fl-text-caption-size);
+      font-family: var(--fl-font-ui); font-size: 12px;
       cursor: pointer; white-space: nowrap;
     }
-    .fl-run-setup-entry:hover { color: var(--fl-color-text); border-color: var(--fl-color-accent); }
+    /* Borderless like its neighbours (polish, 2026-11-17): a soft fill on hover. */
+    .fl-run-setup-entry:hover { color: var(--fl-color-text); background: var(--fl-color-surface-raised); }
     .fl-run-pill {
       display: inline-flex; align-items: center; gap: var(--fl-space-xs);
-      height: 22px; padding: 0 var(--fl-space-sm);
+      height: 26px; padding: 0 8px;
       border: var(--fl-border-width) solid transparent;
-      border-radius: var(--fl-radius-sm);
+      border-radius: var(--fl-radius-row);
       background: transparent;
-      font-family: var(--fl-font-ui); font-size: var(--fl-text-caption-size);
+      font-family: var(--fl-font-ui); font-size: 12px;
       white-space: nowrap;
     }
     /* Borderless like the header's other buttons (mockup option A, 2026-11-17). */

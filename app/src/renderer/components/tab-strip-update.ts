@@ -50,6 +50,8 @@ function sameStructure(prev: TabDescriptor, next: TabDescriptor): boolean {
   return (
     prev.id === next.id &&
     prev.icon === next.icon &&
+    prev.mark?.text === next.mark?.text &&
+    prev.mark?.color === next.mark?.color &&
     (prev.closable ?? false) === (next.closable ?? false) &&
     (prev.renamable ?? false) === (next.renamable ?? false) &&
     prev.accent === next.accent &&

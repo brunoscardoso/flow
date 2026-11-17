@@ -78,7 +78,7 @@ function threadRow(win: Page, title: string) {
 }
 
 function searchBox(win: Page) {
-  return win.locator('.fl-thread-search input').first()
+  return win.locator('.fl-sidebar-search input').first()
 }
 
 test.describe('project remove-from-sidebar count vs cascade (#1082)', () => {

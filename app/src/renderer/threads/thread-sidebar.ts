@@ -345,6 +345,15 @@ export class ThreadSidebar {
   #openMenu: HTMLElement | null = null
   /** The New Task button — anchors task/connect popovers. */
   #taskAnchor: HTMLElement | null = null
+
+  /** Where the task flow's popups hang from. The sidebar's own New square
+   *  (polish, 2026-11-17) when it is on screen — the toolbar's + is hidden
+   *  under it — else the toolbar's +. */
+  #popupAnchor(): HTMLElement | null {
+    const shared = document.querySelector<HTMLElement>('.fl-sidebar-new')
+    if (shared !== null && shared.getClientRects().length > 0) return shared
+    return this.#taskAnchor
+  }
   /** The top "+" new-thread button — its tooltip tracks the project count. */
   #newThreadButton: HTMLElement | null = null
   /**
@@ -378,6 +387,7 @@ export class ThreadSidebar {
       if (event.key === 'Escape' && this.#searchInput.value) {
         this.#searchInput.value = ''
         this.#onSearchInput()
+        document.dispatchEvent(new CustomEvent('flow:thread-search-cleared'))
         return
       }
       // #1172: the box drives its own results, like ⌘P's identical input does.
@@ -575,7 +585,7 @@ export class ThreadSidebar {
           const detail = (event as CustomEvent<{ rootPath?: unknown; anchor?: unknown }>).detail
           if (typeof detail?.rootPath !== 'string') return
           const anchor =
-            detail.anchor instanceof HTMLElement && detail.anchor.isConnected ? detail.anchor : this.#newThreadButton
+            detail.anchor instanceof HTMLElement && detail.anchor.isConnected ? detail.anchor : this.#popupAnchor()
           if (anchor === null) return
           this.#openProjectMenu(detail.rootPath, anchor)
         }
@@ -600,7 +610,8 @@ export class ThreadSidebar {
           new CustomEvent('flow:reveal-sidebar', { detail: { rail: 'threads' } }),
         )
         setTimeout(() => {
-          if (this.#taskAnchor?.isConnected === true) this.#promptNewTask(this.#taskAnchor)
+          const anchor = this.#popupAnchor()
+          if (anchor?.isConnected === true) this.#promptNewTask(anchor)
         }, 0)
       }),
       api.threads.onStream((event) => {
@@ -1350,6 +1361,8 @@ export class ThreadSidebar {
     }
     this.#query = ''
     this.#searchInput.value = ''
+    // The sidebar's shared box shows this query too (polish, 2026-11-17).
+    document.dispatchEvent(new CustomEvent('flow:thread-search-cleared'))
   }
 
   /**
@@ -4274,7 +4287,7 @@ export class ThreadSidebar {
       .status({ provider })
       .then((s) => s.connected)
       .catch(() => false)
-    const anchor = this.#taskAnchor
+    const anchor = this.#popupAnchor()
     if (connected || !anchor) {
       this.#notify(projectRoot, 'Could not import issue', message, 'error')
       return
@@ -4366,7 +4379,7 @@ export class ThreadSidebar {
 
   /** Inline connect form for a provider; runs `onConnected` after storing the token. */
   #promptConnectForm(provider: 'jira' | 'github' | 'azure', onConnected: () => void): void {
-    const anchor = this.#taskAnchor
+    const anchor = this.#popupAnchor()
     if (!anchor) return
     if (provider === 'github') {
       this.#openInputForm(
@@ -5035,6 +5048,18 @@ function injectSidebarStyles(): void {
        fill states "you can type here" on its own, and the focus ring then has
        a state of its own to express instead of merely changing a line's
        colour. */
+    /* ONE SEARCH (polish, 2026-11-17): inside the shell's sidebar the search
+       row above the tabs' panes finds threads and files, and its New square
+       makes a thread — so this list's own box and + step aside, leaving the
+       filter. Outside that sidebar (no shell) they stay. */
+    .fl-activity-sidebar .fl-thread-search,
+    .fl-activity-sidebar .fl-thread-toolbar > fl-button[aria-label="New thread"] {
+      display: none;
+    }
+    .fl-activity-sidebar .fl-thread-toolbar {
+      justify-content: flex-end;
+      padding-top: 0;
+    }
     .fl-thread-search {
       display: flex;
       align-items: center;

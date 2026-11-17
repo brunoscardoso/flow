@@ -36,7 +36,7 @@ import type { Page } from '@playwright/test'
  */
 
 function newThreadBtn(win: Page) {
-  return win.locator('fl-button[aria-label="New thread"]')
+  return win.locator('.fl-sidebar-new[aria-label="New thread"]')
 }
 
 /** Thread ids currently in the store (credential-free IPC). */

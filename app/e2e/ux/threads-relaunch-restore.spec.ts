@@ -137,7 +137,7 @@ async function threadTitles(win: Page, root: string): Promise<string[]> {
 }
 
 function searchBox(win: Page) {
-  return win.locator('input[aria-label="Search threads"]')
+  return win.locator('input[aria-label="Search threads and files"]')
 }
 
 function threadRow(win: Page, title: string) {

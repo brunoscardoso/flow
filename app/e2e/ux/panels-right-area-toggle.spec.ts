@@ -239,6 +239,11 @@ test('the right-area toggle puts the editor area away, brings it back, and keeps
     // ── Put it away and relaunch: it stays away.
     await toggle.click()
     await expect.poll(async () => (await measure(win)).area, { timeout: 10_000 }).toBe(0)
+    // What the relaunch must restore is what was on screen when the app
+    // closed. Settings came up at its minimum width a moment ago and may have
+    // narrowed the sidebar (the islands' gutters leave 22px less room), so
+    // \`before\` is no longer the width to keep.
+    const closing = await measure(win)
     await win.waitForTimeout(SAVE_SETTLE_MS)
     await app.close()
     app = await launch(userDataDir, flowHome)
@@ -252,7 +257,7 @@ test('the right-area toggle puts the editor area away, brings it back, and keeps
     const relaunched = await measure(win)
     expect(relaunched.area).toBe(0)
     expect(relaunched.chat).toBeGreaterThan(before.chat + 100)
-    expect(Math.abs(relaunched.sidebar - before.sidebar)).toBeLessThan(8)
+    expect(Math.abs(relaunched.sidebar - closing.sidebar)).toBeLessThan(8)
     expect(relaunched.column).not.toBeNull()
     expect(relaunched.column!.width).toBeLessThanOrEqual(READING_COLUMN_MAX_PX + 1)
     await win.screenshot({ path: `${SCREENS}/right-area-relaunched.png` })

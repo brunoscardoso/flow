@@ -17,6 +17,7 @@ import type {
 import { neighborOf as neighborInStrip } from '../tab-neighbor'
 import { splitProjectPath } from './tab-reveal'
 import { isUntitledPath } from './untitled'
+import { fileIconBadge, fileIconColor } from './file-icon-color'
 
 export interface EditorTabsCallbacks {
   /** User activated a tab (click or programmatic cycle). */
@@ -95,6 +96,8 @@ export class EditorTabs {
       id,
       label,
       icon,
+      // A file tab wears the file tree's mark for its type (polish, 2026-11-17).
+      ...(icon === 'file' ? { mark: { text: fileIconBadge(label), color: fileIconColor(label) } } : {}),
       closable: true,
       dirty: false,
       revealable: true,

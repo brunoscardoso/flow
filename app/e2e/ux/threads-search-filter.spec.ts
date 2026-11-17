@@ -95,7 +95,7 @@ test('search filters a multi-thread list to the matching subset and clears back'
   await expect(threadRow(window, ALPHA).first()).toBeVisible()
   await expect(threadRow(window, BETA).first()).toBeVisible()
 
-  const search = window.locator('.fl-thread-search input').first()
+  const search = window.locator('.fl-sidebar-search input').first()
 
   // Query that matches only ALPHA → BETA must disappear.
   await search.fill('refund')

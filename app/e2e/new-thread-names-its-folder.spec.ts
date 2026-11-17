@@ -44,7 +44,7 @@ test('a thread created from the page lands in the folder its chip named', async 
   await activateProject(window, project)
   await settleWorktree(window, project)
 
-  await window.locator('fl-button[aria-label="New thread"]').click()
+  await window.locator('.fl-sidebar-new[aria-label="New thread"]').click()
   await expect(window.locator('.fl-newthread')).toBeVisible({ timeout: 20_000 })
   // AN ASK THAT WOULD NAME IT DIFFERENTLY, so a folder named from the subject
   // instead of from the field cannot pass by coincidence. (The title box is

@@ -28,7 +28,7 @@ test.describe('PR #334 — thread search shows a "No threads match" empty state 
   test('a no-match search names the query; clearing it restores the first-run hint', async ({
     window,
   }) => {
-    const search = window.locator('.fl-thread-search input').first()
+    const search = window.locator('.fl-sidebar-search input').first()
     const empty = window.locator(sel.threadEmpty)
     // The first-run hint is the Workspace's (every project belongs to one now):
     // a fresh launch's Default Workspace has no project open, so it says so

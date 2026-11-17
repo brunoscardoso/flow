@@ -74,34 +74,51 @@ export class FlSplit extends HTMLElement {
         flex: none;
         position: relative;
         z-index: 1;
-        background: var(--fl-color-separator);
+        /* --fl-split-seam / --fl-split-gap: the shell's top-level splits set a
+           transparent gap of ground between rounded islands (the polish of
+           2026-11-17); every other split keeps the 1px separator seam. */
+        background: var(--fl-split-seam, var(--fl-color-separator));
       }
       :host(:not([direction='vertical'])) .handle {
-        width: var(--fl-border-width);
+        width: var(--fl-split-gap, var(--fl-border-width));
         cursor: col-resize;
       }
       :host([direction='vertical']) .handle {
-        height: var(--fl-border-width);
+        height: var(--fl-split-gap, var(--fl-border-width));
         cursor: row-resize;
       }
-      /* Widen the hit area beyond the 1px visual line. */
+      /* Widen the hit area beyond the visual line (never narrower than it). */
       .handle::after {
         content: '';
         position: absolute;
       }
       :host(:not([direction='vertical'])) .handle::after {
         top: 0; bottom: 0;
-        left: calc(-1 * (var(--fl-split-handle-size) - var(--fl-border-width)) / 2);
-        width: var(--fl-split-handle-size);
+        left: calc(-1 * (max(var(--fl-split-handle-size), var(--fl-split-gap, 1px)) - var(--fl-split-gap, var(--fl-border-width))) / 2);
+        width: max(var(--fl-split-handle-size), var(--fl-split-gap, 1px));
       }
       :host([direction='vertical']) .handle::after {
         left: 0; right: 0;
-        top: calc(-1 * (var(--fl-split-handle-size) - var(--fl-border-width)) / 2);
-        height: var(--fl-split-handle-size);
+        top: calc(-1 * (max(var(--fl-split-handle-size), var(--fl-split-gap, 1px)) - var(--fl-split-gap, var(--fl-border-width))) / 2);
+        height: max(var(--fl-split-handle-size), var(--fl-split-gap, 1px));
       }
-      .handle:hover, .handle.dragging {
-        background: var(--fl-color-accent);
+      /* The accent shows on hover/drag as a thin line centred in the gap, so a
+         wide gap of ground never lights up as a thick blue bar. */
+      .handle::before {
+        content: '';
+        position: absolute;
+        background: transparent;
         transition: background-color var(--fl-transition-medium);
+        border-radius: 1px;
+      }
+      :host(:not([direction='vertical'])) .handle::before {
+        top: 0; bottom: 0; left: 50%; width: 2px; transform: translateX(-50%);
+      }
+      :host([direction='vertical']) .handle::before {
+        left: 0; right: 0; top: 50%; height: 2px; transform: translateY(-50%);
+      }
+      .handle:hover::before, .handle.dragging::before {
+        background: var(--fl-color-accent);
       }
       .handle.disabled { cursor: default; pointer-events: none; }
     `

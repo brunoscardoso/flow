@@ -29,6 +29,8 @@ import { createDebugSessionRunner } from './debug/debug-session-runner'
 import type { FlPanel } from './components'
 import { FlSplit } from './components'
 import { initFlowSettings } from './settings/flow-settings-view'
+import { tabAccessibleName } from './sidebar-search-model'
+import { createSidebarSearch } from './sidebar-search'
 import { resolveRailItem, type RailItem } from './sidetab-state'
 import { buildWorkspaceSwitcher } from './threads/workspace-switcher'
 import {
@@ -497,8 +499,50 @@ export function mountShell(root: HTMLElement): ShellSurfaces {
   })
   activitySidebarWrapper.appendChild(sidebarPanels.element)
 
+  // ONE SEARCH AND A QUIET NEW under the tabs (polish, 2026-11-17). While the
+  // box holds a query its results take the pane's place.
+  const sidebarSearch = createSidebarSearch((searching) => {
+    sidebarPanels.element.hidden = searching
+  })
+  activitySidebarWrapper.insertBefore(sidebarSearch.row, sidebarPanels.element)
+  activitySidebarWrapper.insertBefore(sidebarSearch.results, sidebarPanels.element)
+  document.addEventListener('flow:rail-item-shown', (event) => {
+    const item = (event as CustomEvent<{ item?: RailItem }>).detail?.item
+    if (item !== undefined) sidebarSearch.setTab(item)
+  })
+
+  // BLUEPRINT AT THE FOOT. It opens as an editor tab, so it is not a tab of the
+  // sidebar; it sits under the panes as the door to the map.
+  const sidebarFoot = document.createElement('button')
+  sidebarFoot.type = 'button'
+  sidebarFoot.className = 'fl-sidebar-foot'
+  sidebarFoot.title = 'Open the Blueprint as a tab'
+  const footIcon = document.createElement('fl-icon')
+  footIcon.setAttribute('name', 'map')
+  footIcon.setAttribute('size', '14')
+  const footLabel = document.createElement('span')
+  footLabel.textContent = 'Blueprint'
+  sidebarFoot.append(footIcon, footLabel)
+  sidebarFoot.addEventListener('click', () => document.dispatchEvent(new CustomEvent('flow:open-blueprint')))
+  activitySidebarWrapper.appendChild(sidebarFoot)
+
+  /** ⌘K: put the cursor in the sidebar's search, opening the sidebar if it is
+   *  put away. A focused terminal keeps ⌘K (its own clear), so it is left alone. */
+  function focusSidebarSearch(): void {
+    if (layout.focusMode) applyLayout(setFocusMode(layout, false))
+    if (!sidebarOpen) {
+      sidebarOpen = true
+      state.sidebarOpen = true
+      activityBar.setActive(activeRailItem)
+      applySidebarBody()
+      saveActive()
+    }
+    requestAnimationFrame(() => sidebarSearch.focus())
+  }
+
   // Show the initial sidebar item.
   sidebarPanels.showItem(activeRailItem)
+  sidebarSearch.setTab(activeRailItem)
 
   // Map each movable panel id → the STABLE WRAPPER reconciled into the root split.
   // Only conversation remains movable; activity sidebar is managed outside the model.
@@ -1138,6 +1182,14 @@ export function mountShell(root: HTMLElement): ShellSurfaces {
         // Search is in the Files pane now, so its shortcut opens that pane and
         // puts the caret in the box — the same thing ⌘⇧F does.
         if (digit === 6) { event.preventDefault(); document.dispatchEvent(new CustomEvent('flow:show-search')); return }
+      }
+      if (key === 'k' && mod && !event.altKey && !event.shiftKey) {
+        const focused = document.activeElement
+        if (!(focused instanceof Element && focused.closest('.xterm') !== null)) {
+          event.preventDefault()
+          focusSidebarSearch()
+          return
+        }
       }
       if (key === 'j' && mod && !event.altKey && !event.shiftKey) {
         // ⌘/Ctrl+J — toggle the bottom slot (VS Code parity, #674): terminal
@@ -1793,31 +1845,57 @@ function buildActivityBar(
   rail.setAttribute('role', 'navigation')
   rail.setAttribute('aria-label', 'Activity bar')
 
+  // NAMED TABS (polish, user 2026-11-17: "its hard to understand where is the
+  // file tree"). Four unlabelled icons switched the whole sidebar and nothing
+  // said which one was the file tree; each tab now says its name, inside one
+  // segmented tray. Changes carries the count of changed files.
   const ENTRIES: Array<{ item: RailItem; icon: string; label: string }> = [
     { item: 'threads', icon: 'message', label: 'Threads' },
     { item: 'files', icon: 'folder', label: 'Files' },
-    { item: 'source-control', icon: 'git-branch', label: 'Source Control' },
+    { item: 'source-control', icon: 'git-branch', label: 'Changes' },
   ]
 
   const buttons = new Map<RailItem, HTMLButtonElement>()
+  const tray = document.createElement('div')
+  tray.className = 'fl-side-tabs'
+  let changesCount: number | null = null
+  let changesBadge: HTMLElement | null = null
 
   for (const { item, icon, label } of ENTRIES) {
     const btn = document.createElement('button')
     btn.type = 'button'
-    btn.className = 'fl-rail-item'
-    btn.title = label
+    btn.className = 'fl-rail-item fl-side-tab'
     btn.setAttribute('aria-label', label)
     btn.setAttribute('data-rail-item', item)
     const iconEl = document.createElement('fl-icon')
-    // 15, not 18: at 18 the glyphs filled their buttons edge to edge and the
-    // row read as a strip of tiles rather than a row of icons.
     iconEl.setAttribute('name', icon)
-    iconEl.setAttribute('size', '15')
-    btn.appendChild(iconEl)
+    iconEl.setAttribute('size', '14')
+    const text = document.createElement('span')
+    text.className = 'fl-side-tab-label'
+    text.textContent = label
+    btn.append(iconEl, text)
+    if (item === 'source-control') {
+      changesBadge = document.createElement('span')
+      changesBadge.className = 'fl-side-tab-count'
+      changesBadge.hidden = true
+      btn.appendChild(changesBadge)
+    }
     btn.addEventListener('click', () => onSelect(item))
-    rail.appendChild(btn)
+    tray.appendChild(btn)
     buttons.set(item, btn)
   }
+  rail.appendChild(tray)
+
+  /** The Changes tab's count — the changed files Source Control last read. */
+  document.addEventListener('flow:changes-count', (event) => {
+    const count = (event as CustomEvent<{ count?: number | null }>).detail?.count
+    changesCount = typeof count === 'number' && count > 0 ? count : null
+    if (changesBadge !== null) {
+      changesBadge.hidden = changesCount === null
+      changesBadge.textContent = changesCount === null ? '' : String(changesCount)
+    }
+    buttons.get('source-control')?.setAttribute('aria-label', tabAccessibleName('Changes', changesCount))
+  })
 
   // #1212: the rail tracks WHICH item is selected AND WHETHER its pane is
   // actually shown. It used to track only the first, so collapsing the sidebar
@@ -1929,7 +2007,8 @@ function injectShellStyles(): void {
       display: flex;
       flex-direction: column;
       height: 100vh;
-      background: var(--fl-color-bg);
+      /* The ground the islands sit on (polish, 2026-11-17). */
+      background: var(--fl-color-ground);
     }
     .fl-titlebar {
       -webkit-app-region: drag;
@@ -1951,7 +2030,10 @@ function injectShellStyles(): void {
          the state survives a relaunch, so a user who zooms out once lands
          back in it forever. Zoom in and the strip became dead space. */
       padding: 0 ${insets.right} 0 ${insets.left};
-      background: var(--fl-color-titlebar);
+      /* ON THE GROUND (polish, 2026-11-17): the header is no band of its own
+         any more — the islands below carry the structure, and the bar reads as
+         the window's frame around them. */
+      background: var(--fl-color-ground);
       /* NO edge at all. It carried the project's accent colour for a while —
          one project, one colour on the window's own border — and that was
          dropped because at this height a coloured line reads as a band across
@@ -2109,6 +2191,28 @@ function injectShellStyles(): void {
       flex-direction: row;
       flex: 1;
       min-height: 0;
+      /* A frame of ground around the islands, sides only: the titlebar above
+         and the status bar below are themselves ground. */
+      padding: 0 var(--fl-island-gap);
+    }
+    /* ISLANDS (polish, 2026-11-17, the "Flow layout polish" canvas). The two
+       top-level splits leave a gap of ground between their panes instead of a
+       1px seam, and every pane that is not itself a split is drawn as a
+       rounded card: one radius, one hairline. Nested splits inside an island
+       reset to the seam, so a diff or a board keeps its own fine dividers. */
+    #fl-split-root,
+    #fl-split-editor-stack {
+      --fl-split-gap: var(--fl-island-gap);
+      --fl-split-seam: transparent;
+    }
+    #fl-split-root > :not(fl-split),
+    #fl-split-editor-stack > * {
+      --fl-split-gap: var(--fl-border-width);
+      --fl-split-seam: var(--fl-color-separator);
+      border: var(--fl-border-width) solid var(--fl-color-island-border);
+      border-radius: var(--fl-radius-island);
+      overflow: hidden;
+      background-clip: padding-box;
     }
     .fl-shell-main > fl-split {
       flex: 1;
@@ -2117,6 +2221,7 @@ function injectShellStyles(): void {
     /* Activity sidebar — swappable content panel (Files/SC/Terminal/Tasks/Blueprint).
        Separate from the threads fl-panel so initThreads' replaceChildren never wipes it. */
     .fl-activity-sidebar {
+      container-type: inline-size;
       display: flex;
       flex-direction: column;
       min-height: 0;
@@ -2127,10 +2232,32 @@ function injectShellStyles(): void {
       flex: 1;
       min-height: 0;
     }
-    /* …except the icon row, which is a fixed-height first line, not a pane. */
-    .fl-activity-sidebar > .fl-activity-bar {
+    /* …except the rows that are not panes: the tabs, the search row and the
+       Blueprint door at the foot. */
+    .fl-activity-sidebar > .fl-activity-bar,
+    .fl-activity-sidebar > .fl-sidebar-search-row,
+    .fl-activity-sidebar > .fl-sidebar-foot {
       flex: none;
     }
+    .fl-sidebar-foot {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 6px 8px 8px;
+      height: 32px;
+      padding: 0 10px;
+      border: var(--fl-border-width) solid var(--fl-color-island-border);
+      border-radius: var(--fl-radius-md);
+      background: transparent;
+      color: var(--fl-color-text-secondary);
+      font: inherit;
+      font-size: 12.5px;
+      text-align: left;
+      cursor: pointer;
+      transition: background-color var(--fl-transition-fast), color var(--fl-transition-fast);
+    }
+    .fl-sidebar-foot fl-icon { color: var(--fl-color-accent); }
+    .fl-sidebar-foot:hover { background: var(--fl-color-surface-raised); color: var(--fl-color-text); }
     /* Threads pane inside the activity sidebar — fills the full pane height. */
     .fl-sidebar-threads {
       display: flex;
@@ -2155,16 +2282,17 @@ function injectShellStyles(): void {
       display: flex;
       flex-direction: row;
       align-items: center;
-      justify-content: center;
+      justify-content: flex-start;
       flex: none;
-      height: 34px;
-      background: var(--fl-color-bg);
+      height: 44px;
+      padding: 0 8px;
+      background: transparent;
       /* No bottom rule. The sidebar's top used to stack four horizontal lines
          in 34px — this one, the search box's own two edges, and the toolbar's.
          The other three are gone; keeping this one would leave a rule with
          nothing on either side of it to separate, since the row below is the
          filled search field, which already reads as its own object. */
-      gap: 2px;
+      gap: 4px;
       user-select: none;
       /* The whole row must survive the sidebar's narrowest legal width — the
          root split's min-size is 180px, and 6 items + the divider come to 175.
@@ -2177,9 +2305,9 @@ function injectShellStyles(): void {
       align-items: center;
       justify-content: center;
       width: 26px;
-      height: 24px;
+      height: 26px;
       border: none;
-      border-radius: var(--fl-radius-sm);
+      border-radius: var(--fl-radius-row);
       background: transparent;
       color: var(--fl-color-text-secondary);
       cursor: pointer;
@@ -2208,6 +2336,51 @@ function injectShellStyles(): void {
     @media (prefers-reduced-motion: reduce) {
       .fl-rail-item { transition: none; }
     }
+    /* THE SIDEBAR'S TABS (polish, 2026-11-17): a segmented tray of named
+       tabs. The open one is a raised neutral pill, not an accent tint — the
+       sidebar's blue is kept for the row a person is working on. */
+    .fl-side-tabs {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      gap: 2px;
+      padding: 3px;
+      border-radius: var(--fl-radius-md);
+      background: var(--fl-color-ground);
+    }
+    .fl-rail-item.fl-side-tab {
+      flex: 1 1 auto;
+      min-width: 0;
+      width: auto;
+      height: 28px;
+      gap: 6px;
+      padding: 0 6px;
+      font-family: var(--fl-font-ui);
+      font-size: 12.5px;
+      color: var(--fl-color-text-secondary);
+      overflow: hidden;
+    }
+    .fl-side-tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .fl-rail-item.fl-side-tab:hover { background: transparent; color: var(--fl-color-text); }
+    .fl-rail-item.fl-side-tab.active,
+    .fl-rail-item.fl-side-tab.active:hover {
+      background: var(--fl-color-surface-selected);
+      color: var(--fl-color-text);
+    }
+    .fl-side-tab-count {
+      flex: none;
+      padding: 0 5px;
+      border-radius: 999px;
+      background: var(--fl-color-accent-muted);
+      color: var(--fl-color-accent);
+      font-size: 10.5px;
+      font-weight: 600;
+      line-height: 16px;
+    }
+    /* Narrow sidebar: the names go before the icons do. */
+    @container (max-width: 250px) {
+      .fl-side-tab-label { display: none; }
+    }
     .fl-status-bar {
       display: flex;
       align-items: center;
@@ -2215,9 +2388,9 @@ function injectShellStyles(): void {
       flex: none;
       height: 24px;
       padding: 0 var(--fl-space-sm);
-      background: var(--fl-color-bg);
-      /* A region seam — the bar's chrome fill against the content above it. */
-      border-top: var(--fl-border-width) solid var(--fl-color-separator);
+      /* On the ground, like the titlebar: the islands above end in their own
+         rounded edge, so the bar needs no seam to be told apart. */
+      background: var(--fl-color-ground);
       color: var(--fl-color-text-secondary);
       font-size: var(--fl-text-caption-size);
       user-select: none;

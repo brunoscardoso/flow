@@ -156,7 +156,7 @@ test.describe('flow 12 — popups vs panel shortcuts, and the rail Terminal togg
     await seeded(window, 'flow-ux-railA-')
     const state = await railState(window)
     const byLabel = (l: string) => state.find((s) => s.label === l)
-    expect(state.map((s) => s.label)).toEqual(['Threads', 'Files', 'Source Control'])
+    expect(state.map((s) => (s.label ?? '').split(',')[0])).toEqual(['Threads', 'Files', 'Changes'])
     expect(byLabel('Threads')?.cls).toContain('active')
     expect(byLabel('Threads')?.pressed).toBe('true')
     expect(byLabel('Files')?.pressed).toBe('false')

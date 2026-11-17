@@ -35,7 +35,7 @@ function sidebarList(win: Page) {
   return win.locator('.fl-thread-list fl-list')
 }
 function searchBox(win: Page) {
-  return win.locator('input[aria-label="Search threads"]')
+  return win.locator('input[aria-label="Search threads and files"]')
 }
 function threadRow(win: Page, title: string) {
   return sidebarList(win).getByText(title, { exact: true })

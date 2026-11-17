@@ -28,10 +28,12 @@ test.describe('shell chrome', () => {
     await expect(window.locator(sel.addProject)).toHaveCount(0)
     // NEW TASK IS A MENU ITEM NOW, not a toolbar button — it moved into the
     // project row's menu, so a locator for a standalone button finds nothing.
-    // The toolbar's own controls are the search field and New thread.
+    // Since the polish (2026-11-17) the sidebar's head holds one search for
+    // threads and files and the New square; the list's own box steps aside.
     await expect(window.locator(sel.newTask)).toHaveCount(0)
     await expect(window.locator(sel.newThread)).toBeVisible()
-    await expect(window.locator('input[aria-label="Search threads"]')).toBeVisible()
+    await expect(window.locator('input[aria-label="Search threads and files"]')).toBeVisible()
+    await expect(window.locator('input[aria-label="Search threads"]')).toBeHidden()
   })
 
   test('exposes Files + Source Control on the activity-bar rail, with SC view modes (#335/#674)', async ({

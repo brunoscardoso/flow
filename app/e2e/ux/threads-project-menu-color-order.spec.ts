@@ -187,7 +187,7 @@ async function switcherOrder(win: Page): Promise<string[]> {
 /** Create a thread over exactly the given number of the open projects. With 2+
  *  roots the "+" opens the multi-project chooser (#45/#131). */
 async function newThread(win: Page, spanAll: boolean): Promise<void> {
-  await win.locator('fl-button[aria-label="New thread"]').click()
+  await win.locator('.fl-sidebar-new[aria-label="New thread"]').click()
   await expect(win.getByText('Projects for this thread', { exact: true })).toBeVisible({
     timeout: 5000,
   })

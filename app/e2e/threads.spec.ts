@@ -8,7 +8,7 @@ import { sel } from './selectors'
  */
 test.describe('threads sidebar', () => {
   test('search input accepts text', async ({ window }) => {
-    const search = window.locator('.fl-thread-search input').first()
+    const search = window.locator('.fl-sidebar-search input').first()
     await expect(search).toBeVisible()
     await search.fill('checkout flow')
     await expect(search).toHaveValue('checkout flow')

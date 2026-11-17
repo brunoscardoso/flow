@@ -231,7 +231,7 @@ test('searching for an archived task returns exactly one row, inside the Archive
   await expect(row(window, 'Zephyr Task')).toHaveCount(0, { timeout: 5000 })
   await expect.poll(() => archiveCountText(window), { timeout: 8000 }).toBe('Archived (1)')
 
-  await window.locator('.fl-thread-search input').first().fill('Zephyr')
+  await window.locator('.fl-sidebar-search input').first().fill('Zephyr')
   await expect(row(window, 'Zephyr Live').first()).toBeVisible({ timeout: 5000 })
 
   // ONE row for the archived task, and it is the archived one (task menu),

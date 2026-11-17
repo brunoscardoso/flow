@@ -84,7 +84,7 @@ async function openBoard(w: Page, prefix: string): Promise<string> {
  * three guards failed on the gesture rather than on the thing they guard.
  */
 async function openFlattenedThreadMenu(w: Page, title: string): Promise<void> {
-  await w.locator('.fl-thread-search input').fill(title)
+  await w.locator('.fl-sidebar-search input').fill(title)
   const row = w.locator('fl-list').getByText(title, { exact: true }).first()
   await expect(row).toBeVisible()
   // SEARCH IS DEBOUNCED, and until it lands the row is still the TASK row —
@@ -111,7 +111,7 @@ async function deleteThreadViaSearch(w: Page, title: string): Promise<string> {
   await expect(w.locator('.fl-thread-menu-confirm')).toBeVisible()
   const confirmText = (await w.locator('.fl-thread-menu-confirm').textContent()) ?? ''
   await w.locator('.fl-thread-menu-item.danger', { hasText: /^Delete$/ }).click()
-  await w.locator('.fl-thread-search input').fill('')
+  await w.locator('.fl-sidebar-search input').fill('')
   return confirmText
 }
 

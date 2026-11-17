@@ -79,6 +79,15 @@
    * seam here: say it with colour.
    */
   --fl-color-titlebar: #212122;
+  /*
+   * THE GROUND — what the window's regions sit ON (polish, 2026-11-17). Every
+   * region (sidebar, chat, editor, terminal) is a rounded island with a gap of
+   * this darker fill between them, instead of full-bleed strips joined by
+   * seams. The titlebar and status bar are drawn on it too.
+   */
+  --fl-color-ground: #121212;
+  /* An island's own edge: one hairline, lighter than the ground it sits on. */
+  --fl-color-island-border: #2a2a2c;
   --fl-color-text: #cccccc;            /* text primary */
   --fl-color-text-secondary: #9d9d9d;
   --fl-color-accent: #3794ff;          /* restrained VS Code blue */
@@ -155,6 +164,12 @@
      to be seen as a curve at all. */
   --fl-radius-md: 8px;
   --fl-radius-lg: 12px;
+  /* Islands: the window's regions as rounded cards on the ground. One radius
+     for every island, one gap between them. Tabs (8), rows and buttons (6)
+     and the composer (12) complete the corner scale — nothing is square. */
+  --fl-radius-island: 10px;
+  --fl-radius-tab: 8px;
+  --fl-island-gap: 6px;
   --fl-split-handle-size: 5px;    /* hit area; visual line stays 1px */
 
   /* ── Elevation ────────────────────────────────────────────────────── */
@@ -203,6 +218,8 @@
   /* Same idea on paper, stepped the other way: on a light ground the header
      reads as its own band by going slightly deeper, not lighter. */
   --fl-color-titlebar: #e9e5dd;
+  --fl-color-ground: #e6e2da;
+  --fl-color-island-border: #dcd6cb;
   /* A dark-ground shadow reads as soot on paper — same elevation, less ink. */
   --fl-shadow-md: 0 4px 14px rgba(60, 50, 35, 0.18);
   --fl-color-text: #37352f;            /* warm near-black */

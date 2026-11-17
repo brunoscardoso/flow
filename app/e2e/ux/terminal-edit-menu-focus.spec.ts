@@ -46,7 +46,7 @@ import type { ElectronApplication, Page } from '@playwright/test'
  */
 
 const SCREENS = 'e2e/ux/__screens'
-const CONTROL = 'input[placeholder="Search threads"]'
+const CONTROL = 'input[aria-label="Search threads and files"]'
 const MARKER = 'TERMEDIT_ALPHA_77'
 
 const activeHost = (win: Page) => win.locator('.fl-term-host:not([hidden])')

@@ -22,7 +22,7 @@ const SCREENS = 'e2e/ux/__screens'
  * The first turn is really sent, so the agent runs with no account (below).
  */
 async function createThread(win: Page, ask = 'Look at the project'): Promise<void> {
-  await win.locator('fl-button[aria-label="New thread"]').click()
+  await win.locator('.fl-sidebar-new[aria-label="New thread"]').click()
   await expect(win.locator('.fl-newthread')).toBeVisible({ timeout: 10000 })
   await win.locator('.fl-newthread-body').fill(ask)
   await win.locator('.fl-newthread-footer fl-button', { hasText: 'Create thread' }).click()
@@ -70,7 +70,7 @@ test('search: a no-match query shows the distinct no-match hint, no bare header'
   await createThread(window)
   await expect(threadRow(window, 'New thread').first()).toBeVisible({ timeout: 10000 })
 
-  const search = window.locator('.fl-thread-search input').first()
+  const search = window.locator('.fl-sidebar-search input').first()
   await search.fill('zzzz-no-such-thread-xyzzy')
 
   const emptyHint = window.locator('.fl-thread-empty')
@@ -133,7 +133,7 @@ test(
     await createThread(window)
     await expect(threadRow(window, 'New thread').first()).toBeVisible({ timeout: 10000 })
 
-    const search = window.locator('.fl-thread-search input').first()
+    const search = window.locator('.fl-sidebar-search input').first()
     await search.fill('qqzz-nomatch')
     await expect(window.locator('.fl-thread-empty')).toContainText('No threads match')
 

@@ -652,6 +652,18 @@ export class GitPanel {
    */
   setState(state: GitPanelState): void {
     this.#lastState = state
+    // The sidebar's Changes tab shows how many files changed (polish,
+    // 2026-11-17) — counted from the state every refresh already brings.
+    document.dispatchEvent(
+      new CustomEvent('flow:changes-count', {
+        detail: {
+          count:
+            state.kind === 'roots'
+              ? state.views.reduce((sum, view) => sum + (view.status?.changes.length ?? 0), 0)
+              : null,
+        },
+      }),
+    )
     // #1438: fresh state from the coordinator ANSWERS an in-flight "load older"
     // request, so it clears the busy flag. This used to live in setRoots(),
     // which nothing in production calls — the coordinator's render() comes

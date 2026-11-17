@@ -50,7 +50,7 @@ function threadRow(win: Page, title: string) {
 }
 
 function searchBox(win: Page) {
-  return win.locator('.fl-thread-search input').first()
+  return win.locator('.fl-sidebar-search input').first()
 }
 
 async function openRowMenu(win: Page, title: string) {

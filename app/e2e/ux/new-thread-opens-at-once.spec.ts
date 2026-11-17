@@ -82,7 +82,7 @@ test('a created thread is open, with its loader running, while its checkout is s
     ipcMain.handle('threads:sendMessage', () => ({ ok: true }))
   }, HELD_MS)
 
-  await window.locator('fl-button[aria-label="New thread"]').click()
+  await window.locator('.fl-sidebar-new[aria-label="New thread"]').click()
   await expect(window.locator('.fl-newthread')).toBeVisible({ timeout: 20_000 })
   await body(window).fill(ASK)
 

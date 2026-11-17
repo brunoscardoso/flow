@@ -207,7 +207,7 @@ test('an archived thread is grouped under the Archived section when it matches a
   await expect(window.locator('.fl-thread-menu')).toHaveCount(0)
 
   // Search surfaces the archived thread…
-  await window.locator('.fl-thread-search input').first().fill('ArchiveMe-Zephyr')
+  await window.locator('.fl-sidebar-search input').first().fill('ArchiveMe-Zephyr')
   await expect(threadRow(window, 'ArchiveMe-Zephyr').first()).toBeVisible({ timeout: 5000 })
 
   // …and it is grouped under the "Archived" section (forced-expanded in search),

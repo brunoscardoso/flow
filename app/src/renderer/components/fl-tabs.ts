@@ -31,6 +31,10 @@ export interface TabDescriptor {
   label: string
   /** Optional fl-icon name rendered before the label. */
   icon?: string
+  /** A file-type mark drawn in place of the icon — a short coloured badge
+   *  (TS, JS, {}) or, with no text, the icon tinted (polish, 2026-11-17: the
+   *  same mark the file tree draws, so a tab and its row match). Structural. */
+  mark?: { text: string | null; color: string }
   closable?: boolean
   /** Dirty indicator (dot) — e.g. unsaved editor buffers. */
   dirty?: boolean
@@ -91,17 +95,20 @@ export class FlTabs extends HTMLElement {
         display: flex;
         align-items: stretch;
         flex: none;
-        background: var(--fl-color-bg);
-        /* A region seam (the strip's chrome fill against the content below it),
-           not an object edge — see --fl-color-separator. */
-        border-bottom: var(--fl-border-width) solid var(--fl-color-separator);
+        /* THE STRIP IS A TRAY (polish, 2026-11-17): a shade under the surface
+           its tabs open onto, with no rule beneath. The active tab takes the
+           surface's own fill and rounded top corners, so it reads as the top
+           of the page below it rather than a button on a bar. */
+        background: var(--fl-tabs-tray, var(--fl-color-bg));
       }
       .strip {
         display: flex;
-        align-items: stretch;
+        align-items: flex-end;
+        gap: 2px;
         flex: 1 1 auto;
         min-width: 0;
         height: var(--fl-tab-height);
+        padding: 0 var(--fl-space-xs);
         overflow-x: auto;
         /* #994: overflow-y must be hidden — a lone overflow-x makes overflow-y
            compute to auto, which stops Blink from redirecting a vertical wheel
@@ -117,7 +124,7 @@ export class FlTabs extends HTMLElement {
       .actions {
         display: inline-flex;
         align-items: center;
-        gap: var(--fl-space-xs);
+        gap: 2px;
         flex: none;
         height: var(--fl-tab-height);
         padding: 0 var(--fl-space-xs);
@@ -125,9 +132,12 @@ export class FlTabs extends HTMLElement {
       .tab {
         display: inline-flex;
         align-items: center;
-        gap: var(--fl-space-xs);
-        padding: 0 var(--fl-space-md);
+        gap: 7px;
+        flex: none;
+        height: calc(var(--fl-tab-height) - 5px);
+        padding: 0 6px 0 var(--fl-space-md);
         border: none;
+        border-radius: var(--fl-radius-tab) var(--fl-radius-tab) 0 0;
         background: transparent;
         color: var(--fl-color-text-secondary);
         font-family: var(--fl-font-ui);
@@ -135,19 +145,41 @@ export class FlTabs extends HTMLElement {
         white-space: nowrap;
         cursor: pointer;
         user-select: none;
+        transition: background-color var(--fl-transition-fast), color var(--fl-transition-fast);
       }
-      .tab:hover { color: var(--fl-color-text); }
+      .tab:hover { color: var(--fl-color-text); background: color-mix(in srgb, var(--fl-color-surface) 55%, transparent); }
       .tab.active {
         color: var(--fl-color-text);
         background: var(--fl-color-surface);
       }
-      .dirty-dot {
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        background: var(--fl-color-accent);
+      .mark {
         flex: none;
+        min-width: 14px;
+        font-family: var(--fl-font-ui);
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        line-height: 1;
+        text-align: center;
       }
+      .dirty-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--fl-color-text);
+        flex: none;
+        /* Drawn OVER the close button, centred on it: the button keeps its
+           place and stays clickable (a hidden one cannot be pressed). */
+        margin: 0 -12.5px 0 5.5px;
+        position: relative;
+        z-index: 1;
+        pointer-events: none;
+      }
+      /* A dirty tab shows its dot where the close sits; hovering trades the dot
+         for the close, the way every editor people already use does. */
+      .tab .dirty-dot + .close { opacity: 0; }
+      .tab:hover .dirty-dot { opacity: 0; }
+      .tab:hover .dirty-dot + .close, .tab .dirty-dot + .close:focus-visible { opacity: 1; }
       .project-dot {
         width: 6px;
         height: 6px;
@@ -166,10 +198,10 @@ export class FlTabs extends HTMLElement {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 16px;
-        height: 16px;
+        width: 18px;
+        height: 18px;
         border: none;
-        border-radius: var(--fl-radius-sm);
+        border-radius: 5px;
         background: transparent;
         color: var(--fl-color-text-secondary);
         cursor: pointer;
@@ -178,6 +210,21 @@ export class FlTabs extends HTMLElement {
       }
       .tab:hover .close, .tab.active .close { visibility: visible; }
       .close:hover { background: var(--fl-color-surface-raised); color: var(--fl-color-text); }
+      /* PILLS (polish, 2026-11-17): the bottom panel's tabs are quiet rounded
+         pills on the header, not page tops — a terminal is a thing you switch
+         between, not a document stacked under the strip. */
+      :host([variant='pills']) { background: transparent; }
+      :host([variant='pills']) .strip { align-items: center; padding: 0 var(--fl-space-xs) 0 6px; }
+      :host([variant='pills']) .tab {
+        height: 26px;
+        padding: 0 4px 0 9px;
+        gap: 6px;
+        border-radius: var(--fl-radius-row);
+        font-size: 12.5px;
+      }
+      :host([variant='pills']) .tab:hover { background: var(--fl-color-surface-raised); }
+      :host([variant='pills']) .tab.active { background: var(--fl-color-surface-selected); }
+      :host([variant='pills']) .close { width: 18px; height: 18px; border-radius: var(--fl-radius-sm); }
       .rename-input {
         border: var(--fl-border-width) solid var(--fl-color-accent);
         border-radius: var(--fl-radius-sm);
@@ -379,10 +426,17 @@ export class FlTabs extends HTMLElement {
         button.appendChild(projectDot)
       }
 
-      if (tab.icon) {
+      if (tab.mark?.text) {
+        const mark = document.createElement('span')
+        mark.className = 'mark'
+        mark.textContent = tab.mark.text
+        mark.style.color = tab.mark.color
+        button.appendChild(mark)
+      } else if (tab.icon) {
         const icon = document.createElement('fl-icon')
         icon.setAttribute('name', tab.icon)
         icon.setAttribute('size', '14')
+        if (tab.mark) icon.style.color = tab.mark.color
         button.appendChild(icon)
       }
 
