@@ -3,8 +3,8 @@
  *
  * A real TypeScript project with one type error is opened in the editor; the
  * main-process language server reports it, and:
- *   1. the Problems toggle carries the count ("Problems 1") and has no
- *      "Terminal" partner tab,
+ *   1. the Problems toggle shows error and warning counts (grey zeros when
+ *      clean, the error colour once there is one) and has no "Terminal" tab,
  *   2. the list shows the file group and the problem (message, source, line:col),
  *   3. clicking the problem opens its file with the caret at that position,
  *   4. Fix with agent is disabled with a plain reason while no conversation is
@@ -102,7 +102,10 @@ test('Problems lists a real type error, jumps to it, and Fix with agent sends on
   const terminalRoot = page.locator(sel.terminalRoot)
   await expect(terminalRoot).toBeVisible()
   const problemsTab = terminalRoot.locator('.fl-problems-toggle')
-  await expect(problemsTab).toHaveText('Problems')
+  // Counts, like a status bar: grey zeros while nothing is wrong.
+  await expect(problemsTab).toHaveText('00')
+  await expect(problemsTab).toHaveAttribute('aria-label', 'Problems: 0 errors, 0 warnings')
+  await expect(problemsTab).not.toHaveClass(/has-errors/)
   // No "Terminal" tab — the terminal tabs name the view (user decision 2026-11-17).
   await expect(terminalRoot.getByText('Terminal', { exact: true })).toHaveCount(0)
   // The toggle sits on the right: after the terminal tabs, before the hide button.
@@ -124,7 +127,14 @@ test('Problems lists a real type error, jumps to it, and Fix with agent sends on
   await expect(page.locator('.monaco-editor .squiggly-error').first()).toBeVisible({ timeout: 60_000 })
 
   // The count reaches the tab label while the terminal is the view shown.
-  await expect(problemsTab).toHaveText('Problems 1', { timeout: 15_000 })
+  await expect(problemsTab).toHaveAttribute('aria-label', 'Problems: 1 error, 0 warnings', { timeout: 15_000 })
+  await expect(problemsTab).toHaveText('10')
+  await expect(problemsTab).toHaveClass(/has-errors/)
+  // The error icon turns the theme's error colour; the warning icon stays grey.
+  const iconColors = await problemsTab.evaluate((button) =>
+    [...button.querySelectorAll('fl-icon')].map((el) => getComputedStyle(el).color),
+  )
+  expect(iconColors[0]).not.toBe(iconColors[1])
 
   // Pressing again returns to the terminals; pressing once more shows the list.
   await problemsTab.click()
@@ -146,6 +156,9 @@ test('Problems lists a real type error, jumps to it, and Fix with agent sends on
   await expect(row.locator('.fl-problems-source')).toContainText('2322')
   await expect(row.locator('.fl-problems-position')).toHaveText('4:14')
   await expect(terminalRoot.locator('.fl-problems-summary')).toHaveText('1 error')
+  // The header becomes the list's own: "Problems", the summary, then Fix all.
+  await expect(terminalRoot.locator('.fl-problems-heading')).toHaveText('Problems')
+  await expect(terminalRoot.locator('.fl-term-tabs')).toBeHidden()
 
   // ── Click jumps: another file is shown, the row brings user.ts back with the
   //    caret at line 4, column 14 (typing proves where the caret is) ─────────

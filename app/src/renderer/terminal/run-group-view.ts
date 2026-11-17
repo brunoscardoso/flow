@@ -671,7 +671,8 @@ function injectRunStyles(): void {
       font-family: var(--fl-font-ui); font-size: var(--fl-text-caption-size);
       white-space: nowrap;
     }
-    .fl-run-pill:hover { border-color: var(--fl-color-border); }
+    /* Borderless like the header's other buttons (mockup option A, 2026-11-17). */
+    .fl-run-pill:hover { background: var(--fl-color-surface-raised); }
     .fl-run-pill.open { border-color: var(--fl-color-accent); background: var(--fl-color-accent-muted); }
     .fl-run-pill-label, .fl-run-pill-run { font-weight: var(--fl-text-ui-weight-medium); color: var(--fl-color-text); }
     .fl-run-pill-run {

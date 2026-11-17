@@ -160,8 +160,10 @@ export function problemsSnapshot(
 // ── Presentation (renderer) ────────────────────────────────────────────────
 
 /** The tab's label: "Problems" alone when there are none, else with the count. */
-export function problemsTabLabel(counts: ProblemCounts): string {
-  return counts.total > 0 ? `Problems ${counts.total}` : 'Problems'
+/** What the Problems toggle says to a screen reader: its counts, in words. */
+export function problemsToggleLabel(counts: ProblemCounts): string {
+  const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`
+  return `Problems: ${plural(counts.errors, 'error')}, ${plural(counts.warnings, 'warning')}`
 }
 
 /** File name and its folder, split for a group header. */

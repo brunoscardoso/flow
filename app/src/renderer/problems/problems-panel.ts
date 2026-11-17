@@ -25,7 +25,7 @@ import {
   fixDisabledReason,
   fixMessage,
   NO_PROBLEMS_TEXT,
-  problemsTabLabel,
+  problemsToggleLabel,
   refsOf,
   sourceLabel,
   type Problem,
@@ -77,17 +77,32 @@ export function mountProblems(mount: ProblemsMount): ProblemsController {
   problemsTab.dataset['view'] = 'problems'
   problemsTab.setAttribute('aria-pressed', 'false')
   problemsTab.title = 'Problems in open files'
-  problemsTab.textContent = 'Problems'
+  // Counts, like a status bar (mockup option A, user decision 2026-11-17):
+  // an error icon and count, a warning icon and count. Grey zeros when clean.
+  const errorCount = document.createElement('span')
+  const warningCount = document.createElement('span')
+  const errorIcon = icon('error', 13)
+  const warningIcon = icon('warning', 13)
+  errorIcon.classList.add('fl-problems-toggle-icon')
+  warningIcon.classList.add('fl-problems-toggle-icon')
+  problemsTab.append(errorIcon, errorCount, warningIcon, warningCount)
 
   // ── Problems header actions ─────────────────────────────────────────────
   const actions = document.createElement('div')
   actions.className = 'fl-problems-actions'
+  const heading = document.createElement('span')
+  heading.className = 'fl-problems-heading'
+  heading.textContent = 'Problems'
   const summary = document.createElement('span')
   summary.className = 'fl-problems-summary'
+  const spacer = document.createElement('span')
+  spacer.className = 'fl-problems-spacer'
+  const divider = document.createElement('span')
+  divider.className = 'fl-problems-divider'
   const fixAllButton = document.createElement('button')
   fixAllButton.className = 'fl-term-tool fl-problems-fix-all'
   fixAllButton.append(icon('sparkles', 12), document.createTextNode('Fix all'))
-  actions.append(summary, fixAllButton)
+  actions.append(heading, summary, spacer, fixAllButton, divider)
   header.insertBefore(actions, mount.before)
   header.insertBefore(problemsTab, mount.before)
 
@@ -140,7 +155,12 @@ export function mountProblems(mount: ProblemsMount): ProblemsController {
   // ── Painting ────────────────────────────────────────────────────────────
 
   function paintLabel(): void {
-    problemsTab.textContent = problemsTabLabel(snapshot.counts)
+    const { errors, warnings } = snapshot.counts
+    errorCount.textContent = String(errors)
+    warningCount.textContent = String(warnings)
+    problemsTab.classList.toggle('has-errors', errors > 0)
+    problemsTab.classList.toggle('has-warnings', warnings > 0)
+    problemsTab.setAttribute('aria-label', problemsToggleLabel(snapshot.counts))
     problemsTab.dataset['count'] = String(snapshot.counts.total)
     summary.textContent = countSummary(snapshot.counts)
     paintFixState(fixAllButton, snapshot.counts.total > 0)
@@ -377,10 +397,34 @@ function injectProblemsStyles(): void {
   stylesInjected = true
   const style = document.createElement('style')
   style.textContent = `
-    .fl-problems-toggle { flex: none; white-space: nowrap; }
+    .fl-problems-toggle { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .fl-problems-toggle .fl-problems-toggle-icon { color: var(--fl-color-text-secondary); }
+    .fl-problems-toggle > span { color: var(--fl-color-text-secondary); }
+    .fl-problems-toggle > fl-icon + span { margin-right: 4px; }
+    .fl-problems-toggle > span:last-child { margin-right: 0; }
+    .fl-problems-toggle.has-errors .fl-problems-toggle-icon:first-child { color: var(--fl-color-error); }
+    .fl-problems-toggle.has-errors > span:nth-of-type(1) { color: var(--fl-color-text); }
+    .fl-problems-toggle.has-warnings .fl-problems-toggle-icon:nth-of-type(2) { color: var(--fl-color-warning); }
+    .fl-problems-toggle.has-warnings > span:nth-of-type(2) { color: var(--fl-color-text); }
     .fl-problems-toggle.active {
       color: var(--fl-color-text);
       background: var(--fl-color-surface-raised);
+      box-shadow: inset 0 -2px 0 var(--fl-color-accent);
+    }
+    .fl-problems-heading {
+      flex: none;
+      padding-left: var(--fl-space-sm);
+      color: var(--fl-color-text);
+      font-family: var(--fl-font-ui);
+      font-size: var(--fl-text-ui-size);
+      font-weight: var(--fl-text-ui-weight-medium);
+    }
+    .fl-problems-spacer { flex: 1; }
+    .fl-problems-divider {
+      flex: none;
+      width: 1px;
+      height: 16px;
+      background: var(--fl-color-border);
     }
     .fl-problems-mode .fl-term-header { min-height: var(--fl-tab-height); }
     .fl-problems-actions,
@@ -391,7 +435,7 @@ function injectProblemsStyles(): void {
     .fl-problems-mode .fl-problems-actions {
       display: flex;
       align-items: center;
-      justify-content: flex-end;
+      justify-content: flex-start;
       gap: var(--fl-space-sm);
       flex: 1;
       min-width: 0;

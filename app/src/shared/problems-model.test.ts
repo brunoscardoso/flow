@@ -8,7 +8,7 @@ import {
   NO_PROBLEMS_TEXT,
   pathForAgent,
   problemsSnapshot,
-  problemsTabLabel,
+  problemsToggleLabel,
   refsOf,
   sourceLabel,
 } from './problems-model'
@@ -101,9 +101,9 @@ describe('problemsSnapshot — the bound', () => {
 })
 
 describe('labels', () => {
-  it('the tab carries the count, and nothing when there are none', () => {
-    expect(problemsTabLabel({ errors: 2, warnings: 1, infos: 0, total: 3 })).toBe('Problems 3')
-    expect(problemsTabLabel({ errors: 0, warnings: 0, infos: 0, total: 0 })).toBe('Problems')
+  it('the toggle reads its counts out in words', () => {
+    expect(problemsToggleLabel({ errors: 2, warnings: 1, infos: 0, total: 3 })).toBe('Problems: 2 errors, 1 warning')
+    expect(problemsToggleLabel({ errors: 0, warnings: 0, infos: 0, total: 0 })).toBe('Problems: 0 errors, 0 warnings')
   })
 
   it('splits a path into name and folder', () => {
