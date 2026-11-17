@@ -19,7 +19,7 @@
 // Importing this module is side-effect free: node-pty is required lazily
 // inside the PtySession constructor, never at load.
 
-import { detectShell, ptySpawnSpec } from './pty-manager'
+import { buildEnv, detectShell, ptySpawnSpec } from './pty-manager'
 
 const COMMAND = 'npm run build'
 
@@ -144,5 +144,35 @@ describe('detectShell', () => {
     } else {
       expect(shell).toBe(process.env.SHELL?.trim() || (process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash'))
     }
+  })
+})
+
+// A Run step runs as `zsh -l -c`, which never reads ~/.zshrc — where Homebrew's
+// folder is often added. `uv run …` died with exit 127 until single commands got
+// the PATH the person's interactive shell reports (user report, 2026-11-17).
+describe('buildEnv — the PATH a single command runs with', () => {
+  const base = { PATH: '/usr/bin:/bin', HOME: '/Users/me', npm_config_prefix: '/x' }
+
+  it('uses the shell-reported PATH when one is given', () => {
+    const env = buildEnv(undefined, '/opt/homebrew/bin:/usr/bin:/bin', base)
+    expect(env.PATH).toBe('/opt/homebrew/bin:/usr/bin:/bin')
+    expect(env.HOME).toBe('/Users/me')
+  })
+
+  it('keeps the inherited PATH when there is no shell answer', () => {
+    expect(buildEnv(undefined, null, base).PATH).toBe('/usr/bin:/bin')
+    expect(buildEnv(undefined, '', base).PATH).toBe('/usr/bin:/bin')
+    expect(buildEnv(undefined, undefined, base).PATH).toBe('/usr/bin:/bin')
+  })
+
+  it("lets the caller's own env win over the shell PATH", () => {
+    const env = buildEnv({ PATH: '/custom/bin' }, '/opt/homebrew/bin:/usr/bin', base)
+    expect(env.PATH).toBe('/custom/bin')
+  })
+
+  it('still drops npm_config_prefix and sets TERM', () => {
+    const env = buildEnv(undefined, '/opt/homebrew/bin', base)
+    expect(env.npm_config_prefix).toBeUndefined()
+    expect(env.TERM).toBe('xterm-256color')
   })
 })

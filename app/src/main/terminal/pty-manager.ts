@@ -23,6 +23,7 @@ import type { IPty } from 'node-pty'
 
 import type { TerminalKind } from '../../shared/ipc-contract'
 import { shellSpec } from '../platform/shell'
+import { cachedUserPathEnv } from '../agent/runtime/tool-path'
 
 /** Scrollback retained per terminal (~10k lines) for renderer replay. */
 export const SCROLLBACK_MAX_LINES = 10_000
@@ -179,14 +180,29 @@ export function ptySpawnSpec(
   }
 }
 
-/** Inherited env with undefined entries dropped (node-pty wants string values). */
-function buildEnv(extra?: Record<string, string>): Record<string, string> {
+/**
+ * Inherited env with undefined entries dropped (node-pty wants string values).
+ *
+ * `userPath` is the PATH the person's interactive shell reports. A single
+ * command runs as `zsh -l -c`, which reads ~/.zprofile but NOT ~/.zshrc — and
+ * ~/.zshrc is where Homebrew's folder is very often added. Without this a Run
+ * step such as `uv run …` died with "command not found" (exit 127) while the
+ * same line typed into an interactive terminal worked (user report,
+ * 2026-11-17). Interactive sessions pass nothing: their shell reads ~/.zshrc
+ * itself. A caller's own `extra` env still wins.
+ */
+export function buildEnv(
+  extra?: Record<string, string>,
+  userPath?: string | null,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
   const env: Record<string, string> = {}
-  for (const [key, value] of Object.entries(process.env)) {
+  for (const [key, value] of Object.entries(baseEnv)) {
     if (typeof value === 'string') {
       env[key] = value
     }
   }
+  if (typeof userPath === 'string' && userPath !== '') env.PATH = userPath
   // npm sets this in scripts; leaking it into an interactive shell breaks
   // global installs inside the terminal (same fix as noto's PtyProcess).
   delete env.npm_config_prefix
@@ -235,7 +251,8 @@ export class PtySession {
       cols: this.#cols,
       rows: this.#rows,
       cwd: options.cwd,
-      env: buildEnv(options.env),
+      // A single command gets the person's shell PATH (see buildEnv).
+      env: buildEnv(options.env, options.command ? (cachedUserPathEnv()?.['PATH'] ?? null) : null),
     })
 
     this.#groupPid = this.#proc.pid
