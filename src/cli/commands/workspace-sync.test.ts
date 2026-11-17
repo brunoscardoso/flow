@@ -182,6 +182,28 @@ describeWithGit('workspace sync CLI — real CLI, real git, two machines', () =>
     SUITE_TIMEOUT_MS
   );
   it(
+    "ignores the Workspace-level qa.jsonl instead of refusing the sync over it (user report 2026-11-17)",
+    () => {
+      const bare = join(sandbox, 'remotes', 'team', 'ws.git');
+      expect(workspace(machineA, 'create', '--name', 'Team', '--remote', WORKSPACE_REMOTE, '--json').status).toBe(0);
+      const wsA = join(machineA, 'workspaces', 'team');
+      // Ask the Blueprint at Workspace level writes the asker's own questions here.
+      write(wsA, 'qa.jsonl', '{"q":"how do coworkers work?"}\n');
+      write(wsA, 'projects/backend/brain/features/coworkers.md', '# Coworkers\n');
+
+      const synced = workspace(machineA, 'sync', '--workspace', 'team', '--json');
+      expect(synced.combined).not.toContain('personal-files');
+      expect(synced.status).toBe(0);
+      expect(synced.json).toMatchObject({ action: 'sync', state: 'synced', pushed: true });
+      // The knowledge went out; the questions stayed on this machine.
+      const published = git(bare, 'ls-tree', '-r', '--name-only', 'HEAD');
+      expect(published).toContain('projects/backend/brain/features/coworkers.md');
+      expect(published).not.toContain('qa.jsonl');
+      expect(readFileSync(join(wsA, 'qa.jsonl'), 'utf-8')).toContain('coworkers');
+    },
+    SUITE_TIMEOUT_MS
+  );
+  it(
     'commits only with --commit-only (nothing fetched or pushed), and moves the Flow folder with move-flow-folder --to',
     () => {
       const bare = join(sandbox, 'remotes', 'team', 'ws.git');

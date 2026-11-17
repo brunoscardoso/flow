@@ -330,6 +330,12 @@ export function workspaceGitignore(): string {
       lines.push(underEveryProject(`!${row.pattern}`));
     }
   }
+  // The repository's own root: its personal and generated files are ignored
+  // too. `/qa.jsonl` was classified personal but never ignored, so every sync
+  // staged it and the pre-push guard refused the whole run (2026-11-17).
+  for (const row of WORKSPACE_ROOT_TABLE) {
+    if (row.class === 'generated' || row.class === 'personal') lines.push(row.pattern);
+  }
   lines.push(WORKSPACE_MARKER_END);
   return lines.join('\n');
 }
