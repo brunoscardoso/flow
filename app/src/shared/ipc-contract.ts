@@ -6998,6 +6998,9 @@ export interface IpcInvokeMap {
   'settings:setTelemetryConsent': { request: { agreed: boolean }; response: void }
   'settings:getModelRouting': { request: Record<string, never>; response: ModelRouting }
   'settings:setModelRouting': { request: { routing: ModelRouting }; response: void }
+  /** Learning from chat (2026-11-17): null = never asked, which means off. */
+  'settings:getLearnFromChat': { request: Record<string, never>; response: { enabled: boolean | null } }
+  'settings:setLearnFromChat': { request: { enabled: boolean }; response: void }
   /**
    * Is a runtime signed in RIGHT NOW? (multi_runtime_support)
    *
@@ -8063,6 +8066,8 @@ export const IPC_INVOKE_CHANNELS = [
   'settings:setTelemetryConsent',
   'settings:getModelRouting',
   'settings:setModelRouting',
+  'settings:getLearnFromChat',
+  'settings:setLearnFromChat',
   'settings:checkRuntimeAuth',
   'settings:installRuntime',
   'settings:startRuntimeLogin',
@@ -8572,6 +8577,8 @@ export interface FlowSettingsApi {
   getModelRouting(): Promise<IpcResponse<'settings:getModelRouting'>>
   /** Save the Auto effort→model routing map (#129). */
   setModelRouting(request: IpcRequest<'settings:setModelRouting'>): Promise<void>
+  getLearnFromChat(): Promise<IpcResponse<'settings:getLearnFromChat'>>
+  setLearnFromChat(request: IpcRequest<'settings:setLearnFromChat'>): Promise<void>
   /** Read the app-wide default runtime provider (multi_runtime_support). */
   /** Is a runtime signed in? Optional — an older preload degrades to "cannot
    *  check", which the settings UI treats as a reason to refuse the switch. */

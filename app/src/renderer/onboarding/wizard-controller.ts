@@ -8,6 +8,7 @@ export type StepId =
   | 'connect'
   | 'project'
   | 'mode'
+  | 'learn'
   | 'signIn'
   | 'settings'
   | 'workspace'
@@ -52,6 +53,9 @@ export const WIZARD_STEPS: readonly StepId[] = [
   'connect',
   'project',
   'mode',
+  // Learning from conversations costs tokens, so it is asked, never assumed
+  // (user, 2026-11-17). Next waits for an answer either way.
+  'learn',
   'signIn',
   'settings',
   // Always present (decision 2026-10-06): every project lives in a Workspace,
@@ -92,6 +96,8 @@ export interface WizardState {
    *  never satisfy the gate while a save is known to have failed. Cleared only
    *  by a subsequent successful persist. */
   modePersistFailed: boolean
+  /** Learn from conversations: the saved answer, null/absent until given. */
+  learnFromChat?: boolean | null
 }
 
 /**
@@ -123,6 +129,9 @@ export function canAdvance(step: StepId, state: WizardState): boolean {
       // #229's guardrail, re-established after #716: an autopilot-relevant
       // choice that failed to save blocks progress until a retry succeeds.
       return state.mode !== null && !state.modePersistFailed
+    case 'learn':
+      // A yes OR a no — just not silence: it spends tokens if on.
+      return state.learnFromChat === true || state.learnFromChat === false
     default:
       return true
   }

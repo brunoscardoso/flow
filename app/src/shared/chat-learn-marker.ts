@@ -55,7 +55,8 @@ export function parseChatLearnMarker(content: string): ChatLearnMarker | null {
 
 /** One card per area: the key two rows about the same area share. */
 export function chatLearnKey(marker: Pick<ChatLearnMarker, 'root' | 'module'>): string {
-  return `${marker.root}\x00${marker.module}`
+  // One area however its path is spelled: a trailing slash is not a second area.
+  return `${marker.root.replace(/\/+$/, '')}\x00${marker.module.replace(/\/+$/, '')}`
 }
 
 /** The area's name as a person reads it — the last segment of its path. */
@@ -66,9 +67,12 @@ export function chatLearnAreaName(module: string): string {
 
 export interface ChatLearnCopy {
   title: string
+  /** The short tail after the title — how much it learned from. */
   detail: string
-  /** The one action the row offers, or null while learning. */
-  action: { kind: 'board'; label: string } | { kind: 'retry'; label: string } | null
+  /** Only a failed run offers something to do: try again. A learned area is
+   *  a status, not a door (user, 2026-11-17: "don't need that show on the
+   *  board action, this is just a component to indicate the learning"). */
+  action: { kind: 'retry'; label: string } | null
 }
 
 /** What the row says in each phase. Plain words, no paths (forbidden-pattern #12). */
@@ -77,21 +81,13 @@ export function chatLearnCopy(marker: ChatLearnMarker): ChatLearnCopy {
   const files = `${String(marker.files)} file${marker.files === 1 ? '' : 's'}`
   switch (marker.phase) {
     case 'learning':
-      return {
-        title: `Learning ${area} for the blueprint`,
-        detail: `From the ${files} this conversation touched`,
-        action: null,
-      }
+      return { title: `Learning ${area}`, detail: `from ${files}`, action: null }
     case 'learned':
-      return {
-        title: `Learned ${area}`,
-        detail: `It is on the blueprint now, from the ${files} this conversation touched.`,
-        action: { kind: 'board', label: 'Show on the board' },
-      }
+      return { title: `Learned ${area}`, detail: `from ${files}`, action: null }
     case 'failed':
       return {
         title: `Could not learn ${area}`,
-        detail: 'The learning run stopped before it finished. Nothing was added to the blueprint.',
+        detail: 'nothing was added',
         action: { kind: 'retry', label: 'Try again' },
       }
   }

@@ -21,6 +21,7 @@ import {
 } from '../loops/task-list-model'
 import { submitOnEnter } from './submit-on-enter-dom'
 import { supportsModelRouting } from '../../shared/runtime-models'
+import { LEARN_FROM_CHAT_COPY } from '../../shared/learn-from-chat'
 import {
   canSignInHere,
   canSignOutHere,
@@ -481,6 +482,7 @@ class SettingsView {
     const provider = providerResult.provider ?? 'claude'
     into('models', this.#renderProviderSection(providerResult.provider, accounts))
     into('agent', this.#renderAgentSection())
+    if (api.settings.getLearnFromChat !== undefined) into('agent', this.#renderLearnFromChatSection())
     // TWO SECTIONS FOLLOW THE PROJECT'S RESOLVED RUNTIME, NOT THE APP-WIDE
     // DEFAULT. "This project" assigns a Claude ACCOUNT; "Model routing" maps
     // effort onto Haiku/Sonnet/Opus — both are Claude's, and both used to gate
@@ -2265,6 +2267,92 @@ class SettingsView {
             // Put the radio back on what is actually stored, and say so.
             paint(saved)
             status.textContent = SETTINGS_AGENT.saveFailed
+          })
+      })
+    }
+    return section
+  }
+
+  /** Learning from conversations (2026-11-17): on or off, app-wide. Not asked
+   *  reads as off and says so — no choice is pre-selected for the person. */
+  #renderLearnFromChatSection(): HTMLElement {
+    const copy = LEARN_FROM_CHAT_COPY
+    const section = document.createElement('div')
+    section.className = 'fl-settings-section'
+    section.dataset['section'] = 'learn-from-chat'
+    const heading = document.createElement('div')
+    heading.className = 'fl-settings-heading'
+    heading.textContent = copy.settingsHeading
+    const hint = document.createElement('div')
+    hint.className = 'fl-settings-hint'
+    hint.textContent = copy.settingsHelp
+    section.append(heading, hint)
+
+    const fieldset = document.createElement('fieldset')
+    fieldset.className = 'fl-settings-choices'
+    const radios: HTMLInputElement[] = []
+    const paint = (answer: boolean | null): void => {
+      for (const radio of radios) {
+        radio.checked = answer !== null && radio.value === String(answer)
+        radio.closest('label')?.classList.toggle('is-on', radio.checked)
+      }
+    }
+    for (const [value, choice] of [
+      [true, copy.on],
+      [false, copy.off],
+    ] as const) {
+      const label = document.createElement('label')
+      label.className = 'fl-settings-choice'
+      const radio = document.createElement('input')
+      radio.type = 'radio'
+      radio.name = 'fl-settings-learn-from-chat'
+      radio.value = String(value)
+      radio.disabled = true
+      radios.push(radio)
+      const text = document.createElement('span')
+      text.className = 'fl-settings-choice-text'
+      const title = document.createElement('span')
+      title.className = 'fl-settings-choice-title'
+      title.textContent = choice.label
+      const desc = document.createElement('span')
+      desc.className = 'fl-settings-choice-desc'
+      desc.textContent = choice.description
+      text.append(title, desc)
+      label.append(radio, text)
+      fieldset.appendChild(label)
+    }
+    section.appendChild(fieldset)
+    const status = document.createElement('div')
+    status.className = 'fl-settings-hint'
+    status.setAttribute('role', 'status')
+    section.appendChild(status)
+
+    let saved: boolean | null = null
+    void window.flow.settings
+      .getLearnFromChat()
+      .then(({ enabled }) => {
+        saved = enabled
+        paint(saved)
+        if (saved === null) status.textContent = copy.notAsked
+        for (const radio of radios) radio.disabled = false
+      })
+      .catch(() => {
+        status.textContent = copy.saveFailed
+      })
+    for (const radio of radios) {
+      radio.addEventListener('change', () => {
+        if (!radio.checked) return
+        const enabled = radio.value === 'true'
+        paint(enabled)
+        status.textContent = ''
+        void window.flow.settings
+          .setLearnFromChat({ enabled })
+          .then(() => {
+            saved = enabled
+          })
+          .catch(() => {
+            paint(saved)
+            status.textContent = copy.saveFailed
           })
       })
     }

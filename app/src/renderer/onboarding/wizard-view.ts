@@ -115,6 +115,7 @@ export class OnboardingWizard {
     projectOpen: false,
     mode: null,
     modePersistFailed: false,
+    learnFromChat: null,
     // Nobody has been asked yet — and that is not a no. See WizardState.
     telemetryConsent: null,
   }

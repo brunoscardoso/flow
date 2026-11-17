@@ -25,6 +25,7 @@ describe('chat-learn marker rows (2026-11-17)', () => {
   it('keys an area by root and module, so phases of one area share a card', () => {
     expect(chatLearnKey({ ...marker, phase: 'learned' } as ChatLearnMarker)).toBe(chatLearnKey(marker))
     expect(chatLearnKey({ ...marker, root: '/other' })).not.toBe(chatLearnKey(marker))
+    expect(chatLearnKey({ ...marker, module: `${marker.module}/` })).toBe(chatLearnKey(marker))
   })
 
   it('names the area by its last segment and never shows the path', () => {
@@ -35,10 +36,10 @@ describe('chat-learn marker rows (2026-11-17)', () => {
     }
   })
 
-  it('offers the board once learned, Try again once failed, nothing while learning', () => {
+  it('is a status line: only a failed run offers Try again', () => {
     expect(chatLearnCopy(marker).action).toBeNull()
-    expect(chatLearnCopy({ ...marker, phase: 'learned' }).action).toEqual({ kind: 'board', label: 'Show on the board' })
+    expect(chatLearnCopy({ ...marker, phase: 'learned' }).action).toBeNull()
     expect(chatLearnCopy({ ...marker, phase: 'failed' }).action).toEqual({ kind: 'retry', label: 'Try again' })
-    expect(chatLearnCopy({ ...marker, files: 1 }).detail).toBe('From the 1 file this conversation touched')
+    expect(chatLearnCopy({ ...marker, files: 1 }).detail).toBe('from 1 file')
   })
 })

@@ -72,6 +72,7 @@ import { registerAskChannels } from './blueprint/ask-ipc'
 import { registerLoopsChannels } from './loops/loops-handler'
 import { makeBrainCaptureOnTurnComplete, threadWorkingSet } from './brain/capture'
 import { resolveChatLearnAsk } from './learn/chat-learn-trigger'
+import { learnFromChatEnabled } from '../shared/learn-from-chat'
 import {
   chatLearnKey,
   formatChatLearnMarker,
@@ -1344,6 +1345,19 @@ function bootstrapMainProcess(): void {
   const maybeLearnFromChat = async (threadId: string): Promise<void> => {
     try {
       if (chatLearnAsked.has(threadId)) return
+      // A learn is an extra agent run: only after the person said yes, in
+      // onboarding or Settings (2026-11-17). Not asked is off.
+      if (!learnFromChatEnabled(appSettings.getLearnFromChat())) return
+      // One area per thread, AND across restarts: `chatLearnAsked` is memory,
+      // so a relaunch used to learn the same area in the same thread again
+      // and draw its row a second time. The thread's own rows are the record.
+      const alreadyTold = threadStore
+        .listMessages(threadId)
+        .some((message) => message.role === 'system' && parseChatLearnMarker(message.content) !== null)
+      if (alreadyTold) {
+        chatLearnAsked.add(threadId)
+        return
+      }
       const thread = threadStore.getThread(threadId)
       if (!thread?.projectRoot) return
       // Learn state, the graph and the board live on the PROJECT root; the

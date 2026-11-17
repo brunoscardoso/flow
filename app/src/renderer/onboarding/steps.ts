@@ -35,6 +35,7 @@ import { ASK_CHOICES, ONBOARDING_ASK } from '../threads/conversation-switches-mo
 import type { AutonomyMode } from './wizard-controller'
 import type { StepView } from './wizard-view'
 import { summaryRows } from './settings-summary'
+import { LEARN_FROM_CHAT_COPY } from '../../shared/learn-from-chat'
 import {
   canSignInHere,
   installConfirm,
@@ -627,6 +628,68 @@ function modeStep(_session: OnboardingSession): StepView {
   }
 }
 
+/**
+ * Learn from your conversations (2026-11-17). Each learn is an extra agent
+ * run, so the person chooses; the pick is saved on click (a no is as safe to
+ * keep as a yes — not asked already means off), and the saved answer is shown
+ * again on reopen.
+ */
+function learnStep(): StepView {
+  const copy = LEARN_FROM_CHAT_COPY
+  return {
+    id: 'learn',
+    title: copy.title,
+    render(container, ctx) {
+      container.appendChild(p(copy.question))
+      const choices = [
+        { value: true, ...copy.on },
+        { value: false, ...copy.off },
+      ]
+      const buttons: HTMLButtonElement[] = []
+      const failed = status('', 'muted')
+      const paint = (answer: boolean | null | undefined): void => {
+        for (const [index, choice] of choices.entries()) {
+          const on = answer === choice.value
+          buttons[index].classList.toggle('fl-wizard-btn--primary', on)
+          buttons[index].setAttribute('aria-pressed', String(on))
+        }
+      }
+      for (const choice of choices) {
+        const btn = button(`${choice.label} — ${choice.description}`, () => {
+          paint(choice.value)
+          failed.textContent = ''
+          void window.flow.settings
+            .setLearnFromChat({ enabled: choice.value })
+            .then(() => ctx.update({ learnFromChat: choice.value }))
+            .catch(() => {
+              failed.textContent = copy.saveFailed
+              paint(ctx.state.learnFromChat)
+            })
+        })
+        btn.dataset['learnChoice'] = String(choice.value)
+        btn.style.display = 'block'
+        btn.style.width = '100%'
+        btn.style.textAlign = 'left'
+        btn.style.marginBottom = 'var(--fl-space-sm)'
+        buttons.push(btn)
+        container.appendChild(btn)
+      }
+      container.appendChild(failed)
+      paint(ctx.state.learnFromChat)
+      if (ctx.state.learnFromChat === null || ctx.state.learnFromChat === undefined) {
+        void window.flow.settings
+          .getLearnFromChat()
+          .then(({ enabled }) => {
+            if (enabled === null || ctx.state.learnFromChat === true || ctx.state.learnFromChat === false) return
+            ctx.update({ learnFromChat: enabled })
+            paint(enabled)
+          })
+          .catch(() => undefined)
+      }
+    },
+  }
+}
+
 function settingsStep(session: OnboardingSession): StepView {
   return {
     id: 'settings',
@@ -951,6 +1014,7 @@ export function createOnboardingSteps(): StepView[] {
     connectStep(),
     projectStep(session),
     modeStep(session),
+    learnStep(),
     signInStep(),
     settingsStep(session),
     workspaceStep(session),

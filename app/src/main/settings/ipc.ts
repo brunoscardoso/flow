@@ -115,6 +115,8 @@ export function registerSettingsChannels(deps: SettingsChannelDependencies): () 
   })
   handle('settings:getModelRouting', () => appSettings.getModelRouting())
   handle('settings:setModelRouting', ({ routing }) => appSettings.setModelRouting(routing))
+  handle('settings:getLearnFromChat', () => ({ enabled: appSettings.getLearnFromChat() }))
+  handle('settings:setLearnFromChat', ({ enabled }) => appSettings.setLearnFromChat(enabled === true))
 
   // The person's worktree defaults — the layer a project inherits until it
   // sets a value of its own. Read and written whole so the panel that just

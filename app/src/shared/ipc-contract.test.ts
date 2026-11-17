@@ -229,6 +229,8 @@ const INVOKE_MAP_KEYS: Record<IpcInvokeChannel, true> = {
   'settings:setTelemetryConsent': true,
   'settings:getModelRouting': true,
   'settings:setModelRouting': true,
+  'settings:getLearnFromChat': true,
+  'settings:setLearnFromChat': true,
   'brain:query': true,
   'ask:start': true,
   'ask:stop': true,

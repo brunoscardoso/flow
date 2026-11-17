@@ -224,3 +224,23 @@ describe('the Workspace step is always there, last, and never gates', () => {
     expect(canAdvance('workspace', base)).toBe(true)
   })
 })
+
+describe('learn from conversations step (2026-11-17)', () => {
+  const base = {
+    runtime: 'claude',
+    runtimeReady: true,
+    accountConnected: true,
+    projectOpen: true,
+    mode: 'manual' as const,
+    telemetryConsent: null,
+    modePersistFailed: false,
+  }
+  it('comes right after the mode step and waits for a yes or a no', () => {
+    expect(WIZARD_STEPS.indexOf('learn')).toBe(WIZARD_STEPS.indexOf('mode') + 1)
+    expect(canAdvance('learn', { ...base, learnFromChat: null })).toBe(false)
+    expect(canAdvance('learn', base)).toBe(false)
+    expect(canAdvance('learn', { ...base, learnFromChat: false })).toBe(true)
+    expect(canAdvance('learn', { ...base, learnFromChat: true })).toBe(true)
+  })
+})
+

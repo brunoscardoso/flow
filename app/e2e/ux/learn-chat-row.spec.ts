@@ -71,8 +71,10 @@ test('a learn started from chat shows one row in that conversation, through lear
   const card = window.locator('.fl-chat-learn')
   await expect(card).toHaveCount(1, { timeout: 15_000 })
   await expect(card).toHaveAttribute('data-phase', 'learning')
-  await expect(card).toContainText('Learning CoworkerPanel for the blueprint')
-  await expect(card).toContainText('From the 26 files this conversation touched')
+  // One quiet line (user, 2026-11-17: "more compacted, more clean").
+  await expect(card).toContainText('Learning CoworkerPanel')
+  await expect(card).toContainText('from 26 files')
+  expect((await card.boundingBox())?.height ?? 99).toBeLessThanOrEqual(26)
   // No path, no raw marker text in the transcript (forbidden-pattern #12).
   await expect(window.locator('.fl-conv-system', { hasText: '[chat-learn]' })).toHaveCount(0)
   await expect(card).not.toContainText('src/components')
@@ -80,12 +82,12 @@ test('a learn started from chat shows one row in that conversation, through lear
   // outside every Workspace shares the card shape and stays).
   await expect(window.locator('.fl-learn-card', { hasText: 'Learn what you just worked on?' })).toHaveCount(0)
 
-  // ── Learned: the SAME single row now says so, with a way to the board ────
+  // ── Learned: the SAME single row now says so — a status, not a door ─────
   await append(row(root, 'learned'))
   await expect(card).toHaveAttribute('data-phase', 'learned', { timeout: 15_000 })
   await expect(card).toHaveCount(1)
   await expect(card).toContainText('Learned CoworkerPanel')
-  await expect(card.getByRole('button', { name: 'Show on the board' })).toBeVisible()
+  await expect(card.getByRole('button')).toHaveCount(0)
   await window.screenshot({ path: join(__dirname, '__screens', 'learn-chat-row-learned.png') })
 
   // ── A second learn of the same area that fails offers Try again ──────────

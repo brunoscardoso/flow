@@ -3,22 +3,20 @@
  *
  * Learning the area a conversation worked in is automatic; this row is how the
  * conversation says so. It paints ONE marker — the newest row main wrote for
- * that area — through `chatLearnCopy`, which owns every string. Its two doors
- * (open the board, try again) are injected so the element holds no IPC.
+ * that area — through `chatLearnCopy`, which owns every string. It is a quiet
+ * status line (user, 2026-11-17: "more compacted, more clean"); its one door —
+ * try again, after a failure — is injected so the element holds no IPC.
  */
 
 import { chatLearnCopy, type ChatLearnMarker } from '../../shared/chat-learn-marker'
 
 export interface ChatLearnCardDeps {
-  openBoard: () => void
   retry: () => Promise<void>
 }
 
-export function chatLearnCard(marker: ChatLearnMarker, deps: ChatLearnCardDeps): HTMLElement {
-  injectStyles()
+/** Paint one marker into the row — first draw and every later phase. */
+export function paintChatLearnCard(row: HTMLElement, marker: ChatLearnMarker, deps: ChatLearnCardDeps): void {
   const copy = chatLearnCopy(marker)
-  const row = document.createElement('div')
-  row.className = 'fl-chat-learn'
   row.dataset['phase'] = marker.phase
   row.dataset['module'] = marker.module
 
@@ -28,40 +26,40 @@ export function chatLearnCard(marker: ChatLearnMarker, deps: ChatLearnCardDeps):
   if (marker.phase !== 'learning') {
     const icon = document.createElement('fl-icon')
     icon.setAttribute('name', marker.phase === 'learned' ? 'check' : 'warning')
-    icon.setAttribute('size', '14')
+    icon.setAttribute('size', '12')
     mark.appendChild(icon)
   }
-
-  const body = document.createElement('div')
-  body.className = 'fl-chat-learn-body'
-  const title = document.createElement('p')
+  const title = document.createElement('span')
   title.className = 'fl-chat-learn-title'
   title.textContent = copy.title
-  const detail = document.createElement('p')
+  const detail = document.createElement('span')
   detail.className = 'fl-chat-learn-detail'
   detail.textContent = copy.detail
-  body.append(title, detail)
+  const nodes: Node[] = [mark, title, detail]
 
   if (copy.action !== null) {
-    const action = copy.action
     const button = document.createElement('button')
     button.type = 'button'
     button.className = 'fl-chat-learn-action'
-    button.textContent = action.label
+    button.textContent = copy.action.label
     button.addEventListener('click', () => {
-      if (action.kind === 'board') {
-        deps.openBoard()
-        return
-      }
       button.disabled = true
       void deps.retry().catch(() => {
         button.disabled = false
       })
     })
-    body.appendChild(button)
+    nodes.push(button)
   }
+  row.replaceChildren(...nodes)
+}
 
-  row.append(mark, body)
+/** One quiet line: mark, "Learned AppSidebar", "from 9 files". */
+export function chatLearnCard(marker: ChatLearnMarker, deps: ChatLearnCardDeps): HTMLElement {
+  injectStyles()
+  const row = document.createElement('div')
+  row.className = 'fl-chat-learn'
+  row.setAttribute('role', 'status')
+  paintChatLearnCard(row, marker, deps)
   return row
 }
 
@@ -73,26 +71,24 @@ function injectStyles(): void {
   const style = document.createElement('style')
   style.textContent = [
     '.fl-chat-learn {',
-    '  display: flex;',
-    '  align-items: flex-start;',
-    '  gap: var(--fl-space-sm);',
-    '  padding: var(--fl-space-sm) var(--fl-space-md);',
-    '  border: var(--fl-border-width) solid var(--fl-color-border);',
-    '  border-radius: var(--fl-radius-row);',
-    '  background: var(--fl-color-surface);',
-    '}',
-    '.fl-chat-learn-mark {',
-    '  flex: none;',
     '  display: inline-flex;',
     '  align-items: center;',
-    '  justify-content: center;',
-    '  width: 16px;',
-    '  height: 18px;',
+    '  gap: 6px;',
+    '  max-width: 100%;',
+    '  height: 24px;',
+    '  padding: 0 10px 0 8px;',
+    '  border-radius: 999px;',
+    '  background: var(--fl-color-surface-raised);',
+    '  font-size: var(--fl-text-caption-size);',
+    '  color: var(--fl-color-text-secondary);',
+    '  white-space: nowrap;',
+    '  overflow: hidden;',
     '}',
+    '.fl-chat-learn-mark { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 12px; }',
     '.fl-chat-learn[data-phase="learning"] .fl-chat-learn-mark::before {',
     '  content: "";',
-    '  width: 8px;',
-    '  height: 8px;',
+    '  width: 6px;',
+    '  height: 6px;',
     '  border-radius: 50%;',
     '  background: var(--fl-color-accent);',
     '  animation: fl-chat-learn-pulse 1.4s ease-in-out infinite;',
@@ -103,26 +99,19 @@ function injectStyles(): void {
     '@media (prefers-reduced-motion: reduce) {',
     '  .fl-chat-learn[data-phase="learning"] .fl-chat-learn-mark::before { animation: none; }',
     '}',
-    '.fl-chat-learn-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }',
-    '.fl-chat-learn-title { margin: 0; color: var(--fl-color-text); }',
-    '.fl-chat-learn-detail {',
-    '  margin: 0;',
-    '  color: var(--fl-color-text-secondary);',
-    '  font-size: var(--fl-text-caption-size);',
-    '}',
+    '.fl-chat-learn-title { color: var(--fl-color-text); overflow: hidden; text-overflow: ellipsis; }',
+    '.fl-chat-learn-detail { flex: none; }',
     '.fl-chat-learn-action {',
-    '  align-self: flex-start;',
-    '  margin-top: var(--fl-space-xs);',
-    '  font: inherit;',
-    '  font-size: var(--fl-text-caption-size);',
-    '  color: var(--fl-color-accent);',
+    '  flex: none;',
+    '  margin-left: 2px;',
+    '  padding: 0;',
+    '  border: none;',
     '  background: transparent;',
-    '  border: var(--fl-border-width) solid var(--fl-color-border);',
-    '  border-radius: var(--fl-radius-sm);',
-    '  padding: 3px var(--fl-space-sm);',
+    '  font: inherit;',
+    '  color: var(--fl-color-accent);',
     '  cursor: pointer;',
     '}',
-    '.fl-chat-learn-action:hover:not(:disabled) { border-color: var(--fl-color-accent); }',
+    '.fl-chat-learn-action:hover:not(:disabled) { text-decoration: underline; }',
     '.fl-chat-learn-action:disabled { opacity: 0.6; cursor: default; }',
   ].join('\n')
   document.head.append(style)

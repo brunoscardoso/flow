@@ -134,7 +134,7 @@ import {
 } from '../../shared/basic-discovery'
 import { parseArtifactMarker, type ArtifactMarker } from '../../shared/artifact-marker'
 import { chatLearnKey, parseChatLearnMarker, type ChatLearnMarker } from '../../shared/chat-learn-marker'
-import { chatLearnCard } from './chat-learn-card'
+import { chatLearnCard, paintChatLearnCard } from './chat-learn-card'
 import { parseFolderBehindMarker } from '../../shared/folder-behind-marker'
 import { FolderBehindCard } from './folder-behind-card'
 import { isWalkthroughBeingWritten } from '../../shared/walkthrough-page'
@@ -761,6 +761,8 @@ export class ConversationPane {
   /** Chat-learn rows by area: the newest marker, and the id of the first row. */
   #chatLearnLatest = new Map<string, ChatLearnMarker>()
   #chatLearnFirst = new Map<string, string>()
+  /** The card drawn for each area, so a later row repaints it in place. */
+  #chatLearnCards = new Map<string, HTMLElement>()
   /** Doc paths with a persisted marker row ANYWHERE in the current thread's
    *  history — including rows still collapsed behind "Show earlier". These
    *  never render a bottom (feed-end) card: the marker position owns them. */
@@ -1889,6 +1891,7 @@ export class ConversationPane {
     // one when it ends. ONE card per area, at the first row, showing the newest.
     this.#chatLearnLatest.clear()
     this.#chatLearnFirst.clear()
+    this.#chatLearnCards.clear()
     for (const entry of entries) {
       if (entry.kind !== 'message' || entry.message.role !== 'system') continue
       const learn = parseChatLearnMarker(entry.message.content)
@@ -3796,24 +3799,34 @@ export class ConversationPane {
   /** The area's card at its first row; every later row about it draws nothing. */
   #chatLearnEntry(row: ChatLearnMarker, message: ThreadMessage): HTMLElement {
     const key = chatLearnKey(row)
+    const threadId = this.#threadId
+    const deps = {
+      retry: async (): Promise<void> => {
+        if (threadId === null) return
+        const marker = this.#chatLearnLatest.get(key) ?? row
+        await window.flow.learn.retryChatLearn({ threadId, rootId: marker.root, modulePath: marker.module })
+      },
+    }
+    // ONCE PER AREA, EVER, in a thread (user, 2026-11-17: "we should not keep
+    // showing the same component with the same information"). The history
+    // pass names each area's first row; a row that arrives LIVE used to find
+    // no entry and drew a second card at the bottom. It now claims the area if
+    // nobody has, and otherwise repaints the existing card and draws nothing.
     const first = this.#chatLearnFirst.get(key)
+    if (first === undefined) this.#chatLearnFirst.set(key, message.id)
     if (first !== undefined && first !== message.id) {
+      this.#chatLearnLatest.set(key, row)
+      const card = this.#chatLearnCards.get(key)
+      if (card?.isConnected === true) paintChatLearnCard(card, row, deps)
       const hidden = entryWrapper('chat-learn', document.createElement('div'))
       hidden.hidden = true
       return hidden
     }
     const marker = this.#chatLearnLatest.get(key) ?? row
-    const threadId = this.#threadId
-    return entryWrapper(
-      'chat-learn',
-      chatLearnCard(marker, {
-        openBoard: () => document.dispatchEvent(new CustomEvent('flow:open-blueprint')),
-        retry: async () => {
-          if (threadId === null) return
-          await window.flow.learn.retryChatLearn({ threadId, rootId: marker.root, modulePath: marker.module })
-        },
-      }),
-    )
+    this.#chatLearnLatest.set(key, marker)
+    const card = chatLearnCard(marker, deps)
+    this.#chatLearnCards.set(key, card)
+    return entryWrapper('chat-learn', card)
   }
 
   #clearFolderBehindCards(): void {

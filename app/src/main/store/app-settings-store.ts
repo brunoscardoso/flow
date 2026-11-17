@@ -29,6 +29,8 @@ const ONBOARDING_COMPLETED_KEY = 'onboarding_completed'
 const AUTONOMY_BYPASS_DEFAULT_KEY = 'autonomy_bypass_default'
 const CLOSE_REMOTE_ON_DONE_KEY = 'close_remote_on_done'
 const MODEL_ROUTING_KEY = 'model_routing_auto'
+/** Learning from chat (2026-11-17): absent = never asked = off. */
+const LEARN_FROM_CHAT_KEY = 'learn_from_chat'
 const DEFAULT_MODEL_KEY = 'default_model'
 const LAST_RUN_VERSION_KEY = 'last_run_version'
 const DEFAULT_EFFORT_KEY = 'default_effort'
@@ -286,6 +288,17 @@ export class AppSettingsStore {
 
   setModelRouting(routing: ModelRouting): void {
     this.#setString(MODEL_ROUTING_KEY, JSON.stringify(routing))
+  }
+
+  /** Whether a conversation's end may start a learn: null until asked. */
+  getLearnFromChat(): boolean | null {
+    const raw = this.#getString(LEARN_FROM_CHAT_KEY)
+    if (raw === null) return null
+    return raw === 'true'
+  }
+
+  setLearnFromChat(enabled: boolean): void {
+    this.#setString(LEARN_FROM_CHAT_KEY, enabled ? 'true' : 'false')
   }
 
   /** The app version of the previous run — compared at startup to detect a
