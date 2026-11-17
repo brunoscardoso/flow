@@ -95,6 +95,9 @@ export interface EditorViewDescriptor {
   /** fl-icon name for the tab. */
   icon: string
   element: HTMLElement
+  /** A preview tab (the Source Control diff): its label is drawn in italics,
+   *  the way VS Code marks a tab the next preview replaces. */
+  preview?: boolean
   /**
    * Present when the view BELONGS TO A CONVERSATION'S TAB SET (a feature view,
    * the blueprint, the browser, the Changes tab): it is captured into the set,
@@ -1092,8 +1095,10 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
     else viewPersist.delete(view.id)
     if (!tabs.has(view.id)) {
       tabs.add(view.id, view.label, view.icon)
+      tabs.setPending(view.id, view.preview === true)
       emitTabsChanged()
     } else {
+      tabs.setPending(view.id, view.preview === true)
       // Reopening an open view is how a view renames itself (the Changes tab's
       // label IS its mode). Without this the descriptor's label was dropped and
       // the tab kept the name it was first opened with. No-op when unchanged.

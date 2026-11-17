@@ -26,7 +26,11 @@ import '../components'
 import type {
   FlowNotification,
   GitCommit,
+  GitCommitFile,
+  GitDiffHunk,
   GitFileChange,
+  GitPublishResult,
+  ThreadBindingSuggestion,
   MergeSummaryConflict,
   MergeSummaryInput,
   ThreadScope,
@@ -34,7 +38,15 @@ import type {
   RegisteredProject,
 } from '../../shared/ipc-contract'
 import type { ShellSurfaces } from '../shell'
-import { DiffView } from './diff-view'
+import { DiffTab, type HunkAction } from './diff-tab'
+import type { DiffTarget } from './diff-tab-model'
+import { createCoalescer } from './refresh-coalesce'
+import { syncSteps } from './commit-action'
+import { showScmMenu } from './scm-menu'
+import { createScmStatusLine } from './scm-status'
+import { publishOutcomeSentence, publishOutcomeTone } from '../threads/change-review-model'
+import { remoteBindingQuestion } from '../threads/remote-binding-ask'
+import { askRemoteBinding } from '../threads/remote-binding-dialog'
 import {
   discardAllConfirmMessage,
   discardAllSequential,
@@ -86,10 +98,15 @@ import { runInWantedScope } from '../tab-scope-gate'
 export { DiffView, type DiffViewRequest } from './diff-view'
 export { GitPanel, type GitRootView, type GitPanelCallbacks } from './git-panel'
 
-/** Matches EditorApi (renderer/editor/index.ts) structurally — only the
- *  Monaco loader is needed here, so the git domain doesn't import editor/. */
+/** Matches EditorApi (renderer/editor/index.ts) structurally — the Monaco
+ *  loader and the view-tab calls the diff tab needs, so the git domain
+ *  doesn't import editor/. */
 export interface GitEditorApi {
   monaco(): Promise<typeof Monaco>
+  openView(view: { id: string; label: string; icon: string; element: HTMLElement; preview?: boolean }): void
+  closeFile(id: string): void
+  hasTab(id: string): boolean
+  onTabsChanged(listener: () => void): void
 }
 
 /** Quiet window after project file events before re-running git status. */
@@ -137,8 +154,18 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
   surfaces.gitPanel.replaceChildren(panelColumn)
 
 
-  // ── Diff view over the editor area ─────────────────────────────────────
-  const diffView = new DiffView(surfaces.editor, () => editorApi.monaco())
+  // ── The diff, as an editor tab (it was an overlay over the editor) ──────
+  const diffView = new DiffTab(editorApi, {
+    // A person closed the tab: nothing is open any more, and any request
+    // still in flight must not reopen it.
+    onClosed: () => {
+      diffRequestSeq += 1
+      diffRoot = null
+      diffOwner = null
+      diffFilePath = null
+    },
+    onHunk: (target, hunk, action) => applyHunk(target, hunk, action),
+  })
   // The root the currently-open diff belongs to (null when closed), so we can
   // close a stale diff when focus moves off that project or its root is removed
   // (#191). Kept in sync by openFileDiff/openCommitDiff and closeStaleDiff.
@@ -166,6 +193,9 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
   // The path of the open WORKING-TREE file diff (null for a commit diff or when
   // closed), so a status refresh can re-sync it to the live tree (#402).
   let diffFilePath: string | null = null
+  // Whether the open file diff is the INDEX one, so a live refresh re-reads
+  // the same comparison.
+  let diffStaged = false
   // Monotonic diff-request generation. Each open captures its value and bails if a
   // newer request has since started, so a late-resolving diff never paints over — or
   // tears down — a newer, valid one (#315). closeDiff() also bumps it, so a
@@ -255,22 +285,37 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
     // A new untracked directory is one `dir/` entry; git:diff now returns a
     // listing of its files for it (#247), so it's previewable like any row.
     const gen = ++diffRequestSeq
+    // THE PANEL'S working-tree diff compares against the INDEX — VS Code's
+    // "(Working Tree)": what a Changes row means, and what Stage hunk acts on.
+    // An untracked path has no index entry (and a rolled-up folder is a
+    // listing), so it keeps the plain read. A conversation's diff stays
+    // against HEAD: it is about what the thread changed, not what is staged.
+    const againstIndex = !staged && owner.kind === 'panel' && change.state !== 'untracked'
     try {
-      const diff = await api.git.diff({ rootId: rootPath, filePath: change.filePath, staged })
+      const diff = await api.git.diff({
+        rootId: rootPath,
+        filePath: change.filePath,
+        staged,
+        ...(againstIndex ? { against: 'index' as const } : {}),
+        ...(staged || againstIndex ? { hunks: true } : {}),
+      })
       // Superseded by a newer click, or the owner already let go → never paint (#315).
       if (!diffCurrent(gen, owner)) return
+      const target: DiffTarget = staged
+        ? { kind: 'index', rootPath, filePath: diff.filePath }
+        : { kind: 'worktree', rootPath, filePath: diff.filePath }
       await diffView.show({
-        title: diff.filePath,
-        subtitle: staged ? 'Staged vs HEAD' : 'Working tree vs HEAD',
+        target,
         diff,
         languagePath: diff.filePath,
-        // A file diff has a real file behind it — the header's ↗ opens it.
+        // A file diff has a real file behind it — Open File opens it.
         openTarget: { rootPath, relPath: diff.filePath },
       })
       // A staged diff reflects the INDEX, which worktree edits don't change, so it
       // must NOT live-refresh on file changes (like a commit diff → null). A
       // working-tree diff keeps its path so #402's refresh follows the file.
-      settleOpenedDiff(gen, owner, rootPath, staged ? null : change.filePath)
+      settleOpenedDiff(gen, owner, rootPath, change.filePath)
+      diffStaged = staged
     } catch (error) {
       console.error('flow: git file diff failed', { rootPath, filePath: change.filePath, error })
       notify(fileDiffFailedToast(change.filePath, error))
@@ -286,8 +331,7 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
       const diff = await api.git.diff({ rootId: rootPath, filePath: '', commit: commit.hash })
       if (!diffCurrent(gen, owner)) return
       await diffView.show({
-        title: commit.subject,
-        subtitle: `${commit.hash.slice(0, 7)} vs parent`,
+        target: { kind: 'commit-all', rootPath, commit: commit.hash, subject: commit.subject },
         diff,
       })
       settleOpenedDiff(gen, owner, rootPath, null) // commit diffs don't live-refresh on file changes
@@ -297,12 +341,177 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
     }
   }
 
+  /** One file of one commit (a file row under an expanded graph commit). */
+  async function openCommitFileDiff(rootPath: string, commit: GitCommit, file: GitCommitFile): Promise<void> {
+    const owner: DiffOwner = { kind: 'panel', rootPath }
+    const gen = ++diffRequestSeq
+    try {
+      const diff = await api.git.diff({ rootId: rootPath, filePath: file.filePath, commit: commit.hash })
+      if (!diffCurrent(gen, owner)) return
+      await diffView.show({
+        target: { kind: 'commit', rootPath, filePath: file.filePath, commit: commit.hash },
+        diff,
+        languagePath: file.filePath,
+        ...(file.state === 'deleted' ? {} : { openTarget: { rootPath, relPath: file.filePath } }),
+      })
+      settleOpenedDiff(gen, owner, rootPath, null)
+    } catch (error) {
+      console.error('flow: git commit file diff failed', { rootPath, commit: commit.hash, error })
+      notify(commitDiffFailedToast(commit.hash, error))
+    }
+  }
+
+  /**
+   * A hunk button in the diff tab. Main re-reads the file and refuses a hunk
+   * that moved; a revert asks first and only then says `confirmed: true` —
+   * here, in the handler of the press a person made (forbidden #15).
+   */
+  async function applyHunk(target: DiffTarget, hunk: GitDiffHunk, action: HunkAction): Promise<void> {
+    if (target.kind !== 'worktree' && target.kind !== 'index') return
+    if (action === 'revert' && !window.confirm(`Revert this change in ${target.filePath}? It cannot be undone.`)) return
+    try {
+      const result = await api.git.applyHunk({
+        rootId: target.rootPath,
+        filePath: target.filePath,
+        action,
+        hunkIndex: hunk.index,
+        expectedHeader: hunk.header,
+        expectedDigest: hunk.digest,
+        ...(action === 'revert' ? { confirmed: true } : {}),
+      })
+      if (result.status !== 'applied') {
+        notify({
+          title: action === 'stage' ? 'Not staged' : action === 'unstage' ? 'Not unstaged' : 'Not reverted',
+          body: result.detail,
+          level: 'error',
+        })
+      }
+    } catch (error) {
+      console.error('flow: hunk action failed', { target, action, error })
+      notify({ title: 'Hunk not changed', body: gitErrorMessage(error), level: 'error' })
+    }
+    // Re-read the tree; the open diff re-syncs to it (#402) and redraws its hunks.
+    await refreshRoot(target.rootPath)
+  }
+
+  /**
+   * Publish the branch the way the change review does: an unbound branch is
+   * ASKED where it goes (never guessed), and the answer rides the same press.
+   * A dismissal says nothing. Returns false when nothing was published.
+   */
+  async function publishBranch(rootPath: string): Promise<boolean> {
+    try {
+      const first = await api.git.publish({ rootId: rootPath })
+      const result: GitPublishResult | null =
+        first.status === 'unbound' ? await askThenPublish(rootPath, first.suggestion) : first
+      if (result === null) return false
+      const sentence = publishOutcomeSentence(result)
+      if (sentence !== null) {
+        notify({
+          title: publishOutcomeTone(result) === 'ok' ? 'Published' : 'Not published',
+          body: sentence,
+          level: publishOutcomeTone(result) === 'ok' ? 'info' : 'error',
+        })
+      }
+      return result.status === 'published' || result.status === 'nothing'
+    } catch (error) {
+      console.error('flow: publish failed', { rootPath, error })
+      notify({ title: 'Not published', body: 'This branch could not be published.', level: 'error' })
+      return false
+    } finally {
+      void refreshRoot(rootPath)
+    }
+  }
+
+  async function askThenPublish(
+    rootPath: string,
+    suggestion: ThreadBindingSuggestion,
+  ): Promise<GitPublishResult | null> {
+    const answer = await askRemoteBinding(remoteBindingQuestion(suggestion))
+    if (answer === null) return null
+    // `confirmed: true` is stated here, where a person just answered.
+    return await api.git.publish({
+      rootId: rootPath,
+      binding: { remote: answer.remote, remoteBranch: answer.remoteBranch, confirmed: true },
+    })
+  }
+
+  /** Pull, reporting what moved. Returns false when the pull failed or conflicted. */
+  async function pullBranch(rootPath: string): Promise<boolean> {
+    try {
+      const result = await api.git.pull({ rootId: rootPath })
+      notify(pullToast(result))
+      return result.conflicted !== true
+    } catch (error) {
+      console.error('flow: pull failed', { rootPath, error })
+      notify({ title: "Couldn't pull", body: gitErrorMessage(error), level: 'error' })
+      return false
+    } finally {
+      void refreshRoot(rootPath)
+    }
+  }
+
+  /** Sync Changes: pull what is behind, then publish what is ahead (VS Code's order). */
+  const syncingRoots = new Set<string>()
+  async function syncBranch(rootPath: string): Promise<void> {
+    if (syncingRoots.has(rootPath)) return
+    const status = views.get(rootPath)?.status
+    if (!status) return
+    syncingRoots.add(rootPath)
+    renderStatusLine()
+    try {
+      if (status.upstream === undefined && status.ahead === 0 && status.behind === 0) {
+        await publishBranch(rootPath)
+        return
+      }
+      const steps = syncSteps(status.behind, status.ahead)
+      if (steps.length === 0) {
+        notify({ title: 'Up to date', body: 'Nothing to pull or push.', level: 'info' })
+        return
+      }
+      for (const step of steps) {
+        const ok = step === 'pull' ? await pullBranch(rootPath) : await publishBranch(rootPath)
+        if (!ok) return
+      }
+    } finally {
+      syncingRoots.delete(rootPath)
+      renderStatusLine()
+    }
+  }
+
+  async function fetchRemote(rootPath: string): Promise<void> {
+    try {
+      const result = await api.git.fetch({ rootId: rootPath })
+      if (result.status === 'failed') notify({ title: "Couldn't fetch", body: result.detail, level: 'error' })
+    } catch (error) {
+      notify({ title: "Couldn't fetch", body: gitErrorMessage(error), level: 'error' })
+    } finally {
+      void refreshRoot(rootPath)
+    }
+  }
+
   const panel = new GitPanel(panelContent, {
     onFileDiff: (rootPath, change, staged) => {
       void openFileDiff(rootPath, change, staged === true, { kind: 'panel', rootPath })
     },
     onCommitDiff: (rootPath, commit) => {
       void openCommitDiff(rootPath, commit)
+    },
+    onCommitFileDiff: (rootPath, commit, file) => {
+      void openCommitFileDiff(rootPath, commit, file)
+    },
+    onCommitFiles: (rootPath, commit) =>
+      api.git.commitFiles({ rootId: rootPath, commit }).catch((error: unknown) => {
+        console.warn('flow: commit files read failed', { rootPath, commit, error })
+        return null
+      }),
+    onSync: (rootPath) => syncBranch(rootPath),
+    onPublish: async (rootPath) => {
+      await publishBranch(rootPath)
+    },
+    onFetch: (rootPath) => fetchRemote(rootPath),
+    onRefresh: (rootPath) => {
+      void refreshRoot(rootPath)
     },
     onRetryLoad: () => {
       void syncRoots()
@@ -378,9 +587,19 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
         }
       })
     },
-    onCommit: async (rootPath, message) => {
+    onCommitAction: async (rootPath, request) => {
       try {
-        const { hash } = await api.git.commitIndex({ rootId: rootPath, message })
+        // Commit All stages everything first (untracked included) through the
+        // same scoped stage the row action uses, then commits the index.
+        if (request.stageFirst.length > 0) {
+          await api.git.stage({ rootId: rootPath, filePaths: request.stageFirst })
+        }
+        const { hash } = await api.git.commitIndex({
+          rootId: rootPath,
+          message: request.message,
+          // Relayed only from the Commit (Amend) item, after its confirm.
+          ...(request.amend ? { amend: true, confirmed: true } : {}),
+        })
         // #1144: say WHICH repo took the commit when several are on screen —
         // a bare hash is no signal at all about where the work landed.
         const repo = repoNameFor(rootPath)
@@ -391,11 +610,15 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
         })
         // Refresh explicitly — the .git/index watch can miss commit's atomic
         // rename-replace, leaving the just-committed files stale in the panel (#507).
-        void refreshRoot(rootPath)
+        // FRESH: Commit & Push / Sync read the ahead count this commit changed.
+        await refreshRoot(rootPath, { fresh: true })
+        if (request.after === 'push') await publishBranch(rootPath)
+        else if (request.after === 'sync') await syncBranch(rootPath)
         return true
       } catch (error) {
         console.error('flow: git commit failed', { rootPath, error })
         notify({ title: "Couldn't commit", body: gitErrorMessage(error), level: 'error' })
+        void refreshRoot(rootPath)
         return false
       }
     },
@@ -649,18 +872,8 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
         })
     },
     onPull: (rootPath) => {
-      void api.git
-        .pull({ rootId: rootPath })
-        .then((result) => {
-          // #1336: report what actually moved. This branch used to notify a
-          // literal "Pulled / Up to date" for every outcome.
-          notify(pullToast(result))
-          void refreshRoot(rootPath)
-        })
-        .catch((error: unknown) => {
-          console.error('flow: pull failed', { rootPath, error })
-          notify({ title: "Couldn't pull", body: gitErrorMessage(error), level: 'error' })
-        })
+      // #1336: report what actually moved (pullToast), one code path with Sync.
+      void pullBranch(rootPath)
     },
     // The landing block this group carries, or null. The controller owns the
     // element; the panel only decides where it goes (landing-per-project).
@@ -823,7 +1036,16 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
     }
   }
 
-  async function refreshRoot(rootPath: string): Promise<void> {
+  // ONE REFRESH PER ROOT IN FLIGHT (perf, project add). Every door that asks
+  // for a root while its refresh runs shares ONE trailing re-read instead of
+  // starting another status + log + merge-state round trip — see
+  // refresh-coalesce.ts for the measurement.
+  const refreshes = createCoalescer<string>((rootPath) => refreshRootNow(rootPath))
+  function refreshRoot(rootPath: string, options?: { fresh?: boolean }): Promise<void> {
+    return refreshes.request(rootPath, options)
+  }
+
+  async function refreshRootNow(rootPath: string): Promise<void> {
     // Mark loading and re-render so an active root with no data yet shows a
     // loading placeholder — not "No project roots" — during the IPC round-trip.
     // (A root that already has a view keeps showing it; see resolvePanelState.)
@@ -867,6 +1089,7 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
       views.set(rootPath, { rootPath, status, commits, mergeState, commitsExhausted })
       refreshStatus.set(rootPath, 'loaded')
       render()
+      renderStatusLine()
       // Re-sync an OPEN working-tree diff to the live tree it claims to show
       // (#402): live-refresh it while its file is still changed, close it once
       // the file leaves the changes list (committed/reverted away) — so the diff
@@ -880,7 +1103,7 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
           const change = (status?.changes ?? []).find((c) => c.filePath === diffFilePath)
           // Re-opened under the SAME owner it already had — a live refresh must
           // not quietly hand a conversation's diff to the panel.
-          if (change && diffOwner !== null) void openFileDiff(rootPath, change, false, diffOwner)
+          if (change && diffOwner !== null) void openFileDiff(rootPath, change, diffStaged, diffOwner)
         }
       }
     } catch (error) {
@@ -1130,8 +1353,12 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
   // Unconditional (#953): even when no overlay is painted yet, an IN-FLIGHT diff
   // request must be cancelled — the user's last action ("open this file") wins,
   // so a late-resolving diff never covers the just-opened file.
+  // The diff is a TAB now, so a file opening beside it no longer closes it —
+  // but an IN-FLIGHT diff request is still cancelled (#953): the person's last
+  // action wins and a late diff never steals focus from the opened file.
   document.addEventListener('flow:editor-file-opened', () => {
-    closeDiff()
+    if (!diffView.isOpen) closeDiff()
+    else diffRequestSeq += 1
   })
 
   // The thread change-review card (#1906) opens a file's diff through the SAME
@@ -1264,6 +1491,125 @@ export function initGit(surfaces: ShellSurfaces, editorApi: GitEditorApi): void 
       .catch(() => {
         // Scope layer unavailable — the active-root fallback stays in charge.
       })
+  }
+
+  // ── The SOURCE CONTROL title row and the status line ───────────────────
+  /** The repository the title row and the status line act on. */
+  function primaryRoot(): string | null {
+    const visible = visibleRoots()
+    return visible[0] ?? null
+  }
+
+  const headerActions = surfaces.scmHeaderActions
+  const headerButton = (icon: string, label: string, cls: string, run: (btn: HTMLButtonElement) => void): HTMLButtonElement => {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = `fl-sc-action ${cls}`
+    btn.title = label
+    btn.setAttribute('aria-label', label)
+    const glyph = document.createElement('fl-icon')
+    glyph.setAttribute('name', icon)
+    glyph.setAttribute('size', '16')
+    btn.appendChild(glyph)
+    btn.addEventListener('click', () => run(btn))
+    headerActions.appendChild(btn)
+    return btn
+  }
+  const viewToggle = headerButton('list-tree', 'View as Tree', 'fl-sc-view-mode', () => {
+    panel.toggleViewMode()
+    paintViewToggle()
+  })
+  function paintViewToggle(): void {
+    const tree = panel.viewMode === 'tree'
+    viewToggle.title = tree ? 'View as List' : 'View as Tree'
+    viewToggle.setAttribute('aria-label', viewToggle.title)
+    viewToggle.querySelector('fl-icon')?.setAttribute('name', tree ? 'list-flat' : 'list-tree')
+  }
+  paintViewToggle()
+  headerButton('check', 'Commit', 'fl-sc-commit', () => {
+    const root = primaryRoot()
+    if (root !== null) panel.pressCommit(root)
+  })
+  headerButton('refresh', 'Refresh', 'fl-sc-refresh', () => {
+    for (const rootPath of visibleRoots()) void refreshRoot(rootPath)
+  })
+  headerButton('more-horizontal', 'More Actions…', 'fl-sc-more', (btn) => {
+    const root = primaryRoot()
+    const status = root === null ? null : (views.get(root)?.status ?? null)
+    const none = root === null || status === null
+    showScmMenu(btn, [
+      { label: 'Pull', disabled: none, onSelect: () => root !== null && void pullBranch(root) },
+      { label: 'Push', disabled: none || status?.detached === true, onSelect: () => root !== null && void publishBranch(root) },
+      { label: 'Fetch', disabled: none, onSelect: () => root !== null && void fetchRemote(root) },
+      {
+        label: 'Sync',
+        disabled: none || status?.detached === true,
+        onSelect: () => root !== null && void syncBranch(root),
+      },
+      {
+        label: 'Rename Branch…',
+        separator: true,
+        disabled: none || status?.detached === true,
+        onSelect: () => root !== null && panel.beginRename(root),
+      },
+      {
+        label: 'Merge Branch…',
+        disabled: none,
+        onSelect: () => root !== null && void pickAndMerge(root),
+      },
+    ])
+  })
+
+  /** Merge Branch…: the existing picker data, asked in a prompt. */
+  async function pickAndMerge(rootPath: string): Promise<void> {
+    const branches = await api.git.listBranches({ rootId: rootPath }).catch(() => [] as string[])
+    if (branches.length === 0) {
+      notify({ title: 'Nothing to merge', body: 'This repository has no other local branch.', level: 'info' })
+      return
+    }
+    const ref = window.prompt(`Merge which branch into the current one?\n\n${branches.join('\n')}`, branches[0] ?? '')
+    if (ref === null || ref.trim() === '') return
+    if (!branches.includes(ref.trim())) {
+      notify({ title: 'Not merged', body: `There is no local branch named ${ref.trim()}.`, level: 'error' })
+      return
+    }
+    const chosen = ref.trim()
+    try {
+      const { conflicted } = await api.git.mergeBranch({ rootId: rootPath, ref: chosen })
+      notify(
+        conflicted
+          ? { title: 'Merge has conflicts', body: `Resolve the conflicts from "${chosen}" in Merge Changes.`, level: 'info' }
+          : { title: 'Merged', body: chosen, level: 'info' },
+      )
+    } catch (error) {
+      notify({ title: "Couldn't merge branch", body: gitErrorMessage(error), level: 'error' })
+    }
+    void refreshRoot(rootPath)
+  }
+
+  const statusLine = createScmStatusLine(surfaces.statusBar, {
+    onShowSourceControl: () => document.dispatchEvent(new CustomEvent('flow:show-git')),
+    onSync: () => {
+      const root = primaryRoot()
+      if (root !== null) void syncBranch(root)
+    },
+  })
+  function renderStatusLine(): void {
+    const root = primaryRoot()
+    const status = root === null ? null : (views.get(root)?.status ?? null)
+    if (root === null || status === null) {
+      statusLine.update(null)
+      return
+    }
+    statusLine.update({
+      branch: status.branch,
+      detached: status.detached === true,
+      dirty: status.dirty,
+      ahead: status.ahead,
+      behind: status.behind,
+      hasUpstream: status.upstream !== undefined || status.ahead > 0 || status.behind > 0,
+      syncing: syncingRoots.has(root),
+    })
   }
 
   void syncRoots()

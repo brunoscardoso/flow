@@ -9,7 +9,7 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 }
 
 describe('createCoalescer', () => {
-  it('shares one trailing run among every caller that arrives mid-flight', async () => {
+  it('a mid-flight caller joins the running refresh, and ONE trailing re-read is queued for all of them', async () => {
     const gates: Array<{ promise: Promise<void>; resolve: () => void }> = []
     const run = jest.fn(async () => {
       const gate = deferred()
@@ -24,19 +24,29 @@ describe('createCoalescer', () => {
     expect(run).toHaveBeenCalledTimes(1)
     const second = coalescer.request('/repo')
     const third = coalescer.request('/repo')
-    const fourth = coalescer.request('/repo')
-    expect(second).toBe(third)
-    expect(third).toBe(fourth)
+    const fresh = coalescer.request('/repo', { fresh: true })
+    const fresh2 = coalescer.request('/repo', { fresh: true })
+    // Joiners share the running refresh; fresh callers share the trailing one.
+    expect(second).toBe(first)
+    expect(third).toBe(first)
+    expect(fresh).toBe(fresh2)
+    expect(fresh).not.toBe(first)
     expect(run).toHaveBeenCalledTimes(1)
 
+    let freshSettled = false
+    void fresh.then(() => {
+      freshSettled = true
+    })
     gates[0]?.resolve()
-    await first
+    await second // answered by the FIRST run
     await Promise.resolve()
     await Promise.resolve()
-    // The waiting callers get ONE fresh run that started after they asked.
+    // ONE trailing run started after they asked, whoever was waiting.
     expect(run).toHaveBeenCalledTimes(2)
+    expect(freshSettled).toBe(false)
     gates[1]?.resolve()
-    await second
+    await fresh
+    expect(freshSettled).toBe(true)
     expect(run).toHaveBeenCalledTimes(2)
     expect(coalescer.running('/repo')).toBe(false)
   })

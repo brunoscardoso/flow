@@ -142,6 +142,19 @@ export const ICON_PATHS = {
   // A pane split down the middle — "split terminal" (#1133): the frame with a
   // divider, the right half kept clear so it reads as the NEW pane.
   'split-horizontal': 'M2 3 H14 V13 H2 Z M8 3 V13',
+  // Source Control (2026-11): arrows, a flat and a nested list, the cloud pair
+  // for pull / push, the sync circle, a file with an arrow out of it, and the
+  // wrapped-line mark. Stroked on the 16-box like the rest.
+  'arrow-up': 'M8 13 V3 M4 7 L8 3 L12 7',
+  'arrow-down': 'M8 3 V13 M4 9 L8 13 L12 9',
+  'list-flat': 'M2.5 4 H13.5 M2.5 8 H13.5 M2.5 12 H13.5',
+  'list-tree': 'M2.5 3.5 H8 M5 3.5 V12 M5 8 H13.5 M5 12 H13.5',
+  'cloud-down': 'M4.5 11.5 A3 3 0 0 1 4.8 5.5 A4 4 0 0 1 12.3 6.5 A2.6 2.6 0 0 1 12 11.5 M8 7.5 V14 M6 12 L8 14 L10 12',
+  'cloud-up': 'M4.5 11.5 A3 3 0 0 1 4.8 5.5 A4 4 0 0 1 12.3 6.5 A2.6 2.6 0 0 1 12 11.5 M8 14 V7.5 M6 9.5 L8 7.5 L10 9.5',
+  sync: 'M13 6.5 A5 5 0 0 0 3.5 5.5 M3 9.5 A5 5 0 0 0 12.5 10.5 M3.5 2.5 V5.5 H6.5 M12.5 13.5 V10.5 H9.5',
+  'go-to-file': 'M4 1.5 H9.5 L12.5 4.5 V8 M9.5 1.5 V4.5 H12.5 M4 1.5 V14.5 H8 M9.5 13 H14.5 M12.5 11 L14.5 13 L12.5 15',
+  'word-wrap': 'M2.5 4 H13.5 M2.5 8 H11.5 A2 2 0 0 1 11.5 12 H8 M9.5 10.5 L8 12 L9.5 13.5 M2.5 12 H5.5',
+  'git-compare': 'M5 2.5 A1.5 1.5 0 1 0 5 5.5 A1.5 1.5 0 0 0 5 2.5 M11 10.5 A1.5 1.5 0 1 0 11 13.5 A1.5 1.5 0 0 0 11 10.5 M5 5.5 V10 A2 2 0 0 0 7 12 H9 M11 10.5 V6 A2 2 0 0 0 9 4 H7',
   // THREE LINES NARROWING DOWNWARD — "filter this list", the glyph Cursor puts
   // on the same control. Not a funnel: a funnel is a shape with sides, and at
   // the 12px this renders at its walls close into a solid wedge. Centred rather

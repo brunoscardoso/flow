@@ -22,6 +22,7 @@ import '../components'
 import type { FlList, ListItemDetail } from '../components'
 import type {
   GitCommit,
+  GitCommitFile,
   GitFileChange,
   GitFileState,
   GitMergeState,
@@ -77,7 +78,34 @@ import { CONFLICT_ROW_HEIGHT, GP_STYLES, ROW_HEIGHT } from './git-panel-styles'
 import { getHunkResolutions } from '../editor/merge-resolution-record'
 import { resolveAllControl, type ConflictResolvePhase } from '../editor/conflict-resolve-state'
 import { fileConflictRisk, type ConflictBadge } from './conflict-risk'
-import { commitBoxState, shouldApplyGeneratedMessage } from './commit-box'
+import { shouldApplyGeneratedMessage } from './commit-box'
+import {
+  commitButtonModel,
+  commitMenuItems,
+  commitPlaceholder,
+  type CommitButtonInput,
+  type CommitMainAction,
+  type CommitMenuAction,
+} from './commit-action'
+import {
+  VIEW_MODE_KEY,
+  buildTreeRows,
+  fileIconFor,
+  parseViewMode,
+  splitPath,
+  type ChangesViewMode,
+} from './change-rows'
+import {
+  GRAPH_ROW_PX,
+  graphWidthPx,
+  laneColorIndex,
+  laneX,
+  layoutGraph,
+  segmentPath,
+  type GraphRow,
+} from './graph-layout'
+import { showScmMenu, type ScmMenuItem } from './scm-menu'
+import { afterCommit, commitScope } from './commit-action'
 import {
   interleaveUntrackedChildren,
   isUntrackedDir,
@@ -112,8 +140,37 @@ export interface GitPanelCallbacks {
   onDiscard(rootPath: string, change: GitFileChange): void
   /** Revert ALL working-tree changes in the section (one confirm, then each). */
   onDiscardAll(rootPath: string, changes: GitFileChange[]): void
-  /** Commit the staged index with `message`; resolves true on success (#335). */
-  onCommit(rootPath: string, message: string): Promise<boolean>
+  /**
+   * Run one of the commit box's actions (the split button's face or a menu
+   * item) with `message`. `stageFirst` lists the files to stage before the
+   * commit (Commit All); `amend` is set only by the Commit (Amend) item a
+   * person chose. Resolves true when the commit landed.
+   */
+  onCommitAction(
+    rootPath: string,
+    request: {
+      action: CommitMainAction | CommitMenuAction
+      message: string
+      stageFirst: string[]
+      amend: boolean
+      after: 'none' | 'push' | 'sync'
+    },
+  ): Promise<boolean>
+  /** Sync Changes: pull what is behind, then publish what is ahead. */
+  onSync(rootPath: string): Promise<void>
+  /** Publish the branch (also the Push action). */
+  onPublish(rootPath: string): Promise<void>
+  /** Fetch from the remote. */
+  onFetch(rootPath: string): Promise<void>
+  /** Re-read this repository. */
+  onRefresh(rootPath: string): void
+  /** The files one commit changed (graph row expansion + hover card). */
+  onCommitFiles(
+    rootPath: string,
+    commit: string,
+  ): Promise<{ files: GitCommitFile[]; total: number; truncated: boolean } | null>
+  /** A file under an expanded commit was clicked → that commit's diff for it. */
+  onCommitFileDiff(rootPath: string, commit: GitCommit, file: GitCommitFile): void
   /** Generate a commit message over the staged files (AI ✨); null if unavailable. */
   onGenerateMessage(rootPath: string, filePaths: string[]): Promise<string | null>
   /** Start the Resolve-with-AI flow for the open projects' merge conflicts (#335, P6). */
@@ -216,6 +273,27 @@ const STATE_NAMES: Record<GitFileState, string> = {
   conflicted: 'Conflicted',
 }
 
+/** A row of a file section: a file row (list or tree), or a tree folder. */
+type ChangeDisplayRow =
+  | (UntrackedDisplayRow & { depth: number })
+  | {
+      kind: 'folder'
+      /** `filePath` is the folder's path; nothing else on it is read. */
+      change: GitFileChange
+      depth: number
+      label: string
+      collapsed: boolean
+    }
+
+/** A row of the graph: a commit, one of an expanded commit's files, or a note. */
+type GraphDisplayRow =
+  | { kind: 'commit'; commit: GitCommit; layout: GraphRow; expanded: boolean }
+  | { kind: 'file'; commit: GitCommit; file: GitCommitFile; continuing: number[] }
+  | { kind: 'note'; commit: GitCommit; text: string; continuing: number[] }
+
+/** VS Code's hover-action order on a file row (after Open File). */
+const ACTION_ORDER = ['discard', 'stage', 'unstage', 'resolve', 'use-ours', 'use-theirs', 'open-merge', 'open-diff']
+
 /** Human section names for list aria-labels. */
 const SECTION_NAMES: Record<SourceControlSection, string> = {
   merge: 'Merge changes',
@@ -293,6 +371,21 @@ export class GitPanel {
    *  Keyed by section because a file can be both staged and edited; merge rows and
    *  rolled-up untracked dir rows never enter it (FR-11). */
   #selections = new Map<string, Selection>()
+  /** List or tree — VS Code's "View as Tree", persisted. */
+  #viewMode: ChangesViewMode = parseViewMode(safeReadStorage(VIEW_MODE_KEY))
+  /** Folded folders in tree view, per `root\0section\0folder`. */
+  #collapsedFolders = new Set<string>()
+  /** Expanded graph commits (`root\0hash`) and their files once read. */
+  #expandedCommits = new Set<string>()
+  #commitFiles = new Map<
+    string,
+    { files: GitCommitFile[]; total: number; truncated: boolean } | null
+  >()
+  /** Which commit box action is running, per root. */
+  #busyAction = new Map<string, CommitMainAction | CommitMenuAction>()
+  /** The commit hover card, and the timer that opens it. */
+  #hoverCard: HTMLElement | null = null
+  #hoverTimer: number | null = null
 
   /** The selection map key for a section within a root. */
   #selectionKey(rootPath: string, section: SourceControlSection): string {
@@ -428,7 +521,8 @@ export class GitPanel {
   #sectionHeader(
     key: string,
     labelText: string,
-  ): { head: HTMLElement; collapsed: boolean } {
+    count: { suffix: string; badge: number | null } | null = null,
+  ): { head: HTMLElement; collapsed: boolean; badge: HTMLElement | null } {
     const collapsed = this.#collapsedSections.has(key)
     const head = document.createElement('div')
     head.className = 'gp-subheader gp-section-head'
@@ -442,8 +536,26 @@ export class GitPanel {
     const chevron = iconEl(collapsed ? 'chevron-right' : 'chevron-down', 12)
     chevron.classList.add('gp-section-chevron')
     const label = document.createElement('span')
+    label.className = 'gp-section-label'
     label.textContent = labelText
+    // The count stays in the header's TEXT (" (3)") for screen readers and for
+    // anything reading the header as words, but it is drawn as the badge on
+    // the right, VS Code style — the suffix itself is clipped out of sight.
+    if (count !== null && count.suffix !== '') {
+      const suffix = document.createElement('span')
+      suffix.className = 'gp-visually-hidden'
+      suffix.textContent = count.suffix
+      label.appendChild(suffix)
+    }
     trigger.append(chevron, label)
+    let badge: HTMLElement | null = null
+    if (count !== null && count.badge !== null) {
+      badge = document.createElement('span')
+      badge.className = 'gp-count-badge'
+      badge.setAttribute('aria-hidden', 'true')
+      // Drawn from the attribute, so the number is not a second copy in the text.
+      badge.dataset['count'] = String(count.badge)
+    }
     const toggle = (): void => this.#toggleSection(key)
     trigger.addEventListener('click', toggle)
     trigger.addEventListener('keydown', (event) => {
@@ -453,7 +565,42 @@ export class GitPanel {
       }
     })
     head.appendChild(trigger)
-    return { head, collapsed }
+    if (badge !== null) head.appendChild(badge)
+    return { head, collapsed, badge }
+  }
+
+  // ── Header-facing API (the SOURCE CONTROL title row) ─────────────────────
+
+  get viewMode(): ChangesViewMode {
+    return this.#viewMode
+  }
+
+  /** VS Code's View as Tree / View as List. */
+  toggleViewMode(): void {
+    this.#viewMode = this.#viewMode === 'list' ? 'tree' : 'list'
+    safeWriteStorage(VIEW_MODE_KEY, this.#viewMode)
+    this.#rerender()
+  }
+
+  /** Open the branch field for a repository (the More menu's Rename Branch). */
+  beginRename(rootPath: string): void {
+    this.#renamingRoot = rootPath
+    this.#rerender()
+  }
+
+  /** Press the commit box's main button for a repository (header Commit). */
+  pressCommit(rootPath: string): void {
+    const button = this.#container.querySelector<HTMLButtonElement>(
+      `.gp-commit-box[data-root="${CSS.escape(rootPath)}"] .gp-commit-btn`,
+    )
+    if (button === null) return
+    if (button.disabled) {
+      this.#container
+        .querySelector<HTMLTextAreaElement>(`.gp-commit-box[data-root="${CSS.escape(rootPath)}"] .gp-commit-msg`)
+        ?.focus()
+      return
+    }
+    button.click()
   }
 
   /**
@@ -577,7 +724,10 @@ export class GitPanel {
     // by its stable list key, and reapply after.
     const listState = this.#captureListState()
     this.#container.textContent = ''
-    for (const group of deriveGitGroups(views, this.#scope)) {
+    const groups = deriveGitGroups(views, this.#scope)
+    this.#groupedRender = groups.some((group) => group.header !== null)
+    this.#closeHoverCard()
+    for (const group of groups) {
       this.#container.appendChild(this.#renderGroup(group))
     }
     this.#restoreListState(listState)
@@ -695,7 +845,11 @@ export class GitPanel {
     // hash. Primary and secondary roots carry the SAME border; the primary
     // is marked by the head tooltip below.
     const accentRef = ensureAccentProperty(header.rootPath, header.accent ?? null)
-    head.style.borderLeftColor = accentRef
+    const dot = document.createElement('span')
+    dot.className = 'gp-group-dot'
+    dot.style.background = accentRef
+    dot.setAttribute('aria-hidden', 'true')
+    head.appendChild(dot)
 
     const name = document.createElement('span')
     name.className = 'gp-group-name'
@@ -718,21 +872,64 @@ export class GitPanel {
     // — `feat/data-contract-guard-fe` twice, adjacent, for every group on
     // screen. The header keeps it only while the group is FOLDED, where the
     // section below is not there to say it and a summary is the whole point.
-    if (header.branch && collapsed) {
-      const branchIcon = iconEl('git-branch', 12)
-      branchIcon.classList.add('gp-group-branch-icon')
-      head.appendChild(branchIcon)
+    // THE REPOSITORY ROW names its branch — the one place it is named while
+    // several repositories are on screen (a '*' when the tree is dirty).
+    const status = group.view.status
+    if (header.branch || status?.detached === true) {
+      const branchWrap = document.createElement('span')
+      branchWrap.className = 'gp-group-branch'
+      branchWrap.appendChild(iconEl('git-branch', 12))
       const branch = document.createElement('span')
-      branch.className = 'gp-group-branch'
-      branch.textContent = header.branch
-      branch.title = header.branch
-      head.appendChild(branch)
+      branch.className = 'gp-branch-name'
+      if (status?.detached === true) {
+        const at = status.headCommit === undefined ? '' : ` at ${status.headCommit.slice(0, 7)}`
+        branch.textContent = `detached HEAD${at}`
+        branch.classList.add('gp-branch-detached')
+      } else {
+        branch.textContent = header.branch
+      }
+      branch.title = branch.textContent
+      branchWrap.appendChild(branch)
+      if (status?.dirty === true) {
+        const star = document.createElement('span')
+        star.className = 'gp-branch-dirty'
+        star.textContent = '*'
+        star.title = 'Uncommitted changes'
+        branchWrap.appendChild(star)
+      }
+      head.appendChild(branchWrap)
     }
-    if (header.aheadBehind && collapsed) {
+    const spacer = document.createElement('span')
+    spacer.className = 'gp-group-spacer'
+    head.appendChild(spacer)
+    const rowActions = document.createElement('span')
+    rowActions.className = 'gp-group-actions'
+    const groupAction = (icon: string, label: string, run: () => void): void => {
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'gp-icon-btn'
+      btn.title = label
+      btn.setAttribute('aria-label', label)
+      btn.appendChild(iconEl(icon, 14))
+      btn.addEventListener('click', (event) => {
+        event.stopPropagation()
+        run()
+      })
+      rowActions.appendChild(btn)
+    }
+    groupAction('check', 'Commit', () => this.pressCommit(header.rootPath))
+    groupAction('refresh', 'Refresh', () => this.#callbacks.onRefresh(header.rootPath))
+    head.appendChild(rowActions)
+    if (header.aheadBehind) {
       const aheadBehind = document.createElement('span')
       aheadBehind.className = 'gp-ahead-behind'
       aheadBehind.textContent = header.aheadBehind
       head.appendChild(aheadBehind)
+    } else if (status && status.changes.length > 0) {
+      const count = document.createElement('span')
+      count.className = 'gp-group-count'
+      count.textContent = String(status.changes.length)
+      head.appendChild(count)
     }
 
     const toggle = (): void => this.#toggleSection(key)
@@ -921,7 +1118,15 @@ export class GitPanel {
       return section
     }
 
-    section.appendChild(this.#renderBranchHeader(view.status, view.rootPath))
+    // ONE REPOSITORY: no repository row (VS Code draws one only for several).
+    // The branch is named in the message placeholder, the status line and the
+    // graph's HEAD badge. Two states still get a line here: a detached HEAD,
+    // which is a warning (#1382), and the branch field while it is renamed.
+    // Several repositories carry the name in their own row (#renderGroup).
+    if (!this.#grouped || this.#renamingRoot === view.rootPath) {
+      const line = this.#renderBranchHeader(view.status, view.rootPath)
+      if (line !== null) section.appendChild(line)
+    }
 
     // ── Merge/rebase in-progress banner (#335, P6) ─────────────────────────
     const banner = this.#renderMergeBanner(view.rootPath, view.mergeState)
@@ -938,11 +1143,13 @@ export class GitPanel {
     const { merge, staged, changes } = assignSections(view.status.changes)
 
     // Commit box at the top (VS Code layout): message + Commit + AI ✨ (#335).
-    section.appendChild(this.#renderCommitBox(view.rootPath, staged))
+    section.appendChild(this.#renderCommitBox(view, merge, staged, changes))
 
     if (merge.length === 0 && staged.length === 0 && changes.length === 0) {
+      // Nothing to list. VS Code says nothing; the Sync button above already
+      // carries what is left to do, so this is one quiet line.
       const clean = document.createElement('div')
-      clean.className = 'gp-empty'
+      clean.className = 'gp-empty gp-clean'
       clean.textContent = 'Working tree clean'
       section.appendChild(clean)
     } else {
@@ -972,29 +1179,41 @@ export class GitPanel {
       undefined,
       view.commitsExhausted === true,
     )
-    const commitsSection = this.#sectionHeader(
+    // THE GRAPH replaces the flat COMMITS list: lanes drawn from parents, ref
+    // badges, relative dates; a commit expands to its files. The fold key is
+    // the old 'commits' one, so a folded history stays folded.
+    const graphSection = this.#sectionHeader(
       sectionCollapseKey(view.rootPath, 'commits'),
-      logWindow.label,
+      'Graph',
+      { suffix: logWindow.label.replace(/^Commits/, ''), badge: null },
     )
-    section.appendChild(commitsSection.head)
-    if (!commitsSection.collapsed) {
+    graphSection.head.classList.add('gp-graph-head')
+    graphSection.head.appendChild(this.#graphActions(view.rootPath))
+    section.appendChild(graphSection.head)
+    if (!graphSection.collapsed) {
       if (view.commits.length === 0) {
         const none = document.createElement('div')
         none.className = 'gp-empty'
         none.textContent = 'No commits'
         section.appendChild(none)
       } else {
-        const list = createList<GitCommit>(
-          view.commits,
+        const layout = layoutGraph(view.commits)
+        const graphRows = this.#graphRows(view, layout.rows)
+        const widthPx = graphWidthPx(layout.width)
+        const list = createList<GraphDisplayRow>(
+          graphRows,
           this.#visibleCommitRows(),
-          (commit) => this.#renderCommitRow(commit),
+          (row) => this.#renderGraphRow(view.rootPath, row, widthPx),
           `Commits, ${view.commits.length}`,
         )
+        list.classList.add('gp-graph-list')
         // Stable key so scroll/selection survive the full rebuild (#1094).
         list.setAttribute('data-list-key', `${view.rootPath}\x00commits`)
         list.addEventListener('fl-list-activate', (event) => {
-          const detail = (event as CustomEvent<ListItemDetail<GitCommit>>).detail
-          this.#callbacks.onCommitDiff(view.rootPath, detail.item)
+          const detail = (event as CustomEvent<ListItemDetail<GraphDisplayRow>>).detail
+          const row = detail.item
+          if (row.kind === 'commit') this.#toggleCommit(view.rootPath, row.commit.hash)
+          else if (row.kind === 'file') this.#callbacks.onCommitFileDiff(view.rootPath, row.commit, row.file)
         })
         section.appendChild(list)
         // #1335: the route to older history. `GitManager.log` has always taken
@@ -1037,9 +1256,10 @@ export class GitPanel {
     if (files.length === 0) return
 
     // #1143: per-repo fold — see sectionCollapseKey.
-    const { head, collapsed } = this.#sectionHeader(
+    const { head, collapsed, badge } = this.#sectionHeader(
       sectionCollapseKey(rootPath, section),
-      `${title} (${files.length})`,
+      title,
+      { suffix: ` (${files.length})`, badge: files.length },
     )
 
     // The merge section is its own query CONTAINER (see GP_NARROW_PANEL_PX):
@@ -1085,24 +1305,25 @@ export class GitPanel {
         mergeBulk.appendChild(btn)
         continue
       }
+      // VS Code's section actions: icons that appear on hover, named in full
+      // by their tooltip and accessible name.
       let iconName: string
-      let text: string
       if (bulk === 'stage-all') {
-        iconName = 'check'
-        text = 'Approve all'
-        btn.title = 'Stage all changes'
+        iconName = 'plus'
+        btn.title = 'Stage All Changes'
         btn.classList.add('gp-bulk-approve')
       } else if (bulk === 'discard-all') {
         iconName = 'discard'
-        text = 'Revert all'
-        btn.title = 'Discard all changes — cannot be undone'
+        btn.title = 'Discard All Changes'
         btn.classList.add('gp-bulk-revert')
       } else {
         iconName = 'minus'
-        text = 'Unstage all'
-        btn.title = 'Unstage all'
+        btn.title = 'Unstage All Changes'
+        btn.classList.add('gp-bulk-unstage')
       }
-      btn.append(iconEl(iconName, 13), labelEl(text))
+      btn.classList.add('gp-icon-btn')
+      btn.setAttribute('aria-label', btn.title)
+      btn.append(iconEl(iconName, 14))
       btn.addEventListener('click', (event) => {
         event.stopPropagation()
         const paths = files.map((file) => file.filePath)
@@ -1158,7 +1379,14 @@ export class GitPanel {
       }
     }
 
-    if (headActions.childElementCount > 0) head.appendChild(headActions)
+    if (headActions.childElementCount > 0) {
+      // Discard All sits left of Stage All, as in VS Code.
+      const approve = headActions.querySelector('.gp-bulk-approve')
+      const revert = headActions.querySelector('.gp-bulk-revert')
+      if (approve !== null && revert !== null) headActions.insertBefore(revert, approve)
+      if (badge !== null) head.insertBefore(headActions, badge)
+      else head.appendChild(headActions)
+    }
     host.appendChild(head)
     if (host !== parent) parent.appendChild(host)
 
@@ -1186,7 +1414,11 @@ export class GitPanel {
       const kids = this.#untrackedChildren.get(key)
       if (kids !== undefined) childrenHere.set(change.filePath, kids)
     }
-    const rows = interleaveUntrackedChildren(files, expandedHere, childrenHere)
+    const flatRows = interleaveUntrackedChildren(files, expandedHere, childrenHere)
+    const rows: ChangeDisplayRow[] =
+      this.#viewMode === 'tree' && section !== 'merge'
+        ? this.#treeRows(rootPath, section, files, flatRows)
+        : flatRows.map((row) => ({ ...row, depth: 0 }))
 
     // #SCMS: the section's selectable file paths in display order — the universe a
     // Shift-range spans. Rolled-up untracked dir rows are excluded (they toggle
@@ -1194,7 +1426,11 @@ export class GitPanel {
     // stored selection against this live set so files that vanished since the last
     // render drop out of the highlight and any subsequent action (FR-10).
     const selectablePaths =
-      section === 'merge' ? [] : rows.filter((row) => row.kind !== 'dir').map((row) => row.change.filePath)
+      section === 'merge'
+        ? []
+        : rows
+            .filter((row) => row.kind !== 'dir' && row.kind !== 'folder')
+            .map((row) => row.change.filePath)
     if (section !== 'merge') {
       this.#setSelection(
         rootPath,
@@ -1204,11 +1440,13 @@ export class GitPanel {
       // #SCMS: path → change for this section (incl. untracked children), so a
       // selection-scoped Discard can resolve its paths to the records it needs.
       const changeByPath = new Map<string, GitFileChange>()
-      for (const row of rows) if (row.kind !== 'dir') changeByPath.set(row.change.filePath, row.change)
+      for (const row of rows) {
+        if (row.kind !== 'dir' && row.kind !== 'folder') changeByPath.set(row.change.filePath, row.change)
+      }
       this.#sectionChanges.set(this.#selectionKey(rootPath, section), changeByPath)
     }
 
-    const list = createList<UntrackedDisplayRow>(
+    const list = createList<ChangeDisplayRow>(
       rows,
       this.#visibleChangeRows(section === 'merge' ? CONFLICT_ROW_HEIGHT : ROW_HEIGHT),
       (row) => this.#renderChangeRow(rootPath, row, section, mergeIdentity),
@@ -1223,7 +1461,12 @@ export class GitPanel {
     // Stable key so scroll/selection survive the full rebuild (#1094).
     list.setAttribute('data-list-key', `${rootPath}\x00${section}`)
     list.addEventListener('fl-list-activate', (event) => {
-      const detail = (event as CustomEvent<ListItemDetail<UntrackedDisplayRow>>).detail
+      const detail = (event as CustomEvent<ListItemDetail<ChangeDisplayRow>>).detail
+      // A folder row in tree view folds and unfolds.
+      if (detail.item.kind === 'folder') {
+        this.#toggleFolder(rootPath, section, detail.item.change.filePath)
+        return
+      }
       // Clicking a rolled-up untracked dir toggles it open.
       if (detail.item.kind === 'dir') {
         this.#toggleUntrackedDir(rootPath, detail.item.change.filePath)
@@ -1299,118 +1542,224 @@ export class GitPanel {
     return legend
   }
 
-  /** Commit box (#335): message textarea + Commit + AI ✨ Generate. The Commit
-   *  button is gated by the pure commitBoxState(stagedCount, message); the draft
-   *  persists per-root across re-renders; ⌘/Ctrl+Enter commits. */
-  #renderCommitBox(rootPath: string, staged: GitFileChange[]): HTMLElement {
-    const stagedCount = staged.length
+  /**
+   * The commit box (#335, rebuilt to VS Code's shape): the message box with the
+   * AI button inside it on the right, then a split button whose face follows
+   * the tree — Commit, Commit All, Commit Merge, Sync Changes N↓ M↑ or Publish
+   * Branch (commit-action.ts decides) — and whose chevron opens the other
+   * commit actions. ⌘/Ctrl+Enter presses the face. The draft persists per root
+   * across re-renders, and a running action survives a rebuild (#1093).
+   */
+  #renderCommitBox(
+    view: GitRootView,
+    merge: GitFileChange[],
+    staged: GitFileChange[],
+    changes: GitFileChange[],
+  ): HTMLElement {
+    const rootPath = view.rootPath
+    const status = view.status
+    const mergeModel = deriveMergeBanner(view.mergeState)
+    const mac = isMac()
     const box = document.createElement('div')
     box.className = 'gp-commit-box'
+    box.dataset['root'] = rootPath
 
+    const wrap = document.createElement('div')
+    wrap.className = 'gp-commit-msg-wrap'
     const textarea = document.createElement('textarea')
     textarea.className = 'gp-commit-msg'
-    textarea.rows = 2
-    textarea.placeholder = 'Message (⌘/Ctrl+Enter to commit)'
+    textarea.rows = 1
+    textarea.placeholder = commitPlaceholder({
+      branch: status?.branch ?? '',
+      detached: status?.detached === true,
+      mac,
+      mergeMessage: mergeModel.visible ? mergeModel.message.split('\n')[0] ?? null : null,
+    })
+    textarea.setAttribute('aria-label', textarea.placeholder)
     textarea.dataset['msgKey'] = rootPath // focus survives a rebuild (#1093)
     textarea.value = this.#commitDrafts.get(rootPath) ?? ''
 
-    const commit = document.createElement('button')
-    commit.type = 'button'
-    commit.className = 'gp-commit-btn'
-    commit.textContent = 'Commit'
+    const generate = document.createElement('button')
+    generate.type = 'button'
+    generate.className = 'gp-commit-generate'
+    generate.appendChild(iconEl('sparkles', 14))
+    generate.title = 'Write a message from the changes'
+    generate.setAttribute('aria-label', 'Generate commit message with AI')
+    const generateFrom = (staged.length > 0 ? staged : changes).map((file) => file.filePath)
+    // Busy state survives re-renders (#1020): a rebuild mid-generation renders
+    // the wand disabled again, so the ~5s wait never reads as a dead click.
+    generate.disabled = generateFrom.length === 0 || this.#generating.has(rootPath)
+    generate.addEventListener('click', () => {
+      if (this.#generating.has(rootPath)) return
+      const seq = ++this.#generateSeq
+      this.#generating.set(rootPath, { seq, draftAtClick: this.#commitDrafts.get(rootPath) ?? '' })
+      generate.disabled = true
+      void this.#callbacks
+        .onGenerateMessage(rootPath, generateFrom)
+        .then((message) => this.#settleGeneration(rootPath, seq, message))
+        .catch(() => this.#settleGeneration(rootPath, seq, null))
+    })
+    wrap.append(textarea, generate)
 
-    // WHY the button is off, where a user can actually read it: a title on a
-    // disabled button never surfaces in Chromium, and no screen-reader path
-    // reached it at all. The hint doubles as the box's validation feedback.
+    // WHY the button is off, where a person can read it: a title on a disabled
+    // button never surfaces in Chromium.
     const hint = document.createElement('div')
     hint.className = 'gp-commit-hint'
     hint.id = `gp-commit-hint-${this.#commitHintSeq++}`
     textarea.setAttribute('aria-describedby', hint.id)
 
-    const syncEnabled = (): void => {
-      // A commit in flight SAYS so. A bare disabled button reads as a dead
-      // click (and invites a second one) for as long as git and its hooks take.
-      if (this.#committing.has(rootPath)) {
-        commit.disabled = true
-        commit.classList.add('gp-busy')
-        commit.textContent = 'Committing…'
-        commit.title = 'Committing the staged changes'
-        hint.hidden = true
-        return
-      }
-      commit.classList.remove('gp-busy')
-      commit.textContent = 'Commit'
-      const state = commitBoxState(stagedCount, textarea.value)
-      commit.disabled = !state.canCommit
-      commit.title = state.disabledReason ?? 'Commit staged changes'
-      hint.textContent = state.disabledReason ?? ''
-      hint.hidden = state.disabledReason === null
-    }
-    syncEnabled()
+    const split = document.createElement('div')
+    split.className = 'gp-commit-split'
+    const commit = document.createElement('button')
+    commit.type = 'button'
+    commit.className = 'gp-commit-btn'
+    const more = document.createElement('button')
+    more.type = 'button'
+    more.className = 'gp-commit-more'
+    more.title = 'More commit actions'
+    more.setAttribute('aria-label', 'More commit actions')
+    more.setAttribute('aria-haspopup', 'menu')
+    more.appendChild(iconEl('chevron-down', 14))
+    split.append(commit, more)
 
-    textarea.addEventListener('input', () => {
-      this.#commitDrafts.set(rootPath, textarea.value)
-      syncEnabled()
+    const input = (): CommitButtonInput => ({
+      stagedCount: staged.length,
+      changesCount: changes.length,
+      conflictCount: merge.length,
+      merging: mergeModel.visible,
+      hasMessage: textarea.value.trim().length > 0,
+      ahead: status?.ahead ?? 0,
+      behind: status?.behind ?? 0,
+      hasUpstream: status?.upstream !== undefined || (status?.ahead ?? 0) > 0 || (status?.behind ?? 0) > 0,
+      detached: status?.detached === true,
+      busy: this.#busyAction.get(rootPath) ?? (this.#committing.has(rootPath) ? 'commit' : null),
     })
 
-    const doCommit = async (): Promise<void> => {
-      if (this.#committing.has(rootPath)) return
-      if (!commitBoxState(stagedCount, textarea.value).canCommit) return
+    const sync = (): void => {
+      const model = commitButtonModel(input())
+      commit.replaceChildren()
+      commit.dataset['action'] = model.action
+      commit.classList.toggle('gp-busy', model.busyLabel !== null)
+      if (model.busyLabel !== null) {
+        commit.textContent = model.busyLabel
+      } else {
+        commit.append(iconEl(model.icon, 14))
+        const label = document.createElement('span')
+        label.className = 'gp-commit-label'
+        label.textContent = model.label
+        commit.appendChild(label)
+        if (model.counts !== null) {
+          const counts = document.createElement('span')
+          counts.className = 'gp-commit-counts'
+          counts.textContent = `${model.counts.behind}↓ ${model.counts.ahead}↑`
+          commit.appendChild(counts)
+        }
+      }
+      commit.disabled = model.disabled
+      commit.title = model.reason ?? model.label
+      more.disabled = model.busyLabel !== null
+      const shown = model.reason !== null && model.reason !== 'There is nothing to commit' ? model.reason : null
+      hint.textContent = shown ?? ''
+      hint.hidden = shown === null
+    }
+    sync()
+
+    // The box grows with what is typed (up to six lines) and never with focus:
+    // a box that shrank on blur moved every row under the pointer between a
+    // press and its release.
+    const fit = (): void => {
+      textarea.style.height = '26px'
+      if (textarea.value.includes('\n') || textarea.scrollHeight > 28) {
+        textarea.style.height = `${Math.min(textarea.scrollHeight + 2, 112)}px`
+      }
+    }
+    queueMicrotask(fit)
+    textarea.addEventListener('input', () => {
+      this.#commitDrafts.set(rootPath, textarea.value)
+      fit()
+      sync()
+    })
+
+    const run = async (action: CommitMainAction | CommitMenuAction): Promise<void> => {
+      if (this.#busyAction.has(rootPath) || this.#committing.has(rootPath)) return
+      if (action === 'sync' || action === 'publish') {
+        this.#busyAction.set(rootPath, action)
+        sync()
+        try {
+          await (action === 'sync' ? this.#callbacks.onSync(rootPath) : this.#callbacks.onPublish(rootPath))
+        } finally {
+          this.#busyAction.delete(rootPath)
+        }
+        this.#rerender()
+        return
+      }
+      if (action === 'commit-merge') {
+        if (!mergeModel.canComplete) return
+        const message = textarea.value.trim() || mergeModel.message
+        this.#callbacks.onCompleteMerge(rootPath, message)
+        return
+      }
+      const message = textarea.value.trim()
+      if (message.length === 0) {
+        textarea.focus()
+        return
+      }
+      const amend = action === 'amend'
+      // Amend REPLACES a commit: a person says so first (forbidden #15). Main
+      // still refuses a commit that is already published.
+      if (amend && !window.confirm('Replace the last commit with the staged changes and this message?')) return
+      const stageFirst = commitScope(action, staged.length) === 'all' ? changes.map((file) => file.filePath) : []
+      this.#busyAction.set(rootPath, action)
       this.#committing.add(rootPath)
-      syncEnabled()
+      sync()
       let ok = false
       try {
-        ok = await this.#callbacks.onCommit(rootPath, textarea.value.trim())
+        ok = await this.#callbacks.onCommitAction(rootPath, {
+          action,
+          message,
+          stageFirst,
+          amend,
+          after: afterCommit(action),
+        })
       } finally {
+        this.#busyAction.delete(rootPath)
         this.#committing.delete(rootPath)
       }
       if (ok) {
         this.#commitDrafts.delete(rootPath)
         textarea.value = ''
       }
-      syncEnabled()
+      sync()
       // A rebuild during the commit drew a busy box this closure does not own.
       this.#rerender()
     }
-    commit.addEventListener('click', () => void doCommit())
+
+    commit.addEventListener('click', () => {
+      const model = commitButtonModel(input())
+      if (model.disabled) return
+      void run(model.action)
+    })
     textarea.addEventListener('keydown', (event) => {
       if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
         event.preventDefault()
-        void doCommit()
+        const model = commitButtonModel(input())
+        if (model.disabled || model.action === 'sync' || model.action === 'publish') return
+        void run(model.action)
       }
     })
-
-    const generate = document.createElement('button')
-    generate.type = 'button'
-    generate.className = 'gp-commit-generate'
-    generate.appendChild(iconEl('sparkles', 16))
-    generate.title = 'Generate commit message with AI'
-    generate.setAttribute('aria-label', 'Generate commit message with AI')
-    // Busy state survives re-renders (#1020): a rebuild mid-generation renders
-    // the wand disabled again, so the ~5s wait never reads as a dead click.
-    generate.disabled = stagedCount === 0 || this.#generating.has(rootPath)
-    generate.addEventListener('click', () => {
-      if (this.#generating.has(rootPath)) return
-      const seq = ++this.#generateSeq
-      this.#generating.set(rootPath, {
-        seq,
-        draftAtClick: this.#commitDrafts.get(rootPath) ?? '',
-      })
-      generate.disabled = true
-      void this.#callbacks
-        .onGenerateMessage(rootPath, staged.map((file) => file.filePath))
-        .then((message) => this.#settleGeneration(rootPath, seq, message))
-        .catch(() => this.#settleGeneration(rootPath, seq, null))
+    more.addEventListener('click', (event) => {
+      event.stopPropagation()
+      const items: ScmMenuItem[] = commitMenuItems(input(), mac).map((item) => ({
+        label: item.label,
+        ...(item.shortcut !== undefined ? { hint: item.shortcut } : {}),
+        disabled: item.disabled,
+        separator: item.separator === true,
+        onSelect: () => void run(item.action),
+      }))
+      showScmMenu(more, items, 'gp-commit-menu')
     })
 
-    const actions = document.createElement('div')
-    actions.className = 'gp-commit-actions'
-    actions.appendChild(generate)
-    actions.appendChild(commit)
-
-    box.appendChild(textarea)
-    box.appendChild(hint)
-    box.appendChild(actions)
+    box.append(wrap, hint, split)
     return box
   }
 
@@ -1452,23 +1801,9 @@ export class GitPanel {
     const editing = this.#renamingRoot === rootPath
     host.dataset['editing'] = editing ? 'true' : 'false'
 
-    if (!editing) {
-      const pencil = document.createElement('button')
-      pencil.type = 'button'
-      pencil.className = 'gp-branch-edit-btn'
-      pencil.title = 'Rename this branch'
-      pencil.setAttribute('aria-label', 'Rename this branch')
-      const glyph = document.createElement('fl-icon')
-      glyph.setAttribute('name', 'pencil')
-      glyph.setAttribute('size', '12')
-      pencil.appendChild(glyph)
-      pencil.addEventListener('click', () => {
-        this.#renamingRoot = rootPath
-        this.#rerender()
-      })
-      host.appendChild(pencil)
-      return host
-    }
+    // Renaming starts from the header's More menu (beginRename); nothing is
+    // drawn while the field is closed.
+    if (!editing) return host
 
     const input = document.createElement('input')
     input.type = 'text'
@@ -1538,7 +1873,9 @@ export class GitPanel {
     this.#rerender()
   }
 
-  #renderBranchHeader(status: GitStatus, rootPath: string): HTMLElement {
+  #renderBranchHeader(status: GitStatus, rootPath: string): HTMLElement | null {
+    const renaming = this.#renamingRoot === rootPath
+    if (status.detached !== true && !renaming) return null
     const header = document.createElement('div')
     header.className = 'gp-branch'
 
@@ -1582,6 +1919,7 @@ export class GitPanel {
     if (status.detached !== true) {
       header.appendChild(this.#branchEdit(rootPath, status.branch || ''))
     }
+    if (renaming) return header
 
     if (status.ahead > 0 || status.behind > 0) {
       const aheadBehind = document.createElement('span')
@@ -1608,16 +1946,98 @@ export class GitPanel {
     return header
   }
 
+  /** Tree view rows for one section: folders, then the section's own rows. */
+  #treeRows(
+    rootPath: string,
+    section: SourceControlSection,
+    files: GitFileChange[],
+    flatRows: UntrackedDisplayRow[],
+  ): ChangeDisplayRow[] {
+    const byPath = new Map<string, UntrackedDisplayRow>()
+    const childrenByDir = new Map<string, UntrackedDisplayRow[]>()
+    for (const row of flatRows) {
+      if (row.kind === 'child') {
+        const parent = row.parentDir ?? ''
+        const list = childrenByDir.get(parent) ?? []
+        list.push(row)
+        childrenByDir.set(parent, list)
+      } else {
+        byPath.set(row.change.filePath, row)
+      }
+    }
+    const prefix = `${rootPath}\x00${section}\x00`
+    const collapsed = new Set<string>()
+    for (const key of this.#collapsedFolders) if (key.startsWith(prefix)) collapsed.add(key.slice(prefix.length))
+    const tree = buildTreeRows<UntrackedDisplayRow>(
+      files.map((change) => byPath.get(change.filePath) ?? { change, kind: 'normal' as const }),
+      (row) => row.change.filePath,
+      collapsed,
+      (row) => (row.kind === 'dir' ? (childrenByDir.get(row.change.filePath) ?? []) : []),
+    )
+    return tree.map((row): ChangeDisplayRow => {
+      if (row.kind === 'item') return { ...row.item, depth: row.depth }
+      return {
+        kind: 'folder',
+        change: { filePath: row.path, state: 'modified', staged: false },
+        depth: row.depth,
+        label: row.label,
+        collapsed: row.collapsed,
+      }
+    })
+  }
+
+  #toggleFolder(rootPath: string, section: SourceControlSection, folder: string): void {
+    const key = `${rootPath}\x00${section}\x00${folder}`
+    if (this.#collapsedFolders.has(key)) this.#collapsedFolders.delete(key)
+    else this.#collapsedFolders.add(key)
+    this.#rerender()
+  }
+
+  /** True while several repositories are on screen (each has its own row). */
+  get #grouped(): boolean {
+    return this.#container.querySelector('.gp-group-head') !== null || this.#groupedRender
+  }
+
+  #groupedRender = false
+
+  #renderFolderRow(rootPath: string, displayRow: ChangeDisplayRow & { kind: 'folder' }, section: SourceControlSection): HTMLElement {
+    const row = document.createElement('div')
+    row.className = 'gp-row gp-folder-row'
+    row.style.paddingLeft = `${12 + displayRow.depth * 8}px`
+    row.title = displayRow.change.filePath
+    const chevron = document.createElement('button')
+    chevron.type = 'button'
+    chevron.className = 'gp-chevron'
+    chevron.setAttribute('aria-expanded', String(!displayRow.collapsed))
+    chevron.title = displayRow.collapsed ? 'Expand folder' : 'Collapse folder'
+    chevron.appendChild(iconEl(displayRow.collapsed ? 'chevron-right' : 'chevron-down', 12))
+    chevron.addEventListener('click', (event) => {
+      event.stopPropagation()
+      this.#toggleFolder(rootPath, section, displayRow.change.filePath)
+    })
+    const name = document.createElement('span')
+    name.className = 'gp-name gp-folder-name'
+    name.textContent = displayRow.label
+    row.append(chevron, name)
+    return row
+  }
+
   #renderChangeRow(
     rootPath: string,
-    displayRow: UntrackedDisplayRow,
+    displayRow: ChangeDisplayRow,
     section: SourceControlSection,
     mergeIdentity?: { ours?: SideIdentity; theirs?: SideIdentity },
   ): HTMLElement {
+    if (displayRow.kind === 'folder') return this.#renderFolderRow(rootPath, displayRow, section)
     const change = displayRow.change
     const row = document.createElement('div')
-    row.className = 'gp-row'
+    row.className = 'gp-row gp-file-row'
     if (displayRow.kind === 'child') row.classList.add('gp-row-child')
+    if (change.state === 'deleted') row.classList.add('gp-row-deleted')
+    // VS Code indents a file 20px; a tree level adds 8, an untracked folder's
+    // file one more level.
+    const depth = displayRow.depth + (displayRow.kind === 'child' && this.#viewMode === 'list' ? 1 : 0)
+    row.style.paddingLeft = `${(displayRow.kind === 'dir' ? 4 : 20) + depth * 8}px`
     row.title = change.filePath
 
     // #SCMS: a multi-selected Changes/Staged row wears .fl-row-marked — the
@@ -1688,28 +2108,33 @@ export class GitPanel {
       row.appendChild(chevron)
     }
 
+    // The VS Code row: a file-type mark, the NAME, then its folder dimmed;
+    // the coloured status letter sits at the right edge, after the hover
+    // actions. A tree row drops the folder — the tree already says it.
+    const icon = fileIconFor(change.filePath)
+    const mark = document.createElement('span')
+    mark.className = `gp-file-icon gp-file-icon-${icon.tone}`
+    mark.setAttribute('aria-hidden', 'true')
+    if (icon.tone === 'folder') mark.appendChild(iconEl('folder', 13))
+    else if (icon.label === '') mark.appendChild(iconEl('file', 13))
+    else mark.textContent = icon.label
+    row.appendChild(mark)
+
+    const parts = splitPath(change.filePath)
+    const name = document.createElement('span')
+    name.className = 'gp-name'
+    name.textContent = parts.name
+    row.appendChild(name)
+    const dir = document.createElement('span')
+    dir.className = 'gp-dir'
+    dir.textContent = this.#viewMode === 'tree' || displayRow.kind === 'child' ? '' : parts.dir
+    row.appendChild(dir)
+
     const letter = document.createElement('span')
     letter.className = `gp-letter ${STATE_CLASSES[change.state]}`
     letter.textContent = STATE_LETTERS[change.state]
     letter.setAttribute('aria-label', STATE_NAMES[change.state])
     letter.title = STATE_NAMES[change.state]
-    row.appendChild(letter)
-
-    // A rolled-up dir path carries a trailing slash — trim it so the row reads as
-    // a folder name (`app/` · `(protected)`) rather than an empty name (#615).
-    const displayPath =
-      displayRow.kind === 'dir' ? change.filePath.replace(/\/$/, '') : change.filePath
-    const slash = displayPath.lastIndexOf('/')
-    if (slash >= 0) {
-      const dir = document.createElement('span')
-      dir.className = 'gp-dir'
-      dir.textContent = `${displayPath.slice(0, slash + 1)}`
-      row.appendChild(dir)
-    }
-    const name = document.createElement('span')
-    name.className = 'gp-name'
-    name.textContent = slash >= 0 ? displayPath.slice(slash + 1) : displayPath
-    row.appendChild(name)
 
     // Inline hover actions per section. The row click is open-diff; stopPropagation
     // so an action button doesn't also open the diff. Conflicted (merge) rows lead
@@ -1732,7 +2157,25 @@ export class GitPanel {
       sideRow.className = 'gp-conflict-choice'
       sideRow.appendChild(this.#renderRiskBadge(rootPath, change.filePath))
     }
-    for (const action of fileActions(section)) {
+    // Open File leads every file row's hover actions (VS Code order: Open
+    // File, Discard, Stage). A rolled-up folder has no single file to open.
+    if (section !== 'merge' && displayRow.kind !== 'dir') {
+      const open = document.createElement('button')
+      open.type = 'button'
+      open.className = 'gp-action-btn gp-action-open'
+      open.title = 'Open File'
+      open.setAttribute('aria-label', 'Open File')
+      open.appendChild(iconEl('go-to-file', 14))
+      open.addEventListener('click', (event) => {
+        event.stopPropagation()
+        document.dispatchEvent(
+          new CustomEvent('flow:open-file', { detail: { rootPath, relPath: change.filePath } }),
+        )
+      })
+      actions.appendChild(open)
+    }
+    const ordered = fileActions(section).slice().sort((a, b) => ACTION_ORDER.indexOf(a) - ACTION_ORDER.indexOf(b))
+    for (const action of ordered) {
       if (action === 'open-diff') continue
       const btn = document.createElement('button')
       btn.type = 'button'
@@ -1795,7 +2238,11 @@ export class GitPanel {
         btn.className = 'gp-action-btn'
         if (action === 'discard') btn.classList.add('gp-action-discard')
         btn.title = action === 'stage' ? 'Stage' : action === 'unstage' ? 'Unstage' : 'Discard changes'
-        btn.appendChild(iconEl(iconName, 13))
+        btn.setAttribute(
+          'aria-label',
+          action === 'stage' ? 'Stage Changes' : action === 'unstage' ? 'Unstage Changes' : 'Discard Changes',
+        )
+        btn.appendChild(iconEl(iconName, 14))
         btn.addEventListener('click', (event) => {
           event.stopPropagation()
           // #SCMS (FR-8): when this row is part of a multi-selection, the hover
@@ -1817,6 +2264,8 @@ export class GitPanel {
       else actions.appendChild(btn)
     }
     if (actions.childElementCount > 0) row.appendChild(actions)
+    if (change.state === 'conflicted') letter.textContent = '!'
+    row.appendChild(letter)
     if (sideRow !== null && sideRow.childElementCount > 0) {
       const wrap = document.createElement('div')
       wrap.className = 'gp-row-stack'
@@ -1992,22 +2441,265 @@ export class GitPanel {
   }
 
 
-  #renderCommitRow(commit: GitCommit): HTMLElement {
-    const row = document.createElement('div')
-    row.className = 'gp-row'
-    row.title = `${commit.hash.slice(0, 7)} · ${commit.author} · ${commit.date}\n${commit.subject}`
+  // ── The graph ──────────────────────────────────────────────────────────
+
+  /** Fetch / Pull / Push / Refresh on the Graph header (hover actions). */
+  #graphActions(rootPath: string): HTMLElement {
+    const actions = document.createElement('div')
+    actions.className = 'gp-bulk-actions gp-graph-actions'
+    const add = (icon: string, label: string, cls: string, run: () => void): void => {
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = `gp-bulk-btn gp-icon-btn ${cls}`
+      btn.title = label
+      btn.setAttribute('aria-label', label)
+      btn.appendChild(iconEl(icon, 14))
+      btn.addEventListener('click', (event) => {
+        event.stopPropagation()
+        run()
+      })
+      actions.appendChild(btn)
+    }
+    add('cloud-down', 'Fetch', 'gp-graph-fetch', () => void this.#callbacks.onFetch(rootPath))
+    add('arrow-down', 'Pull', 'gp-graph-pull', () => this.#callbacks.onPull(rootPath))
+    add('arrow-up', 'Push', 'gp-graph-push', () => void this.#callbacks.onPublish(rootPath))
+    add('refresh', 'Refresh', 'gp-graph-refresh', () => this.#callbacks.onRefresh(rootPath))
+    return actions
+  }
+
+  /** Commits, with an expanded commit's files right under it. */
+  #graphRows(view: GitRootView, layoutRows: GraphRow[]): GraphDisplayRow[] {
+    const rows: GraphDisplayRow[] = []
+    view.commits.forEach((commit, index) => {
+      const layout = layoutRows[index]
+      if (layout === undefined) return
+      const key = `${view.rootPath}\x00${commit.hash}`
+      const expanded = this.#expandedCommits.has(key)
+      rows.push({ kind: 'commit', commit, layout, expanded })
+      if (!expanded) return
+      const continuing = layout.continuing
+      const read = this.#commitFiles.get(key)
+      if (read === undefined) {
+        rows.push({ kind: 'note', commit, text: 'Loading files…', continuing })
+      } else if (read === null) {
+        rows.push({ kind: 'note', commit, text: 'Flow couldn’t read this commit’s files.', continuing })
+      } else if (read.files.length === 0) {
+        rows.push({ kind: 'note', commit, text: 'No file changes of its own', continuing })
+      } else {
+        for (const file of read.files) rows.push({ kind: 'file', commit, file, continuing })
+        if (read.truncated) {
+          rows.push({ kind: 'note', commit, text: `and ${read.total - read.files.length} more files`, continuing })
+        }
+      }
+    })
+    return rows
+  }
+
+  #readCommitFiles(rootPath: string, hash: string): Promise<void> {
+    const key = `${rootPath}\x00${hash}`
+    if (this.#commitFiles.has(key)) return Promise.resolve()
+    return this.#callbacks
+      .onCommitFiles(rootPath, hash)
+      .then((result) => {
+        this.#commitFiles.set(key, result)
+      })
+      .catch(() => {
+        this.#commitFiles.set(key, null)
+      })
+  }
+
+  #toggleCommit(rootPath: string, hash: string): void {
+    const key = `${rootPath}\x00${hash}`
+    if (this.#expandedCommits.has(key)) {
+      this.#expandedCommits.delete(key)
+      this.#rerender()
+      return
+    }
+    this.#expandedCommits.add(key)
+    this.#rerender()
+    if (!this.#commitFiles.has(key)) {
+      void this.#readCommitFiles(rootPath, hash).then(() => {
+        if (this.#expandedCommits.has(key)) this.#rerender()
+      })
+    }
+  }
+
+  #renderGraphRow(rootPath: string, row: GraphDisplayRow, widthPx: number): HTMLElement {
+    const el = document.createElement('div')
+    el.className = 'gp-row gp-graph-row'
+    if (row.kind !== 'commit') {
+      el.classList.add('gp-graph-child')
+      el.appendChild(laneSvg(widthPx, row.continuing.map((lane) => ({ lane, from: 0, to: GRAPH_ROW_PX })), null))
+      if (row.kind === 'note') {
+        const note = document.createElement('span')
+        note.className = 'gp-graph-note'
+        note.textContent = row.text
+        el.appendChild(note)
+        return el
+      }
+      const file = row.file
+      const icon = fileIconFor(file.filePath)
+      const mark = document.createElement('span')
+      mark.className = `gp-file-icon gp-file-icon-${icon.tone}`
+      mark.setAttribute('aria-hidden', 'true')
+      if (icon.label === '') mark.appendChild(iconEl('file', 13))
+      else mark.textContent = icon.label
+      const parts = splitPath(file.filePath)
+      const name = document.createElement('span')
+      name.className = 'gp-name'
+      name.textContent = parts.name
+      const dir = document.createElement('span')
+      dir.className = 'gp-dir'
+      dir.textContent = parts.dir
+      const letter = document.createElement('span')
+      letter.className = `gp-letter ${STATE_CLASSES[file.state]}`
+      letter.textContent = STATE_LETTERS[file.state]
+      letter.title = STATE_NAMES[file.state]
+      if (file.state === 'deleted') el.classList.add('gp-row-deleted')
+      el.title = file.renamedFrom ? `${file.renamedFrom} → ${file.filePath}` : file.filePath
+      el.append(mark, name, dir, letter)
+      return el
+    }
+
+    const { commit, layout } = row
+    el.classList.add('gp-commit-row')
+    el.classList.toggle('gp-commit-expanded', row.expanded)
+    el.setAttribute('aria-expanded', String(row.expanded))
+    el.title = ''
+    const refs = commit.refs ?? []
+    const head = refs.some((ref) => ref.current === true || ref.kind === 'head')
+    const segments = layout.segments.map((segment) => ({ path: segmentPath(segment), color: segment.colorLane }))
+    el.appendChild(laneSvg(widthPx, [], { segments, lane: layout.lane, merge: layout.merge, head }))
 
     const subject = document.createElement('span')
     subject.className = 'gp-subject'
+    if (layout.merge) subject.classList.add('gp-subject-merge')
     subject.textContent = commit.subject
-    row.appendChild(subject)
+    el.appendChild(subject)
+
+    for (const ref of refs.slice(0, 3)) {
+      const badge = document.createElement('span')
+      badge.className = `gp-ref gp-ref-${ref.kind}${ref.current === true ? ' gp-ref-current' : ''}`
+      if (ref.kind === 'tag') badge.appendChild(iconEl('dot', 10))
+      badge.appendChild(document.createTextNode(ref.name))
+      badge.title = ref.kind === 'remote' ? `Remote branch ${ref.name}` : ref.kind === 'tag' ? `Tag ${ref.name}` : `Branch ${ref.name}`
+      el.appendChild(badge)
+    }
+
+    const actions = document.createElement('span')
+    actions.className = 'gp-row-actions'
+    const open = document.createElement('button')
+    open.type = 'button'
+    open.className = 'gp-action-btn gp-action-open-commit'
+    open.title = 'Open Changes'
+    open.setAttribute('aria-label', 'Open Changes')
+    open.appendChild(iconEl('git-compare', 14))
+    open.addEventListener('click', (event) => {
+      event.stopPropagation()
+      this.#callbacks.onCommitDiff(rootPath, commit)
+    })
+    actions.appendChild(open)
+    el.appendChild(actions)
 
     const meta = document.createElement('span')
     meta.className = 'gp-meta'
-    meta.textContent = `${commit.author} · ${relativeAge(commit.date)}`
-    row.appendChild(meta)
+    meta.textContent = relativeAge(commit.date)
+    el.appendChild(meta)
 
-    return row
+    el.addEventListener('mouseenter', () => this.#scheduleHoverCard(rootPath, commit, el))
+    el.addEventListener('mouseleave', () => this.#closeHoverCard())
+    return el
+  }
+
+  #scheduleHoverCard(rootPath: string, commit: GitCommit, anchor: HTMLElement): void {
+    this.#closeHoverCard()
+    this.#hoverTimer = window.setTimeout(() => {
+      this.#hoverTimer = null
+      if (!anchor.isConnected) return
+      this.#openHoverCard(rootPath, commit, anchor)
+    }, 450)
+  }
+
+  #closeHoverCard(): void {
+    if (this.#hoverTimer !== null) window.clearTimeout(this.#hoverTimer)
+    this.#hoverTimer = null
+    this.#hoverCard?.remove()
+    this.#hoverCard = null
+  }
+
+  /** The commit hover card: author, date, the full subject, files and line counts, short sha. */
+  #openHoverCard(rootPath: string, commit: GitCommit, anchor: HTMLElement): void {
+    const card = document.createElement('div')
+    card.className = 'gp-hover-card'
+    card.setAttribute('role', 'tooltip')
+    const head = document.createElement('div')
+    head.className = 'gp-hover-head'
+    const avatar = document.createElement('span')
+    avatar.className = 'gp-avatar'
+    avatar.textContent = initials(commit.author)
+    const who = document.createElement('div')
+    const author = document.createElement('div')
+    author.className = 'gp-hover-author'
+    author.textContent = commit.author
+    const when = document.createElement('div')
+    when.className = 'gp-hover-meta'
+    const date = new Date(commit.date)
+    when.textContent = Number.isNaN(date.getTime())
+      ? commit.date
+      : `${relativeAge(commit.date)} ago · ${date.toLocaleString()}`
+    who.append(author, when)
+    head.append(avatar, who)
+    const subject = document.createElement('div')
+    subject.className = 'gp-hover-subject'
+    subject.textContent = commit.subject
+    const stat = document.createElement('div')
+    stat.className = 'gp-hover-stat'
+    const sha = document.createElement('div')
+    sha.className = 'gp-hover-sha'
+    sha.textContent = commit.hash.slice(0, 7)
+    card.append(head, subject, stat, sha)
+
+    const key = `${rootPath}\x00${commit.hash}`
+    const paintStat = (): void => {
+      const read = this.#commitFiles.get(key)
+      stat.replaceChildren()
+      if (read === undefined) {
+        stat.textContent = 'Reading files…'
+        return
+      }
+      if (read === null) {
+        stat.textContent = 'Files unavailable'
+        return
+      }
+      let added = 0
+      let deleted = 0
+      for (const file of read.files) {
+        added += file.added ?? 0
+        deleted += file.deleted ?? 0
+      }
+      const total = read.total
+      stat.append(
+        document.createTextNode(`${total} file${total === 1 ? '' : 's'} changed, `),
+        Object.assign(document.createElement('span'), { className: 'gp-stat-add', textContent: `${added} insertions(+)` }),
+        document.createTextNode(', '),
+        Object.assign(document.createElement('span'), { className: 'gp-stat-del', textContent: `${deleted} deletions(−)` }),
+      )
+    }
+    paintStat()
+    if (!this.#commitFiles.has(key)) {
+      void this.#readCommitFiles(rootPath, commit.hash).then(() => {
+        if (this.#hoverCard === card) paintStat()
+      })
+    }
+
+    const rect = anchor.getBoundingClientRect()
+    document.body.appendChild(card)
+    const width = card.offsetWidth || 300
+    const left = rect.right + 8 + width < window.innerWidth ? rect.right + 8 : Math.max(8, rect.left - width - 8)
+    const top = Math.max(8, Math.min(window.innerHeight - card.offsetHeight - 8, rect.top - 6))
+    card.style.left = `${Math.round(left)}px`
+    card.style.top = `${Math.round(top)}px`
+    this.#hoverCard = card
   }
 }
 
@@ -2104,6 +2796,87 @@ function applyRiskBadge(el: HTMLElement, badge: ConflictBadge): void {
   // hidden and only the dot is left.
   el.setAttribute('role', 'img')
   el.setAttribute('aria-label', detail)
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg'
+
+/**
+ * One graph cell's SVG: the lane lines through the row and, on a commit row,
+ * its node — filled, hollow for a merge, ringed for the commit HEAD is on.
+ * Colours come from --gp-lane-0..3 (theme tokens in GP_STYLES).
+ */
+function laneSvg(
+  widthPx: number,
+  straight: Array<{ lane: number; from: number; to: number }>,
+  node: {
+    segments: Array<{ path: string; color: number }>
+    lane: number
+    merge: boolean
+    head: boolean
+  } | null,
+): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, 'svg')
+  svg.setAttribute('class', 'gp-lanes')
+  svg.setAttribute('width', String(widthPx))
+  svg.setAttribute('height', String(GRAPH_ROW_PX))
+  svg.setAttribute('viewBox', `0 0 ${widthPx} ${GRAPH_ROW_PX}`)
+  svg.setAttribute('aria-hidden', 'true')
+  const stroke = (lane: number): string => `var(--gp-lane-${laneColorIndex(lane)})`
+  for (const line of straight) {
+    const path = document.createElementNS(SVG_NS, 'path')
+    const x = laneX(line.lane)
+    path.setAttribute('d', `M${x} ${line.from} L${x} ${line.to}`)
+    path.setAttribute('stroke', stroke(line.lane))
+    path.setAttribute('class', 'gp-lane-line')
+    svg.appendChild(path)
+  }
+  if (node !== null) {
+    for (const segment of node.segments) {
+      const path = document.createElementNS(SVG_NS, 'path')
+      path.setAttribute('d', segment.path)
+      path.setAttribute('stroke', stroke(segment.color))
+      path.setAttribute('class', 'gp-lane-line')
+      svg.appendChild(path)
+    }
+    const cx = String(laneX(node.lane))
+    const color = stroke(node.lane)
+    if (node.head) {
+      const ring = document.createElementNS(SVG_NS, 'circle')
+      ring.setAttribute('cx', cx)
+      ring.setAttribute('cy', String(GRAPH_ROW_PX / 2))
+      ring.setAttribute('r', '5.6')
+      ring.setAttribute('fill', 'none')
+      ring.setAttribute('stroke', color)
+      ring.setAttribute('stroke-width', '1.2')
+      svg.appendChild(ring)
+    }
+    const dot = document.createElementNS(SVG_NS, 'circle')
+    dot.setAttribute('cx', cx)
+    dot.setAttribute('cy', String(GRAPH_ROW_PX / 2))
+    dot.setAttribute('class', node.merge ? 'gp-node gp-node-merge' : 'gp-node')
+    if (node.merge) {
+      dot.setAttribute('r', '3.4')
+      dot.setAttribute('fill', 'var(--fl-color-bg)')
+      dot.setAttribute('stroke', color)
+      dot.setAttribute('stroke-width', '1.6')
+    } else {
+      dot.setAttribute('r', '3.6')
+      dot.setAttribute('fill', color)
+    }
+    svg.appendChild(dot)
+  }
+  return svg
+}
+
+/** Two letters for the hover card's avatar. */
+function initials(name: string): string {
+  const words = name.trim().split(/\s+/).filter((word) => word.length > 0)
+  const letters = words.length >= 2 ? `${words[0]?.[0] ?? ''}${words[words.length - 1]?.[0] ?? ''}` : (words[0] ?? '?').slice(0, 2)
+  return letters.toUpperCase()
+}
+
+function isMac(): boolean {
+  return typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform)
 }
 
 /** Compact relative age: 45s, 12m, 3h, 5d, 2w, 4mo, 1y. */

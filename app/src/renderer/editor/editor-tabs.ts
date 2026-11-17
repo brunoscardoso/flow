@@ -133,6 +133,15 @@ export class EditorTabs {
     }
   }
 
+  /** Draw a tab's label in italics (a preview tab). No-op when unchanged. */
+  setPending(id: string, pending: boolean): void {
+    const tab = this.#tabs.find((candidate) => candidate.id === id)
+    if (tab && (tab.pending ?? false) !== pending) {
+      tab.pending = pending
+      this.#render()
+    }
+  }
+
   setDirty(id: string, dirty: boolean): void {
     const tab = this.#tabs.find((candidate) => candidate.id === id)
     if (tab && tab.dirty !== dirty) {

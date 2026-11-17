@@ -191,6 +191,9 @@ export interface ShellSurfaces {
   searchPanel: HTMLElement
   /** Source Control → Changes view body (git sections) (#335). */
   gitPanel: HTMLElement
+  /** Source Control header's action cluster (view toggle, commit, refresh,
+   *  more) — the git domain fills it; the shell only owns the title row. */
+  scmHeaderActions: HTMLElement
   /** Source Control → Phases view body (phase-grouped review) (#335). */
   reviewPanel: HTMLElement
   terminal: FlPanel
@@ -207,6 +210,7 @@ interface Sidebar {
   treeBody: HTMLElement
   changesBody: HTMLElement
   phasesBody: HTMLElement
+  scHeaderActions: HTMLElement
   /** Switch to the given rail item's content view. */
   showItem(item: RailItem): void
   /** Restore the view-mode (changes|phases) for source-control. */
@@ -266,6 +270,16 @@ function createSidebar(state: ShellLayoutState, save: () => void): Sidebar {
   // ── Source Control body (Changes | Phases toggle) ──────────────────────
   const scBody = document.createElement('div')
   scBody.className = 'fl-sidebar-pane fl-sc-body'
+  // The VS Code title row: SOURCE CONTROL and its icon actions. The actions
+  // are the git domain's (they act on repositories); the shell owns the row.
+  const scHeader = document.createElement('div')
+  scHeader.className = 'fl-sc-header'
+  const scTitle = document.createElement('span')
+  scTitle.className = 'fl-sc-title'
+  scTitle.textContent = 'Source Control'
+  const scHeaderActions = document.createElement('span')
+  scHeaderActions.className = 'fl-sc-header-actions'
+  scHeader.append(scTitle, scHeaderActions)
   const viewToggle = document.createElement('div')
   viewToggle.className = 'fl-sc-viewtoggle'
   const changesBtn = sideViewButton('Changes')
@@ -276,6 +290,7 @@ function createSidebar(state: ShellLayoutState, save: () => void): Sidebar {
   changesBody.className = 'fl-sc-view'
   const phasesBody = document.createElement('div')
   phasesBody.className = 'fl-sc-view'
+  scBody.appendChild(scHeader)
   scBody.appendChild(viewToggle)
   scBody.appendChild(changesBody)
   scBody.appendChild(phasesBody)
@@ -338,6 +353,7 @@ function createSidebar(state: ShellLayoutState, save: () => void): Sidebar {
     treeBody,
     changesBody,
     phasesBody,
+    scHeaderActions,
     showItem,
     setViewMode,
   }
@@ -1626,6 +1642,7 @@ export function mountShell(root: HTMLElement): ShellSurfaces {
     fileTree: sidebarPanels.treeBody,
     searchPanel: sidebarPanels.searchBody,
     gitPanel: sidebarPanels.changesBody,
+    scmHeaderActions: sidebarPanels.scHeaderActions,
     reviewPanel: sidebarPanels.phasesBody,
     terminal,
     statusBar,
@@ -2269,27 +2286,52 @@ function injectShellStyles(): void {
     }
     /* Source Control: view-mode toggle over two stacked sub-views (#335). */
     .fl-sc-body { display: flex; flex-direction: column; }
+    /* The VS Code title row: SOURCE CONTROL plus its icon actions. */
+    .fl-sc-header {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      flex: none;
+      height: 35px;
+      padding: 0 8px 0 20px;
+    }
+    .fl-sc-title {
+      flex: 1;
+      min-width: 0;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--fl-color-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .fl-sc-header-actions { display: flex; align-items: center; gap: 2px; }
+    /* Changes | Phases — a segmented strip under the title row. */
     .fl-sc-viewtoggle {
       display: flex;
       gap: 2px;
-      padding: var(--fl-space-xs);
-      /* Region seam — the Changes|Phases strip against the pane below it. */
-      border-bottom: var(--fl-border-width) solid var(--fl-color-separator);
+      flex: none;
+      margin: 0 12px 6px;
+      padding: 2px;
+      background: var(--fl-color-surface);
+      border: var(--fl-border-width) solid var(--fl-color-border);
+      border-radius: 5px;
     }
     .fl-sc-viewbtn {
       flex: 1;
-      height: 22px;
-      border: var(--fl-border-width) solid transparent;
-      border-radius: var(--fl-radius-sm);
+      height: 20px;
+      border: none;
+      border-radius: 3px;
       background: transparent;
       color: var(--fl-color-text-secondary);
-      font-size: var(--fl-text-caption-size);
+      font-size: 12px;
       cursor: pointer;
     }
     .fl-sc-viewbtn:hover { color: var(--fl-color-text); }
     .fl-sc-viewbtn.active {
-      background: var(--fl-color-surface);
-      border-color: var(--fl-color-border);
+      background: var(--fl-color-surface-raised);
       color: var(--fl-color-text);
     }
     .fl-sc-view { flex: 1; min-height: 0; overflow-y: auto; }

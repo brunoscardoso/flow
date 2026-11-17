@@ -59,6 +59,26 @@ export const sel = {
   // Focus-mode exit pill (#616) — shown only while focus mode is on.
   focusHint: '.fl-focus-hint',
 
+  // Source Control, VS Code layout (2026-11 rebuild).
+  scHeader: '.fl-sc-header',
+  scHeaderAction: (label: string): string => `.fl-sc-header-actions [aria-label="${label}"]`,
+  scmCommitBox: '.gp-commit-box',
+  scmCommitMsg: '.gp-commit-msg',
+  scmCommitBtn: '.gp-commit-btn',
+  scmCommitMore: '.gp-commit-more',
+  scmMenuItem: '.gp-menu-item',
+  scmFileRow: '.gp-file-row',
+  scmGraphRow: '.gp-commit-row',
+  scmGraphChild: '.gp-graph-child',
+  scmLanes: '.gp-lanes',
+  // The diff, as an editor tab (the Review panel keeps its .gd-overlay).
+  scmDiffTab: '.gd-diff-tab',
+  scmDiffTabStrip: 'button.tab[data-id="flow://scm-diff"]',
+  scmHunkStage: '.gd-hunk-stage',
+  scmHunkUnstage: '.gd-hunk-unstage',
+  scmStatusBranch: '.fl-scm-branch',
+  scmStatusSync: '.fl-scm-sync',
+
   // Feature surfaces (roots, confirmed from renderer source).
   terminalPanel: '#fl-panel-terminal',
   terminalRoot: '.fl-term-root',

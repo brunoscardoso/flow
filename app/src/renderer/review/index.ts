@@ -20,6 +20,7 @@ import type { FlowNotification, ReviewFile, ReviewGroup } from '../../shared/ipc
 import type { ShellSurfaces } from '../shell'
 import { DiffView, type GitEditorApi } from '../git'
 import { resolveOpenDiffFate } from '../git/diff-lifecycle'
+import { createCoalescer } from '../git/refresh-coalesce'
 import { ReviewPanel } from './review-panel'
 import { invariantFlagsByFile } from './invariant-flags'
 import { commitPaths, filePathsWithRenameSources } from './review-approval'
@@ -336,6 +337,11 @@ export function initReview(surfaces: ShellSurfaces, editorApi: GitEditorApi): vo
     panel.setInvariantFlags(invariantFlagsByFile(event.result.verdicts))
   })
 
+  // ONE review:list PER ROOT IN FLIGHT — the same defect the Source Control
+  // refresh had (refresh-coalesce.ts): a project add or a commit reaches
+  // refresh() from several doors at once, and each started its own listing.
+  // A door arriving mid-read joins it; one trailing read keeps the result fresh.
+  const lists = createCoalescer<string>((root) => listNow(root))
   let refreshTimer: number | null = null
   function refresh(): void {
     if (!activeRoot) {
@@ -344,8 +350,11 @@ export function initReview(surfaces: ShellSurfaces, editorApi: GitEditorApi): vo
       panel.setGroups([])
       return
     }
-    const root = activeRoot
-    void api.review
+    void lists.request(activeRoot)
+  }
+
+  function listNow(root: string): Promise<void> {
+    return api.review
       .list({ rootPath: root })
       .then((result) => {
         if (root === activeRoot) {

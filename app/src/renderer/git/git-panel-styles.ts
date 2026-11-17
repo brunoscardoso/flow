@@ -19,7 +19,7 @@
  */
 
 /** Height of a single Source Control row, in px. */
-export const ROW_HEIGHT = 28
+export const ROW_HEIGHT = 22
 
 /**
  * Height of a CONFLICTED file's row — two lines: the filename, then the risk and
@@ -1009,4 +1009,244 @@ export const GP_STYLES = `
          panel width before it has to ellipsize at all. */
       .gp-legend-chip { flex: 1 1 100%; }
     }
+
+    /* ── VS Code Source Control (2026-11 rebuild) ───────────────────────────
+       Later in the sheet on purpose: these rules restate the row, section,
+       commit box and graph in VS Code's measures and win over the older ones
+       above by order. Lane colours are theme tokens, set for dark and light. */
+    .gp-root {
+      --gp-lane-0: #3794ff;
+      --gp-lane-1: #e2c08d;
+      --gp-lane-2: #b180d7;
+      --gp-lane-3: #73c991;
+      --gp-state-modified: #e2c08d;
+      --gp-state-added: #73c991;
+      --gp-state-deleted: #f14c4c;
+      --gp-state-untracked: #73c991;
+      --gp-state-renamed: #73c991;
+      --gp-state-conflicted: #f14c4c;
+      --gp-select-line: #0078d4;
+      font-size: 13px;
+    }
+    :root[data-theme='light'] .gp-root {
+      --gp-lane-0: #2f74c0;
+      --gp-lane-1: #b07a1a;
+      --gp-lane-2: #8a52b8;
+      --gp-lane-3: #2e8b57;
+      --gp-state-modified: #9a6a12;
+      --gp-state-added: #2e8b57;
+      --gp-state-deleted: #d13438;
+      --gp-state-untracked: #2e8b57;
+      --gp-state-renamed: #2e8b57;
+      --gp-state-conflicted: #d13438;
+      --gp-select-line: #2f74c0;
+    }
+    .gp-root { padding-bottom: 8px; }
+    .gp-section { padding-bottom: 0; }
+    .gp-section + .gp-section { border-top: none; margin-top: 0; padding-top: 0; }
+    /* Inline on purpose: an absolutely positioned clip would read as its own
+       line in the header text, splitting "Changes (2)" in two. */
+    .gp-visually-hidden {
+      display: inline-block; width: 1px; height: 1px; margin-right: -1px;
+      overflow: hidden; white-space: pre; vertical-align: bottom; opacity: 0;
+    }
+
+    /* Rows: full width, square, 22px — fl-list's own rule pads and rounds them. */
+    .row { padding: 0 !important; border-radius: 0 !important; }
+    .gp-row { gap: 6px; height: 22px; padding-right: 8px; font-size: 13px; }
+    .gp-file-icon {
+      flex: none; width: 16px; height: 16px; display: inline-grid; place-items: center;
+      font: 700 8.5px/1 var(--fl-font-ui); letter-spacing: 0; color: var(--fl-color-text-secondary);
+    }
+    .gp-file-icon-ts { color: #3178c6; }
+    .gp-file-icon-js { color: #cbcb41; }
+    .gp-file-icon-test { color: #e8a33d; }
+    .gp-file-icon-md { color: #519aba; }
+    .gp-file-icon-json { color: #cbcb41; }
+    .gp-file-icon-css { color: #42a5f5; }
+    .gp-file-icon-html { color: #e37933; }
+    .gp-file-icon-py { color: #3c78aa; }
+    .gp-file-icon-img { color: #a074c4; }
+    .gp-row .gp-name {
+      flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      color: var(--fl-color-text);
+    }
+    .gp-row .gp-dir {
+      flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      color: var(--fl-color-text-secondary); opacity: 0.85; font-size: 12px;
+    }
+    .gp-row-deleted .gp-name { text-decoration: line-through; opacity: 0.75; }
+    .gp-letter {
+      flex: none; width: 14px; margin-left: 2px; text-align: center;
+      font-size: 12px; font-weight: 600;
+    }
+    .gp-state-modified { color: var(--gp-state-modified); }
+    .gp-state-added { color: var(--gp-state-added); }
+    .gp-state-deleted { color: var(--gp-state-deleted); }
+    .gp-state-untracked { color: var(--gp-state-untracked); }
+    .gp-state-renamed { color: var(--gp-state-renamed); }
+    .gp-state-conflicted { color: var(--gp-state-conflicted); }
+    .gp-row-actions { margin-left: 0; padding-left: 0; gap: 1px; display: none; }
+    .gp-row:hover .gp-row-actions,
+    .row.selected .gp-row-actions,
+    .gp-row:focus-within .gp-row-actions,
+    .gp-row-conflict .gp-row-actions { display: flex; }
+    .gp-action-btn {
+      width: 22px; height: 22px; min-width: 22px; padding: 0; border-radius: 4px;
+      display: inline-grid; place-items: center;
+    }
+    .gp-row:not(.gp-row-conflict) .gp-action-btn,
+    .gp-row:hover .gp-action-btn { opacity: 1; color: var(--fl-color-text-secondary); }
+    .gp-action-btn:hover { color: var(--fl-color-text); background: var(--fl-color-surface-raised); }
+    .gp-action-resolve { width: auto; padding: 0 6px; }
+    .gp-chevron { width: 16px; height: 16px; flex: none; }
+    .gp-folder-row .gp-folder-name { flex: 1 1 auto; color: var(--fl-color-text); }
+    .gp-row-child { padding-left: 0; }
+
+    /* Section header: chevron, UPPERCASE label, hover actions, count badge. */
+    .gp-subheader.gp-section-head {
+      height: 22px; min-height: 22px; margin: 0; padding: 0 8px 0 4px;
+      flex-wrap: nowrap; justify-content: flex-start; gap: 2px;
+      border: none; background: transparent;
+      font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+      color: var(--fl-color-text); text-transform: none;
+    }
+    .gp-section-head:hover { background: var(--fl-color-surface-raised); }
+    .gp-section-head .gp-section-toggle {
+      flex: 1 1 auto; min-width: 0; gap: 2px; color: var(--fl-color-text);
+      font: inherit; letter-spacing: inherit;
+    }
+    .gp-section-label { text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .gp-section-head .gp-bulk-actions { flex: none; display: none; gap: 1px; flex-wrap: nowrap; }
+    .gp-section-head:hover .gp-bulk-actions,
+    .gp-section-head:focus-within .gp-bulk-actions { display: flex; }
+    .gp-icon-btn {
+      width: 22px; height: 22px; padding: 0; display: inline-grid; place-items: center;
+      border: none; border-radius: 4px; background: transparent;
+      color: var(--fl-color-text-secondary); cursor: pointer; opacity: 1;
+    }
+    .gp-icon-btn:hover { color: var(--fl-color-text); background: var(--fl-color-surface-raised); }
+    .gp-count-badge {
+      flex: none; min-width: 18px; height: 18px; padding: 0 5px; margin-left: 4px;
+      border-radius: 9px; background: var(--fl-color-surface-raised); color: var(--fl-color-text);
+      display: inline-grid; place-items: center;
+      font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums;
+    }
+    .gp-count-badge::after { content: attr(data-count); }
+    .gp-graph-head { margin-top: 6px; }
+
+    /* Commit box: the message with the AI button inside, then a split button. */
+    .gp-commit-box { padding: 4px 12px 8px 20px; gap: 6px; display: grid; border: none; background: transparent; }
+    .gp-commit-msg-wrap { position: relative; }
+    .gp-commit-msg-wrap .gp-commit-msg {
+      display: block; width: 100%; height: 26px; min-height: 26px; resize: none; overflow: hidden;
+      padding: 4px 28px 4px 6px; line-height: 17px; font: inherit; font-size: 13px;
+      color: var(--fl-color-text); background: var(--fl-color-surface);
+      border: var(--fl-border-width) solid var(--fl-color-border); border-radius: 2px;
+    }
+    .gp-commit-msg-wrap .gp-commit-msg:focus { border-color: var(--gp-select-line); outline: none; }
+    .gp-commit-msg-wrap .gp-commit-msg::placeholder { color: var(--fl-color-text-secondary); opacity: 0.8; }
+    .gp-commit-msg-wrap .gp-commit-generate {
+      position: absolute; right: 3px; top: 2px; width: 22px; height: 22px; padding: 0;
+      display: grid; place-items: center; border: none; border-radius: 4px;
+      background: transparent; color: var(--fl-color-text-secondary);
+    }
+    .gp-commit-msg-wrap .gp-commit-generate:hover:not(:disabled) { color: var(--fl-color-text); background: var(--fl-color-surface-raised); }
+    .gp-commit-split { display: flex; height: 26px; }
+    .gp-commit-split .gp-commit-btn {
+      flex: 1; min-width: 0; height: 26px; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      border: none; border-radius: 2px 0 0 2px; padding: 0 8px;
+      background: var(--fl-color-accent); color: var(--fl-color-on-accent, #fff);
+      font: inherit; font-size: 13px; cursor: pointer; white-space: nowrap;
+    }
+    .gp-commit-split .gp-commit-btn:hover:not(:disabled) { filter: brightness(0.92); }
+    .gp-commit-split .gp-commit-btn:disabled {
+      opacity: 0.5; cursor: default;
+      background: var(--fl-color-accent); color: var(--fl-color-on-accent, #fff);
+    }
+    .gp-commit-counts { font-variant-numeric: tabular-nums; }
+    .gp-commit-more {
+      flex: none; width: 26px; height: 26px; display: grid; place-items: center; padding: 0;
+      border: none; border-left: 1px solid rgba(255, 255, 255, 0.25); border-radius: 0 2px 2px 0;
+      background: var(--fl-color-accent); color: var(--fl-color-on-accent, #fff); cursor: pointer;
+    }
+    .gp-commit-more:hover:not(:disabled) { filter: brightness(0.92); }
+    .gp-commit-more:disabled { opacity: 0.5; cursor: default; }
+    .gp-commit-hint { margin: -2px 0 0; }
+    .gp-clean { padding: 2px 20px 6px; font-size: 12px; }
+
+    /* Repository rows (several repositories): dot, name, branch*, actions, counts. */
+    .gp-group-head {
+      height: 22px; min-height: 22px; gap: 6px; padding: 0 8px 0 4px;
+      border-left: none; border-radius: 0; font-size: 13px;
+    }
+    .gp-group-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+    .gp-group-name { font-weight: 600; flex: 0 1 auto; }
+    .gp-group-head .gp-group-branch {
+      display: inline-flex; align-items: center; gap: 3px; min-width: 0; margin: 0;
+      color: var(--fl-color-text-secondary); font-size: 12px; overflow: hidden;
+    }
+    .gp-group-head .gp-branch-name { font-size: 12px; color: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .gp-group-spacer { flex: 1 1 auto; }
+    .gp-group-actions { display: none; gap: 1px; }
+    .gp-group-head:hover .gp-group-actions, .gp-group-head:focus-within .gp-group-actions { display: flex; }
+    .gp-group-count { color: var(--fl-color-text-secondary); font-size: 12px; }
+    .gp-group-boxed { padding-bottom: 4px; }
+    .gp-group-boxed + .gp-group-boxed { border-top: none; padding-top: 0; margin-top: 0; }
+
+    /* The single-repository lines: a detached HEAD warning, or the rename field. */
+    .gp-branch { padding: 2px 12px 2px 20px; min-height: 22px; }
+
+    /* Graph rows. */
+    .gp-graph-row { gap: 4px; padding-left: 4px; }
+    .gp-lanes { flex: none; overflow: visible; }
+    .gp-lane-line { fill: none; stroke-width: 1.6; }
+    .gp-graph-row .gp-subject {
+      flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      color: var(--fl-color-text);
+    }
+    .gp-subject-merge { color: var(--fl-color-text-secondary) !important; }
+    .gp-graph-row .gp-meta {
+      flex: none; margin-left: 0; color: var(--fl-color-text-secondary); opacity: 0.8;
+      font-size: 11.5px; white-space: nowrap;
+    }
+    .gp-ref {
+      flex: none; display: inline-flex; align-items: center; gap: 3px; height: 16px; padding: 0 5px;
+      border-radius: 8px; font-size: 10.5px; font-weight: 600; white-space: nowrap;
+      max-width: 12ch; overflow: hidden; text-overflow: ellipsis;
+    }
+    .gp-ref-branch, .gp-ref-head { background: var(--gp-lane-0); color: #fff; }
+    .gp-ref-remote { border: 1px solid var(--gp-lane-0); color: var(--gp-lane-0); background: transparent; }
+    .gp-ref-tag { background: var(--fl-color-surface-raised); color: var(--fl-color-text); }
+    .gp-graph-child { gap: 6px; }
+    .gp-graph-note { color: var(--fl-color-text-secondary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    /* The commit hover card (light DOM, beside the panel). */
+    .gp-hover-card {
+      position: fixed; z-index: 1000; width: 300px; padding: 10px 12px; display: grid; gap: 6px;
+      background: var(--fl-color-surface); color: var(--fl-color-text);
+      border: var(--fl-border-width) solid var(--fl-color-border); border-radius: 6px;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4); font-size: 12px; pointer-events: none;
+      font-family: var(--fl-font-ui);
+    }
+    .gp-hover-head { display: flex; align-items: center; gap: 8px; }
+    .gp-avatar {
+      flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+      background: #b180d7; color: #fff; font-size: 10px; font-weight: 600;
+    }
+    .gp-hover-author { font-weight: 600; }
+    .gp-hover-meta { color: var(--fl-color-text-secondary); }
+    .gp-hover-subject { white-space: pre-wrap; word-break: break-word; }
+    .gp-hover-stat { font-family: var(--fl-font-mono); font-size: 11px; color: var(--fl-color-text-secondary); }
+    .gp-stat-add { color: var(--fl-color-success); }
+    .gp-stat-del { color: var(--fl-color-error); }
+    .gp-hover-sha { font-family: var(--fl-font-mono); color: var(--fl-color-accent); }
+
+    /* The SOURCE CONTROL title row's buttons (shell owns the row). */
+    .fl-sc-action {
+      width: 22px; height: 22px; padding: 0; display: inline-grid; place-items: center;
+      border: none; border-radius: 4px; background: transparent;
+      color: var(--fl-color-text-secondary); cursor: pointer;
+    }
+    .fl-sc-action:hover { color: var(--fl-color-text); background: var(--fl-color-surface-raised); }
   `
