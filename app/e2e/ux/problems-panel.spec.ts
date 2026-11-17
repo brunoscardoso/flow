@@ -1,9 +1,10 @@
 /**
- * THE PROBLEMS LIST — the bottom panel's second view, beside Terminal.
+ * THE PROBLEMS LIST — the bottom panel's second view, a toggle on its right.
  *
  * A real TypeScript project with one type error is opened in the editor; the
  * main-process language server reports it, and:
- *   1. the Problems tab carries the count ("Problems 1"),
+ *   1. the Problems toggle carries the count ("Problems 1") and has no
+ *      "Terminal" partner tab,
  *   2. the list shows the file group and the problem (message, source, line:col),
  *   3. clicking the problem opens its file with the caret at that position,
  *   4. Fix with agent is disabled with a plain reason while no conversation is
@@ -100,10 +101,22 @@ test('Problems lists a real type error, jumps to it, and Fix with agent sends on
 
   const terminalRoot = page.locator(sel.terminalRoot)
   await expect(terminalRoot).toBeVisible()
-  const problemsTab = terminalRoot.locator('.fl-problems-view[data-view="problems"]')
-  const terminalTab = terminalRoot.locator('.fl-problems-view[data-view="terminal"]')
-  await expect(terminalTab).toHaveText('Terminal')
+  const problemsTab = terminalRoot.locator('.fl-problems-toggle')
   await expect(problemsTab).toHaveText('Problems')
+  // No "Terminal" tab — the terminal tabs name the view (user decision 2026-11-17).
+  await expect(terminalRoot.getByText('Terminal', { exact: true })).toHaveCount(0)
+  // The toggle sits on the right: after the terminal tabs, before the hide button.
+  const order = await terminalRoot.locator('.fl-term-header').evaluate((header) => {
+    const kids = [...header.children]
+    const at = (el: Element | null) => (el === null ? -1 : kids.indexOf(el))
+    return {
+      toggle: at(header.querySelector('.fl-problems-toggle')),
+      tabs: at(header.querySelector('.fl-term-tabs')),
+      last: kids.length - 1,
+    }
+  })
+  expect(order.toggle).toBeGreaterThan(order.tabs)
+  expect(order.toggle).toBe(order.last - 1)
 
   // ── A real type error, reported by the language server ──────────────────
   await openInEditor(page, root, 'user.ts')
@@ -113,9 +126,15 @@ test('Problems lists a real type error, jumps to it, and Fix with agent sends on
   // The count reaches the tab label while the terminal is the view shown.
   await expect(problemsTab).toHaveText('Problems 1', { timeout: 15_000 })
 
+  // Pressing again returns to the terminals; pressing once more shows the list.
   await problemsTab.click()
-  await expect(problemsTab).toHaveClass(/active/)
+  await expect(problemsTab).toHaveAttribute('aria-pressed', 'true')
   await expect(terminalRoot.locator('.fl-term-hosts')).toBeHidden()
+  await problemsTab.click()
+  await expect(problemsTab).toHaveAttribute('aria-pressed', 'false')
+  await expect(terminalRoot.locator('.fl-term-hosts')).toBeVisible()
+  await problemsTab.click()
+  await expect(problemsTab).toHaveAttribute('aria-pressed', 'true')
   const group = terminalRoot.locator('.fl-problems-group[data-file="user.ts"]')
   await expect(group).toHaveCount(1)
   await expect(group.locator('.fl-problems-file-name')).toHaveText('user.ts')
@@ -153,7 +172,7 @@ test('Problems lists a real type error, jumps to it, and Fix with agent sends on
   await expect(page.locator(sel.composer)).toBeVisible()
   // The panel may have been re-laid for the conversation; show Problems again.
   await expect(terminalRoot).toBeVisible()
-  if (!(await problemsTab.getAttribute('class'))?.includes('active')) await problemsTab.click()
+  if ((await problemsTab.getAttribute('aria-pressed')) !== 'true') await problemsTab.click()
   const rowFix = row.getByRole('button', { name: 'Fix with agent' })
   await expect(rowFix).toBeEnabled({ timeout: 10_000 })
   await expect(fixAll).toBeEnabled()

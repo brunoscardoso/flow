@@ -38,7 +38,7 @@ import { PROBLEMS_COALESCE_MS, problemsReadLimit } from './problems-refresh-mode
 export interface ProblemsMount {
   /** The bottom panel's root (`.fl-term-root`): the view classes go on it. */
   root: HTMLElement
-  /** Its header — the view switch is placed first, the actions before `before`. */
+  /** Its header — the actions and the Problems toggle go in front of `before`. */
   header: HTMLElement
   /** Header element the Problems actions are inserted in front of. */
   before: Element
@@ -68,22 +68,16 @@ export function mountProblems(mount: ProblemsMount): ProblemsController {
   const { root, header, api } = mount
   const readProblems = api.editor.problems?.bind(api.editor)
 
-  // ── View switch (Terminal | Problems N) ─────────────────────────────────
-  const views = document.createElement('div')
-  views.className = 'fl-problems-views'
-  views.setAttribute('role', 'tablist')
-  const terminalTab = document.createElement('button')
-  terminalTab.className = 'fl-term-tool fl-problems-view active'
-  terminalTab.setAttribute('role', 'tab')
-  terminalTab.dataset['view'] = 'terminal'
-  terminalTab.textContent = 'Terminal'
+  // ── The Problems toggle (right side, beside the panel's own buttons) ────
+  // No "Terminal" tab: the terminal tabs already say what the panel shows
+  // (user decision 2026-11-17). Pressing Problems shows the list; pressing it
+  // again — or any terminal action — brings the terminals back.
   const problemsTab = document.createElement('button')
-  problemsTab.className = 'fl-term-tool fl-problems-view'
-  problemsTab.setAttribute('role', 'tab')
+  problemsTab.className = 'fl-term-tool fl-problems-toggle'
   problemsTab.dataset['view'] = 'problems'
+  problemsTab.setAttribute('aria-pressed', 'false')
+  problemsTab.title = 'Problems in open files'
   problemsTab.textContent = 'Problems'
-  views.append(terminalTab, problemsTab)
-  header.prepend(views)
 
   // ── Problems header actions ─────────────────────────────────────────────
   const actions = document.createElement('div')
@@ -95,12 +89,12 @@ export function mountProblems(mount: ProblemsMount): ProblemsController {
   fixAllButton.append(icon('sparkles', 12), document.createTextNode('Fix all'))
   actions.append(summary, fixAllButton)
   header.insertBefore(actions, mount.before)
+  header.insertBefore(problemsTab, mount.before)
 
   // ── Body ────────────────────────────────────────────────────────────────
   const body = document.createElement('div')
   body.className = 'fl-problems-body'
-  body.setAttribute('role', 'tabpanel')
-  root.appendChild(body)
+    root.appendChild(body)
 
   // ── State ───────────────────────────────────────────────────────────────
   let listShown = false
@@ -324,17 +318,14 @@ export function mountProblems(mount: ProblemsMount): ProblemsController {
     if (next === listShown) return
     listShown = next
     root.classList.toggle('fl-problems-mode', listShown)
-    terminalTab.classList.toggle('active', !listShown)
     problemsTab.classList.toggle('active', listShown)
-    terminalTab.setAttribute('aria-selected', String(!listShown))
-    problemsTab.setAttribute('aria-selected', String(listShown))
+    problemsTab.setAttribute('aria-pressed', String(listShown))
     if (listShown) {
       paintList() // the snapshot already held, at once — then a fresh read
       void read()
     }
   }
-  terminalTab.addEventListener('click', () => setView('terminal'))
-  problemsTab.addEventListener('click', () => setView('problems'))
+  problemsTab.addEventListener('click', () => setView(listShown ? 'terminal' : 'problems'))
 
   // ── Signals ─────────────────────────────────────────────────────────────
 
@@ -386,12 +377,10 @@ function injectProblemsStyles(): void {
   stylesInjected = true
   const style = document.createElement('style')
   style.textContent = `
-    .fl-problems-views {
-      display: inline-flex;
-      align-items: center;
-      flex: none;
-      gap: 2px;
-      padding-left: var(--fl-space-xs);
+    .fl-problems-toggle { flex: none; white-space: nowrap; }
+    .fl-problems-toggle.active {
+      color: var(--fl-color-text);
+      background: var(--fl-color-surface-raised);
     }
     .fl-problems-mode .fl-term-header { min-height: var(--fl-tab-height); }
     .fl-problems-actions,
