@@ -98,6 +98,7 @@ import {
   stepTabFace,
 } from './run-group-model'
 import { RUN_TONE_COLOR, RunGroupView } from './run-group-view'
+import { mountProblems } from '../problems/problems-panel'
 
 type XtermModule = typeof import('@xterm/xterm')
 type XtermTerminal = import('@xterm/xterm').Terminal
@@ -216,7 +217,8 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
   tabsEl.classList.add('fl-term-tabs')
 
   const takeoverButton = document.createElement('button')
-  takeoverButton.className = 'fl-term-tool'
+  // fl-term-only: terminal controls, hidden while the Problems view is shown.
+  takeoverButton.className = 'fl-term-tool fl-term-only'
   takeoverButton.hidden = true
 
   // ONE button for a new shell, full or split (user decision 2026-11-15). The
@@ -224,7 +226,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
   // thing; now the + asks which one when there is a terminal to split beside,
   // and opens a full one straight away when there is none.
   const newButton = document.createElement('button')
-  newButton.className = 'fl-term-tool'
+  newButton.className = 'fl-term-tool fl-term-only'
   newButton.title = 'New terminal'
   newButton.setAttribute('aria-label', 'New terminal')
   newButton.setAttribute('aria-haspopup', 'menu')
@@ -274,6 +276,13 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
   root.appendChild(header)
   root.appendChild(hosts)
   panel.appendChild(root)
+
+  // The bottom panel's second view: the Problems list (its own module — it
+  // only borrows this header and root). A new terminal asked for from
+  // anywhere brings the terminal view back, or the shell would open hidden.
+  const problems = mountProblems({ root, header, before: collapseButton, api })
+  document.addEventListener('flow:terminal-new', () => problems.showTerminalView())
+  document.addEventListener('flow:show-terminal', () => problems.showTerminalView())
 
   // ── State ──────────────────────────────────────────────────────────────
   const tabs = new Map<string, TerminalTab>()
@@ -1510,6 +1519,8 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     },
   })
   runGroup = group
+  // A terminal control: hidden while the Problems view is shown, like the others.
+  group.element.classList.add('fl-term-only')
   header.insertBefore(group.element, takeoverButton)
   if (ownerScope !== undefined) group.setScope(ownerScope)
 

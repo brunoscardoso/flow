@@ -61,6 +61,7 @@ import {
   type LspLocation,
 } from './lsp-manager'
 import { createTypeScriptServerConfig } from './tsserver-adapter'
+import { DEFAULT_PROBLEMS_LIMIT, problemsSnapshot } from '../../shared/problems-model'
 
 export interface LspChannelDependencies {
   lspManager: LspManager
@@ -92,6 +93,13 @@ export function registerLspChannels(deps: LspChannelDependencies): () => Promise
   // from its batch filter (see ProjectRegistry.setOpenDocumentFilter).
   const openEditorDocs = new Map<string, number>()
   projectRegistry.setOpenDocumentFilter((path) => openEditorDocs.has(path))
+
+  // THE ONE STORE OF DIAGNOSTICS. The latest publishDiagnostics per file, by
+  // absolute path — the Problems list reads it through editor:problems. Only
+  // files with something to say are kept: an empty publish (a fix, a close)
+  // deletes the entry, so the map is bounded by the files a server is
+  // reporting on. The renderer's squiggles are drawn from the same events.
+  const latestDiagnostics = new Map<string, DiagnosticsEvent>()
 
   /** Contract-typed ipcMain.handle — compile error on channel/shape drift. */
   function handle<C extends IpcInvokeChannel>(
@@ -160,6 +168,10 @@ export function registerLspChannels(deps: LspChannelDependencies): () => Promise
     const path = await resolveInsideRoot(root.rootPath, filePath)
     await lspManager.didChange(root.rootPath, path, content)
   })
+  handle('editor:problems', ({ limit }) => {
+    const bound = typeof limit === 'number' && Number.isFinite(limit) ? limit : DEFAULT_PROBLEMS_LIMIT
+    return problemsSnapshot(latestDiagnostics.values(), Math.min(bound, DEFAULT_PROBLEMS_LIMIT))
+  })
   handle('editor:didClose', async ({ rootId, filePath }) => {
     const root = resolveRoot(projectRegistry, rootId)
     const path = await resolveInsideRoot(root.rootPath, filePath)
@@ -182,6 +194,8 @@ export function registerLspChannels(deps: LspChannelDependencies): () => Promise
       filePath,
       diagnostics: event.diagnostics.map(toDiagnostic),
     }
+    if (payload.diagnostics.length === 0) latestDiagnostics.delete(event.path)
+    else latestDiagnostics.set(event.path, payload)
     broadcast('editor:diagnostics', payload)
   }
   lspManager.on(LSP_DIAGNOSTICS_EVENT, onDiagnostics)
@@ -216,6 +230,7 @@ export function registerLspChannels(deps: LspChannelDependencies): () => Promise
     const nextRootPaths = new Set(roots.map((root) => root.rootPath))
     for (const rootPath of knownRootPaths) {
       if (!nextRootPaths.has(rootPath)) {
+        forgetDiagnosticsUnder(rootPath)
         void lspManager.disposeRoot(rootPath).catch((error) => {
           console.error('[LSP] Failed to dispose servers for removed root', { rootPath, error })
         })
@@ -224,6 +239,14 @@ export function registerLspChannels(deps: LspChannelDependencies): () => Promise
     knownRootPaths = nextRootPaths
   }
   projectRegistry.on(PROJECT_LIST_CHANGED_EVENT, onRootsChanged)
+
+  /** A removed project's problems go with it: its servers are shut down, so
+   *  nothing would ever publish the empty list that clears them. */
+  function forgetDiagnosticsUnder(rootPath: string): void {
+    for (const [path, event] of latestDiagnostics) {
+      if (event.rootId === rootPath) latestDiagnostics.delete(path)
+    }
+  }
 
   return async function disposeLspChannels(): Promise<void> {
     for (const channel of registered) {
@@ -235,6 +258,7 @@ export function registerLspChannels(deps: LspChannelDependencies): () => Promise
     projectRegistry.off(PROJECT_LIST_CHANGED_EVENT, onRootsChanged)
     projectRegistry.setOpenDocumentFilter(null)
     openEditorDocs.clear()
+    latestDiagnostics.clear()
     try {
       await lspManager.dispose()
     } catch (error) {

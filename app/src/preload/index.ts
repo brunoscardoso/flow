@@ -275,6 +275,7 @@ const flowApi: FlowApi = {
     didOpen: (request) => invoke('editor:didOpen', request),
     didChange: (request) => invoke('editor:didChange', request),
     didClose: (request) => invoke('editor:didClose', request),
+    problems: (request) => invoke('editor:problems', request),
     pendingChanges: (request) => invoke('editor:pendingChanges', request),
     resolveHunk: (request) => invoke('editor:resolveHunk', request),
     onDiagnostics: (listener) => subscribe('editor:diagnostics', listener),

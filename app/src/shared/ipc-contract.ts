@@ -26,6 +26,7 @@ import type { ContextUsageSnapshot } from './context-usage'
 import type { SideIdentity } from './side-identity'
 import type { ConflictHunkChoice, ConflictHunkOrder } from './conflict-hunks'
 import type { UpdateStatus } from './updater'
+import type { ProblemsSnapshot } from './problems-model'
 import type {
   RunGroupState,
   RunSaveAnswer,
@@ -5895,6 +5896,12 @@ export interface IpcInvokeMap {
     request: { rootId: string; filePath: string }
     response: void
   }
+  /** The Problems list: main's latest diagnostics for open files, bounded to
+   *  `limit` problems (0 = counts only — the tab label's read). */
+  'editor:problems': {
+    request: { limit?: number }
+    response: ProblemsSnapshot
+  }
   'editor:pendingChanges': {
     request: { rootId?: string }
     response: PendingFileChange[]
@@ -7862,6 +7869,7 @@ export const IPC_INVOKE_CHANNELS = [
   'editor:didOpen',
   'editor:didChange',
   'editor:didClose',
+  'editor:problems',
   'editor:pendingChanges',
   'editor:resolveHunk',
   'terminal:list',
@@ -8317,6 +8325,8 @@ export interface FlowEditorApi {
   didOpen(request: IpcRequest<'editor:didOpen'>): Promise<void>
   didChange(request: IpcRequest<'editor:didChange'>): Promise<void>
   didClose(request: IpcRequest<'editor:didClose'>): Promise<void>
+  /** The Problems list snapshot — optional so an older preload reads as "no list". */
+  problems?(request: IpcRequest<'editor:problems'>): Promise<IpcResponse<'editor:problems'>>
   pendingChanges(
     request: IpcRequest<'editor:pendingChanges'>,
   ): Promise<IpcResponse<'editor:pendingChanges'>>

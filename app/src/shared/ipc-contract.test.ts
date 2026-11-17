@@ -86,6 +86,7 @@ const INVOKE_MAP_KEYS: Record<IpcInvokeChannel, true> = {
   'editor:didOpen': true,
   'editor:didChange': true,
   'editor:didClose': true,
+  'editor:problems': true,
   'editor:pendingChanges': true,
   'editor:resolveHunk': true,
   'terminal:list': true,
