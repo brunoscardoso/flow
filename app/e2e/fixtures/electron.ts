@@ -1,5 +1,5 @@
 import { test as base, _electron as electron, expect, type ElectronApplication, type Page } from '@playwright/test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -67,6 +67,29 @@ function withOverrides(
 }
 
 /**
+ * A zsh startup directory of the run's own, so a spec's shell never writes the
+ * developer's history.
+ *
+ * Terminal specs type `echo SOME_MARKER`, `sleep 987652`, probe `cd`s… into a
+ * real login shell. Without this every one of them landed in ~/.zsh_history —
+ * over a thousand lines — and up-arrow in the developer's own terminal served
+ * test probes. Setting HISTFILE is not enough: macOS's /etc/zshrc assigns
+ * `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history` unconditionally, so ZDOTDIR is the
+ * only lever. Each startup file here sources the developer's real one, so the
+ * shell under test is still their shell (PATH, oh-my-zsh, prompt) — only its
+ * history file moves into the throwaway profile. HISTFILE is set as well for
+ * bash, which reads it from the environment.
+ */
+function zshSandbox(userDataDir: string): string {
+  const dir = join(userDataDir, 'zdot')
+  mkdirSync(dir, { recursive: true })
+  for (const name of ['.zshenv', '.zprofile', '.zshrc', '.zlogin']) {
+    writeFileSync(join(dir, name), `[ -f "$HOME/${name}" ] && source "$HOME/${name}"\n`)
+  }
+  return dir
+}
+
+/**
  * Launches the built Flow app against a throwaway userData directory so every
  * test starts from a known, isolated state (a fresh dir triggers first-run
  * onboarding). Seed state by writing into `userDataDir` before first use, or
@@ -108,6 +131,9 @@ export const test = base.extend<FlowFixtures & FlowOptions>({
           // come, and reports a product failure. The var is read by the
           // developer's own zsh config, nothing this app controls.
           DISABLE_AUTO_UPDATE: 'true',
+          // A SPEC'S SHELL MUST NOT WRITE THE DEVELOPER'S HISTORY — see zshSandbox.
+          ZDOTDIR: zshSandbox(userDataDir),
+          HISTFILE: join(userDataDir, 'shell_history'),
         },
         appEnv,
       ),
