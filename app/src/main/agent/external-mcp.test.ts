@@ -44,6 +44,7 @@ describe('loadExternalMcpServers — scopes', () => {
   it('reads a project .mcp.json stdio server', () => {
     const result = loadExternalMcpServers(
       projectRoot,
+      undefined,
       deps({
         [projectMcpPath]: JSON.stringify({
           mcpServers: { vercel: { command: 'npx', args: ['-y', 'vercel-mcp'] } },
@@ -56,6 +57,7 @@ describe('loadExternalMcpServers — scopes', () => {
   it('reads a user-scope server from ~/.claude.json', () => {
     const result = loadExternalMcpServers(
       projectRoot,
+      undefined,
       deps({
         [userConfigPath]: JSON.stringify({
           mcpServers: { vercel: { type: 'http', url: 'https://mcp.vercel.com' } },
@@ -68,6 +70,7 @@ describe('loadExternalMcpServers — scopes', () => {
   it('reads a local-scope server from ~/.claude.json projects[root]', () => {
     const result = loadExternalMcpServers(
       projectRoot,
+      undefined,
       deps({
         [userConfigPath]: JSON.stringify({
           projects: { [projectRoot]: { mcpServers: { vercel: { command: 'vercel-mcp' } } } },
@@ -80,6 +83,7 @@ describe('loadExternalMcpServers — scopes', () => {
   it('later scope wins a name collision: local > project > user', () => {
     const result = loadExternalMcpServers(
       projectRoot,
+      undefined,
       deps({
         [userConfigPath]: JSON.stringify({
           mcpServers: { vercel: { command: 'user' } },
@@ -94,6 +98,7 @@ describe('loadExternalMcpServers — scopes', () => {
   it('merges distinct servers across scopes', () => {
     const result = loadExternalMcpServers(
       projectRoot,
+      undefined,
       deps({
         [userConfigPath]: JSON.stringify({ mcpServers: { a: { command: 'a' } } }),
         [projectMcpPath]: JSON.stringify({ mcpServers: { b: { command: 'b' } } }),
@@ -105,18 +110,19 @@ describe('loadExternalMcpServers — scopes', () => {
 
 describe('loadExternalMcpServers — fail-soft and safety', () => {
   it('returns empty when no config files exist', () => {
-    expect(loadExternalMcpServers(projectRoot, deps({}))).toEqual({})
+    expect(loadExternalMcpServers(projectRoot, undefined, deps({}))).toEqual({})
   })
 
   it('skips a malformed-JSON file rather than throwing', () => {
     expect(
-      loadExternalMcpServers(projectRoot, deps({ [projectMcpPath]: '{ not json' })),
+      loadExternalMcpServers(projectRoot, undefined, deps({ [projectMcpPath]: '{ not json' })),
     ).toEqual({})
   })
 
   it('drops the reserved `flow` name so a user server cannot shadow the board tools', () => {
     const result = loadExternalMcpServers(
       projectRoot,
+      undefined,
       deps({
         [projectMcpPath]: JSON.stringify({
           mcpServers: { flow: { command: 'evil' }, vercel: { command: 'ok' } },
@@ -129,6 +135,7 @@ describe('loadExternalMcpServers — fail-soft and safety', () => {
   it('skips malformed server entries but keeps valid siblings', () => {
     const result = loadExternalMcpServers(
       projectRoot,
+      undefined,
       deps({
         [projectMcpPath]: JSON.stringify({
           mcpServers: { broken: { type: 'http' }, good: { command: 'x' } },
@@ -144,8 +151,68 @@ describe('loadExternalMcpServers — fail-soft and safety', () => {
     const worktree = '/repos/.worktrees/acme-thread'
     const result = loadExternalMcpServers(
       projectRoot,
+      undefined,
       deps({ [`${worktree}/.mcp.json`]: JSON.stringify({ mcpServers: { x: { command: 'x' } } }) }),
     )
     expect(result).toEqual({})
+  })
+})
+
+describe('loadExternalMcpServers — the session’s own config dir', () => {
+  // A project bound to an account runs with CLAUDE_CONFIG_DIR set to that
+  // account's folder, and Claude Code keeps that account's servers in
+  // <configDir>/.claude.json — `claude mcp add` run as that account writes there,
+  // not to ~/.claude.json.
+  const accountDir = `${home}/.claude-personal`
+  const accountConfigPath = `${accountDir}/.claude.json`
+
+  it('reads user and local servers from <configDir>/.claude.json when the session has one', () => {
+    const result = loadExternalMcpServers(
+      projectRoot,
+      accountDir,
+      deps({
+        [accountConfigPath]: JSON.stringify({
+          mcpServers: { linear: { type: 'http', url: 'https://mcp.linear.app' } },
+          projects: { [projectRoot]: { mcpServers: { db: { command: 'db-mcp' } } } },
+        }),
+      }),
+    )
+    expect(result).toEqual({
+      linear: { type: 'http', url: 'https://mcp.linear.app' },
+      db: { command: 'db-mcp' },
+    })
+  })
+
+  it('does not hand another account’s ~/.claude.json servers to an account-bound session', () => {
+    const result = loadExternalMcpServers(
+      projectRoot,
+      accountDir,
+      deps({
+        [userConfigPath]: JSON.stringify({
+          mcpServers: { vercel: { type: 'http', url: 'https://mcp.vercel.com' } },
+          projects: { [projectRoot]: { mcpServers: { other: { command: 'other' } } } },
+        }),
+        [accountConfigPath]: JSON.stringify({ mcpServers: { mine: { command: 'mine' } } }),
+      }),
+    )
+    expect(result).toEqual({ mine: { command: 'mine' } })
+  })
+
+  it('still reads the project .mcp.json for an account-bound session', () => {
+    const result = loadExternalMcpServers(
+      projectRoot,
+      accountDir,
+      deps({ [projectMcpPath]: JSON.stringify({ mcpServers: { shared: { command: 'shared' } } }) }),
+    )
+    expect(result).toEqual({ shared: { command: 'shared' } })
+  })
+
+  it('falls back to ~/.claude.json when the session has no config dir', () => {
+    const result = loadExternalMcpServers(
+      projectRoot,
+      undefined,
+      deps({ [userConfigPath]: JSON.stringify({ mcpServers: { vercel: { command: 'v' } } }) }),
+    )
+    expect(result).toEqual({ vercel: { command: 'v' } })
   })
 })

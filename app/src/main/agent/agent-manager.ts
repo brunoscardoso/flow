@@ -410,7 +410,10 @@ export interface AgentManagerOptions {
    * so tests are not at the mercy of the dev machine's real `~/.claude.json`;
    * default reads the real config files, fail-soft. Absent → the real reader.
    */
-  loadExternalMcpServers?: (projectRoot: string) => Record<string, McpServerConfig>
+  loadExternalMcpServers?: (
+    projectRoot: string,
+    configDir: string | undefined,
+  ) => Record<string, McpServerConfig>
   /**
    * THE CONTEXT GATE (Workspaces Phase 7). On a thread's first send — awaited
    * BEFORE the session is created, because a session's folders are fixed when
@@ -1750,7 +1753,9 @@ export class AgentManager extends EventEmitter {
     // surprise here can never fail a session.
     try {
       const readExternal = this.options.loadExternalMcpServers ?? loadExternalMcpServers
-      const external = readExternal(thread.projectRoot)
+      // The config dir the session ACTUALLY runs with (an account's folder, or an
+      // inherited one) — its `.claude.json` is where that account's servers live.
+      const external = readExternal(thread.projectRoot, options.env?.['CLAUDE_CONFIG_DIR'])
       if (Object.keys(external).length > 0) {
         options.mcpServers = { ...external, ...(options.mcpServers ?? {}) }
       }

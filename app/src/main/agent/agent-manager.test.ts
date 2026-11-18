@@ -15,7 +15,7 @@ import { join } from 'path'
 
 import type { Query } from '@anthropic-ai/claude-agent-sdk'
 
-import type { Options } from '@anthropic-ai/claude-agent-sdk'
+import type { McpServerConfig, Options } from '@anthropic-ai/claude-agent-sdk'
 
 import type { AgentStreamEvent } from '../../shared/ipc-contract'
 import type { CredentialsManager } from '../credentials'
@@ -931,6 +931,41 @@ describe('AgentManager', () => {
         if (prevKey === undefined) delete process.env['ANTHROPIC_API_KEY']
         else process.env['ANTHROPIC_API_KEY'] = prevKey
       }
+    })
+
+    it('account-bound project reads its MCP servers from the account’s config dir, and the session gets them', async () => {
+      const fakes: FakeQuery[] = []
+      let capturedServers: Options['mcpServers']
+      const queryFn = jest.fn((params: { options?: Options }): Query => {
+        capturedServers = params.options?.mcpServers
+        const fake = makeFakeQuery()
+        fakes.push(fake)
+        return fake as unknown as Query
+      })
+      const accounts = new AccountStore(db)
+      const acct = accounts.createAccount({ label: 'Acme', configDirPath: '/dir/acme' })
+      accounts.setDefaultAccountId(acct.id)
+      const resolver = new AccountResolver(accounts, loggedInProbe)
+      const loader = jest.fn(
+        (_root: string, configDir: string | undefined): Record<string, McpServerConfig> =>
+          configDir === '/dir/acme' ? { linear: { type: 'http', url: 'https://mcp.linear.app' } } : {},
+      )
+      const manager = new AgentManager(store, credentialsStub, broker, {
+        queryFn,
+        accountResolver: resolver,
+        loadExternalMcpServers: loader,
+      })
+      const thread = store.createThread({ projectRoot: tempDir })
+
+      await manager.sendMessage(thread.id, 'hi')
+      await flushMicrotasks()
+
+      expect(loader).toHaveBeenCalledWith(tempDir, '/dir/acme')
+      expect(capturedServers?.['linear']).toEqual({ type: 'http', url: 'https://mcp.linear.app' })
+
+      manager.dispose()
+      fakes.forEach((fake) => fake.release())
+      await flushMicrotasks()
     })
 
     it('generateBrief (brief + commit-message) authenticates AS the bound account, not legacy auth (#237)', async () => {

@@ -26,9 +26,15 @@
 // SCOPES, lowest precedence first (a later scope wins a name collision, matching
 // Claude Code's own local > project > user ordering):
 //
-//   user     ~/.claude.json            → top-level `mcpServers`
+//   user     <config>/.claude.json     → top-level `mcpServers`
 //   project  <projectRoot>/.mcp.json   → `mcpServers`
-//   local    ~/.claude.json            → `projects[<projectRoot>].mcpServers`
+//   local    <config>/.claude.json     → `projects[<projectRoot>].mcpServers`
+//
+// <config> is the SESSION's CLAUDE_CONFIG_DIR when it has one, else the home
+// folder — the same place Claude Code itself keeps `.claude.json`. A project
+// bound to an account runs with that account's folder, so `claude mcp add` run
+// as that account wrote there; reading ~/.claude.json instead lost those servers
+// and handed every account the default account's servers.
 //
 // The reserved `flow` name is dropped so a user's server can never shadow the
 // board tools (the board merge runs after this and would win regardless).
@@ -96,22 +102,24 @@ function collectServers(servers: unknown, into: Record<string, McpServerConfig>)
 }
 
 /**
- * Every user-configured MCP server that applies to `projectRoot`, merged across
+ * Every user-configured MCP server that applies to `projectRoot` for a session
+ * whose CLAUDE_CONFIG_DIR is `configDir` (undefined = none), merged across
  * the three file scopes (user < project < local, later wins). Empty when nothing
  * is configured or every file is missing — the common case, and byte-identical
  * to before this existed. Never throws.
  */
 export function loadExternalMcpServers(
   projectRoot: string,
+  configDir: string | undefined,
   deps: ExternalMcpDeps = {},
 ): Record<string, McpServerConfig> {
   const read = deps.readFileFn ?? ((path: string) => readFileSync(path, 'utf8'))
-  const home = deps.homedirFn?.() ?? homedir()
+  const configHome = configDir !== undefined && configDir !== '' ? configDir : (deps.homedirFn?.() ?? homedir())
   const merged: Record<string, McpServerConfig> = {}
 
-  // Read ~/.claude.json once — it holds BOTH the user-scope map and the
+  // Read <config>/.claude.json once — it holds BOTH the user-scope map and the
   // per-project (local) map, and it can be large.
-  const userConfig = readJsonObject(join(home, '.claude.json'), read)
+  const userConfig = readJsonObject(join(configHome, '.claude.json'), read)
 
   // user scope — applies to every project
   if (userConfig) collectServers(userConfig['mcpServers'], merged)
