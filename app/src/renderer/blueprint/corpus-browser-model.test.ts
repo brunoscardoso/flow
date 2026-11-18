@@ -7,6 +7,7 @@
 
 import type { BlueprintCorpusIndexEntry } from '../../shared/ipc-contract'
 import {
+  featureHasCorpusDocs,
   clearFeatureFilter,
   countCorpusTabs,
   deriveCorpusBrowserView,
@@ -319,5 +320,22 @@ describe('feature-scoped counts and the empty reason', () => {
     const view = deriveCorpusBrowserView(index, cleared)
     expect(names(view.rows)).toEqual(['C1'])
     expect(names(view.noFeatureRows)).toEqual(['C2'])
+  })
+})
+
+describe('featureHasCorpusDocs', () => {
+  const entry = (featureSlug: string | null, kind: 'change' | 'discovery') =>
+    ({ featureSlug, kind }) as unknown as Parameters<typeof featureHasCorpusDocs>[0][number]
+
+  it('offers the door when the feature has a change or a discovery', () => {
+    expect(featureHasCorpusDocs([entry('auth', 'change')], 'auth')).toBe(true)
+    expect(featureHasCorpusDocs([entry('auth', 'discovery')], 'auth')).toBe(true)
+  })
+
+  it('hides it when nothing is linked to the feature', () => {
+    expect(featureHasCorpusDocs([entry('auth', 'change')], 'auth')).toBe(true)
+    expect(featureHasCorpusDocs([entry('billing', 'change'), entry(null, 'discovery')], 'auth')).toBe(false)
+    expect(featureHasCorpusDocs([], 'auth')).toBe(false)
+    expect(featureHasCorpusDocs([entry('auth', 'change')], null)).toBe(false)
   })
 })

@@ -162,6 +162,7 @@ import {
   deriveCorpusBrowserView,
   initialCorpusBrowserState,
   type CorpusBrowserRow,
+  featureHasCorpusDocs,
   type CorpusBrowserState,
   type CorpusBrowserTab,
   type CorpusDateField,
@@ -1279,6 +1280,9 @@ function islandHasContent(root: HTMLElement): boolean {
   return false
 }
 
+/** How long the Changes & discoveries door trusts its last index read. */
+const CORPUS_DOOR_TTL_MS = 30_000
+
 export class BlueprintBoard {
   readonly element: HTMLElement
 
@@ -1597,6 +1601,11 @@ export class BlueprintBoard {
   #briefFoot: HTMLElement | null = null
   /** The brief's node drawer, or null when closed. */
   #briefDrawer: HTMLElement | null = null
+
+  /** The corpus index per project, read once so the Changes & discoveries
+   *  door can be offered only when the feature has documents. 'loading' while
+   *  the read is in flight; refreshed whenever the browser itself reads it. */
+  #corpusIndexByRoot = new Map<string, { entries: readonly BlueprintCorpusIndexEntry[]; at: number; loading: boolean }>()
 
   // ── Corpus browser (changes-discovery-view #1532) ─────────────────────────
   /**
@@ -4204,6 +4213,9 @@ export class BlueprintBoard {
     // A NEWER open may also have started on the same root — without this the
     // last read to RESOLVE wins, not the last one the user clicked.
     if (generation !== this.#corpusOpenGeneration) return
+    if (rootId !== null && result !== undefined) {
+      this.#corpusIndexByRoot.set(rootId, { entries: result.entries, at: Date.now(), loading: false })
+    }
     this.#corpus = {
       state,
       entries: result?.entries ?? [],
@@ -4251,6 +4263,37 @@ export class BlueprintBoard {
    * it is not in hand, the store's own id grammar (`feature:<slug>`,
    * `mintFeatureId`) makes the fallback honest rather than a guess.
    */
+  /**
+   * Whether this feature has any change or discovery document. Unknown until
+   * the project's index has been read once: the first ask starts the read and
+   * answers false, and the board repaints when the answer arrives. A build
+   * that cannot read the index never offers the door.
+   */
+  #featureHasCorpusDocs(featureRef: string | null): boolean {
+    const rootId = this.#activeRoot
+    if (rootId === null || featureRef === null) return false
+    const cached = this.#corpusIndexByRoot.get(rootId)
+    // A new plan or discovery can link a feature at any time; a short window
+    // keeps the answer fresh without a read per paint (allowed-pattern #20).
+    const stale = cached === undefined || Date.now() - cached.at > CORPUS_DOOR_TTL_MS
+    if (stale && cached?.loading !== true) {
+      const before = cached?.entries ?? null
+      this.#corpusIndexByRoot.set(rootId, { entries: before ?? [], at: cached?.at ?? 0, loading: true })
+      void this.#readCorpusIndex(rootId).then((result) => {
+        const entries = result?.entries ?? before ?? []
+        this.#corpusIndexByRoot.set(rootId, { entries, at: Date.now(), loading: false })
+        if (rootId !== this.#activeRoot || result === undefined) return
+        const slugs = (list: readonly BlueprintCorpusIndexEntry[] | null): string =>
+          (list ?? []).map((entry) => entry.featureSlug ?? '').sort().join('\n')
+        if (slugs(before) === slugs(result.entries)) return
+        if (this.#territory !== null) this.#renderFeatureBoard()
+        if (this.#brief !== null) this.#renderBriefBar()
+      })
+    }
+    const entries = this.#corpusIndexByRoot.get(rootId)?.entries ?? []
+    return featureHasCorpusDocs(entries, this.#corpusSlugFor(featureRef))
+  }
+
   #corpusSlugFor(ref: string | null): string | null {
     if (ref === null) return null
     const node = this.#featureGraph?.nodes.find(
@@ -5199,7 +5242,8 @@ export class BlueprintBoard {
       // like the time switch it is something you DO, and the bar's design
       // context named that chrome for its top buttons.
       const corpusRef = this.#briefFeatureRef
-      if (deep) {
+      const hasCorpus = this.#featureHasCorpusDocs(corpusRef)
+      if (deep && hasCorpus) {
         // A QUIET TEXT BUTTON in the top island, like its neighbours.
         actions.appendChild(
           this.#headerButton({
@@ -5223,7 +5267,7 @@ export class BlueprintBoard {
       corpusBtn.title = 'Browse every change and discovery doc, pre-filtered to this feature'
       corpusBtn.addEventListener('click', () => void this.openCorpusBrowser(corpusRef))
       corpusWrap.appendChild(corpusBtn)
-      if (!deep) actions.appendChild(corpusWrap)
+      if (!deep && hasCorpus) actions.appendChild(corpusWrap)
     }
 
     // THE ACTIONS GO TO THE HEADER, the facts stay under the title. `controls`
@@ -16902,7 +16946,7 @@ export class BlueprintBoard {
     // `showCorpusControl`'s decision, not a kind test repeated here. A quiet
     // text button, the same one the feature's diagram carries, so Blocks and
     // Diagram of one feature wear the same top island.
-    if (view.title.showCorpusControl && focus !== undefined) {
+    if (view.title.showCorpusControl && focus !== undefined && this.#featureHasCorpusDocs(focus.id)) {
       const corpus = this.#headerButton({
         icon: 'archive',
         label: 'Changes & discoveries',

@@ -143,6 +143,18 @@ export function countCorpusTabs(
   return { changes, discoveries }
 }
 
+/** Whether the Changes & discoveries door has anything behind it for this
+ *  feature. A door that opens onto "nothing is linked yet" is offered only
+ *  when it can show something (user, 2026-11-16). No feature → no door. */
+export function featureHasCorpusDocs(
+  entries: readonly BlueprintCorpusIndexEntry[],
+  featureSlug: string | null,
+): boolean {
+  if (featureSlug === null) return false
+  const { changes, discoveries } = countCorpusTabs([...entries], featureSlug)
+  return changes + discoveries > 0
+}
+
 /** Last path segment — search matches the filename a user sees in `flow/`. */
 function corpusPathBasename(path: string): string {
   const segments = path.split('/')

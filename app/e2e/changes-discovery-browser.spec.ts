@@ -374,40 +374,21 @@ test('2 — feature-view entry: browser button, change click-through to its brie
   await window.screenshot({ path: 'e2e/__screens/changes-discovery-clickthrough.png' })
 })
 
-test('3 — a feature nothing is linked to: zero badges, the board\'s sentence, and Show all lists the docs', async ({
-  window,
-}) => {
+test('3 — a feature nothing is linked to offers no Changes & discoveries door', async ({ window }) => {
   test.setTimeout(240_000)
-  // The shape that read as broken on a real project: the opening feature has
-  // no docs, and most of the index is linked to no feature at all.
+  // The door is offered only when it opens onto something (user, 2026-11-16):
+  // a feature with no linked doc shows no button at all, while the project's
+  // other docs stay where they are.
   const unlinkedChats = INDEX_ENTRIES.map((entry) =>
     entry.featureSlug === CHATS.slug ? { ...entry, featureSlug: null } : entry,
   )
   await openBoard(window, 'flow-ux-corpus-unlinked-', unlinkedChats)
   await diveIntoCell(window, CHATS.name)
-  await window.waitForTimeout(1200)
-  await window.locator('.flow-board-root .fb-float-tl').getByRole('button', { name: 'Changes & discoveries' }).click()
-  await expect(window.locator(DRAWER)).toBeVisible({ timeout: 30_000 })
-  await expect(window.locator('.fb-corpus-chip-slug')).toHaveText(CHATS.slug)
-
-  // THE BADGES COUNT THE FEATURE, not the project.
-  await expect(window.locator(`${DRAWER} .fb-learn-tab[data-tab="changes"]`)).toHaveText('Changes (0)')
-  await expect(window.locator(`${DRAWER} .fb-learn-tab[data-tab="discoveries"]`)).toHaveText('Discoveries (0)')
-  await expect(window.locator(`${DRAWER} .fb-corpus-row`)).toHaveCount(0)
-
-  // The empty says what is true, in the board's words, with the way out.
-  await expect(window.locator(`${DRAWER} .fb-corpus-empty .fb-corpus-notice`)).toHaveText(
-    `Nothing is linked to ${CHATS.name} yet.`,
-  )
-  await expect(window.locator(`${DRAWER} .fb-corpus-empty-note`)).toHaveText('4 of them are not linked to any feature.')
-  await expect(window.locator(`${DRAWER}`)).not.toContainText('No docs match the current filters')
-  const showAll = window.locator(`${DRAWER} .fb-corpus-showall`)
-  await expect(showAll).toHaveText('Show all 5')
-
-  await showAll.click()
-  await expect(window.locator('.fb-corpus-chip')).toHaveCount(0)
-  await expect(window.locator(`${DRAWER} .fb-learn-tab[data-tab="changes"]`)).toHaveText('Changes (4)')
-  await expect(window.locator(`${DRAWER} .fb-corpus-row`).first()).toBeVisible()
-  await expect(window.locator('.fb-corpus-nofeature summary')).toContainText('No feature · 3')
-  await expect(window.locator(`${DRAWER} .fb-corpus-empty`)).toHaveCount(0)
+  const island = window.locator('.flow-board-root .fb-float-tl')
+  // THE POSITIVE FIRST: the feature's own top island IS drawn, with its
+  // other action — so the absence below is about the door, not a blank island.
+  await expect(island.getByRole('button', { name: 'Follow the code' })).toBeVisible({ timeout: 60_000 })
+  // Give the index read time to land and the board time to repaint.
+  await window.waitForTimeout(2500)
+  await expect(island.getByRole('button', { name: 'Changes & discoveries' })).toHaveCount(0)
 })
