@@ -76,19 +76,9 @@ export function initThreads(surfaces: ShellSurfaces): void {
     'margin:0 auto',
     'min-height:22px',
   ].join(';')
-  const conversationTitle = document.createElement('span')
-  conversationTitle.style.cssText = [
-    // The title yields first: a long branch name is identity the reader picked,
-    // while the conversation's name is already the row they clicked to get here.
-    'flex:0 1 auto',
-    'min-width:0',
-    'overflow:hidden',
-    'text-overflow:ellipsis',
-    'white-space:nowrap',
-    'font-size:var(--fl-text-ui-size)',
-    'font-weight:var(--fl-text-ui-weight-medium)',
-    'color:var(--fl-color-text)',
-  ].join(';')
+  // NO TITLE (user, 2026-11-17: "remove that header on the thread chat"):
+  // the sidebar row already names the open conversation. The strip is drawn
+  // only while the chain chip has an autopilot run to show.
   const paneContainer = document.createElement('div')
   paneContainer.style.cssText = 'flex:1;min-height:0;'
   const composerContainer = document.createElement('div')
@@ -355,7 +345,7 @@ export function initThreads(surfaces: ShellSurfaces): void {
    */
   let chainReadFor: string | null = null
 
-  conversationHeaderRow.append(conversationTitle, chainChip.element)
+  conversationHeaderRow.append(chainChip.element)
   conversationHeader.appendChild(conversationHeaderRow)
 
   /** Draw the header for whatever is open — or hide it when nothing is. */
@@ -366,18 +356,12 @@ export function initThreads(surfaces: ShellSurfaces): void {
       chainChip.update(null)
       return
     }
-    conversationHeader.style.display = ''
-    // The same stand-in the sidebar row uses, so a thread whose first turn has
-    // not titled it yet is called one thing in both places.
-    const name = thread.title ?? ''
-    const shown = name.trim() === '' ? 'Untitled thread' : name
-    conversationTitle.textContent = shown
-    // The whole name is always reachable, even when the strip shortens it.
-    conversationTitle.title = shown
     // A CHAIN BELONGS TO ONE CONVERSATION. Anything held for a different one is
     // not this header's news — drawing it would report another thread's run on
     // the thread in front of the reader.
     chainChip.update(headerChain?.threadId === thread.id ? headerChain : null)
+    // Only a running chain earns the strip; nothing else is drawn in it.
+    conversationHeader.style.display = chainChip.element.hidden ? 'none' : ''
   }
 
   /**
@@ -988,12 +972,10 @@ export function initThreads(surfaces: ShellSurfaces): void {
    * repository can have one, and whether there is uncommitted work worth
    * mentioning.
    *
-   * THE QUESTION OPENS ON THE CONVERSATION'S NAME. It used to open on the
-   * header's branch chip; that chip is gone, and the question is not. The title
-   * is the stable element left in that row — it is written into, never
-   * replaced, so a popover anchored to it survives every update — and it sits
-   * where the chip did, so the menu still appears at the top of the
-   * conversation it is asking about rather than as a modal over the transcript.
+   * THE QUESTION OPENS ON THE MESSAGE BOX. It opened on the conversation's
+   * name until that header left (2026-11-17); the question is asked because a
+   * message is being sent, so it sits beside the box that sends it — a stable
+   * element, never replaced, so the popover survives every update.
    *
    * A clean tree, a thread that already has its own branch, a project that
    * turned this off and a repository that cannot have one all return on the
@@ -1006,7 +988,7 @@ export function initThreads(surfaces: ShellSurfaces): void {
       {
         prepare: (request) => api.threads.prepareWorktree(request),
         askCarry: (question) =>
-          askCarryInline({ anchor: conversationTitle, watch: conversationTitle }, question),
+          askCarryInline({ anchor: composerContainer, watch: composerContainer }, question),
       },
       { threadId: thread.id },
     )
