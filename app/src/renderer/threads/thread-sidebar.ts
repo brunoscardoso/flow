@@ -450,23 +450,13 @@ export class ThreadSidebar {
     // into nothing from a chevron INSIDE that list left a state whose only
     // exit was the control the user had just made disappear. ⌘B still puts the
     // whole sidebar away.
-    // HOW THE LIST IS SHOWN — its order, and whether it shows the archive —
-    // for the open Workspace as a whole. It used to sit on each project's
-    // header; the one list has no headers, so it sits beside the search.
-    const viewButton = document.createElement('fl-button')
-    viewButton.setAttribute('variant', 'ghost')
-    viewButton.setAttribute('icon', '')
-    viewButton.setAttribute('aria-label', 'Sort and filter threads')
-    viewButton.setAttribute('title', 'How the list is sorted, and whether it shows the archive')
-    viewButton.dataset['part'] = 'list-view'
-    const viewGlyph = document.createElement('fl-icon')
-    viewGlyph.setAttribute('name', 'filter')
-    viewGlyph.setAttribute('size', '14')
-    viewButton.appendChild(viewGlyph)
-    viewButton.addEventListener('click', () => this.#openProjectViewMenu(this.#listKey(), viewButton))
+    // HOW THE LIST IS SHOWN — its order, and whether it shows the archive.
+    // It was a funnel icon alone on a row over the list (user, 2026-11-17:
+    // "this icon to sort the threads doesn't make any sense"); the menu now
+    // opens from the Threads tab itself — its ▾, or a right-click on it —
+    // which asks through THREAD_VIEW_MENU_EVENT below.
 
     toolbar.appendChild(searchWrap)
-    toolbar.appendChild(viewButton)
     toolbar.appendChild(newButton)
     container.appendChild(toolbar)
 
@@ -594,6 +584,12 @@ export class ThreadSidebar {
       })(),
       // The Kanban board's "+ New task" opens the task form. The toolbar no
       // longer has a button for it; the form anchors on `+` instead.
+      // The Threads tab's ▾ (or a right-click on it) asks for the list's view
+      // menu, anchored on the tab.
+      onDocEvent('flow:thread-view-menu', (event) => {
+        const anchor = (event as CustomEvent<{ anchor?: unknown }>).detail?.anchor
+        if (anchor instanceof HTMLElement && anchor.isConnected) this.#openProjectViewMenu(this.#listKey(), anchor)
+      }),
       onDocEvent('flow:new-task', () => {
         // #1314: the form is an ANCHORED popup, positioned from a button in
         // the Threads pane's toolbar. The ⌘P palette is global; that anchor is
@@ -4956,7 +4952,7 @@ function baseName(path: string): string {
 }
 
 /** Subscribe to a document event, returning an unsubscribe (for #unsubscribes). */
-function onDocEvent(name: string, handler: () => void): () => void {
+function onDocEvent(name: string, handler: (event: Event) => void): () => void {
   document.addEventListener(name, handler)
   return () => document.removeEventListener(name, handler)
 }
@@ -5056,9 +5052,9 @@ function injectSidebarStyles(): void {
     .fl-activity-sidebar .fl-thread-toolbar > fl-button[aria-label="New thread"] {
       display: none;
     }
+    /* Its view menu moved to the Threads tab, so nothing on this row shows. */
     .fl-activity-sidebar .fl-thread-toolbar {
-      justify-content: flex-end;
-      padding-top: 0;
+      display: none;
     }
     .fl-thread-search {
       display: flex;

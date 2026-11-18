@@ -57,7 +57,12 @@ test('the chat can no longer be put away, and a window already put away comes ba
   // simply wrong, and this repo has been burned by exactly that. The list's
   // view menu (order + archive) joined the `+` when the Workspace list lost its
   // project headers; it changes what the list shows, never whether it is shown.
-  expect(await toolbarLabels(window)).toEqual(['Sort and filter threads', 'New thread'])
+  // Since the polish (2026-11-17) the shell's sidebar head holds the search
+  // and New, and the view menu opens from the Threads tab; the list's own row
+  // is hidden, its New kept only as a fallback popup anchor.
+  expect(await toolbarLabels(window)).toEqual(['New thread'])
+  await expect(window.locator('.fl-thread-toolbar')).toBeHidden()
+  await expect(window.locator('[data-rail-item="threads"] [aria-label="Sort and filter threads"]')).toBeVisible()
 
   // ── The `—` is gone from the whole document, not just from the chat ─────
   await expect(hideBtn(window)).toHaveCount(0)

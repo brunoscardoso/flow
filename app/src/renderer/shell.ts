@@ -1874,6 +1874,30 @@ function buildActivityBar(
     text.className = 'fl-side-tab-label'
     text.textContent = label
     btn.append(iconEl, text)
+    if (item === 'threads') {
+      // The list's order and archive (user, 2026-11-17): a ▾ on the open
+      // Threads tab, or a right-click on the tab, instead of a funnel icon
+      // alone on a row over the list.
+      const menu = document.createElement('span')
+      menu.className = 'fl-side-tab-menu'
+      menu.setAttribute('role', 'button')
+      menu.tabIndex = -1
+      menu.setAttribute('aria-label', 'Sort and filter threads')
+      menu.title = 'How the list is sorted, and whether it shows the archive'
+      const caret = document.createElement('fl-icon')
+      caret.setAttribute('name', 'chevron-down')
+      caret.setAttribute('size', '10')
+      menu.appendChild(caret)
+      const openViewMenu = (event: Event): void => {
+        event.preventDefault()
+        event.stopPropagation()
+        if (!btn.classList.contains('active')) onSelect('threads')
+        document.dispatchEvent(new CustomEvent('flow:thread-view-menu', { detail: { anchor: btn } }))
+      }
+      menu.addEventListener('click', openViewMenu)
+      btn.addEventListener('contextmenu', openViewMenu)
+      btn.appendChild(menu)
+    }
     if (item === 'source-control') {
       changesBadge = document.createElement('span')
       changesBadge.className = 'fl-side-tab-count'
@@ -2361,6 +2385,19 @@ function injectShellStyles(): void {
       overflow: hidden;
     }
     .fl-side-tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .fl-side-tab-menu {
+      display: none;
+      flex: none;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      margin-right: -2px;
+      border-radius: 4px;
+      color: var(--fl-color-text-secondary);
+    }
+    .fl-side-tab.active .fl-side-tab-menu { display: inline-flex; }
+    .fl-side-tab-menu:hover { background: var(--fl-color-surface-raised); color: var(--fl-color-text); }
     .fl-rail-item.fl-side-tab:hover { background: transparent; color: var(--fl-color-text); }
     .fl-rail-item.fl-side-tab.active,
     .fl-rail-item.fl-side-tab.active:hover {
@@ -2377,8 +2414,13 @@ function injectShellStyles(): void {
       font-weight: 600;
       line-height: 16px;
     }
-    /* Narrow sidebar: the names go before the icons do. */
+    /* Narrow sidebar: the icons go first, so the names stay whole; only a
+       very narrow one keeps icons alone. */
+    @container (max-width: 360px) {
+      .fl-side-tab > fl-icon { display: none; }
+    }
     @container (max-width: 250px) {
+      .fl-side-tab > fl-icon { display: inline-flex; }
       .fl-side-tab-label { display: none; }
     }
     .fl-status-bar {

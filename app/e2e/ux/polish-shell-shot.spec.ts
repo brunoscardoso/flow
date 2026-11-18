@@ -62,6 +62,12 @@ test('the shell draws its regions as rounded islands with a named sidebar', asyn
   mkdirSync(SHOTS, { recursive: true })
   await window.screenshot({ path: join(SHOTS, 'polish-shell.png') })
 
+  // The list's order and archive open from the Threads tab's ▾.
+  await window.locator('[data-rail-item="threads"] [aria-label="Sort and filter threads"]').click()
+  await expect(window.locator('.fl-thread-menu-heading', { hasText: 'Order' })).toBeVisible()
+  await window.screenshot({ path: join(SHOTS, 'polish-shell-sort.png') })
+  await window.keyboard.press('Escape')
+
   // One search finds threads and files, grouped; Enter opens the first.
   await window.keyboard.press('Meta+k')
   await expect(window.locator('.fl-sidebar-search input')).toBeFocused()
