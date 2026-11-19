@@ -13,6 +13,7 @@ export {
   type TabCloseDetail,
   type TabRevealDetail,
   type TabRenameDetail,
+  type TabCaretDetail,
 } from './fl-tabs'
 export { FlList, type ListItemDetail } from './fl-list'
 export { FlSplit, type SplitResizeDetail } from './fl-split'

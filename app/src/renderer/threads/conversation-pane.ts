@@ -35,6 +35,11 @@ import { showRevealMenu } from '../reveal-menu'
 import { openImageViewer, closeImageViewer } from './image-viewer'
 import { renderMarkdown, StreamingMarkdown } from './markdown-renderer'
 import { PermissionCard } from './permission-card'
+import { ConnectorSignInCard, type ConnectorSignInResult } from './connector-sign-in-card'
+import { connectorIconLoader, createConnectorIcon } from './connector-icon'
+import { connectorStore } from './connector-store'
+import { signInOutcomeSentence } from './connector-chip-model'
+import type { ConnectorChangeEvent, ConnectorEntry } from '../../shared/connectors'
 import { QuestionCard } from './question-card'
 import { SessionGoneError, isSessionGone } from './question-submit'
 import { PendingCardQueue, QuestionQueue } from './question-queue'
@@ -52,6 +57,7 @@ import { ArtifactCard, type ArtifactCardCallbacks } from './artifact-card'
 import {
   artifactCardHosts,
   artifactCommandFor,
+  uiDraftsCommandFor,
   artifactRenderDecision,
   buildArtifactModel,
   planWrittenFromDocument,
@@ -79,6 +85,12 @@ import {
   type PlanRunState,
   storyHostIndex,
 } from './artifact-card-model'
+import {
+  deriveUiDraftsState,
+  UiDraftsAsks,
+  type UiDraftsState,
+} from './ui-drafts-card-model'
+import { draftPageUrl, type DraftCanvasSummary, type DraftsChangedEvent } from '../../shared/ui-drafts'
 import { ConflictReviewCard } from './conflict-review-card'
 import {
   CONFLICT_REVIEW_EVENT,
@@ -796,6 +808,19 @@ export class ConversationPane {
   #executingThread = new Map<string, string | null>()
   /** Discoveries this pane's threads asked to plan from (`PlanRequests`). */
   #planRequests = new PlanRequests()
+
+  /** Which canvases a thread asked for with Generate UI drafts, and which have
+   *  opened by themselves. Kept here because a card is rebuilt and a flag on
+   *  the card is lost with it. */
+  #uiDraftsAsks = new UiDraftsAsks()
+
+  /** The canvases of each project root, as `drafts:list` last answered. A root
+   *  is dropped (not refreshed) when a change arrives that nothing on screen
+   *  draws, so the next card re-reads it. */
+  #draftCanvases = new Map<string, Map<string, DraftCanvasSummary>>()
+
+  /** Roots whose canvases are being read right now. */
+  #draftLoads = new Set<string>()
   /** Each project's run state, as last broadcast — read only while something
    *  executes. Keyed by root: a plan in a project attached to the thread is
    *  run from the thread's project, so both may be asked (`planRunStateFor`). */
@@ -831,6 +856,16 @@ export class ConversationPane {
   #conflictReviewCards: ConflictReviewCard[] = []
   #conflictReviewHandler?: (event: Event) => void
   #unsubscribes: Array<() => void> = []
+  /**
+   * Connector sign-in cards, per chat then connector (plan_connectors, Phase
+   * 5). Kept so a feed rebuild can put a live one back, and so one connector
+   * never gets a second card in the same chat.
+   */
+  #connectorCards = new Map<string, Map<string, { card: ConnectorSignInCard; wrapper: HTMLElement; projectRoot: string; displayName: string }>>()
+  /** `<chat>\u0000<connector>` answered this app run (signed in or skipped). */
+  #connectorAnswered = new Set<string>()
+  /** The runtime each project resolves to, asked once per project per run. */
+  #projectProviders = new Map<string, Promise<string | null>>()
   /** Pending requestAnimationFrame id for the coalesced scroll-follow. */
   #scrollFrame: number | null = null
 
@@ -841,6 +876,7 @@ export class ConversationPane {
     // setting must repaint the conversation they are looking at, not the next
     // one they open (Phase 5.4).
     this.#density = getFeedDensity()
+    this.#unsubscribes.push(connectorStore.subscribe((event) => this.#onConnectorsChanged(event)))
     this.#unsubscribes.push(
       onFeedDensityChanged((density) => {
         this.#density = density
@@ -1134,10 +1170,16 @@ export class ConversationPane {
         this.#unsubscribes.push(api.flow.onStateChanged((state) => this.#onFlowState(state)))
       }
     }
+    // A canvas changed on disk (UI drafts). Answered only for a canvas a card
+    // on screen shows or this thread is waiting on (allowed-pattern #17).
+    if (api.drafts?.onChanged) {
+      this.#unsubscribes.push(api.drafts.onChanged((event) => void this.#onDraftsChanged(event)))
+    }
     if (api.project) {
       this.#unsubscribes.push(
         api.project.onActiveChanged((context) => {
           this.#activeRoot = context?.rootPath ?? null
+          this.#draftCanvases.clear()
           // Artifacts belong to a project — the previous project's cards must not
           // leak onto the new one.
           this.#clearArtifacts()
@@ -1438,6 +1480,8 @@ export class ConversationPane {
       // loader rather than stacking one on top of its own spinner.
       if (status === 'working') this.#busy = true
       await this.#loadHistory(threadId)
+      // A connector of this chat may be waiting for a sign-in.
+      void this.#checkConnectorSignIn(threadId, false)
       // A later stream event reconciles cleanly — 'status working' re-asserts
       // #busy, 'done'/'error' reset it — the loader is a single toggled node,
       // so no duplicate indicator is possible.
@@ -1772,6 +1816,128 @@ export class ConversationPane {
   #remountLiveCards(): void {
     this.#renderStoryCard()
     this.#renderKnownArtifacts()
+    this.#remountConnectorCards()
+  }
+
+  // ── Connector sign-in (plan_connectors, Phase 5) ──────────────────────────
+
+  /** The runtime a project resolves to, or null when it cannot be read. */
+  #providerOf(projectRoot: string): Promise<string | null> {
+    let known = this.#projectProviders.get(projectRoot)
+    if (known === undefined) {
+      const ask = window.flow.settings.getProjectProvider
+      known =
+        ask === undefined
+          ? Promise.resolve(null)
+          : ask({ rootPath: projectRoot })
+              .then(({ provider }) => provider)
+              .catch(() => null)
+      this.#projectProviders.set(projectRoot, known)
+    }
+    return known
+  }
+
+  /**
+   * Show one sign-in card when a connector the person added, and that is on
+   * in this chat, needs sign-in — after a turn (`fresh`: the session may have just reported it)
+   * and when the chat opens. Claude chats only: Codex and Copilot have no
+   * per-chat list or sign-in. Never a second card for one connector in one
+   * chat, and never again once answered in this app run.
+   */
+  async #checkConnectorSignIn(threadId: string, fresh: boolean): Promise<void> {
+    const thread = this.#bannerThread
+    if (thread === null || thread.id !== threadId || window.flow.connectors === undefined) return
+    const projectRoot = thread.projectRoot
+    if ((await this.#providerOf(projectRoot)) !== 'claude' || this.#threadId !== threadId) return
+    const scope = { projectRoot, threadId }
+    connectorStore.setActive(scope)
+    const answer = await (fresh ? connectorStore.refresh(scope) : connectorStore.ensure(scope))
+    if (this.#threadId !== threadId) return
+    const shown = this.#connectorCards.get(threadId)
+    const entry = answer.entries.find(
+      (candidate) =>
+        candidate.status === 'needs-auth' &&
+        // Only a connector the person added (account or project). A Claude.ai
+        // account can carry dozens nobody signed in to; asking about each in
+        // the chat was noise (user report, 2026-11-18). Those are signed in
+        // to from Settings.
+        (candidate.source === 'account' || candidate.source === 'project') &&
+        candidate.offInThread !== true &&
+        shown?.has(candidate.name) !== true &&
+        !this.#connectorAnswered.has(`${threadId}\u0000${candidate.name}`),
+    )
+    if (entry === undefined) return
+    this.#showConnectorSignIn(threadId, projectRoot, entry)
+  }
+
+  #showConnectorSignIn(threadId: string, projectRoot: string, entry: ConnectorEntry): void {
+    const api = window.flow.connectors
+    if (api === undefined) return
+    const name = entry.name
+    const answered = (): void => {
+      this.#connectorAnswered.add(`${threadId}\u0000${name}`)
+    }
+    const load = connectorIconLoader()
+    const card = new ConnectorSignInCard({
+      connectorName: entry.displayName,
+      icon: createConnectorIcon({ name, displayName: entry.displayName, size: 22, ...(load !== undefined ? { load } : {}) }),
+      onSignIn: () => api.signIn({ projectRoot, name, threadId }),
+      onSkip: async () => {
+        await api.cancelSignIn({ projectRoot, name }).catch(() => undefined)
+        const result = await api.setForThread({ threadId, name, on: false })
+        if (!result.ok) throw new Error(result.reason)
+        answered()
+      },
+      // Claude.ai connectors finish on Claude.ai; the person says they are back.
+      onFinished: async (): Promise<ConnectorSignInResult> => {
+        await api.reconnect({ projectRoot, name, threadId }).catch(() => undefined)
+        const next = await connectorStore.refresh({ projectRoot, threadId })
+        const now = next.entries.find((candidate) => candidate.name === name)
+        if (now !== undefined && now.status === 'connected') {
+          answered()
+          return { ok: true, state: 'connected' }
+        }
+        return { ok: false, reason: `${entry.displayName} still needs you to sign in on Claude.ai.` }
+      },
+    })
+    const wrapper = entryWrapper('permission', card.element)
+    let cards = this.#connectorCards.get(threadId)
+    if (cards === undefined) {
+      cards = new Map()
+      this.#connectorCards.set(threadId, cards)
+    }
+    cards.set(name, { card, wrapper, projectRoot, displayName: entry.displayName })
+    this.#feed.appendChild(wrapper)
+    // Actionable, like a permission ask: never left below the fold.
+    this.#scrollToBottom(true)
+  }
+
+  /** A feed rebuild wipes the live cards; an unanswered one comes back. */
+  #remountConnectorCards(): void {
+    const threadId = this.#threadId
+    if (threadId === null) return
+    for (const shown of this.#connectorCards.get(threadId)?.values() ?? []) {
+      if (shown.card.state !== 'done') this.#feed.appendChild(shown.wrapper)
+    }
+  }
+
+  /** A watched sign-in ended: the card that is waiting on it says how. */
+  #onConnectorsChanged(event: ConnectorChangeEvent): void {
+    const signIn = event.signIn
+    if (signIn === undefined) return
+    for (const [threadId, cards] of this.#connectorCards) {
+      if (event.threadId !== undefined && event.threadId !== threadId) continue
+      const shown = cards.get(signIn.name)
+      if (shown === undefined || shown.card.state === 'done') continue
+      if (event.projectRoot !== undefined && event.projectRoot !== shown.projectRoot) continue
+      const sentence = signInOutcomeSentence(shown.displayName, signIn.outcome)
+      if (sentence === null) {
+        shown.card.markConnected()
+        this.#connectorAnswered.add(`${threadId}\u0000${signIn.name}`)
+      } else if (shown.card.state === 'waiting') {
+        shown.card.markFailed(sentence)
+      }
+    }
   }
 
   /**
@@ -3161,7 +3327,7 @@ export class ConversationPane {
         stream?.finalize()
         // Correlation ids are bridge-generated; reconcile the transcript
         // against the persisted rows now that the turn is stored.
-        void this.#reconcile(event.threadId)
+        void this.#reconcile(event.threadId).then(() => this.#checkConnectorSignIn(event.threadId, true))
         break
       }
     }
@@ -4052,6 +4218,9 @@ export class ConversationPane {
       onNarrate: (m) => void this.#onArtifactNarrate(kind, m, foreign),
       onAskAgent: (m) => this.#onArtifactAskAgent(m, mention),
       onGenerateArtifact: (m) => this.#onArtifactGenerate(m, mention),
+      uiDraftsState: (m) => this.#uiDraftsStateFor(m, foreign ?? this.#activeRoot),
+      onGenerateUiDrafts: (m) => this.#onUiDraftsGenerate(m, mention, foreign ?? this.#activeRoot),
+      onOpenUiDrafts: (m) => this.#openUiDrafts(foreign ?? this.#activeRoot, m.uiDraftsCanvas),
       ...this.#nextStepCallbacks(mention),
     }
   }
@@ -4234,6 +4403,113 @@ export class ConversationPane {
         detail: { threadId, text: artifactCommandFor(mention(action.docPath)) },
       }),
     )
+  }
+
+  // ── UI drafts on the discovery card (plan `ui_drafts`, Phase 3) ──────────
+
+  /** The key an ask is filed under: the project and the canvas in it. */
+  #draftKey(root: string, canvas: string): string {
+    return `${root}\u0000${canvas}`
+  }
+
+  /**
+   * Where a discovery's UI drafts stand, from the cached canvases and this
+   * thread's ask. Null until the project's canvases have been read once (the
+   * button appears then, rather than flashing a wrong answer).
+   */
+  #uiDraftsStateFor(model: ArtifactCardModel, root: string | null): UiDraftsState | null {
+    const canvas = model.uiDraftsCanvas
+    if (canvas === null || root === null) return null
+    const known = this.#draftCanvases.get(root)
+    if (known === undefined) {
+      void this.#loadDrafts(root)
+      return null
+    }
+    return deriveUiDraftsState(
+      known.get(canvas),
+      this.#uiDraftsAsks.askedAt(this.#threadId, this.#draftKey(root, canvas)),
+      Date.now(),
+    )
+  }
+
+  /** Read a project's canvases once, then redraw the cards that show them. */
+  async #loadDrafts(root: string): Promise<void> {
+    const api = window.flow
+    if (api?.drafts === undefined || this.#draftLoads.has(root)) return
+    this.#draftLoads.add(root)
+    try {
+      const { canvases } = await api.drafts.list({ rootPath: root })
+      this.#draftCanvases.set(root, new Map(canvases.map((canvas) => [canvas.canvas, canvas])))
+    } catch {
+      // A read that fails leaves the button off; the next change reads again.
+      return
+    } finally {
+      this.#draftLoads.delete(root)
+    }
+    this.#refreshUiDraftCards(null)
+    for (const canvas of this.#draftCanvases.get(root)?.keys() ?? []) this.#openUiDraftsWhenComplete(root, canvas)
+  }
+
+  /** The cards on screen that carry a UI drafts button. */
+  #mountedDiscoveryCards(): ArtifactCard[] {
+    if (document.visibilityState === 'hidden') return []
+    return [...this.#markerCards.values(), ...this.#artifactCards.values()].filter(
+      (card) => card.element.isConnected && card.model.kind === 'discovery',
+    )
+  }
+
+  /** Redraw the UI drafts button of the cards that show `canvas` (every one when null). */
+  #refreshUiDraftCards(canvas: string | null): void {
+    for (const card of this.#mountedDiscoveryCards()) {
+      if (canvas === null ? card.model.uiDraftsCanvas !== null : card.offersUiDrafts(canvas)) card.refreshUiDrafts()
+    }
+  }
+
+  /**
+   * A canvas changed. Nothing is read unless something would draw the answer:
+   * a discovery card on screen for that canvas, or this thread waiting for it
+   * to finish. Otherwise the root's cache is dropped, so the next card to
+   * mount reads it fresh.
+   */
+  async #onDraftsChanged(event: DraftsChangedEvent): Promise<void> {
+    const showing = this.#mountedDiscoveryCards().some((card) => card.offersUiDrafts(event.canvas))
+    const waiting = this.#uiDraftsAsks.pending(this.#threadId, this.#draftKey(event.rootPath, event.canvas))
+    if (!showing && !waiting) {
+      this.#draftCanvases.delete(event.rootPath)
+      return
+    }
+    await this.#loadDrafts(event.rootPath)
+  }
+
+  /** Generate UI drafts: send the command through the composer and remember the ask. */
+  #onUiDraftsGenerate(model: ArtifactCardModel, mention: (path: string) => string, root: string | null): void {
+    const canvas = model.uiDraftsCanvas
+    const threadId = this.#threadId
+    if (canvas === null || root === null || threadId === null) return
+    if (!this.#sendFromCard(uiDraftsCommandFor(mention(model.path)))) return
+    this.#uiDraftsAsks.record(threadId, this.#draftKey(root, canvas), Date.now())
+    this.#refreshUiDraftCards(canvas)
+  }
+
+  /** Open a canvas in the built-in browser. */
+  #openUiDrafts(root: string | null, canvas: string | null): void {
+    if (root === null || canvas === null) return
+    document.dispatchEvent(
+      new CustomEvent('flow:open-browser', { detail: { url: draftPageUrl({ kind: 'canvas', root, canvas }) } }),
+    )
+  }
+
+  /**
+   * Open a canvas by itself — once, for the thread that asked, when it is
+   * complete. Only the Generate button records an ask: a canvas an agent writes
+   * on a typed request cannot be tied to one thread (two threads of a project
+   * may write at the same time), so it waits for the person's press.
+   */
+  #openUiDraftsWhenComplete(root: string, canvas: string): void {
+    const info = this.#draftCanvases.get(root)?.get(canvas)
+    if (this.#uiDraftsAsks.takeOpen(this.#threadId, this.#draftKey(root, canvas), info)) {
+      this.#openUiDrafts(root, canvas)
+    }
   }
 
   // ── The next step from the card (plan `plan_change_review`, Phase 7) ──────

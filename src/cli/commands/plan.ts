@@ -48,6 +48,12 @@ import { readRoundsEntries } from '../state/rounds-reader.js';
 import { evaluateResume, type ResumeStatus } from '../state/resume-evaluator.js';
 import type { RunScript } from '../state/types.js';
 import { parsePlanContent, whyNoPhases } from '../state/plan-parser.js';
+import {
+  draftScreensOf,
+  hashDraftScreen,
+  upsertDraftScreensBlock,
+  type DraftScreenRecord,
+} from '../state/draft-screens.js';
 import { archiveRounds, summarizeArchivedRounds } from '../state/rounds-summary.js';
 import { locateWorkspaceProject } from '../handlers/workspace-locate.js';
 import {
@@ -502,7 +508,8 @@ export type PlanNotesRefusalReason =
   | 'status-and-verdict'
   | 'nothing-to-set'
   | 'plan-changed'
-  | 'write-failed';
+  | 'write-failed'
+  | 'unknown-discovery';
 
 /**
  * A refusal that carries its answer: the payload goes to stdout as one JSON
@@ -893,4 +900,119 @@ export function applyPlanNote(planArg: string, request: PlanNoteRequest, deps: P
     `the plan kept changing while this note was written (${String(MAX_PLAN_NOTE_ATTEMPTS)} tries) — nothing was written`,
     { plan: found.name, path: displayPathOf(found), note: request.note, attempts: MAX_PLAN_NOTE_ATTEMPTS },
   );
+}
+
+// ── Draft screens: what the plan read ───────────────────
+
+export interface PlanScreensResult {
+  action: 'screens';
+  plan: string;
+  path: string;
+  /** The discovery whose artifact was read, relative to the target; null when it has none. */
+  discovery: string | null;
+  screens: DraftScreenRecord[];
+  /** False when the plan already held exactly these records (or there was nothing to record). */
+  changed: boolean;
+}
+
+/** `discovery_<feature>_v<N>.md` names, newest first, in the discovery and archive folders. */
+function discoveryFilesFor(flowDir: string, feature: string): Array<{ rel: string; version: number }> {
+  const found: Array<{ rel: string; version: number }> = [];
+  for (const dir of ['discovery', 'archive']) {
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(join(flowDir, dir));
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const match = /^discovery_(.+?)(?:_v(\d+))?\.md$/.exec(entry);
+      if (match === null || match[1] !== feature) continue;
+      found.push({ rel: join(dir, entry), version: match[2] === undefined ? 1 : Number(match[2]) });
+    }
+  }
+  return found.sort((a, b) => b.version - a.version);
+}
+
+/**
+ * Record, in the plan, the content hash of every draft screen the discovery's
+ * artifact shows — the ONE writer of the plan's `## Draft screens` block
+ * (forbidden-pattern #18: the app's "Changed since the plan" badge reads it).
+ * The discovery is the one the plan was written from unless `discovery` names
+ * another. A discovery with no artifact, an artifact with no draft slots, or no
+ * readable screen records nothing and writes nothing — and says nothing.
+ */
+export function recordDraftScreens(
+  planArg: string,
+  options: { target: string; discovery?: string },
+): PlanScreensResult {
+  const found = findPlanOrRefuse(options.target, planArg);
+  const flowDir = join(options.target, 'flow');
+  let discoveryRel: string | null = null;
+  if (options.discovery !== undefined) {
+    const full = isAbsolute(options.discovery) ? options.discovery : resolvePath(options.target, options.discovery);
+    const rel = relative(flowDir, full).replace(/\\/g, '/');
+    if (!/^(discovery|archive)\/discovery_[^/]+\.md$/.test(rel) || !existsSync(full)) {
+      throw new PlanNotesRefusal('unknown-discovery', `there is no discovery document at '${options.discovery}'`, {
+        discovery: options.discovery,
+      });
+    }
+    discoveryRel = rel;
+  } else {
+    const planVersion = /_v(\d+)\.md$/.exec(basename(found.path));
+    const version = planVersion === null ? Number.POSITIVE_INFINITY : Number(planVersion[1]);
+    const candidates = discoveryFilesFor(flowDir, found.name);
+    discoveryRel = (candidates.find((entry) => entry.version <= version) ?? candidates[0])?.rel.replace(/\\/g, '/') ?? null;
+  }
+  const nothing: PlanScreensResult = {
+    action: 'screens',
+    plan: found.name,
+    path: displayPathOf(found),
+    discovery: discoveryRel === null ? null : join('flow', discoveryRel),
+    screens: [],
+    changed: false,
+  };
+  if (discoveryRel === null) return nothing;
+  let page: string;
+  try {
+    page = readFileSync(join(flowDir, discoveryRel.replace(/\.md$/, '.walkthrough.html')), 'utf-8');
+  } catch {
+    return nothing;
+  }
+  const records: DraftScreenRecord[] = [];
+  for (const { canvas, screen } of draftScreensOf(page)) {
+    try {
+      const html = readFileSync(join(flowDir, 'drafts', canvas, `${screen}.html`), 'utf-8');
+      records.push({ canvas, screen, hash: hashDraftScreen(html) });
+    } catch {
+      // A screen that is not drawn yet has no version to record.
+    }
+  }
+  if (records.length === 0) return nothing;
+  const next = upsertDraftScreensBlock(found.content, records);
+  const changed = next !== found.content;
+  if (changed) atomicWriteFile(found.path, next);
+  return { ...nothing, screens: records, changed };
+}
+
+/**
+ * `plan screens <plan> [--discovery <doc>] [--json]` — silent when there is
+ * nothing to record; otherwise one line (or JSON). Refusals follow the family
+ * contract: `plan refused: <reason>`, exit 1.
+ */
+export async function runPlanScreens(
+  planArg: string,
+  options: { target: string; discovery?: string; json?: boolean },
+): Promise<void> {
+  try {
+    const result = recordDraftScreens(planArg, options);
+    if (options.json === true) {
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    } else if (result.screens.length > 0) {
+      const count = result.screens.length;
+      process.stdout.write(`screens: ${String(count)} draft screen${count === 1 ? '' : 's'} recorded in ${result.path}\n`);
+    }
+  } catch (error) {
+    reportPlanRefusal(error);
+  }
 }

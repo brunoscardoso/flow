@@ -20,6 +20,7 @@
  * itself stale and re-reads on the way back in.
  */
 import type { FlowApi } from '../../shared/ipc-contract'
+import { createScriptView } from './script-editor'
 import {
   runScopeKey,
   type RunGroupState,
@@ -41,6 +42,7 @@ import {
   type LaunchpadMenuEntry,
   type RunDotTone,
 } from './run-group-model'
+import { scriptProposals } from './script-proposals'
 import { RunSetupPanel } from './run-setup-panel'
 
 export interface RunGroupDeps {
@@ -104,10 +106,16 @@ export class RunGroupView {
       state: () => this.#view?.state ?? null,
       startRun: () => this.#act((run, scope) => run.start({ scope })),
       askAgent: () => this.#askAgent(),
+      agentThread: () => this.#scope?.threadId ?? null,
       onSaved: (view) => this.#setView(view),
       onClosed: () => this.#renderPill(),
     })
     deps.api.run?.onUpdated((state) => this.#onUpdated(state))
+    // The agent's script for a one-time action: shown now when the page is open
+    // for that conversation, else kept for the next time it opens.
+    deps.api.run?.onScriptProposal?.((proposal) => {
+      if (!this.#panel.receiveProposal(proposal)) scriptProposals.keep(proposal)
+    })
   }
 
   /** The group's state, for the tab strip; null when there is no Run here. */
@@ -152,6 +160,36 @@ export class RunGroupView {
   /** Reload one step (its tab's Reload). A blocked step starts anyway. */
   reloadStep(stepKey: string): void {
     this.#act((run, scope) => run.reload({ scope, stepKey }))
+  }
+
+  /** Start one step that is not running: the whole Run when nothing has run yet, else only it. */
+  startStep(stepKey: string): void {
+    this.activatePending(stepKey)
+  }
+
+  /** Stop one step; the others keep running. */
+  stopStep(stepKey: string): void {
+    this.#act((run, scope) => run.stop({ scope, stepKey }))
+  }
+
+  /** Restart every step, in order — the Launchpad menu's Reload all. */
+  reloadAll(): void {
+    this.#act((run, scope) => run.reload({ scope }))
+  }
+
+  /** End every step — the Launchpad menu's Stop all. */
+  stopAll(): void {
+    this.#act((run, scope) => run.stop({ scope }))
+  }
+
+  /** The name of the project a step runs in, as the setup names it. */
+  projectNameOf(projectRoot: string): string {
+    const resolution = this.#view?.resolution
+    const named = resolution?.steps.find((step) => step.projectRoot === projectRoot)?.projectName
+    if (named !== undefined && named.length > 0) return named
+    const place = resolution?.places.find((candidate) => candidate.root === projectRoot)
+    if (place !== undefined && place.name.length > 0) return place.name
+    return baseName(projectRoot) || projectRoot
   }
 
   // ─── reading ───────────────────────────────────────────────────────────────
@@ -295,9 +333,17 @@ export class RunGroupView {
     const where = document.createElement('p')
     where.className = 'fl-run-ask-where'
     where.textContent = copy.where
-    const command = document.createElement('pre')
-    command.className = 'fl-run-ask-command'
-    command.textContent = copy.command
+    // A script is shown whole, as the editor shows it (line numbers, colour),
+    // in a block that scrolls past a few lines.
+    let command: HTMLElement
+    if (copy.script) {
+      command = createScriptView(copy.command, copy.title)
+      command.classList.add('fl-run-ask-command', 'script')
+    } else {
+      command = document.createElement('pre')
+      command.className = 'fl-run-ask-command'
+      command.textContent = copy.command
+    }
     const actions = document.createElement('div')
     actions.className = 'fl-run-ask-actions'
     const cancel = document.createElement('button')
@@ -307,7 +353,7 @@ export class RunGroupView {
     const go = document.createElement('button')
     go.type = 'button'
     go.className = 'fl-run-btn primary'
-    go.textContent = RUN_STRINGS.confirmRun
+    go.textContent = copy.run
     actions.append(cancel, go)
     box.append(title, where, command, actions)
     overlay.appendChild(box)
@@ -421,9 +467,10 @@ export class RunGroupView {
           tag.textContent = RUN_STRINGS.asksFirst
           nameLine.appendChild(tag)
         }
+        // The small text under its name: "command", or "script · 12 lines".
         const command = document.createElement('span')
-        command.className = 'fl-run-menu-command'
-        command.textContent = item.command
+        command.className = 'fl-run-menu-detail'
+        command.textContent = item.detail
         text.append(nameLine, command)
         node.append(lead, text)
         element.appendChild(node)
@@ -713,6 +760,7 @@ function injectRunStyles(): void {
     .fl-run-menu-item.running > fl-icon { color: var(--fl-color-warning); }
     .fl-run-menu-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
     .fl-run-menu-name { display: inline-flex; align-items: center; gap: var(--fl-space-sm); font-weight: var(--fl-text-ui-weight-medium); }
+    .fl-run-menu-detail { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); }
     .fl-run-menu-command { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fl-color-text-secondary); font-family: var(--fl-font-mono); font-size: var(--fl-text-mono-size); }
     .fl-run-menu-tag {
       padding: 0 var(--fl-space-xs); border-radius: var(--fl-radius-pill);
@@ -739,6 +787,23 @@ function injectRunStyles(): void {
       background: var(--fl-color-bg); border: var(--fl-border-width) solid var(--fl-color-border);
       font-family: var(--fl-font-mono); font-size: var(--fl-text-mono-size);
     }
+    .fl-run-ask:has(.fl-run-ask-command.script) { width: min(620px, calc(100vw - 32px)); }
+    .fl-run-ask-command.script {
+      max-height: 180px; overflow: auto; white-space: pre; word-break: normal; line-height: 1.55;
+      background: var(--fl-color-surface);
+    }
+    .fl-run-ask-command.script.fl-run-script-view { display: flex; padding: 0; line-height: 20px; }
+    .fl-run-script-view-gutter {
+      position: sticky; left: 0; flex: none; padding: var(--fl-space-sm) 10px var(--fl-space-sm) var(--fl-space-sm);
+      min-width: 36px; text-align: right; white-space: pre; user-select: none;
+      color: var(--fl-color-text-secondary); background: var(--fl-color-surface);
+      font-family: var(--fl-font-mono); font-size: var(--fl-text-mono-size); line-height: 20px;
+    }
+    .fl-run-script-view-code {
+      flex: 1 0 auto; margin: 0; padding: var(--fl-space-sm) var(--fl-space-sm) var(--fl-space-sm) 4px; white-space: pre;
+      font-family: var(--fl-font-mono); font-size: var(--fl-text-mono-size); line-height: 20px; color: var(--fl-color-text);
+    }
+    .fl-run-ask-command.script:focus-visible { outline: 2px solid var(--fl-color-focus-ring); outline-offset: 1px; }
     .fl-run-ask-actions { display: flex; justify-content: flex-end; gap: var(--fl-space-sm); margin-top: var(--fl-space-xs); }
     .fl-run-ask .fl-run-btn:focus-visible { outline: 2px solid var(--fl-color-focus-ring); outline-offset: 2px; }
 
@@ -787,9 +852,9 @@ function injectRunStyles(): void {
     .fl-run-muted { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); margin: 0; }
     .fl-run-note { margin: 0; color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); line-height: 1.5; }
     .fl-run-label { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); white-space: nowrap; }
-    .fl-run-segment { display: inline-flex; border: var(--fl-border-width) solid var(--fl-color-border); border-radius: var(--fl-radius-sm); overflow: hidden; }
+    .fl-run-segment { display: inline-flex; flex: none; border: var(--fl-border-width) solid var(--fl-color-border); border-radius: var(--fl-radius-sm); overflow: hidden; }
     .fl-run-segment-btn {
-      height: 22px; padding: 0 var(--fl-space-sm); border: none; background: transparent;
+      flex: none; height: 22px; padding: 0 var(--fl-space-sm); border: none; background: transparent;
       color: var(--fl-color-text-secondary); font-family: var(--fl-font-ui);
       font-size: var(--fl-text-caption-size); cursor: pointer; white-space: nowrap;
     }
@@ -900,6 +965,68 @@ function injectRunStyles(): void {
     .fl-run-hint:hover, .fl-run-hint:focus-visible { background: var(--fl-color-surface-raised); outline: none; }
     .fl-run-hint-command { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--fl-font-mono); font-size: var(--fl-text-mono-size); }
     .fl-run-hint-source { flex: none; white-space: nowrap; }
+    .fl-run-script { display: flex; flex-direction: column; gap: var(--fl-space-xs); min-width: 0; }
+    .fl-run-editor {
+      display: grid; grid-template-columns: auto minmax(0, 1fr); min-width: 0; overflow: hidden;
+      background: var(--fl-color-bg); border: var(--fl-border-width) solid var(--fl-color-border); border-radius: var(--fl-radius-sm);
+    }
+    .fl-run-editor:focus-within { border-color: var(--fl-color-focus-ring); }
+    .fl-run-editor-gutter {
+      box-sizing: border-box; overflow: hidden; padding: 8px 8px 8px 12px; text-align: right; white-space: pre; user-select: none;
+      border-right: var(--fl-border-width) solid var(--fl-color-border);
+      color: var(--fl-color-text-secondary); opacity: 0.7;
+      font: var(--fl-text-mono-size)/20px var(--fl-font-mono);
+    }
+    .fl-run-editor-code { position: relative; min-width: 0; }
+    .fl-run-editor-colour, .fl-run-editor-input {
+      box-sizing: border-box; margin: 0; padding: 8px 12px; white-space: pre; tab-size: 2;
+      font: var(--fl-text-mono-size)/20px var(--fl-font-mono); letter-spacing: normal;
+    }
+    .fl-run-editor-colour { position: absolute; inset: 0; overflow: hidden; pointer-events: none; color: var(--fl-color-text); }
+    .fl-run-editor-input {
+      position: absolute; inset: 0; width: 100%; height: 100%; resize: none; overflow: auto;
+      border: 0; outline: none; background: transparent; color: transparent; caret-color: var(--fl-color-text);
+    }
+    .fl-run-editor-input::selection { background: var(--fl-color-accent-muted); color: transparent; }
+    .fl-run-sh-comment { color: var(--fl-color-text-secondary); font-style: italic; }
+    .fl-run-sh-string { color: var(--fl-color-warning); }
+    .fl-run-sh-keyword { color: var(--fl-color-accent); }
+    .fl-run-sh-program { color: var(--fl-color-success); }
+    .fl-run-sh-variable { color: var(--fl-color-accent); font-style: italic; }
+    .fl-run-script-hint {
+      display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--fl-space-sm);
+      color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size);
+    }
+    .fl-run-script-lines { white-space: nowrap; }
+    .fl-run-editor-marks { position: absolute; left: 0; right: 0; top: 0; height: 0; pointer-events: none; }
+    .fl-run-editor-mark {
+      position: absolute; left: 0; right: 0; height: 20px;
+      background: color-mix(in srgb, var(--fl-color-success) 16%, transparent);
+      box-shadow: inset 3px 0 var(--fl-color-success);
+    }
+    .fl-run-editor.read-only .fl-run-editor-code, .fl-run-editor.read-only .fl-run-editor-gutter { opacity: 0.55; }
+    .fl-run-command[readonly] { opacity: 0.55; }
+    .fl-run-script-tail { display: inline-flex; align-items: center; gap: var(--fl-space-sm); margin-left: auto; }
+    .fl-run-agent-btn {
+      display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 var(--fl-space-sm);
+      border: var(--fl-border-width) solid var(--fl-color-border); border-radius: var(--fl-radius-sm);
+      background: var(--fl-color-surface); color: var(--fl-color-accent); cursor: pointer;
+      font-family: var(--fl-font-ui); font-size: var(--fl-text-caption-size); white-space: nowrap;
+    }
+    .fl-run-agent-btn:hover { background: var(--fl-color-surface-raised); }
+    .fl-run-agent-btn:disabled { color: var(--fl-color-text-secondary); opacity: 0.6; cursor: default; background: transparent; }
+    .fl-run-card-line .fl-run-agent-btn { margin-left: auto; }
+    .fl-run-agent-note {
+      display: flex; flex-wrap: wrap; align-items: center; gap: var(--fl-space-sm);
+      padding: 4px var(--fl-space-sm); border-radius: var(--fl-radius-sm);
+      background: var(--fl-color-accent-muted); color: var(--fl-color-text); font-size: var(--fl-text-caption-size);
+    }
+    .fl-run-agent-note.written { background: color-mix(in srgb, var(--fl-color-success) 14%, transparent); }
+    .fl-run-agent-dot {
+      width: 7px; height: 7px; border-radius: 50%; background: var(--fl-color-accent); flex: none;
+      animation: fl-run-agent-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes fl-run-agent-pulse { 50% { opacity: 0.3; } }
     @container (max-width: 520px) {
       .fl-run-step-hints { margin-left: 0; }
       .fl-run-card-line:not(.small) { flex-wrap: wrap; }

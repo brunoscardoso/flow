@@ -1479,6 +1479,56 @@ export class ThreadStore extends EventEmitter {
   }
 
   /**
+   * The connectors this conversation turned off (migration v43). An unknown
+   * thread, an empty column and a row that does not parse all read as none —
+   * every connector on, which is what a new chat starts with.
+   */
+  getConnectorsOff(threadId: string): string[] {
+    const row = this.db.prepare('SELECT connectors_off FROM threads WHERE id = ?').get(threadId) as
+      | { connectors_off: string | null }
+      | undefined
+    if (row === undefined || row.connectors_off === null || row.connectors_off === '') return []
+    try {
+      return normaliseConnectorNames(JSON.parse(row.connectors_off))
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * THE ONLY WRITER of `threads.connectors_off`. Stores the de-duplicated,
+   * sorted names (or NULL when none remain). Bookkeeping, not activity:
+   * `updated_at` is left alone and nothing is broadcast — the connector
+   * service reports its own changes.
+   */
+  setConnectorsOff(threadId: string, names: readonly string[]): void {
+    const clean = normaliseConnectorNames(names)
+    const value = clean.length === 0 ? null : JSON.stringify(clean)
+    const result = this.db.prepare('UPDATE threads SET connectors_off = ? WHERE id = ?').run(value, threadId)
+    if (result.changes === 0) {
+      throw new Error(`[ThreadStore] Cannot set connectors for unknown thread: ${threadId}`)
+    }
+  }
+
+  /**
+   * The connector tools used in a project's chats: distinct (chat, tool name)
+   * pairs of tool calls named `mcp__…`, for threads of that project. A
+   * point-read for the Settings suggestions, bounded by `limit` (allowed-
+   * pattern #19): it never lists a thread's worth of rows.
+   */
+  listConnectorToolUse(projectRoot: string, limit = 500): Array<{ threadId: string; toolName: string }> {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT tc.thread_id AS threadId, tc.tool_name AS toolName
+           FROM tool_calls tc JOIN threads t ON t.id = tc.thread_id
+          WHERE t.${THREAD_PROJECT_ROOT_COLUMN} = ? AND tc.tool_name LIKE 'mcp\\_\\_%' ESCAPE '\\'
+          LIMIT ?`,
+      )
+      .all(projectRoot, Math.max(1, Math.floor(limit))) as Array<{ threadId: string; toolName: string }>
+    return rows
+  }
+
+  /**
    * Every thread that currently owns a checkout, paired with the project root
    * it was cut from. This is the address gate's widening source (see
    * project/addressable-roots.ts): a worktree is never a registered project
@@ -2494,4 +2544,14 @@ function buildFtsMatchExpression(query: string): string | null {
     return null
   }
   return tokens.map((token) => `"${token.replace(/"/g, '""')}"*`).join(' ')
+}
+
+/** Connector names as stored: strings only, non-empty, unique, sorted. */
+function normaliseConnectorNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const names = new Set<string>()
+  for (const item of value) {
+    if (typeof item === 'string' && item.trim() !== '') names.add(item)
+  }
+  return [...names].sort()
 }

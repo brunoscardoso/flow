@@ -45,6 +45,7 @@ import { addAttachmentWithOutcome, removeAttachment } from './attachment-chips'
 import { computeCommandInsertion } from './command-insertion'
 import { createModelEffortMenu } from './model-effort-menu'
 import { createNewThreadBranchChip } from './new-thread-branch-chip'
+import { createConnectorChip } from './connector-chip'
 import { branchSeed, prepareRequestFor } from './new-thread-branch'
 import { createHuntConfig, HUNT_CONFIG_STYLES } from '../loops/hunt-config-view'
 import { emptyHuntConfig } from '../loops/hunt-config'
@@ -454,6 +455,15 @@ export function createNewThreadPage(onClose: () => void): NewThreadPage {
   footer.appendChild(createModelEffortMenu({ modelSelect: modelPicker, effortSelect: effortPicker }).element)
   footer.appendChild(autopilotChip)
 
+  /**
+   * The chat's connectors, chosen before it exists (plan_connectors, note 9).
+   * A DRAFT: the names switched off here are written onto the chat once it is
+   * created (`withConnectors`), so a new chat still starts with every
+   * connector on unless somebody said otherwise on this page.
+   */
+  const connectorChip = createConnectorChip({ mode: 'draft', className: 'fl-newthread-chip' })
+  footer.appendChild(connectorChip.element)
+
   const commandMenu = document.createElement('div')
   commandMenu.className = 'fl-newthread-commands'
   commandMenu.hidden = true
@@ -481,7 +491,7 @@ export function createNewThreadPage(onClose: () => void): NewThreadPage {
   submit.textContent = 'Create thread'
   submit.addEventListener('click', () => {
     if (!currentSubmitState().ready) return
-    finish(withHunt(withBranch(draft)))
+    finish(withConnectors(withHunt(withBranch(draft))))
   })
   footer.appendChild(submit)
 
@@ -509,13 +519,13 @@ export function createNewThreadPage(onClose: () => void): NewThreadPage {
     // where a plain Enter has to stay a newline.
     if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
       event.preventDefault()
-      if (currentSubmitState().ready) finish(withHunt(withBranch(draft)))
+      if (currentSubmitState().ready) finish(withConnectors(withHunt(withBranch(draft))))
       return
     }
     // A plain Enter in a single-line field submits, the way it does in a dialog.
     if (event.key === 'Enter' && event.target !== description) {
       event.preventDefault()
-      if (currentSubmitState().ready) finish(withHunt(withBranch(draft)))
+      if (currentSubmitState().ready) finish(withConnectors(withHunt(withBranch(draft))))
     }
   })
 
@@ -526,6 +536,16 @@ export function createNewThreadPage(onClose: () => void): NewThreadPage {
    * mirroring it into `draft` on every keystroke would be a second copy that can
    * disagree with the one on screen.
    */
+  function withConnectors(current: ThreadDraft): ThreadDraft {
+    const off = connectorChip.draftOff()
+    if (off.length === 0) {
+      const next: ThreadDraft = { ...current }
+      delete next.connectorsOff
+      return next
+    }
+    return { ...current, connectorsOff: off }
+  }
+
   function withHunt(current: ThreadDraft): ThreadDraft {
     const config = hunt.read()
     if (!config.on) return { ...current }
@@ -876,6 +896,10 @@ export function createNewThreadPage(onClose: () => void): NewThreadPage {
     }
     projectsRow.hidden = roots.length < 2
 
+    // The connectors listed are the primary project's — the one the chat runs in.
+    const primaryRoot = draft.roots[0]
+    connectorChip.setScope(primaryRoot === undefined ? null : { projectRoot: primaryRoot })
+
     paintSubmit()
   }
 
@@ -906,6 +930,9 @@ export function createNewThreadPage(onClose: () => void): NewThreadPage {
       // dropped with it — `setBranches` refills them for whichever project this
       // page has just been opened for.
       branchChip.reset()
+      // RESET, like the branch: connectors switched off for the last chat are
+      // on again for the next one.
+      connectorChip.resetDraft()
       branchChip.setBranches(null)
       branchChip.setProjectBranch(null)
       closeCommandMenu()
@@ -942,6 +969,8 @@ export function createNewThreadPage(onClose: () => void): NewThreadPage {
     },
     setRuntimeModels(provider, extraModels, untestedModels) {
       rebuildModelPicker(provider, extraModels, untestedModels)
+      // The per-chat connector list is Claude's only.
+      connectorChip.setAvailable(provider === 'claude')
     },
     cancel() {
       finish(null)

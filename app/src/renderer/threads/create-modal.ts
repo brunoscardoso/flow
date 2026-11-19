@@ -172,6 +172,12 @@ export interface ThreadDraft {
    * ABSENT IS OFF — what every conversation starts with.
    */
   autopilot?: boolean
+  /**
+   * Connectors switched off for THIS conversation on the new-chat page
+   * (plan_connectors, note 9). OPTIONAL, AND ABSENT IS "EVERY CONNECTOR ON" —
+   * what every conversation starts with. Written onto the chat once it exists.
+   */
+  connectorsOff?: string[]
   /** Images to send with the description, as its first message. */
   attachments: MessageAttachmentInput[]
   /**

@@ -23,6 +23,7 @@ import type {
   FlPanel,
   FlSplit,
   FlTabs,
+  TabCaretDetail,
   TabCloseDetail,
   TabDescriptor,
   TabRenameDetail,
@@ -91,13 +92,31 @@ import { isModalOverlayOpen } from '../modal-overlay'
 import { detectTerminalLinks, isOpenableTerminalUrl } from './terminal-links'
 import {
   onceTabFace,
-  orderRunTabs,
   pendingTabTooltip,
   pendingTabId,
   stepKeyOfPendingTab,
   stepTabFace,
 } from './run-group-model'
 import { RUN_TONE_COLOR, RunGroupView } from './run-group-view'
+import {
+  GroupViewMemory,
+  groupMenu,
+  groupTabFace,
+  isGroupTabId,
+  LAUNCHPAD_GROUPED_KEY,
+  LAUNCHPAD_TAB_STRINGS,
+  parseGrouped,
+  planStrip,
+  selectedStep,
+  separateStepMenu,
+  serializeGrouped,
+  stepKeyOfTerminal,
+  type GroupLayout,
+  type GroupSelection,
+  type GroupTabEntry,
+} from './launchpad-tabs-model'
+import { LaunchpadLog } from './launchpad-log'
+import { LaunchpadGroupView } from './launchpad-group-view'
 import { mountProblems } from '../problems/problems-panel'
 
 type XtermModule = typeof import('@xterm/xterm')
@@ -273,6 +292,29 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
   empty.className = 'fl-term-empty'
   empty.textContent = 'No terminals — press + to open one'
   hosts.append(splitEl, stash, empty)
+  // The grouped Launchpad tab's body — its own layer over the split row; the
+  // step hosts are MOVED into its panes (never copied, never re-created).
+  const launchpad = new LaunchpadGroupView({
+    hostOf: (terminalId) => tabs.get(terminalId)?.host ?? null,
+    attach: (terminalId) => {
+      const tab = tabs.get(terminalId)
+      if (tab) void attachXterm(tab).then(() => fitTab(tab))
+    },
+    fit: (terminalId) => {
+      const tab = tabs.get(terminalId)
+      if (tab) fitTab(tab)
+    },
+    select: (selection) => selectInGroup(selection, true),
+    setLayout: (next) => setGroupLayout(next),
+    restartAll: () => runGroup?.reloadAll(),
+    stopAll: () => runGroup?.stopAll(),
+    restartStep: (stepKey) => runGroup?.reloadStep(stepKey),
+    startStep: (stepKey) => runGroup?.startStep(stepKey),
+    stopStep: (stepKey) => runGroup?.stopStep(stepKey),
+    projectNameOf: (projectRoot) => runGroup?.projectNameOf(projectRoot) ?? (baseName(projectRoot) || projectRoot),
+    logOf: (scopeKey) => logOf(scopeKey),
+  })
+  hosts.appendChild(launchpad.element)
 
   root.appendChild(header)
   root.appendChild(hosts)
@@ -402,6 +444,34 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
   let runGroup: RunGroupView | null = null
   /** A Launchpad terminal to show as soon as its tab arrives (main may answer before the tab exists). */
   let focusWhenCreated: string | null = null
+  /**
+   * The grouped Launchpad tab: every step that starts with Run shares ONE tab
+   * (a person can choose separate tabs instead — a per-app preference). While
+   * the group tab is the one on screen, `groupShown` is true and `activeId` is
+   * the terminal of the step shown alone, or null for All.
+   */
+  let grouped = readGrouped()
+  let groupShown = false
+  const groupMemory = new GroupViewMemory()
+  /** Each Run scope's One log — bounded rings, fed from the output stream. */
+  const launchpadLogs = new Map<string, LaunchpadLog>()
+
+  function readGrouped(): boolean {
+    try {
+      return parseGrouped(localStorage.getItem(LAUNCHPAD_GROUPED_KEY))
+    } catch {
+      return true // private mode / quota — the default applies
+    }
+  }
+
+  function logOf(scopeKey: string): LaunchpadLog {
+    let log = launchpadLogs.get(scopeKey)
+    if (log === undefined) {
+      log = new LaunchpadLog()
+      launchpadLogs.set(scopeKey, log)
+    }
+    return log
+  }
 
   /** The panel's current scoping inputs for the pure decision layer. */
   function scopeState(): TerminalScopeState {
@@ -555,7 +625,22 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     // labelled with its name and state; a step with no terminal yet stands in
     // as a pending tab. Plain terminals keep today's labels and order.
     const runState = runGroup?.state ?? null
-    const descriptors: TabDescriptor[] = orderRunTabs(visible, (tab) => tab.info.terminalId, runState).map((entry) => {
+    // Grouped (the default): those steps share ONE Launchpad tab instead.
+    let groupId: string | null = null
+    const descriptors: TabDescriptor[] = planStrip(visible, (tab) => tab.info.terminalId, runState, grouped).map((entry) => {
+      if (entry.kind === 'group') {
+        groupId = entry.id
+        const face = groupTabFace(entry.steps)
+        return {
+          id: entry.id,
+          label: face.label,
+          dots: face.tones.map((tone) => RUN_TONE_COLOR[tone]),
+          caret: LAUNCHPAD_TAB_STRINGS.caretTitle,
+          closable: false,
+          renamable: false,
+          tooltip: face.tooltip,
+        }
+      }
       if (entry.kind === 'pending') {
         const face = stepTabFace(entry.step)
         return {
@@ -566,6 +651,8 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
           pending: face.pending,
           accent: RUN_TONE_COLOR[face.tone],
           tooltip: runState === null ? face.tooltip : pendingTabTooltip(entry.step, runState),
+          // Separate tabs: the caret holds the way back to one group tab.
+          caret: LAUNCHPAD_TAB_STRINGS.stepMenuTitle,
         }
       }
       if (entry.kind === 'once') {
@@ -591,6 +678,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
           renamable: false,
           accent: RUN_TONE_COLOR[face.tone],
           tooltip: face.tooltip,
+          caret: LAUNCHPAD_TAB_STRINGS.stepMenuTitle,
         }
       }
       const tab = entry.item
@@ -632,7 +720,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
       }
     })
     tabsEl.tabs = descriptors
-    tabsEl.activeId = activeId
+    tabsEl.activeId = groupShown && groupId !== null ? groupId : activeId
     empty.hidden = visible.length > 0 || descriptors.length > 0
     renderTakeoverToggle()
   }
@@ -910,7 +998,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
 
     // Auto-activate only a terminal that belongs to the active project;
     // other-project terminals join hidden (host stays hidden by default).
-    if (!activeId && isTabVisible(tab)) {
+    if (!activeId && !groupShown && isTabVisible(tab)) {
       activateTab(info.terminalId)
     } else {
       renderPanes()
@@ -930,19 +1018,47 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
    */
   function renderPanes(): void {
     layout = pruneLayout(layout, new Set(tabs.keys()))
-    const paneIds = visiblePanes(layout, activeId, (id) => {
-      const tab = tabs.get(id)
-      return tab !== undefined && isTabVisible(tab)
-    })
+    // The grouped Launchpad tab on screen: its body holds the step panes, and
+    // the split row shows nothing.
+    const group = groupShown ? currentGroup() : null
+    if (groupShown && group === null) {
+      // The group went away (its Run's conversation left the screen, or it was
+      // split into separate tabs): hand the screen to an ordinary tab.
+      groupShown = false
+      if (activeId === null || !tabs.has(activeId)) {
+        activeId = null
+        queueMicrotask(() => {
+          if (!groupShown && activeId === null) reconcileActiveTab()
+        })
+      }
+    }
+    if (group !== null) syncGroupActive(group)
+    const placed = new Set<string>()
+    if (group === null) {
+      launchpad.hide()
+    } else {
+      const view = groupMemory.get(group.scopeKey, group.steps)
+      for (const id of launchpad.render({ scopeKey: group.scopeKey, steps: group.steps, view })) placed.add(id)
+    }
+    const paneIds =
+      group !== null
+        ? []
+        : visiblePanes(layout, activeId, (id) => {
+            const tab = tabs.get(id)
+            return tab !== undefined && isTabVisible(tab)
+          })
     const current = [...splitEl.children].map((child) => (child as HTMLElement).dataset['terminalId'])
     const changed =
       current.length !== paneIds.length || paneIds.some((id, index) => current[index] !== id)
+    // Every host neither in the row nor in a Launchpad pane goes to the stash —
+    // checked on every pass, since the group's panes change without the row.
+    for (const tab of tabs.values()) {
+      if (paneIds.includes(tab.info.terminalId) || placed.has(tab.info.terminalId)) continue
+      if (tab.host.parentElement === stash) continue
+      tab.host.hidden = true
+      stash.appendChild(tab.host)
+    }
     if (changed) {
-      for (const tab of tabs.values()) {
-        if (paneIds.includes(tab.info.terminalId)) continue
-        tab.host.hidden = true
-        if (tab.host.parentElement !== stash) stash.appendChild(tab.host)
-      }
       // Append in ORDER — fl-split's panes follow child order, and its
       // MutationObserver rebuilds the handles for us.
       for (const id of paneIds) {
@@ -974,6 +1090,113 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     }
   }
 
+  // ── The grouped Launchpad tab ──────────────────────────────────────────
+
+  /** The group tab the strip holds now, or null (separate tabs, or no Run here). */
+  function currentGroup(): GroupTabEntry | null {
+    if (!grouped) return null
+    const visible = [...tabs.values()].filter(isTabVisible)
+    for (const entry of planStrip(visible, (tab) => tab.info.terminalId, runGroup?.state ?? null, true)) {
+      if (entry.kind === 'group') return entry
+    }
+    return null
+  }
+
+  /** The group and step a terminal belongs to, when it is folded into the group tab. */
+  function groupOwnerOf(terminalId: string): { group: GroupTabEntry; stepKey: string } | null {
+    const group = currentGroup()
+    const step = group?.steps.find((candidate) => candidate.terminalId === terminalId)
+    return group === null || step === undefined ? null : { group, stepKey: step.key }
+  }
+
+  /** While the group is on screen, the active terminal is the step shown alone — or none, for All. */
+  function syncGroupActive(group: GroupTabEntry): void {
+    const key = selectedStep(groupMemory.get(group.scopeKey, group.steps))
+    const terminalId = key === null ? null : (group.steps.find((step) => step.key === key)?.terminalId ?? null)
+    activeId = terminalId !== null && tabs.has(terminalId) ? terminalId : null
+  }
+
+  /** Give the keyboard to the step shown alone (a person picked it). */
+  function focusGroupStep(): void {
+    const tab = activeId === null ? null : tabs.get(activeId)
+    if (!tab) return
+    void attachXterm(tab).then(() => {
+      fitTab(tab)
+      if (!isModalOverlayOpen()) tab.term?.focus()
+    })
+  }
+
+  /** Put the group tab on screen, on the view it was left on. */
+  function showGroup(focus: boolean): void {
+    if (currentGroup() === null) return
+    groupShown = true
+    renderPanes()
+    renderTabs()
+    if (focus) focusGroupStep()
+  }
+
+  /** All, or one step — remembered for this group while the app runs. */
+  function selectInGroup(selection: GroupSelection, focus: boolean): void {
+    const group = currentGroup()
+    if (group === null) return
+    groupMemory.select(group.scopeKey, selection)
+    showGroup(focus)
+  }
+
+  function setGroupLayout(next: GroupLayout): void {
+    const group = currentGroup()
+    if (group === null) return
+    groupMemory.setLayout(group.scopeKey, next)
+    renderPanes()
+  }
+
+  /** One group tab, or one tab per step — a per-app choice, kept on this computer. */
+  function setGrouped(next: boolean): void {
+    if (next === grouped) return
+    const wasShowing = groupShown ? currentGroup() : null
+    const shownStep = activeId
+    grouped = next
+    try {
+      localStorage.setItem(LAUNCHPAD_GROUPED_KEY, serializeGrouped(next))
+    } catch {
+      // Still applies for this session.
+    }
+    if (!next) {
+      groupShown = false
+      launchpad.hide()
+      // Separate tabs: the step that was shown (or the first with a terminal) keeps the screen.
+      const fallback = wasShowing?.steps.find((step) => step.terminalId !== null && tabs.has(step.terminalId))?.terminalId
+      const target = shownStep ?? fallback ?? null
+      if (target !== null && tabs.has(target)) {
+        activateTab(target, { focus: true })
+        return
+      }
+      renderPanes()
+      renderTabs()
+      return
+    }
+    // Grouped again: a step tab that was active is shown inside the group.
+    const owner = activeId === null ? null : groupOwnerOf(activeId)
+    if (owner !== null) {
+      groupMemory.select(owner.group.scopeKey, { step: owner.stepKey })
+      showGroup(true)
+      return
+    }
+    renderPanes()
+    renderTabs()
+  }
+
+  /** A step's output also feeds its group's One log (bounded; drawn only while shown). */
+  function feedLaunchpadLog(tab: TerminalTab, data: string): void {
+    const run = tab.info.run
+    if (run === undefined) return
+    const state = runGroup?.state ?? null
+    const key = stepKeyOfTerminal(state !== null && state.scopeKey === run.scopeKey ? state : null, tab.info.terminalId, run)
+    if (key === null) return
+    logOf(run.scopeKey).push(key, data)
+    launchpad.logChanged(run.scopeKey)
+  }
+
   /** A LIVE pane sharing the row with `terminalId` — the survivor a dying
    *  shell should hand the keyboard to (#1293). Prefers the pane to its right,
    *  then its left, matching every other adjacency rule here (#408). */
@@ -997,6 +1220,10 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
       const tab = id === undefined ? undefined : tabs.get(id)
       if (tab) fitTab(tab)
     }
+    for (const id of launchpad.placed) {
+      const tab = tabs.get(id)
+      if (tab) fitTab(tab)
+    }
   }
 
   /**
@@ -1018,6 +1245,18 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     if (!tab) {
       return
     }
+    // A step folded into the group tab is shown INSIDE it: the group comes on
+    // screen, and a person's ask selects that step there.
+    const owner = groupOwnerOf(terminalId)
+    if (owner !== null) {
+      groupShown = true
+      if (options.focus === true) groupMemory.select(owner.group.scopeKey, { step: owner.stepKey })
+      renderPanes()
+      renderTabs()
+      if (options.focus === true && activeId === terminalId) focusGroupStep()
+      return
+    }
+    groupShown = false
     activeId = terminalId
     layout = addTerminal(layout, terminalId)
     renderPanes()
@@ -1060,7 +1299,10 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     const wasActive = activeId === terminalId
     // #1133: with the row split, focus stays in the ROW — the pane beside the
     // closed one — before falling back to the strip's global adjacency.
-    const nextId = wasActive
+    // A step's terminal going away inside the group tab (a restart replaces
+    // it) leaves the group on screen — its pane shows the new one.
+    const inGroup = groupShown && tab.info.run !== undefined
+    const nextId = wasActive && !inGroup
       ? (neighborInGroup(layout, terminalId) ??
         neighborOf([...tabs.values()].filter(isTabVisible).map((t) => t.info.terminalId), terminalId))
       : null
@@ -1396,11 +1638,21 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     title?: string
     dot?: string
     icon?: string
+    /** Quieter words at the row's end (a step's state). */
+    hint?: string
+    /** A rule above the row. */
+    separator?: boolean
     disabled?: boolean
     onPick: () => void
   }
 
-  function openMenu(heading: string | null, entries: MenuRow[], returnFocusTo: HTMLElement): void {
+  function openMenu(
+    heading: string | null,
+    entries: MenuRow[],
+    returnFocusTo: HTMLElement,
+    /** Open under a point of the header (a tab's caret) instead of at its right end. */
+    anchor?: { left: number },
+  ): void {
     // #1150: one picker at a time. Enter used to re-fire the + button that
     // still held focus, stacking a SECOND menu on top of the first.
     closeRootMenu()
@@ -1413,7 +1665,17 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
       label.textContent = heading
       menu.appendChild(label)
     }
+    if (anchor !== undefined) {
+      menu.style.left = `${Math.max(4, Math.round(anchor.left))}px`
+      menu.style.right = 'auto'
+    }
     for (const entry of entries) {
+      if (entry.separator === true) {
+        const rule = document.createElement('div')
+        rule.className = 'fl-term-root-sep'
+        rule.setAttribute('role', 'separator')
+        menu.appendChild(rule)
+      }
       const item = document.createElement('button')
       item.className = 'fl-term-root-item'
       item.type = 'button'
@@ -1431,6 +1693,12 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
         item.appendChild(icon)
       }
       item.appendChild(document.createTextNode(entry.label))
+      if (entry.hint !== undefined) {
+        const hint = document.createElement('small')
+        hint.className = 'fl-term-root-hint'
+        hint.textContent = entry.hint
+        item.appendChild(hint)
+      }
       if (entry.title !== undefined) item.title = entry.title
       if (entry.disabled === true) {
         // aria-disabled, not disabled: a disabled button shows no tooltip,
@@ -1509,7 +1777,12 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     api,
     dock: hosts,
     isOnScreen: () => panel.isConnected,
-    onChange: () => renderTabs(),
+    onChange: () => {
+      // The group's state moved: its tab's dots, and — while it is on screen —
+      // its sub-bar and panes.
+      if (groupShown || grouped) renderPanes()
+      renderTabs()
+    },
     focusTerminal: (terminalId) => {
       if (tabs.has(terminalId)) {
         focusWhenCreated = null
@@ -1564,6 +1837,11 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
 
   tabsEl.addEventListener('fl-tab-select', (event) => {
     const { id } = (event as CustomEvent<TabSelectDetail>).detail
+    if (isGroupTabId(id)) {
+      runGroup?.tuckSetup()
+      showGroup(true) // the person clicked the Launchpad tab
+      return
+    }
     const pendingStep = stepKeyOfPendingTab(id)
     if (pendingStep !== null) {
       // A Run step with no terminal yet: the click starts it (or the Run);
@@ -1574,6 +1852,48 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     }
     runGroup?.tuckSetup() // the setup covers the terminals; a chosen tab is shown
     activateTab(id, { focus: true }) // the user clicked this tab
+  })
+
+  // The caret on the group tab jumps to a step (or splits the group into
+  // separate tabs); on a step tab, in separate mode, it groups them again.
+  tabsEl.addEventListener('fl-tab-caret', (event) => {
+    const { id, x } = (event as CustomEvent<TabCaretDetail>).detail
+    const anchor = { left: x - header.getBoundingClientRect().left }
+    if (isGroupTabId(id)) {
+      const group = currentGroup()
+      if (group === null) return
+      const rows: MenuRow[] = []
+      let separatorNext = false
+      for (const entry of groupMenu(group.steps)) {
+        if (entry.kind === 'separator') {
+          separatorNext = true
+          continue
+        }
+        const separator = separatorNext
+        separatorNext = false
+        if (entry.kind === 'all') {
+          rows.push({ label: entry.label, separator, onPick: () => selectInGroup('all', false) })
+        } else if (entry.kind === 'step') {
+          rows.push({
+            label: entry.label,
+            dot: RUN_TONE_COLOR[entry.tone],
+            hint: entry.state,
+            separator,
+            onPick: () => selectInGroup({ step: entry.key }, true),
+          })
+        } else {
+          rows.push({ label: entry.label, separator, onPick: () => setGrouped(false) })
+        }
+      }
+      openMenu(null, rows, newButton, anchor)
+      return
+    }
+    openMenu(
+      null,
+      separateStepMenu().map((entry) => ({ label: entry.label, onPick: () => setGrouped(true) })),
+      newButton,
+      anchor,
+    )
   })
 
   tabsEl.addEventListener('fl-tab-close', (event) => {
@@ -1599,6 +1919,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     const tab = tabs.get(terminalId)
     if (tab) {
       writeToTab(tab, data)
+      feedLaunchpadLog(tab, data)
       return
     }
     // Scrollback replay can arrive before the terminal:list response builds
@@ -1638,6 +1959,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     }
     tab.exited = true
     writeToTab(tab, terminalExitMarker(exitCode))
+    feedLaunchpadLog(tab, terminalExitMarker(exitCode))
     // #1293: the keyboard must not be left inside the corpse. #439 and #957
     // fixed this for the reveal and project-switch arrivals, but both only
     // fire when NO live shell exists — and a split row is precisely the case
@@ -1676,6 +1998,14 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
   // same starting-guarded start as the reveal path so a hidden-panel reveal that
   // auto-opened a terminal doesn't also open a second one from this keystroke (#372).
   document.addEventListener('flow:terminal-new', () => startTerminal(true))
+  // Problems' "Show in terminal": that terminal on screen and focused — a
+  // grouped Launchpad step is selected inside its group tab (activateTab).
+  document.addEventListener('flow:terminal-focus', (event) => {
+    const terminalId = (event as CustomEvent<{ terminalId?: string }>).detail?.terminalId
+    if (typeof terminalId !== 'string' || !tabs.has(terminalId)) return
+    problems.showTerminalView()
+    activateTab(terminalId, { focus: true })
+  })
   // RUN THIS IN A SHELL — the seam a surface uses when the thing it offers is
   // genuinely a command (a CLI login). It reveals the panel itself, because a
   // command typed into a hidden terminal is a button that did nothing.
@@ -1890,6 +2220,12 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
    *  strip for their scrollback; they're just not what the user is silently
    *  dropped into. */
   function reconcileActiveTab(): void {
+    // The group tab on screen stays on screen while it is still there.
+    if (groupShown && currentGroup() !== null) {
+      renderPanes()
+      renderTabs()
+      return
+    }
     const current = activeId ? tabs.get(activeId) : null
     // "STILL IN SCOPE" IS NOT ENOUGH WHEN THE THREAD HAS ITS OWN TREE. A
     // displaced project shell satisfies visibility and liveness, so this used
@@ -2282,6 +2618,17 @@ function injectPanelStyles(): void {
     }
     .fl-term-root-item:hover:not(.disabled) {
       background: var(--fl-color-accent-muted);
+    }
+    .fl-term-root-sep {
+      height: 0;
+      margin: var(--fl-space-xs) 0;
+      border-top: var(--fl-border-width) solid var(--fl-color-border);
+    }
+    .fl-term-root-hint {
+      margin-left: auto;
+      padding-left: var(--fl-space-md);
+      color: var(--fl-color-text-secondary);
+      font-size: var(--fl-text-caption-size);
     }
     .fl-term-root-item.disabled {
       color: var(--fl-color-text-secondary);

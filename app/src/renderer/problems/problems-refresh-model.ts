@@ -9,6 +9,7 @@
 //   - the panel shows the terminal      → counts only (the tab label)
 //   - the panel shows Problems          → the bounded list
 import { DEFAULT_PROBLEMS_LIMIT } from '../../shared/problems-model'
+import { DEFAULT_TERMINAL_PROBLEMS_LIMIT } from '../../shared/terminal-problems'
 
 /** Quiet window after the last diagnostics event before one read. */
 export const PROBLEMS_COALESCE_MS = 250
@@ -24,4 +25,10 @@ export interface ProblemsSurfaceState {
 export function problemsReadLimit(state: ProblemsSurfaceState): number | null {
   if (!state.rendered) return null
   return state.listShown ? DEFAULT_PROBLEMS_LIMIT : 0
+}
+
+/** The same rule for the terminal problems read: off screen nothing, counts, or the bounded list. */
+export function terminalProblemsReadLimit(state: ProblemsSurfaceState): number | null {
+  if (!state.rendered) return null
+  return state.listShown ? DEFAULT_TERMINAL_PROBLEMS_LIMIT : 0
 }

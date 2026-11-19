@@ -27,6 +27,17 @@ export const BROWSER_INSPECT_CAPTURE = 'flow:browser-inspect-capture'
  *  its toolbar toggle. NOT sent for a host-driven deactivate. */
 export const BROWSER_INSPECT_DEACTIVATED = 'flow:browser-inspect-deactivated'
 
+/** guest -> host: an element picked inside a draft canvas's screen frame, relayed
+ *  by the guest preload from the canvas page (`DraftCanvasPick`, draft-pick.ts). */
+export const BROWSER_DRAFT_PICK = 'flow:browser-draft-pick'
+
+/** guest -> host: the canvas page's own inspect toggle changed (`{ on }`). */
+export const BROWSER_DRAFT_INSPECT = 'flow:browser-draft-inspect'
+
+/** guest -> host: a history request (undo, versions) relayed from the canvas page
+ *  (`DraftHistoryRequest`, draft-history-messages.ts). */
+export const BROWSER_DRAFT_HISTORY = 'flow:browser-draft-history'
+
 /** Payload the host sends on `BROWSER_INSPECT_TOGGLE`. */
 export interface BrowserInspectToggle {
   on: boolean

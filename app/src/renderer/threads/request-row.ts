@@ -28,6 +28,7 @@ import type { RequestSummary } from './request-summary'
 import { requestRowView, type RequestRowStepInput, type RequestRowView } from './request-row-model'
 import { liveTotalsText, type RequestFileChanges } from './request-file-changes'
 import { fileChangeChips, fileChipsKey, type FileChangeActions } from './request-file-changes-view'
+import { connectorIconLoader, connectorLabelOptions, createConnectorIcon } from './connector-icon'
 
 export interface RequestRowOptions {
   /** The INITIAL state; not reported through `onToggle` (see TurnRow). */
@@ -65,6 +66,9 @@ export class RequestRow {
   #marker: HTMLSpanElement
   #lead: HTMLSpanElement
   #facts: HTMLSpanElement
+  /** Small icons of the connectors the request used (plan_connectors, FR-7). */
+  #connectors: HTMLSpanElement
+  #drawnConnectors = ''
   #model: HTMLSpanElement
   #changes: HTMLSpanElement
   #now: HTMLDivElement
@@ -101,12 +105,15 @@ export class RequestRow {
     this.#lead.className = 'fl-request-row-lead'
     this.#facts = document.createElement('span')
     this.#facts.className = 'fl-request-row-facts'
+    this.#connectors = document.createElement('span')
+    this.#connectors.className = 'fl-request-row-connectors'
+    this.#connectors.hidden = true
     this.#model = document.createElement('span')
     this.#model.className = 'fl-request-row-model'
     this.#changes = document.createElement('span')
     this.#changes.className = 'fl-request-row-changes'
     this.#changes.hidden = true
-    header.append(this.#marker, this.#lead, this.#facts, this.#changes, this.#model)
+    header.append(this.#marker, this.#lead, this.#facts, this.#connectors, this.#changes, this.#model)
 
     const toggle = (): void => this.setExpanded(!this.#expanded)
     header.addEventListener('click', toggle)
@@ -139,7 +146,7 @@ export class RequestRow {
     live: boolean,
     files: RequestFileChanges | null = null,
   ): void {
-    this.#draw(requestRowView(summary, steps, live))
+    this.#draw(requestRowView(summary, steps, live, connectorLabelOptions()))
     this.#drawFiles(live, files)
   }
 
@@ -225,6 +232,27 @@ export class RequestRow {
       if (view.modelId !== null) this.#model.title = view.modelId
       this.#header.title = view.label
       this.#header.setAttribute('aria-label', view.model === null ? view.label : `${view.label} · ${view.model}`)
+    }
+
+    // The connectors used: redrawn only when the set changed, so a loaded
+    // icon is not dropped by the next stream batch.
+    const connectorsKey = view.connectors.map((c) => c.serverName + '|' + c.connectorName).join(',')
+    if (connectorsKey !== this.#drawnConnectors) {
+      this.#drawnConnectors = connectorsKey
+      this.#connectors.textContent = ''
+      const load = connectorIconLoader()
+      for (const used of view.connectors) {
+        const icon = createConnectorIcon({
+          name: used.serverName,
+          displayName: used.connectorName,
+          size: 16,
+          load,
+        })
+        icon.title = used.connectorName
+        this.#connectors.appendChild(icon)
+      }
+      this.#connectors.hidden = view.connectors.length === 0
+      this.#connectors.title = view.connectors.map((c) => c.connectorName).join(', ')
     }
 
     const newest = view.newestStep ?? ''
@@ -418,6 +446,13 @@ function injectRequestRowStyles(): void {
       min-width: 0;
     }
     .fl-request-row-lead, .fl-request-row-fact, .fl-request-row-model { white-space: nowrap; }
+    .fl-request-row-connectors {
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+    }
+    .fl-request-row-connectors[hidden] { display: none; }
     .fl-request-row-sep { padding: 0 var(--fl-space-xs); }
     .fl-request-row-failed { color: var(--fl-color-error); }
     .fl-request-row-model {

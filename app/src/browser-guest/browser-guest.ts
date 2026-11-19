@@ -24,6 +24,9 @@
 import { ipcRenderer } from 'electron'
 
 import {
+  BROWSER_DRAFT_HISTORY,
+  BROWSER_DRAFT_INSPECT,
+  BROWSER_DRAFT_PICK,
   BROWSER_INSPECT_CAPTURE,
   BROWSER_INSPECT_DEACTIVATED,
   BROWSER_INSPECT_TOGGLE,
@@ -32,6 +35,9 @@ import {
   type BrowserInspectToggle,
   type BrowserRecordToggle,
 } from '../shared/browser-inspect-channels'
+import { DRAFT_CANVAS_HISTORY, parseDraftHistoryRequest } from '../shared/draft-history-messages'
+import { DRAFT_CANVAS_INSPECT, DRAFT_CANVAS_PICK, parseDraftCanvasPick } from '../shared/draft-pick'
+import { parseDraftPageUrl } from '../shared/ui-drafts'
 import { createInspectBridge } from './inspect-bridge'
 import { createInteractionRecorder } from './interaction-recorder'
 
@@ -47,6 +53,29 @@ const bridge = createInspectBridge({
 ipcRenderer.on(BROWSER_INSPECT_TOGGLE, (_event, toggle: BrowserInspectToggle) => {
   if (toggle.on) bridge.activate()
   else bridge.deactivate()
+})
+
+// UI drafts: the canvas page relays picks made inside its screen frames (which
+// have no preload of their own) by posting them to ITSELF. Only a same-origin
+// message on a canvas page is heard — a screen's frames are opaque origins, and
+// a screen opened alone is not a canvas — and the pick is re-validated before
+// it crosses to the host.
+window.addEventListener('message', (event: MessageEvent) => {
+  if (event.origin !== window.location.origin) return
+  if (parseDraftPageUrl(window.location.href)?.kind !== 'canvas') return
+  const data = event.data as { type?: unknown; on?: unknown } | null
+  if (data === null || typeof data !== 'object') return
+  if (data.type === DRAFT_CANVAS_PICK) {
+    const pick = parseDraftCanvasPick(data)
+    if (pick !== null) ipcRenderer.sendToHost(BROWSER_DRAFT_PICK, pick)
+    return
+  }
+  if (data.type === DRAFT_CANVAS_HISTORY) {
+    const request = parseDraftHistoryRequest(data)
+    if (request !== null) ipcRenderer.sendToHost(BROWSER_DRAFT_HISTORY, request)
+    return
+  }
+  if (data.type === DRAFT_CANVAS_INSPECT) ipcRenderer.sendToHost(BROWSER_DRAFT_INSPECT, { on: data.on === true })
 })
 
 // A debug session's record of what the person DID. Passive: off unless a

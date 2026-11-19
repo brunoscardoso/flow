@@ -50,6 +50,11 @@ const PROJECT_PATHS: readonly [string, string][] = [
   ['contracts/stripe_contract.md', 'authored'],
   ['ledger.md', 'authored'],
   ['rules/core/allowed-patterns.md', 'authored'],
+  ['drafts/checkout/layout.json', 'authored'],
+  ['drafts/checkout/tokens.css', 'authored'],
+  ['drafts/checkout/cart.html', 'authored'],
+  ['drafts/checkout/versions/first-pass/cart.html', 'authored'],
+  ['drafts/checkout/versions/first-pass/version.json', 'authored'],
   // append-only
   ['brain/.structure/annotations.jsonl', 'append-only'],
   ['brain/.structure/investigations.jsonl', 'append-only'],
@@ -95,6 +100,10 @@ const PROJECT_PATHS: readonly [string, string][] = [
   ['brain/.structure/brain-usage.json', 'personal'],
   ['brain/.structure/feature-learning-state.json', 'personal'],
   ['brain/.structure/features.lock', 'personal'],
+  ['drafts/checkout/.history/cart/000001763400000000.html', 'personal'],
+  ['drafts/checkout/.history/.layout/000001763400000000.json', 'personal'],
+  ['drafts/checkout/.view-state.json', 'personal'],
+  ['drafts/checkout/cart.html.1763400000000.ab12cd.tmp', 'generated'],
 ];
 
 describe('classifyKnowledgePath', () => {
@@ -159,6 +168,26 @@ describe('classifyKnowledgePath', () => {
       expect(classifyKnowledgePath(stray)).toBe('personal');
       expect(classifyKnowledgePath(`projects/orders-api/${stray}`, { root: 'workspace' })).toBe('personal');
     }
+  });
+
+  it('syncs a canvas and its named versions, and keeps its undo history and view state on this machine', () => {
+    // Positives first (#28): the canvas itself is team knowledge, at project
+    // and at Workspace level, so a `personal` below is the history row talking.
+    for (const shared of ['drafts/checkout/layout.json', 'drafts/checkout/cart.html', 'drafts/checkout/versions/v1/cart.html']) {
+      expect(classifyKnowledgePath(shared)).toBe('authored');
+      expect(classifyKnowledgePath(`projects/orders-api/${shared}`, { root: 'workspace' })).toBe('authored');
+    }
+    expect(classifyKnowledgePathDetailed('drafts/checkout/cart.html').row?.pattern).toBe('/drafts/');
+    for (const own of ['drafts/checkout/.history/cart/000001763400000000.html', 'drafts/checkout/.view-state.json']) {
+      expect(classifyKnowledgePath(own)).toBe('personal');
+      expect(classifyKnowledgePath(`projects/orders-api/${own}`, { root: 'workspace' })).toBe('personal');
+    }
+    // …and the pre-push guard names a staged snapshot.
+    expect(findPersonalFiles(['projects/orders-api/drafts/checkout/.history/cart/1.html']).map((hit) => hit.path)).toEqual([
+      'projects/orders-api/drafts/checkout/.history/cart/1.html',
+    ]);
+    // A folder named drafts deeper down is not a canvas folder.
+    expect(classifyKnowledgePathDetailed('resources/drafts/a.md').row).toBeNull();
   });
 
   it('still shares the one root file that is team knowledge', () => {

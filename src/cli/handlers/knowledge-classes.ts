@@ -130,6 +130,18 @@ export const KNOWLEDGE_CLASS_TABLE: readonly KnowledgeClassRow[] = [
   { pattern: 'brain/.structure/*.jsonl', class: 'append-only', why: 'append-only blueprint stores', workspaceOnly: true, reinclude: true },
   { pattern: 'brain/.structure/*', class: 'generated', why: 'derived structure layer', workspaceOnly: true },
 
+  // ── UI drafts (plan `ui_drafts`) ──
+  // A canvas — its layout, tokens, screens and named versions — is team
+  // knowledge and syncs. Its undo history and view state are this machine's
+  // own: an undo stack replayed on a teammate's checkout would undo THEIR work.
+  // The personal rows come first: the first match decides, and the ignore file
+  // (written in reverse) then lists them after the re-include, so git's last
+  // match agrees. After `*.tmp`, so an interrupted atomic write in a canvas is
+  // still generated.
+  { pattern: 'drafts/*/.history/', class: 'personal', why: 'this machine’s undo snapshots of a canvas' },
+  { pattern: 'drafts/*/.view-state.json', class: 'personal', why: 'this machine’s zoom and pan on a canvas' },
+  { pattern: '/drafts/', class: 'authored', why: 'look-alike screens, their layout, tokens and named versions', reinclude: true },
+
   // ── The general rules ──
   { pattern: '*.jsonl', class: 'append-only', why: 'append-only stores merge by union' },
 ];

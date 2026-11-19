@@ -92,6 +92,7 @@ import {
 import { isWalkthroughPath, walkthroughPathFor } from '../../shared/walkthrough-page'
 import type { RejectedSession, SessionRejectionReason } from '../auth/auth-session'
 import { isExpired, type StoredIdentity } from '../auth/identity-store'
+import { withoutDraftSlots } from '../drafts/artifact-slots'
 import { SHARING_UNAVAILABLE, shareLinkOrigin } from './share-endpoint'
 import { errorCode, readGuardedFile, type GuardedFileRead, type ShareFileGuard } from './share-file-guard'
 import type { ProjectIds } from './share-project-id'
@@ -398,11 +399,17 @@ export function createShareClient(deps: ShareClientDeps) {
         },
       }
     }
-    const walkthroughHtml = page.content.toString('utf8')
+    // The SHARED copy, without draft slots: the share host cannot frame a
+    // draft screen, so a slot would arrive as an empty box. What the author is
+    // shown (bytes, hash) and what is sent are both this copy, so the review
+    // check below still compares exactly the bytes that leave the machine.
+    const pageHtml = page.content.toString('utf8')
+    const walkthroughHtml = withoutDraftSlots(pageHtml)
+    const sharedPage = walkthroughHtml === pageHtml ? page.content : Buffer.from(walkthroughHtml, 'utf8')
     const discoveryMarkdown = docRead.content.toString('utf8')
     const walkthroughBytes = Buffer.byteLength(walkthroughHtml, 'utf8')
     const discoveryBytes = Buffer.byteLength(discoveryMarkdown, 'utf8')
-    const walkthroughSha256 = sha256Of(page.content)
+    const walkthroughSha256 = sha256Of(sharedPage)
     const discoverySha256 = sha256Of(docRead.content)
     return {
       ok: true,

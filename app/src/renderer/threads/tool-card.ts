@@ -11,6 +11,8 @@ import type { ToolCallRecord, ToolCallStatus } from '../../shared/ipc-contract'
 import { brainSearchPresentation, toolIcon } from './tool-card-model'
 import { subagentSpawnChip, type SubagentSpawnChip } from './background-activity-model'
 import { basename, changeSummary, classifyTool, computeLineDiff, filePathOf } from './tool-card-presentation'
+import { callDuration, connectorCall, connectorErrorSentence, type ConnectorCall } from './connector-label'
+import { connectorIconLoader, connectorLabelOptions, createConnectorIcon } from './connector-icon'
 
 const SUMMARY_KEYS = [
   'command',
@@ -29,6 +31,16 @@ export class ToolCard {
   #line: HTMLDivElement
   #icon: HTMLElement
   #name: HTMLSpanElement
+  /** The connector's name beside the action, in the quieter ink — only for a
+   *  connector call (plan_connectors, note 7). */
+  #connectorName: HTMLSpanElement
+  /** The connector icon, swapped in for the tool icon on a connector call. */
+  #connectorIcon: HTMLElement | null = null
+  /** The server the drawn connector icon belongs to, so an update for the same
+   *  connector keeps the element (and its loaded image). */
+  #connectorIconKey = ''
+  /** A finished connector call's duration, right before the status glyph. */
+  #duration: HTMLSpanElement
   #summary: HTMLSpanElement
   #statusGlyph: HTMLElement
   #detail: HTMLDivElement
@@ -74,15 +86,25 @@ export class ToolCard {
     name.className = 'fl-tool-name'
     this.#name = name
 
+    this.#connectorName = document.createElement('span')
+    this.#connectorName.className = 'fl-tool-connector-name'
+    this.#connectorName.hidden = true
+
     this.#summary = document.createElement('span')
     this.#summary.className = 'fl-tool-summary'
+
+    this.#duration = document.createElement('span')
+    this.#duration.className = 'fl-tool-duration'
+    this.#duration.hidden = true
 
     this.#statusGlyph = document.createElement('span')
     this.#statusGlyph.className = 'fl-tool-status'
 
     line.appendChild(icon)
     line.appendChild(name)
+    line.appendChild(this.#connectorName)
     line.appendChild(this.#summary)
+    line.appendChild(this.#duration)
     line.appendChild(this.#statusGlyph)
 
     const toggle = (): void => {
@@ -232,6 +254,8 @@ export class ToolCard {
       const open = `Open the sub-agent's chat: ${chip.label}`
       this.#line.title = open
       this.#line.setAttribute('aria-label', open)
+      this.#renderConnector(null)
+      this.#duration.hidden = true
       this.#renderStatus(record.status)
       return
     }
@@ -241,9 +265,25 @@ export class ToolCard {
     const brain = brainSearchPresentation(record.toolName, record.inputJson)
     const kind = classifyTool(record.toolName)
     const isChange = kind === 'edit' || kind === 'write'
+    // A connector call reads as its action and its connector, with the
+    // connector's icon — never the raw tool name (plan_connectors, note 7).
+    // The one label rule lives in connector-label.ts.
+    const connector = brain ? null : connectorCall(record.toolName, connectorLabelOptions())
+    this.#renderConnector(connector)
+    const duration = connector === null ? null : callDuration(record.startedAt, record.completedAt)
+    this.#duration.textContent = duration ?? ''
+    this.#duration.hidden = duration === null
     this.#icon.setAttribute('name', brain ? brain.icon : toolIcon(record.toolName))
-    this.#name.textContent = brain ? brain.label : record.toolName
-    this.#summary.textContent = brain ? singleLine(brain.summary) : isChange ? this.#changeLine(record) : inputSummary(record.inputJson)
+    this.#name.textContent = brain ? brain.label : connector !== null ? connector.action : record.toolName
+    const failedSentence =
+      connector !== null && record.status === 'error' ? connectorErrorSentence(record.outputJson) : null
+    this.#summary.textContent = brain
+      ? singleLine(brain.summary)
+      : failedSentence !== null
+        ? failedSentence
+        : isChange
+          ? this.#changeLine(record)
+          : inputSummary(record.inputJson)
     this.#summary.title = this.#summary.textContent
     // THE SUMMARY IS ALWAYS REAL — the short scalars survive a summarized input
     // (see `stubInput`), so the collapsed line reads the same either way. Only
@@ -264,6 +304,36 @@ export class ToolCard {
     this.#outputSection.hidden = !withheld && output === ''
     this.#outputPre.textContent = withheld ? 'Open to load the output.' : output
     this.#renderStatus(record.status)
+  }
+
+  /** Swap the tool icon for the connector's on a connector call, and show
+   *  the connector's name beside the action; undo both for any other call. */
+  #renderConnector(connector: ConnectorCall | null): void {
+    this.element.classList.toggle('fl-tool-connector', connector !== null)
+    if (connector === null) {
+      this.#connectorIcon?.remove()
+      this.#connectorIcon = null
+      this.#connectorIconKey = ''
+      this.#icon.hidden = false
+      this.#connectorName.hidden = true
+      this.#connectorName.textContent = ''
+      return
+    }
+    const key = connector.serverName + '|' + connector.connectorName
+    if (this.#connectorIcon === null || this.#connectorIconKey !== key) {
+      this.#connectorIcon?.remove()
+      this.#connectorIcon = createConnectorIcon({
+        name: connector.serverName,
+        displayName: connector.connectorName,
+        size: 16,
+        load: connectorIconLoader(),
+      })
+      this.#connectorIconKey = key
+      this.#line.insertBefore(this.#connectorIcon, this.#icon)
+    }
+    this.#icon.hidden = true
+    this.#connectorName.hidden = false
+    this.#connectorName.textContent = connector.connectorName
   }
 
   /** Collapsed line for an edit/write: file plus WHAT changed, degrading to
@@ -435,6 +505,22 @@ function injectToolCardStyles(): void {
       font-size: var(--fl-text-ui-size);
       font-weight: var(--fl-text-ui-weight-medium);
       color: var(--fl-color-text);
+    }
+    .fl-tool-connector-name {
+      flex: none;
+      font-size: var(--fl-text-caption-size);
+      color: var(--fl-color-text-secondary);
+    }
+    .fl-tool-connector-name[hidden], .fl-tool-duration[hidden], .fl-tool-icon[hidden] { display: none; }
+    .fl-tool-duration {
+      flex: none;
+      font-size: var(--fl-text-caption-size);
+      color: var(--fl-color-text-secondary);
+      font-variant-numeric: tabular-nums;
+    }
+    .fl-tool-card.fl-tool-connector[data-status='error'] .fl-tool-name,
+    .fl-tool-card.fl-tool-connector[data-status='error'] .fl-tool-summary {
+      color: var(--fl-color-error);
     }
     .fl-tool-summary {
       flex: 1;

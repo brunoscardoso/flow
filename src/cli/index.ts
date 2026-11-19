@@ -317,7 +317,7 @@ program
 const planCommand = program
   .command('plan')
   .description(
-    'Work with implementation plans (compile <plan>, archive <plan>, notes <plan>, note <plan>, stamp <doc>)'
+    'Work with implementation plans (compile <plan>, archive <plan>, notes <plan>, note <plan>, screens <plan>, stamp <doc>)'
   );
 
 planCommand
@@ -389,6 +389,23 @@ planCommand
   .action(async (plan: string, options: import('./commands/plan.js').PlanNoteRequest & { json?: boolean }) => {
     const { runPlanNote } = await import('./commands/plan.js');
     await runPlanNote(plan, options);
+  });
+
+planCommand
+  .command('screens <plan>')
+  .description(
+    "Record the content hash of each draft screen the discovery's artifact shows, in the plan's Draft screens block — the one writer of that block. Silent when there are none"
+  )
+  .option('--discovery <doc>', 'The discovery whose artifact to read (defaults to the one the plan was written from)')
+  .option('--json', 'Output JSON')
+  .option(
+    '--target <dir>',
+    'Target directory (defaults to current directory)',
+    process.cwd()
+  )
+  .action(async (plan: string, options: { target: string; discovery?: string; json?: boolean }) => {
+    const { runPlanScreens } = await import('./commands/plan.js');
+    await runPlanScreens(plan, options);
   });
 
 planCommand

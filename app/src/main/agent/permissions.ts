@@ -92,6 +92,9 @@ interface PendingPermission {
   input: Record<string, unknown>
   primaryInput: string | null
   suggestions: PermissionUpdate[] | undefined
+  /** Asked because the tool is marked ask-first: an "always" answer must not
+   *  be remembered anywhere that would stop the next call from asking. */
+  askFirst: boolean
   resolve: (result: PermissionResult) => void
   cleanup: () => void
 }
@@ -140,11 +143,23 @@ export type QuestionAsker = (
   signal: AbortSignal,
 ) => Promise<Record<string, string> | null>
 
+/**
+ * Is this connector tool (`mcp__<server>__<tool>`) marked to always ask first
+ * for the thread's account? Injected by the app wiring (the connector service)
+ * so the broker stays free of settings and accounts; absent → no tool is
+ * marked. Must not throw; a throw is treated as "ask".
+ */
+export type AskFirstLookup = (threadId: string, toolName: string) => boolean
+
+/** The card title for an ask-first connector tool. Plain words, no tool name. */
+export const ASK_FIRST_TITLE = 'This connector action is set to ask first'
+
 export class PermissionBroker extends EventEmitter {
   private readonly pending = new Map<string, PendingPermission>()
   private approvedObserver: ApprovedToolObserver | null = null
   private questionAsker: QuestionAsker | null = null
   private mergeStateProbe: MergeStateProbe | null = null
+  private askFirstLookup: AskFirstLookup | null = null
 
   constructor(private readonly db: FlowDatabase) {
     super()
@@ -158,6 +173,23 @@ export class PermissionBroker extends EventEmitter {
   /** Attach (or clear) the AskUserQuestion picker — see QuestionAsker. */
   setQuestionAsker(asker: QuestionAsker | null): void {
     this.questionAsker = asker
+  }
+
+  /** Attach (or clear) the ask-first lookup — see AskFirstLookup (plan_connectors). */
+  setAskFirstLookup(lookup: AskFirstLookup | null): void {
+    this.askFirstLookup = lookup
+  }
+
+  /** Whether a connector tool asks first. A lookup that throws asks: an
+   *  unverifiable mark costs one question, never a silent run. */
+  private isAskFirst(threadId: string, toolName: string): boolean {
+    if (this.askFirstLookup === null || !toolName.startsWith('mcp__')) return false
+    try {
+      return this.askFirstLookup(threadId, toolName)
+    } catch (error) {
+      console.error('[Permissions] ask-first lookup failed:', error)
+      return true
+    }
   }
 
   /** Attach (or clear) the merge-state probe — see MergeStateProbe (#1135). */
@@ -262,6 +294,26 @@ export class PermissionBroker extends EventEmitter {
         })
       }
 
+      // CONNECTOR TOOLS MARKED ASK-FIRST (plan_connectors note 4) — beside the
+      // board-write gate and for the same reason: ahead of the saved-rule check,
+      // so an earlier "always allow" cannot run a tool the person later marked
+      // to ask first. Skipped under bypassPermissions like every gate here.
+      if (this.isAskFirst(threadId, toolName)) {
+        return this.askUser({
+          threadId,
+          projectRoot,
+          ruleRoot,
+          toolName,
+          input,
+          primaryInput,
+          signal: options.signal,
+          suggestions: options.suggestions,
+          toolUseID: options.toolUseID,
+          title: ASK_FIRST_TITLE,
+          askFirst: true,
+        })
+      }
+
       // MERGE GUARD (#1135) — deliberately ahead of the saved-rule check: while
       // a merge/rebase/cherry-pick is in progress, accepting or completing the
       // resolution is the engineer's decision, so a standing `allow` rule for
@@ -333,7 +385,7 @@ export class PermissionBroker extends EventEmitter {
     // A board write always asks (the gate is ahead of the rule check), so an
     // 'always' verdict on one would only write a rule that can never apply —
     // skip it rather than clutter the store with an inert rule.
-    if (verdict === 'allow-always' && !isFlowWriteTool(pending.toolName)) {
+    if (verdict === 'allow-always' && !isFlowWriteTool(pending.toolName) && !pending.askFirst) {
       this.recordAllowRule(pending.ruleRoot, pending.toolName, pending.primaryInput)
     }
 
@@ -358,7 +410,8 @@ export class PermissionBroker extends EventEmitter {
           // must not let happen.
           ...(verdict === 'allow-always' &&
           pending.suggestions &&
-          !isFlowWriteTool(pending.toolName)
+          !isFlowWriteTool(pending.toolName) &&
+          !pending.askFirst
             ? { updatedPermissions: pending.suggestions }
             : {}),
         })
@@ -463,6 +516,7 @@ export class PermissionBroker extends EventEmitter {
     suggestions: PermissionUpdate[] | undefined
     toolUseID: string
     title: string | undefined
+    askFirst?: boolean
   }): Promise<PermissionResult> {
     // LOG-7: an already-aborted signal never fires 'abort' again — parking
     // here would leak the request and hang the tool call. Deny immediately.
@@ -493,6 +547,7 @@ export class PermissionBroker extends EventEmitter {
         input: params.input,
         primaryInput: params.primaryInput,
         suggestions: params.suggestions,
+        askFirst: params.askFirst === true,
         resolve,
         cleanup: () => params.signal.removeEventListener('abort', onAbort),
       })

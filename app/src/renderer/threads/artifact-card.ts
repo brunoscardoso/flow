@@ -25,6 +25,8 @@ import {
   ARTIFACT_GENERATE_LABEL,
   ARTIFACT_OPEN_LABEL,
   ARTIFACT_WRITING_LABEL,
+  UI_DRAFTS_GENERATE_LABEL,
+  UI_DRAFTS_OPEN_LABEL,
   artifactRowActions,
   CANCEL_LABEL,
   executeConfirmText,
@@ -49,6 +51,7 @@ import {
   type ArtifactDocRef,
 } from './artifact-card-model'
 import type { PlanNoteCounts } from '../../shared/ipc-contract'
+import { uiDraftsWritingText, type UiDraftsState } from './ui-drafts-card-model'
 
 export interface ArtifactCardCallbacks {
   /** Open the doc in the editor (pane → flow:open-file-path). */
@@ -63,6 +66,15 @@ export interface ArtifactCardCallbacks {
    *  composer's own send, as `/artifact @<doc>`). Offered while the discovery
    *  has no page. */
   onGenerateArtifact: (model: ArtifactCardModel) => void
+  /** Where this discovery's UI drafts stand — the pane knows the canvases of
+   *  the project and which this thread asked for. Absent or null: no UI
+   *  drafts button on this card. */
+  uiDraftsState?: (model: ArtifactCardModel) => UiDraftsState | null
+  /** Ask the thread's agent to draft the screens (pane → the composer's own
+   *  send, as `/ui-draft @<doc>`). */
+  onGenerateUiDrafts?: (model: ArtifactCardModel) => void
+  /** Open the finished canvas in the built-in browser (pane → `flow:open-browser`). */
+  onOpenUiDrafts?: (model: ArtifactCardModel) => void
   /** Compile the doc's `## Story` section (pane → learn:narrate). Shown only
    *  when `narrateAction === 'narrate'`. */
   onNarrate: (model: ArtifactCardModel) => void
@@ -445,6 +457,7 @@ export class ArtifactCard {
       ],
       openDoc: showsOpenDocButton(this.#model) || (selected.kind === 'plan' && this.#model.feature !== null),
       artifact: feature !== null,
+      uiDrafts: this.#uiDraftsState() !== null,
       notes: counts,
     })
     for (const action of row) this.#appendAction(action, selected, plan)
@@ -504,6 +517,12 @@ export class ArtifactCard {
           ),
         )
         return
+      case 'ui-drafts': {
+        const drafts = this.#uiDraftsState()
+        if (drafts === null) return
+        this.#actions.appendChild(this.#uiDraftsButton(drafts))
+        return
+      }
       case 'artifact':
         if (feature === null) return
         if (feature.state === 'writing') {
@@ -618,6 +637,60 @@ export class ArtifactCard {
     buttons.append(anyway, first, cancel)
     this.#run.append(sentence, buttons)
     this.#run.hidden = false
+  }
+
+  /** Where this card's UI drafts stand, or null when it offers none. */
+  #uiDraftsState(): UiDraftsState | null {
+    if (this.#model.kind !== 'discovery' || this.#model.uiDraftsCanvas === null) return null
+    return this.#callbacks.uiDraftsState?.(this.#model) ?? null
+  }
+
+  /** Re-draw the action row from what the pane now knows about the canvas.
+   *  Called by the pane on a canvas change; it never re-reads anything. */
+  refreshUiDrafts(): void {
+    this.#renderActions()
+  }
+
+  /** Whether this card offers UI drafts for `canvas` (the pane's refresh filter). */
+  offersUiDrafts(canvas: string): boolean {
+    return this.#model.uiDraftsCanvas === canvas && this.#uiDraftsState() !== null
+  }
+
+  /** The 2x2 grid glyph that leads the UI drafts button. */
+  #gridIcon(): HTMLElement {
+    const icon = document.createElement('fl-icon')
+    icon.setAttribute('name', 'grid')
+    icon.setAttribute('size', '12')
+    icon.setAttribute('aria-hidden', 'true')
+    return icon
+  }
+
+  /** The UI drafts door: generate, a loader while the agent writes, or open. */
+  #uiDraftsButton(drafts: UiDraftsState): HTMLButtonElement {
+    if (drafts.state === 'writing') {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'fl-artifact-btn fl-artifact-btn-accent fl-artifact-btn-writing'
+      button.disabled = true
+      button.setAttribute('aria-busy', 'true')
+      button.title = 'The agent is drafting the screens. The canvas opens in the browser when it is ready.'
+      const dot = document.createElement('span')
+      dot.className = 'fl-artifact-pulse-dot'
+      dot.setAttribute('aria-hidden', 'true')
+      button.append(dot, uiDraftsWritingText(drafts))
+      return button
+    }
+    const open = drafts.state === 'open'
+    const button = this.#actionButton(
+      open ? UI_DRAFTS_OPEN_LABEL : UI_DRAFTS_GENERATE_LABEL,
+      open
+        ? 'Open the drafted screens of this feature on a canvas in the browser.'
+        : 'Ask the agent to draft the screens of this feature, styled like your app, on a canvas.',
+      () => (open ? this.#callbacks.onOpenUiDrafts?.(this.#model) : this.#callbacks.onGenerateUiDrafts?.(this.#model)),
+    )
+    button.classList.add('fl-artifact-btn-ui-drafts')
+    button.prepend(this.#gridIcon())
+    return button
   }
 
   /** The artifact door while its page is being written: a loader, not a door. */
@@ -820,10 +893,17 @@ function injectArtifactStyles(): void {
       animation: fl-artifact-spin 0.8s linear infinite;
     }
     @keyframes fl-artifact-spin { to { transform: rotate(360deg); } }
+    .fl-artifact-btn-ui-drafts { display: inline-flex; align-items: center; gap: 6px; }
+    .fl-artifact-pulse-dot {
+      width: 7px; height: 7px; border-radius: 50%; background: currentColor;
+      animation: fl-artifact-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes fl-artifact-pulse { 50% { opacity: 0.25; } }
     @media (prefers-reduced-motion: reduce) {
       .fl-artifact-btn { transition: none; }
       .fl-artifact-run-bar i { animation: none; left: 0; width: 100%; opacity: 0.5; }
       .fl-artifact-spinner { animation: none; border-right-color: currentColor; opacity: 0.6; }
+      .fl-artifact-pulse-dot { animation: none; opacity: 0.6; }
     }
   `
   document.head.appendChild(style)

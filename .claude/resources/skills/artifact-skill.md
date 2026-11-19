@@ -185,6 +185,26 @@ the page (`discovery_feature-view_v1.md`, C-5):
 (The rule applies to the whole page — its nav, hero, cards, steps and mockups
 alike.)
 
+#### Draft screens at a step
+
+When the discovery has a drafts canvas (`flow/drafts/<canvas>/`, the discovery's
+feature name — read its `layout.json` for the screens and their titles), a step
+that has a draft screen **shows it instead of a hand-drawn mock**. Write one
+empty element where the step's mock stands and delete that mock:
+
+```html
+<div data-flow-draft="<canvas>/<screen>"></div>
+```
+
+Both parts are slugs (the screen's `id` in `layout.json`). Name a screen only
+when its file exists; a step with no draft screen keeps its mock. Write no
+frame, address or style: when Flow serves the page it replaces the element with
+a framed live preview of the screen and its title, shows "Changed since the
+plan" beside the title when the screen no longer matches the version the plan
+read, and shows "This screen is not drawn yet." for a screen that has no file.
+The page still tells the whole story — the workflow diagram, the hero and the
+other steps are written as before.
+
 ### Step 4: Verify it yourself
 
 Never accept the sub-agent's report as proof (forbidden-pattern #7):
@@ -194,6 +214,7 @@ ls <discovery-basename>.walkthrough.html                                   # mus
 grep -nE "(src|href)=\"https?://" <discovery-basename>.walkthrough.html  # must print nothing
 grep -c "Made with Flow IDE" <discovery-basename>.walkthrough.html         # must be >= 1 (chrome intact)
 grep -c "SLOT:" <discovery-basename>.walkthrough.html                      # must be 0 (every slot filled)
+ls flow/drafts/<canvas>/<screen>.html                                          # for every data-flow-draft="<canvas>/<screen>": must exist
 ```
 
 Also read the page's visible text for emoji decoration and remove any that the
@@ -215,7 +236,7 @@ MOVED HERE FROM `CLAUDE.md` (#1949). The always-loaded file paid ~1,950 tokens
 per session and per sub-agent to describe a subsystem most sessions never
 touch, and then pointed here anyway.
 
-When the watcher sees the page beside a discovery (`FlowArtifactChangedEvent.walkthrough`; a page written after the markdown re-emits the discovery's event), the DISCOVERY card's artifact button reads **Writing artifact…** while any `SLOT:` is left and **Open artifact** once the page is written; pressing the card itself opens the discovery document. Internal names (`walkthrough`, `.walkthrough.html`, `flow-page://walkthrough`, `flow:open-feature-view`) are unchanged, so every page written before the rename still opens. That opens an editor tab: a slim Flow header (the doc title) above the page in an iframe. **The page never runs in Flow's origin.** Main registers a privileged `flow-page` scheme and serves `flow-page://walkthrough/?root=<root>&path=<rel>` only for a root the renderer may already address and only for a `flow/(discovery|plans|brainstorms|archive)/<name>.walkthrough.html` path (lexical guard — no `..`, nothing absolute; `app/src/main/flow/walkthrough-page.ts`), with its own CSP: inline script and style, `data:` images and fonts, `default-src 'none'` for everything else. The iframe is `sandbox="allow-scripts"` only — never `allow-same-origin` — so the page's own navigation script runs while `parent.document` is refused and every fetch or remote image is blocked (proven in a hidden Electron probe: zero network). An open view reloads only when the page itself changed and only while it is on screen.
+When the watcher sees the page beside a discovery (`FlowArtifactChangedEvent.walkthrough`; a page written after the markdown re-emits the discovery's event), the DISCOVERY card's artifact button reads **Writing artifact…** while any `SLOT:` is left and **Open artifact** once the page is written; pressing the card itself opens the discovery document. Internal names (`walkthrough`, `.walkthrough.html`, `flow-page://walkthrough`, `flow:open-feature-view`) are unchanged, so every page written before the rename still opens. That opens an editor tab: a slim Flow header (the doc title) above the page in an iframe. **The page never runs in Flow's origin.** Main registers a privileged `flow-page` scheme and serves `flow-page://walkthrough/?root=<root>&path=<rel>` only for a root the renderer may already address and only for a `flow/(discovery|plans|brainstorms|archive)/<name>.walkthrough.html` path (lexical guard — no `..`, nothing absolute; `app/src/main/flow/walkthrough-page.ts`), with its own CSP: inline script and style, `data:` images and fonts, frames from the drafts host only (`frame-src flow-page://drafts`, for a step's draft screen), `default-src 'none'` for everything else. The iframe is `sandbox="allow-scripts"` only — never `allow-same-origin` — so the page's own navigation script runs while `parent.document` is refused and every fetch or remote image is blocked (proven in a hidden Electron probe: zero network). An open view reloads only when the page itself changed and only while it is on screen.
 
 ---
 

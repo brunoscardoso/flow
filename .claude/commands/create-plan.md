@@ -291,6 +291,7 @@ After the skill completes:
 
 1. **Save the plan document** to `flow/plans/plan_<feature>_v<version>.md`
    Then run `planflow-ai plan stamp flow/plans/plan_<feature>_v<version>.md` once — it records the branch and commit the document was written on (never write those keys by hand).
+   Then run `planflow-ai plan screens flow/plans/plan_<feature>_v<version>.md` once — it records the version of each draft screen the discovery's artifact shows, in a `## Draft screens` block (never write it by hand). It prints nothing when the artifact has no draft screens; show nothing for it.
 2. **Report only the file path and the verification lines** — do NOT display the full plan content in chat
 3. **STOP** — do NOT execute the plan, do NOT offer to build
 

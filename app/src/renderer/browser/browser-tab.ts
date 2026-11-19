@@ -41,6 +41,21 @@ import { adoptBrowserScope } from './browser-scope'
 import { loadIndicator } from './load-indicator'
 import { runInWantedScope, tabScopeGate } from '../tab-scope-gate'
 import type { TabScopeKey } from '../tab-scope-model'
+import { FLOW_BROWSER_PARTITION } from '../../shared/browser-partition'
+import { draftCanvasDir, parseDraftPageUrl, type DraftsChangedEvent } from '../../shared/ui-drafts'
+import type { DraftElementFacts, DraftPickRect } from '../../shared/draft-pick'
+import { canvasChangedScript, draftChangeTiming, draftReloadAction, mergeDraftChange } from './drafts-reload'
+import { askAgentAboutDraft } from './browser-capture-chip'
+import { DraftEditPanel } from './draft-edit-panel'
+import {
+  createHistoryQueue,
+  draftHistoryScript,
+  readDraftHistoryState,
+  runDraftHistory,
+  type DraftHistoryTarget,
+} from './draft-history-host'
+import type { DraftHistoryState } from '../../shared/draft-history-messages'
+import { draftPanelTarget, inspectRoute, type DraftPanelTarget } from './draft-inspect-model'
 
 const BROWSER_TAB_ID = 'flow://browser'
 /** The persisted identity of the browser in a conversation's tab set. */
@@ -63,12 +78,16 @@ interface WebviewElement extends HTMLElement {
   canGoBack(): boolean
   canGoForward(): boolean
   reload(): void
+  /** Whether the guest is loading (a navigation is in flight). */
+  isLoading(): boolean
   /** Load a page directly on the guest (resolves when it has loaded). */
   loadURL(url: string): Promise<void>
   /** Forget the back/forward list — another conversation's pages are not ours. */
   clearHistory(): void
   /** Send an IPC message to the guest (received in its preload by ipcRenderer). */
   send(channel: string, ...args: unknown[]): void
+  /** Run a script in the guest's top document. */
+  executeJavaScript(code: string): Promise<unknown>
 }
 
 /** A webview navigation event carries the destination url. */
@@ -119,7 +138,7 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   webview.setAttribute('webpreferences', 'contextIsolation=yes')
   // A persisted partition keeps the dev app's cookies/storage across reloads,
   // isolated from the host and from other partitions.
-  webview.setAttribute('partition', 'persist:flow-browser')
+  webview.setAttribute('partition', FLOW_BROWSER_PARTITION)
   // The guest preload carries the inspect bridge (element → React source). Its
   // file:// URL is resolved by the main preload (out/preload/browser-guest.js);
   // without it the toolbar still navigates, only inspect mode is unavailable.
@@ -158,6 +177,12 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   loadBar.hidden = true
   viewport.append(webview as unknown as HTMLElement, overlay.element, loadBar, inspectHint)
 
+  // The page and, beside it, the draft edit panel — outside the webview, so
+  // the panel is Flow's own UI and never part of a draft.
+  const pageRow = document.createElement('div')
+  pageRow.className = 'fl-browser-page-row'
+  pageRow.style.cssText = 'display:flex;flex:1;min-height:0;min-width:0;'
+
   // Inspect mode: the toggle routes through main to the guest picker; captured
   // elements arrive as the webview's `ipc-message` events.
   const inspectMode = initInspectMode(webview, browser)
@@ -173,32 +198,224 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
       void browser.reload({}).catch((error: unknown) => console.warn('flow: browser reload failed', error))
     },
     onNavigate: (url) => go(url, false),
-    onToggleInspect: (on) => {
-      inspectMode.setActive(on)
-      inspectHint.hidden = !on
-      webview.style.cursor = on ? 'crosshair' : ''
-    },
+    onToggleInspect: (on) => setInspect(on),
   })
+
+  // ── Inspect: the stock picker, or a draft canvas's own ──────────────────
+  // On a draft canvas the screens are frames the stock picker cannot see into;
+  // the canvas runs its own inspect (frames get a picker main injects), and the
+  // toolbar toggle drives that instead. Everywhere else, the stock picker.
+  let inspectOn = false
+  const showInspecting = (on: boolean, route: 'canvas' | 'page'): void => {
+    inspectOn = on
+    chrome.setInspect(on)
+    // The canvas has its own pressed toggle in its toolbar; the strip would cover it.
+    inspectHint.hidden = !on || route === 'canvas'
+    webview.style.cursor = on && route === 'page' ? 'crosshair' : ''
+  }
+  const setInspect = (on: boolean): void => {
+    const route = inspectRoute(currentUrl())
+    showInspecting(on, route)
+    if (route === 'canvas') {
+      inspectMode.setActive(false)
+      void webview
+        .executeJavaScript(`window.flowCanvas ? window.flowCanvas.setInspect(${on ? 'true' : 'false'}) : null`)
+        .catch((error: unknown) => console.warn('flow: canvas inspect failed', error))
+      return
+    }
+    inspectMode.setActive(on)
+  }
+  // A new page starts with its picker off: carry the toggle over to it.
+  const onInspectPageLoad = (): void => {
+    if (inspectOn) setInspect(true)
+  }
+  webview.addEventListener('did-finish-load', onInspectPageLoad)
 
   // Sticky inspect: each click posts a capture and the picker STAYS on, so a
   // whole set of elements can be added in one session. Each capture rides a
   // decoupled document event that the capture-boundary phase turns into a chip.
   const stopCapture = inspectMode.onElementCapture((payload) => {
+    // A draft screen open alone: the pick opens the edit panel, and the chip
+    // waits for "Ask the agent".
+    const target = payload.draft === undefined ? null : draftPanelTarget(currentUrl(), payload.draft.screen)
+    if (target !== null && payload.draft !== undefined) {
+      void openDraftPanel(target, payload.draft, null)
+      return
+    }
     document.dispatchEvent(new CustomEvent('flow:browser-element-captured', { detail: payload }))
   })
   // The toolbar toggle resets only when the session actually ends — the guest
   // told us it deactivated itself (Escape). A user toggle-off already sets it.
   const stopDeactivate = inspectMode.onDeactivated(() => {
-    chrome.setInspect(false)
-    inspectHint.hidden = true
-    webview.style.cursor = ''
+    showInspecting(false, 'page')
+  })
+  // The canvas's own toggle (or Escape inside it) — the toolbar follows.
+  const stopDraftInspect = inspectMode.onDraftInspect((on) => showInspecting(on, 'canvas'))
+  const stopDraftPick = inspectMode.onDraftPick((pick) => {
+    const target = draftPanelTarget(currentUrl(), pick.screen)
+    if (target !== null) void openDraftPanel(target, pick.facts, pick.rect)
+  })
+
+  // ── The draft edit panel ────────────────────────────────────────────────
+  interface DraftSelection extends DraftPanelTarget {
+    facts: DraftElementFacts
+    screenTitle: string
+    /** Where the frame was when picked in the canvas; null when the screen is open alone. */
+    rect: DraftPickRect | null
+  }
+  let selection: DraftSelection | null = null
+
+  /** The screen's title from the canvas layout, or its slug. */
+  const screenTitleOf = async (target: DraftPanelTarget): Promise<string> => {
+    try {
+      if (api.drafts === undefined) return target.screen
+      const answer = await api.drafts.readLayout({ rootPath: target.rootPath, canvas: target.canvas })
+      if (answer.ok) return answer.layout.screens.find((entry) => entry.id === target.screen)?.title ?? target.screen
+    } catch (error) {
+      console.warn('flow: draft layout read failed', error)
+    }
+    return target.screen
+  }
+
+  const openDraftPanel = async (
+    target: DraftPanelTarget,
+    facts: DraftElementFacts,
+    rect: DraftPickRect | null,
+  ): Promise<void> => {
+    const screenTitle = await screenTitleOf(target)
+    selection = { ...target, facts, screenTitle, rect }
+    draftPanel.show({ facts, screenTitle })
+  }
+
+  const closeDraftPanel = (): void => {
+    const wasCanvas = selection?.view === 'canvas'
+    selection = null
+    draftPanel.hide()
+    if (wasCanvas && inspectRoute(currentUrl()) === 'canvas') {
+      void webview
+        .executeJavaScript('window.flowCanvas ? window.flowCanvas.select(null) : null')
+        .catch(() => undefined)
+    }
+  }
+
+  /** Show files Flow just wrote at once: Flow's own writes are not broadcast, so the tab tells the page. */
+  const showSavedFiles = (target: { rootPath: string; canvas: string }, files: string[]): void => {
+    const action = draftReloadAction(currentUrl(), { rootPath: target.rootPath, canvas: target.canvas, files })
+    if (action.kind === 'page') webview.reload()
+    else if (action.kind === 'canvas') {
+      void webview
+        .executeJavaScript(canvasChangedScript(action.files))
+        .catch((error: unknown) => console.warn('flow: canvas reload failed', error))
+    }
+  }
+  const showSavedEdit = (target: DraftPanelTarget): void =>
+    showSavedFiles(target, [`${target.screen}.html`])
+
+  /** Where the screen's frame is now (the canvas may have moved since the pick). */
+  const currentFrameRect = async (screen: string): Promise<DraftPickRect | null> => {
+    try {
+      const rect = (await webview.executeJavaScript(
+        `window.flowCanvas && window.flowCanvas.frameRect ? window.flowCanvas.frameRect(${JSON.stringify(screen)}) : null`,
+      )) as DraftPickRect | null
+      return rect !== null && typeof rect === 'object' && typeof rect.width === 'number' ? rect : null
+    } catch {
+      return null
+    }
+  }
+
+  const draftPanel = new DraftEditPanel({
+    onEdit: async (edit) => {
+      const target = selection
+      if (target === null) return { ok: false, reason: 'Pick an element first.' }
+      if (api.drafts === undefined) return { ok: false, reason: 'The change could not be saved.' }
+      const answer = await api.drafts.applyEdit({
+        rootPath: target.rootPath,
+        canvas: target.canvas,
+        screen: target.screen,
+        edit,
+      })
+      if (answer.ok) {
+        showSavedEdit(target)
+        // Flow's own write is not broadcast: the page's Undo count is told here.
+        pushUndoCount()
+      }
+      return answer
+    },
+    onAsk: () => {
+      const target = selection
+      if (target === null) return
+      void (async () => {
+        const rect = target.view === 'canvas' ? ((await currentFrameRect(target.screen)) ?? target.rect) : null
+        await askAgentAboutDraft(
+          {
+            componentPath: target.facts.tag,
+            selector: '',
+            domSummary: target.facts.summary,
+            draft: {
+              ...target.facts,
+              screen: target.screen,
+              canvas: target.canvas,
+              screenTitle: target.screenTitle,
+              file: `${draftCanvasDir(target.canvas) ?? ''}/${target.screen}.html`,
+            },
+          },
+          browser,
+          rect,
+        )
+      })().catch((error: unknown) => console.warn('flow: ask the agent failed', error))
+    },
+    onClose: () => closeDraftPanel(),
+  })
+  // Leaving the canvas (or the screen) the element is on closes the panel.
+  const onDraftNavigate = (): void => {
+    if (selection === null) return
+    const page = parseDraftPageUrl(currentUrl() ?? '')
+    if (page === null || page.root !== selection.rootPath || page.canvas !== selection.canvas) closeDraftPanel()
+    else if (page.kind === 'screen' && page.screen !== selection.screen) closeDraftPanel()
+  }
+  webview.addEventListener('did-navigate', onDraftNavigate)
+
+  // ── Undo and versions, asked for by the canvas page ─────────────────────
+  // The page has no IPC: it asks through the guest relay, and the answer goes
+  // back through its own door (`flowCanvas.history`). The project and canvas
+  // come from the page ADDRESS, never from the message.
+  const historyQueue = createHistoryQueue()
+  const canvasHistoryTarget = (): DraftHistoryTarget | null => {
+    const page = parseDraftPageUrl(currentUrl() ?? '')
+    return page !== null && page.kind === 'canvas' ? { rootPath: page.root, canvas: page.canvas } : null
+  }
+  const tellCanvasHistory = (state: DraftHistoryState): Promise<void> =>
+    webview
+      .executeJavaScript(draftHistoryScript(state))
+      .then(() => undefined)
+      .catch((error: unknown) => console.warn('flow: canvas history update failed', error))
+  /** Give the page the undo count: after it loads and after each change. */
+  const pushUndoCount = (): void => {
+    const target = canvasHistoryTarget()
+    const drafts = api.drafts
+    if (target === null || drafts === undefined) return
+    void readDraftHistoryState(drafts, target).then((state) => tellCanvasHistory(state))
+  }
+  webview.addEventListener('did-finish-load', pushUndoCount)
+  const stopDraftHistory = inspectMode.onDraftHistory((request) => {
+    const target = canvasHistoryTarget()
+    const drafts = api.drafts
+    if (target === null || drafts === undefined) return
+    void historyQueue(async () => {
+      const outcome = await runDraftHistory(drafts, target, request, { panelOpen: selection !== null })
+      // The page learns first, so it is ready to re-read the picked element
+      // when its reloaded frame reports in.
+      await tellCanvasHistory(outcome.state)
+      if (outcome.files.length > 0) showSavedFiles(target, outcome.files)
+    })
   })
 
   // Debug drawer: console/network capture list beneath the webview, the UI
   // trigger for console/network tagging (rows + "Tag recent" + "Add all").
   const debugDrawer = new DebugDrawer(browser)
 
-  container.append(chrome.element, viewport, debugDrawer.element)
+  pageRow.append(viewport, draftPanel.element)
+  container.append(chrome.element, pageRow, debugDrawer.element)
 
   // ── ⌘/Ctrl+L → add the whole console to context ─────────────────────────────
   // Gated so it only fires while the Browser tab is on screen AND focus is
@@ -432,6 +649,57 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   }
   document.addEventListener('flow:open-browser', openBrowserTab)
 
+  // ── UI drafts: follow the drafts observer while a canvas is shown ──────────
+  // The canvas page cannot listen for changes itself (no IPC, no storage), so
+  // the host tells it which files changed and it reloads only those frames,
+  // keeping its zoom and position. Only while the tab is on screen
+  // (allowed-pattern #17); changes seen off screen are applied on the way back.
+  let pendingDrafts: DraftsChangedEvent[] = []
+  const browserOnScreen = (): boolean =>
+    container.isConnected && container.offsetParent !== null && document.visibilityState === 'visible'
+  const applyDraftChange = (event: DraftsChangedEvent): void => {
+    const action = draftReloadAction(currentUrl(), event)
+    if (action.kind === 'page') {
+      webview.reload()
+      return
+    }
+    if (action.kind === 'canvas') {
+      void webview
+        .executeJavaScript(canvasChangedScript(action.files))
+        .catch((error: unknown) => console.warn('flow: canvas reload failed', { canvas: event.canvas, error }))
+      pushUndoCount()
+    }
+  }
+  /** Whether a navigation is in flight in the guest (false before it attaches). */
+  const guestLoading = (): boolean => {
+    try {
+      return webview.isLoading()
+    } catch {
+      return false
+    }
+  }
+  const draftTiming = (): 'now' | 'hold' => draftChangeTiming({ onScreen: browserOnScreen(), loading: guestLoading() })
+  const flushDrafts = (): void => {
+    if (pendingDrafts.length === 0 || draftTiming() === 'hold') return
+    const held = pendingDrafts
+    pendingDrafts = []
+    for (const event of held) applyDraftChange(event)
+  }
+  const stopDrafts =
+    api.drafts?.onChanged((event) => {
+      // Held off screen, and while a navigation is in flight: a reload now
+      // would cancel it (a Back pressed on the changed screen was lost).
+      if (draftTiming() === 'now') applyDraftChange(event)
+      else pendingDrafts = mergeDraftChange(pendingDrafts, event)
+    }) ?? (() => undefined)
+  // …and applied when the load stops, against the page that loaded.
+  webview.addEventListener('did-stop-loading', flushDrafts)
+  const draftsVisibility = new IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.isIntersecting)) flushDrafts()
+  })
+  draftsVisibility.observe(container)
+  document.addEventListener('visibilitychange', flushDrafts)
+
   // A conversation's tab set coming back with the browser in it: reopen it on
   // the page that conversation was looking at (one browser per window), or
   // blank when it never had one.
@@ -443,6 +711,10 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
 
   return () => {
     document.removeEventListener('flow:open-browser', openBrowserTab)
+    document.removeEventListener('visibilitychange', flushDrafts)
+    webview.removeEventListener('did-stop-loading', flushDrafts)
+    draftsVisibility.disconnect()
+    stopDrafts()
     document.removeEventListener('keydown', onKeyDown, true)
     webview.removeEventListener('did-start-loading', onStartLoading)
     webview.removeEventListener('did-stop-loading', onStopLoading)
@@ -454,6 +726,12 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     webview.removeEventListener('dom-ready', syncNavState)
     stopCapture()
     stopDeactivate()
+    stopDraftInspect()
+    stopDraftPick()
+    stopDraftHistory()
+    webview.removeEventListener('did-finish-load', pushUndoCount)
+    webview.removeEventListener('did-finish-load', onInspectPageLoad)
+    webview.removeEventListener('did-navigate', onDraftNavigate)
     inspectMode.dispose()
     debugDrawer.dispose()
   }

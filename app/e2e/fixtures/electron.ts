@@ -9,6 +9,36 @@ const MAIN_ENTRY = resolve(__dirname, '../../out/main/index.js')
 /** How long a graceful app quit may take before the process is reaped. */
 const CLOSE_BUDGET_MS = 15_000
 
+/** What main printed since launch, per app — the last lines only. */
+const MAIN_OUTPUT = new WeakMap<ElectronApplication, string[]>()
+const MAIN_OUTPUT_LINES = 300
+
+/**
+ * Keep the main process's stdout and stderr, bounded, so a launch that never
+ * opens a window can be reported with what main said while it hung. Seen
+ * 2026-11-19: rarely, the first launch of a run returns from `electron.launch`
+ * and never creates a window (60 targeted launches did not reproduce it); the
+ * failure carried nothing but the timeout.
+ */
+function recordMainOutput(app: ElectronApplication): void {
+  const lines: string[] = []
+  MAIN_OUTPUT.set(app, lines)
+  const started = Date.now()
+  const keep = (stream: string) => (chunk: Buffer | string) => {
+    for (const line of String(chunk).split('\n')) {
+      if (line.trim() === '') continue
+      lines.push(`[+${String(Date.now() - started)}ms ${stream}] ${line}`)
+      if (lines.length > MAIN_OUTPUT_LINES) lines.shift()
+    }
+  }
+  try {
+    app.process().stdout?.on('data', keep('out'))
+    app.process().stderr?.on('data', keep('err'))
+  } catch {
+    // No process to read (closed already) — nothing to keep.
+  }
+}
+
 /**
  * Closes the first-run onboarding wizard if it's up. A fresh userData dir has no
  * Claude account, so the "Welcome to Flow" wizard (reusing .fl-settings-overlay,
@@ -138,6 +168,7 @@ export const test = base.extend<FlowFixtures & FlowOptions>({
         appEnv,
       ),
     })
+    recordMainOutput(app)
     await use(app)
     // Quitting is intercepted by an ASYNC disposal (`before-quit` →
     // disposeMainProcess → re-issue quit, main/index.ts:2082). If any part of
@@ -174,8 +205,17 @@ export const test = base.extend<FlowFixtures & FlowOptions>({
     }
   },
 
-  window: async ({ app }, use) => {
-    const window = await app.firstWindow()
+  window: async ({ app }, use, testInfo) => {
+    let window: Page
+    try {
+      window = await app.firstWindow()
+    } catch (error) {
+      await testInfo.attach('main process output', {
+        body: (MAIN_OUTPUT.get(app) ?? []).join('\n') || '(main printed nothing)',
+        contentType: 'text/plain',
+      })
+      throw error
+    }
     await window.waitForLoadState('domcontentloaded')
     // Feature specs expect the shell, not the first-run wizard.
     await dismissOnboarding(window)

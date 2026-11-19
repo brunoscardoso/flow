@@ -128,3 +128,66 @@ describe('parseCodexStream', () => {
     expect(kinds).toEqual(['message-start', 'message-delta', 'text-stop', 'tool-end', 'usage'])
   })
 })
+
+describe('parseCodexEvent — mcp_tool_call (plan_connectors, note 8)', () => {
+  const START = {
+    type: 'item.started',
+    item: {
+      id: 'item_5',
+      type: 'mcp_tool_call',
+      server: 'linear',
+      tool: 'search_issues',
+      arguments: { query: 'login bug' },
+      status: 'in_progress',
+    },
+  }
+  const DONE = {
+    type: 'item.completed',
+    item: {
+      ...START.item,
+      result: { content: [{ type: 'text', text: '3 issues' }], structured_content: null },
+      status: 'completed',
+    },
+  }
+  const FAILED = {
+    type: 'item.completed',
+    item: { ...START.item, server: 'claude.ai Linear', error: { message: 'Not signed in' }, status: 'failed' },
+  }
+
+  it('starts a tool row named in the connector form, with the arguments as input', () => {
+    const { events } = parseCodexEvent(START, THREAD, NOW)
+    expect(events).toHaveLength(1)
+    const event = events[0]
+    if (event.kind !== 'tool-start') throw new Error('expected tool-start')
+    expect(event.toolCall).toMatchObject({
+      id: 'item_5',
+      toolName: 'mcp__linear__search_issues',
+      inputJson: '{"query":"login bug"}',
+      outputJson: null,
+      status: 'running',
+      completedAt: null,
+    })
+  })
+
+  it('ends it with the result as output', () => {
+    const event = parseCodexEvent(DONE, THREAD, NOW).events[0]
+    if (event?.kind !== 'tool-end') throw new Error('expected tool-end')
+    expect(event.toolCall.status).toBe('success')
+    expect(JSON.parse(event.toolCall.outputJson ?? 'null')).toEqual(DONE.item.result)
+  })
+
+  it('ends a failed call as an error carrying its sentence, server sanitized', () => {
+    const event = parseCodexEvent(FAILED, THREAD, NOW).events[0]
+    if (event?.kind !== 'tool-end') throw new Error('expected tool-end')
+    expect(event.toolCall).toMatchObject({
+      toolName: 'mcp__claude_ai_Linear__search_issues',
+      status: 'error',
+      outputJson: '{"error":"Not signed in"}',
+    })
+  })
+
+  it('drops an item without a server or a tool, never guessing', () => {
+    expect(parseCodexEvent({ type: 'item.started', item: { id: 'x', type: 'mcp_tool_call', tool: 't' } }, THREAD, NOW).events).toEqual([])
+    expect(parseCodexEvent({ type: 'item.completed', item: { id: 'x', type: 'mcp_tool_call', server: 's' } }, THREAD, NOW).events).toEqual([])
+  })
+})

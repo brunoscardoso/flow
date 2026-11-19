@@ -14,7 +14,11 @@ import {
 } from '../../shared/run-setup'
 import type { ReadyOutcome, ReadyWait } from './ready-check'
 import { RunSetupStore } from './run-setup-store'
-import { RunOnceError, RunSupervisor, type RunReadyChecks, type RunTerminalPort } from './run-supervisor'
+import { RunOnceError, RunSupervisor, type RunReadyChecks, type RunSupervisorDeps, type RunTerminalPort } from './run-supervisor'
+import { createRunScriptFiles } from './run-script-files'
+import { mkdtempSync, promises as fsp, rmSync, statSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const ROOT = '/repos/shop'
 const SCOPE: RunScope = { rootPath: ROOT, threadId: 't1' }
@@ -147,11 +151,19 @@ const THREE: RunSetup = {
   ],
 }
 
-function harness(setup: RunSetup = THREE, clock: { now: number } = { now: 0 }) {
+/** Script files that are never written: a test that runs a script passes real ones over a temp folder. */
+const NO_SCRIPTS: RunSupervisorDeps['scripts'] = {
+  prepare: async () => {
+    throw new Error('this test runs no script')
+  },
+  remove: async () => undefined,
+}
+
+function harness(setup: RunSetup = THREE, clock: { now: number } = { now: 0 }, scripts: RunSupervisorDeps['scripts'] = NO_SCRIPTS) {
   const terminals = new FakeTerminals()
   const ready = new FakeReady()
   const store = setupStore(setup)
-  const supervisor = new RunSupervisor({ terminals, setups: store, ready, now: () => clock.now })
+  const supervisor = new RunSupervisor({ terminals, setups: store, ready, scripts, now: () => clock.now })
   const updates: RunGroupState[] = []
   supervisor.onUpdated((state) => updates.push(state))
   const statusOf = (): Array<[string, string]> => supervisor.state(SCOPE).steps.map((s) => [s.key.split('::')[1]!, s.status])
@@ -392,6 +404,37 @@ describe('RunSupervisor — exits, reload, stop', () => {
     expect(h.supervisor.states()).toEqual([])
   })
 
+  it('Stop one ends only that step: the others keep running and nothing is disposed', async () => {
+    const h = harness()
+    await allRunning(h)
+    expect(h.statusOf()).toEqual([
+      ['db', 'ready'],
+      ['api', 'ready'],
+      ['web', 'running'],
+    ])
+    const state = await h.supervisor.stop(SCOPE, `${ROOT}::api`)
+    expect(h.terminals.stopped).toEqual(['term-2'])
+    expect(h.terminals.disposed).toEqual([])
+    expect(state.steps.map((s) => s.status)).toEqual(['ready', 'stopped', 'running'])
+    expect(state.active).toBe(true)
+    // Its exit is a stop, not a failure.
+    h.terminals.exit('term-2', 143)
+    await flush()
+    expect(h.supervisor.state(SCOPE).steps[1]).toMatchObject({ status: 'stopped', exitCode: 143 })
+    // Restart brings it back on its own.
+    await h.supervisor.reload(SCOPE, `${ROOT}::api`)
+    await flush()
+    expect(h.terminals.commands()).toEqual(['docker compose up db', 'npm run api', 'npm run dev', 'npm run api'])
+  })
+
+  it('Stop one with a step the Run does not have changes nothing', async () => {
+    const h = harness()
+    await allRunning(h)
+    await h.supervisor.stop(SCOPE, `${ROOT}::nope`)
+    expect(h.terminals.stopped).toEqual([])
+    expect(h.statusOf().map(([, status]) => status)).toEqual(['ready', 'ready', 'running'])
+  })
+
   it('Run after Stop removes the stopped tabs and starts fresh', async () => {
     const h = harness()
     await allRunning(h)
@@ -489,7 +532,7 @@ describe('RunSupervisor — apply with steps combined across projects', () => {
       ],
     })
     const terminals = new FakeTerminals()
-    const supervisor = new RunSupervisor({ terminals, setups: store, ready: new FakeReady() })
+    const supervisor = new RunSupervisor({ terminals, setups: store, ready: new FakeReady(), scripts: NO_SCRIPTS })
     await supervisor.start(scope)
     await flush()
     expect(supervisor.state(scope).steps.map((s) => s.key)).toEqual([`${B}::db`, `${A}::web`, `${B}::old`])
@@ -675,5 +718,133 @@ describe('RunSupervisor — one-time actions', () => {
     await expect(away.supervisor.runOnce(SCOPE, `${ROOT}::m`)).rejects.toThrow('elsewhere is not on this computer')
     expect(h.terminals.created).toEqual([])
     expect(away.terminals.created).toEqual([])
+  })
+})
+
+describe('RunSupervisor — one-time actions that hold a script', () => {
+  const SCRIPT = [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    '',
+    'until docker compose exec -T postgres pg_isready >/dev/null 2>&1; do',
+    '  sleep 1',
+    'done',
+    'echo "done for $USER" \'it\'s fine\'',
+  ].join('\n')
+  const SETUP: RunSetup = {
+    version: 1,
+    steps: [
+      { id: 'reset', name: 'Reset database', command: SCRIPT, start: 'now', kind: 'once', body: 'script' },
+      { id: 'plain', name: 'Codegen', command: 'npm run codegen', start: 'now', kind: 'once' },
+      { id: 'nobang', name: 'Loop', command: 'for i in 1 2; do\n  echo $i\ndone', start: 'now', kind: 'once', body: 'script' },
+    ],
+  }
+  let dir: string
+  let removed: Array<Promise<void>>
+  let scripts: RunSupervisorDeps['scripts']
+
+  beforeEach(() => {
+    // A folder with a quote and a space in its name: the command must quote the path.
+    const parent = mkdtempSync(join(tmpdir(), 'flow-run-scripts-'))
+    dir = join(parent, "it's private")
+    removed = []
+    const files = createRunScriptFiles({ dir, platform: 'darwin' })
+    scripts = {
+      prepare: (script) => files.prepare(script),
+      remove: (file) => {
+        const done = files.remove(file)
+        removed.push(done)
+        return done
+      },
+    }
+  })
+  afterEach(() => {
+    rmSync(join(dir, '..'), { recursive: true, force: true })
+  })
+
+  function onlyFile(): string {
+    const command = harnessLastCommand
+    const match = /'((?:[^']|'\\'')*)'$/.exec(command)
+    if (match === null) throw new Error(`no quoted path in ${command}`)
+    return match[1]!.replace(/'\\''/g, "'")
+  }
+  let harnessLastCommand = ''
+
+  it('writes the script to one private file and runs that file — the file itself when it names its program', async () => {
+    const h = harness(SETUP, { now: 0 }, scripts)
+    await h.supervisor.runOnce(SCOPE, `${ROOT}::reset`)
+    expect(h.terminals.created).toHaveLength(1)
+    harnessLastCommand = h.terminals.created[0]!.command ?? ''
+    const file = onlyFile()
+    expect(file.startsWith(dir)).toBe(true)
+    // Single-quoted, the quote in the folder name escaped for the shell.
+    expect(harnessLastCommand).toBe(`'${file.replace(/'/g, `'\\''`)}'`)
+    expect(await fsp.readFile(file, 'utf8')).toBe(`${SCRIPT}\n`)
+    expect(statSync(file).mode & 0o777).toBe(0o700)
+    expect(statSync(dir).mode & 0o777).toBe(0o700)
+    expect(h.terminals.created[0]).toMatchObject({ cwd: '/repos/.shop-threads/blue', title: 'Reset database' })
+  })
+
+  it('runs a script without a first-line program through bash', async () => {
+    const h = harness(SETUP, { now: 0 }, scripts)
+    await h.supervisor.runOnce(SCOPE, `${ROOT}::nobang`)
+    harnessLastCommand = h.terminals.created[0]!.command ?? ''
+    expect(harnessLastCommand.startsWith("bash '")).toBe(true)
+    expect(await fsp.readFile(onlyFile(), 'utf8')).toBe('for i in 1 2; do\n  echo $i\ndone\n')
+  })
+
+  it('removes the file when the run exits', async () => {
+    const h = harness(SETUP, { now: 0 }, scripts)
+    await h.supervisor.runOnce(SCOPE, `${ROOT}::reset`)
+    harnessLastCommand = h.terminals.created[0]!.command ?? ''
+    const file = onlyFile()
+    expect(existsSync(file)).toBe(true)
+    h.terminals.exit('term-1', 0)
+    await Promise.all(removed)
+    expect(removed).toHaveLength(1)
+    expect(existsSync(file)).toBe(false)
+  })
+
+  it('removes the file when the run is stopped (its process ends) or its tab is closed', async () => {
+    const h = harness(SETUP, { now: 0 }, scripts)
+    await h.supervisor.runOnce(SCOPE, `${ROOT}::reset`)
+    harnessLastCommand = h.terminals.created[0]!.command ?? ''
+    const first = onlyFile()
+    // Stopped: the terminal ends the process, which reports its exit.
+    h.terminals.stopProcess('term-1')
+    h.terminals.exit('term-1', 130)
+    await Promise.all(removed)
+    expect(existsSync(first)).toBe(false)
+
+    await h.supervisor.runOnce(SCOPE, `${ROOT}::reset`)
+    harnessLastCommand = h.terminals.created[1]!.command ?? ''
+    const second = onlyFile()
+    expect(second).not.toBe(first)
+    expect(existsSync(second)).toBe(true)
+    h.terminals.closeByUser('term-2')
+    await Promise.all(removed)
+    expect(existsSync(second)).toBe(false)
+    // Each file removed once.
+    expect(removed).toHaveLength(2)
+  })
+
+  it('leaves a plain command exactly as before — no file', async () => {
+    const h = harness(SETUP, { now: 0 }, scripts)
+    await h.supervisor.runOnce(SCOPE, `${ROOT}::plain`)
+    expect(h.terminals.commands()).toEqual(['npm run codegen'])
+    expect(existsSync(dir)).toBe(false)
+  })
+
+  it('two quick presses of a script write one file and open one tab', async () => {
+    const h = harness(SETUP, { now: 0 }, scripts)
+    await Promise.all([h.supervisor.runOnce(SCOPE, `${ROOT}::reset`), h.supervisor.runOnce(SCOPE, `${ROOT}::reset`)])
+    expect(h.terminals.created).toHaveLength(1)
+    expect((await fsp.readdir(dir)).length).toBe(1)
+  })
+
+  it('a script that cannot be written is refused with a sentence and opens no tab', async () => {
+    const h = harness(SETUP, { now: 0 }, NO_SCRIPTS)
+    await expect(h.supervisor.runOnce(SCOPE, `${ROOT}::reset`)).rejects.toThrow('could not get this script ready')
+    expect(h.terminals.created).toEqual([])
   })
 })

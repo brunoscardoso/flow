@@ -44,10 +44,11 @@ import type { AttachmentStore } from '../store/attachment-store'
 import { buildUserContent } from './user-content'
 import { BRAIN_FIRST_COMPACT } from './brain-first'
 import type { BoardToolsProvider } from './board-tools/board-tools-provider'
-import { createFlowBoardTools, type RunToolDeps, type SubtaskToolDeps } from './board-tools/flow-tools'
+import { createFlowBoardTools, type LaunchpadToolDeps, type RunToolDeps, type SubtaskToolDeps } from './board-tools/flow-tools'
 import {
   FLOW_MCP_SERVER_NAME,
   flowToolName,
+  LAUNCHPAD_SET_SCRIPT_TOOL_NAME,
   RUN_OUTPUT_TOOL_NAME,
   RUN_RELOAD_TOOL_NAME,
   SUBTASK_TOOL_NAME,
@@ -462,6 +463,12 @@ export interface AgentManagerOptions {
    * tools. Lazy because the supervisor is built after the manager.
    */
   runTools?: (scope: { rootPath: string; threadId: string }) => RunToolDeps | null
+  /**
+   * LAUNCHPAD SCRIPT TOOL. Binds `launchpad_set_script` to ONE conversation: it
+   * hands a script to that conversation's Launchpad editor, nothing that saves
+   * or runs. Called per session with the thread's id; null → no tool.
+   */
+  launchpadTools?: (scope: { threadId: string }) => LaunchpadToolDeps | null
 }
 
 /** One message stored while its thread waits on a basic discovery. */
@@ -577,6 +584,12 @@ interface ClaudeThreadSession {
   /** The thread's attached projects when this session was created (`projectsKey`). */
   projectsKey: string
   /**
+   * The connectors this session runs with turned OFF (`connectorsKey`), denied
+   * for the session at start. When it disagrees with the thread's stored list,
+   * the next turn restarts the resting session so the change applies.
+   */
+  connectorsKey: string
+  /**
    * Whether the session runs with permission prompts skipped right now — set
    * at creation and moved by `setThreadPermissions` when the SDK took the
    * switch live. When it disagrees with the thread, the switch did not take,
@@ -611,6 +624,11 @@ interface RuntimeThreadSession {
  */
 function projectsKey(roots: readonly string[]): string {
   return JSON.stringify([...new Set(roots)].sort())
+}
+
+/** The identity of a thread's off connectors, compared like `projectsKey`. */
+function connectorsKey(names: readonly string[]): string {
+  return JSON.stringify([...new Set(names)].sort())
 }
 
 /** How many recent messages `start_subtask` searches for its source prompt. */
@@ -1516,6 +1534,72 @@ export class AgentManager extends EventEmitter {
   }
 
   /**
+   * A running Claude chat's own SDK query, or null. The connector service asks
+   * it for status instead of opening a query of its own.
+   */
+  getClaudeQuery(threadId: string): Query | null {
+    const session = this.sessions.get(threadId)
+    return session !== undefined && session.provider === 'claude' ? session.query : null
+  }
+
+  /** The SDK query function, bound to the agent binary (connector status queries). */
+  getQueryFunction(): Promise<QueryFunction> {
+    return this.loadQueryFn()
+  }
+
+  /**
+   * Who a connector status query for this project runs as: the account's config
+   * folder and the same environment a session would get. Uses the pure account
+   * resolution (no login check) — a status read must not spawn the auth probe.
+   * An account that cannot be used answers null with a sentence.
+   */
+  connectorContext(
+    projectRoot: string,
+  ): { ok: true; configDir: string | null; env: NodeJS.ProcessEnv | undefined } | { ok: false; reason: string } {
+    // No account: the runtime inherits Flow's own environment, so the folder it
+    // reads is an inherited CLAUDE_CONFIG_DIR when there is one — reading or
+    // writing the home folder's file instead would show and edit a list the
+    // runtime never loads.
+    const inherited = (): string | null => {
+      const dir = process.env['CLAUDE_CONFIG_DIR']
+      return dir !== undefined && dir !== '' ? dir : null
+    }
+    const resolver = this.options.accountResolver
+    if (resolver === undefined) return { ok: true, configDir: inherited(), env: this.authEnv(null) }
+    const resolution = resolver.resolve(projectRoot)
+    switch (resolution.status) {
+      case 'legacy':
+        return { ok: true, configDir: inherited(), env: this.authEnv(null) }
+      case 'ready':
+        return { ok: true, configDir: resolution.account.configDirPath, env: this.authEnv(resolution.account.configDirPath) }
+      default:
+        return { ok: false, reason: "This project's account can't be used right now, so its connectors can't be read." }
+    }
+  }
+
+  /**
+   * A chat turned a connector on or off (the store is already written). Nothing
+   * is switched on the live session: the only live switch the SDK offers
+   * (`toggleMcpServer`) is saved by the CLI into the account's own config and
+   * would leak to every chat and to the terminal. The session's
+   * `connectorsKey` now disagrees with the store, so the next turn stands the
+   * resting session down and the new one starts with the right deny list.
+   */
+  async applyThreadConnector(_threadId: string, _name: string, _on: boolean): Promise<void> {
+    // Intentionally empty — see above. Kept so the connector service has one
+    // place to tell the agent manager, should a session-only live switch exist.
+  }
+
+  /** The thread's stored off connectors; a store failure reads as none. */
+  #connectorsOff(threadId: string): string[] {
+    try {
+      return this.threadStore.getConnectorsOff(threadId)
+    } catch {
+      return []
+    }
+  }
+
+  /**
    * Stand a resting session down when the thread's attached projects are no
    * longer the ones it was created with, so the next turn resumes with the
    * current folder set (see the call site in sendMessage). Returns whether it
@@ -1531,7 +1615,13 @@ export class AgentManager extends EventEmitter {
     // changed folder set.
     const permissionsDiffer =
       session.provider === 'claude' && thread !== null && session.bypassPermissions !== thread.bypassPermissions
-    if (!permissionsDiffer && session.projectsKey === projectsKey(this.#sessionRoots(threadId))) return false
+    // A connector turned on or off for this chat that the session could not
+    // take live (plan_connectors note 3) — the same stand-down.
+    const connectorsDiffer =
+      session.provider === 'claude' && session.connectorsKey !== connectorsKey(this.#connectorsOff(threadId))
+    if (!permissionsDiffer && !connectorsDiffer && session.projectsKey === projectsKey(this.#sessionRoots(threadId))) {
+      return false
+    }
     const status = this.threadStore.getThread(threadId)?.status ?? null
     if (status !== null && !RESTING_STATUSES.has(status)) return false
     if (this.backgroundTasks.list(threadId).length > 0) return false
@@ -1735,14 +1825,16 @@ export class AgentManager extends EventEmitter {
         : null
       const subtasks = this.#subtaskToolDeps(thread.id)
       const run = this.options.runTools?.({ rootPath: thread.projectRoot, threadId: thread.id }) ?? null
-      if (board !== null || subtasks !== null || run !== null) {
-        const server = await createFlowBoardTools(board, subtasks, run)
+      const launchpad = this.options.launchpadTools?.({ threadId: thread.id }) ?? null
+      if (board !== null || subtasks !== null || run !== null || launchpad !== null) {
+        const server = await createFlowBoardTools(board, subtasks, run, launchpad)
         options.mcpServers = { ...(options.mcpServers ?? {}), [FLOW_MCP_SERVER_NAME]: server }
       }
     } catch (error) {
       console.error('[AgentManager] flow tools failed:', error)
     }
 
+    const offConnectors = this.#connectorsOff(thread.id).filter((name) => name !== FLOW_MCP_SERVER_NAME)
     // The USER's own MCP servers (their `.mcp.json` / ~/.claude.json). Flow
     // otherwise injects only the `flow` board server, so a server the user
     // registered never reaches the session — the worktree cwd and the
@@ -1755,7 +1847,17 @@ export class AgentManager extends EventEmitter {
       const readExternal = this.options.loadExternalMcpServers ?? loadExternalMcpServers
       // The config dir the session ACTUALLY runs with (an account's folder, or an
       // inherited one) — its `.claude.json` is where that account's servers live.
-      const external = readExternal(thread.projectRoot, options.env?.['CLAUDE_CONFIG_DIR'])
+      // With no env of its own the runtime inherits Flow's, CLAUDE_CONFIG_DIR included.
+      const external = readExternal(thread.projectRoot, (options.env ?? process.env)['CLAUDE_CONFIG_DIR'])
+      // The connectors this chat turned off are left out before the merge
+      // (plan_connectors note 3). `flow` is never in `external` (external-mcp
+      // drops the reserved name) and the board server is merged after, so it
+      // can never be turned off from here.
+      for (const name of offConnectors) {
+        if (name in external) {
+          delete external[name]
+        }
+      }
       if (Object.keys(external).length > 0) {
         options.mcpServers = { ...external, ...(options.mcpServers ?? {}) }
       }
@@ -1763,6 +1865,23 @@ export class AgentManager extends EventEmitter {
       console.error('[AgentManager] external MCP load failed:', error)
     }
 
+    // THE CHAT'S OFF CONNECTORS ARE DENIED FOR THIS SESSION ONLY. Leaving one
+    // out of mcpServers is not enough: the runtime discovers the project's
+    // `.mcp.json`, the account's own servers, Claude.ai connectors and plugins
+    // by itself. And `toggleMcpServer` must never be used for this — the CLI
+    // saves it into the account's `.claude.json` (`disabledMcpServers`), which
+    // turns the connector off for every chat and for the person's terminal
+    // too (found by the connectors e2e, 2026-11-18). `deniedMcpServers` in the
+    // session's flag settings blocks a server in every scope, works for
+    // Claude.ai and plugin names, and is never written anywhere (verified
+    // against the bundled CLI: a fresh session sees the server again). It
+    // cannot be changed mid-session, so a switch applies from the next turn
+    // through the `connectorsKey` stand-down in `standDownIfProjectsChanged`.
+    if (offConnectors.length > 0) {
+      options.settings = {
+        deniedMcpServers: offConnectors.map((serverName) => ({ serverName })),
+      }
+    }
     const query = queryFn({ prompt: input, options })
 
     const session: ThreadSession = {
@@ -1774,6 +1893,7 @@ export class AgentManager extends EventEmitter {
       bridge,
       resumedFrom: thread.sdkSessionId ?? null,
       projectsKey: projectsKey(this.#sessionRoots(thread.id)),
+      connectorsKey: connectorsKey(offConnectors),
       bypassPermissions: thread.bypassPermissions,
     }
     this.sessions.set(thread.id, session)
@@ -2029,6 +2149,9 @@ export class AgentManager extends EventEmitter {
         ...(this.options.runTools !== undefined
           ? [flowToolName(RUN_OUTPUT_TOOL_NAME), flowToolName(RUN_RELOAD_TOOL_NAME)]
           : []),
+        // The Launchpad script tool only puts a script into the editor; the
+        // person saves (or not), so it never asks.
+        ...(this.options.launchpadTools !== undefined ? [flowToolName(LAUNCHPAD_SET_SCRIPT_TOOL_NAME)] : []),
       ],
       // Saved allow/deny rules stay keyed to the PROJECT, not the worktree:
       // a rule remembered against a checkout that is pruned at merge time

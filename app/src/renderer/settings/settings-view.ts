@@ -107,6 +107,7 @@ import { getThemeMode, setThemeMode, onThemeChanged } from '../theme/theme-contr
 import { isThemeMode } from '../theme/theme-model'
 
 import { WorkspaceSettingsSection } from './workspace-settings-section'
+import { ConnectorsSettingsSection } from './connectors-settings-section'
 import { WORKSPACES_GROUP_LABEL } from './workspace-settings-model'
 
 const OPEN_EVENT = 'flow:open-settings'
@@ -178,6 +179,9 @@ export const SETTINGS_GROUPS = [
   { key: 'worktrees', label: WORKTREE_SECTION_TITLE },
   { key: 'tasks', label: 'Tasks' },
   { key: 'integrations', label: 'Integrations' },
+  // The MCP servers the agent can use as tools — account, project, Claude.ai
+  // and plugin connectors, with add, sign in and remove (plan_connectors).
+  { key: 'connectors', label: 'Connectors' },
   // Grouping projects into Workspaces — the on/off switch and each Workspace's
   // projects, sync and shared repository (workspaces-knowledge-hub Phase 10).
   { key: 'workspaces', label: WORKSPACES_GROUP_LABEL },
@@ -231,6 +235,8 @@ class SettingsView {
   #group: SettingsGroup = 'models'
   /** The Workspaces section — one instance for the page's life (see #render). */
   #workspaces: WorkspaceSettingsSection | null = null
+  /** The Connectors section — one instance for the page's life, like #workspaces. */
+  #connectors: ConnectorsSettingsSection | null = null
   #tabButtons = new Map<SettingsGroup, HTMLButtonElement>()
   /** Retires the integrations renderer mounted by the last render, if any. */
   #integrationsMount: (() => void) | null = null
@@ -365,6 +371,8 @@ class SettingsView {
     }
     // The Workspaces section re-reads what changed while it was not on screen.
     if (group === 'workspaces') this.#workspaces?.shown()
+    // Connectors read their status only while on screen (allowed-pattern #17).
+    if (group === 'connectors') this.#connectors?.shown()
   }
 
   async open(group?: SettingsGroup): Promise<void> {
@@ -544,6 +552,16 @@ class SettingsView {
     // something almost nobody changes twice, beside two controls people press
     // all day.
     into('integrations', this.#renderIntegrationsSection())
+
+    // CONNECTORS, KEPT ALIVE ACROSS RENDERS for the same reason as Workspaces:
+    // an open add form or a waiting sign-in must survive an account change.
+    // It follows the page's project until a person picks another in it. An
+    // older preload without the connectors bridge has no tab.
+    if (api.connectors !== undefined) {
+      this.#connectors ??= new ConnectorsSettingsSection()
+      this.#connectors.setDefaultProject(activeProject?.rootPath ?? null)
+      into('connectors', this.#connectors.element)
+    }
 
     // KEPT ALIVE ACROSS RENDERS, like Flow settings' knowledge section: it
     // repaints itself from the Workspace broadcasts, and an open "Add a

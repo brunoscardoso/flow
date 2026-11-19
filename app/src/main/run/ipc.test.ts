@@ -57,8 +57,8 @@ function harness(options: { trusted?: boolean; saveError?: Error } = {}) {
         calls.push({ reload: [scope, stepKey, force] })
         return empty(scope)
       },
-      stop: async (scope) => {
-        calls.push({ stop: scope })
+      stop: async (scope, stepKey) => {
+        calls.push(stepKey === undefined ? { stop: scope } : { stop: [scope, stepKey] })
         return empty(scope)
       },
       apply: async (scope) => {
@@ -197,6 +197,19 @@ describe('registerRunChannels', () => {
       { reload: [{ rootPath: ROOT, threadId: null }, `${ROOT}::web`, false] },
       { reload: [{ rootPath: ROOT, threadId: null }, undefined, true] },
     ])
+  })
+
+  it('run:stop stops one step when a step is named, and every step when none is', async () => {
+    const h = harness()
+    await h.call('run:stop', { scope: { rootPath: ROOT, threadId: null }, stepKey: `${ROOT}::web` })
+    await h.call('run:stop', { scope: { rootPath: ROOT, threadId: null } })
+    expect(h.calls).toEqual([
+      { stop: [{ rootPath: ROOT, threadId: null }, `${ROOT}::web`] },
+      { stop: { rootPath: ROOT, threadId: null } },
+    ])
+    await expect(h.call('run:stop', { scope: { rootPath: ROOT, threadId: null }, stepKey: '' })).rejects.toThrow(
+      'stepKey must be a non-empty string',
+    )
   })
 
   it('broadcasts the supervisor updates, and dispose removes handlers and the subscription', () => {

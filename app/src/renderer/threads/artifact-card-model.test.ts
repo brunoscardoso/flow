@@ -288,6 +288,7 @@ describe('buildArtifactModel', () => {
       storyStatus: 'compiled',
       narrateAction: null,
       featureViewAction: null,
+      uiDraftsCanvas: null,
       summary: null,
     })
   })

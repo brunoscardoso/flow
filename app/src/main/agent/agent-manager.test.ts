@@ -569,6 +569,172 @@ describe('AgentManager', () => {
     fakes[0].release()
   })
 
+  describe('a chat’s off connectors (plan_connectors note 3)', () => {
+    const linear = { type: 'http' as const, url: 'https://mcp.linear.app/mcp' }
+    const neon = { type: 'stdio' as const, command: 'npx', args: ['neon'] }
+
+    function harness(): {
+      fakes: Array<FakeQuery & { toggleMcpServer: jest.Mock }>
+      queryFn: jest.Mock
+      manager: AgentManager
+    } {
+      const fakes: Array<FakeQuery & { toggleMcpServer: jest.Mock }> = []
+      const queryFn = jest.fn((): Query => {
+        const fake = Object.assign(makeFakeQuery(), { toggleMcpServer: jest.fn().mockResolvedValue(undefined) })
+        fakes.push(fake)
+        return fake as unknown as Query
+      })
+      const manager = new AgentManager(store, credentialsStub, broker, {
+        queryFn: queryFn as unknown as QueryFunction,
+        loadExternalMcpServers: () => ({ linear, neon }),
+      })
+      return { fakes, queryFn, manager }
+    }
+
+    function serversOf(queryFn: jest.Mock, call: number): Record<string, unknown> {
+      const options = (queryFn.mock.calls[call] as unknown as [{ options: Options }])[0].options
+      return (options.mcpServers ?? {}) as Record<string, unknown>
+    }
+
+    it('an on connector reaches the session, an off one does not, and flow is never switched off', async () => {
+      const { fakes, queryFn, manager } = harness()
+      const thread = store.createThread({ projectRoot: tempDir })
+      store.setConnectorsOff(thread.id, ['neon', 'flow'])
+
+      await manager.sendMessage(thread.id, 'go')
+      await flushMicrotasks()
+
+      const servers = serversOf(queryFn, 0)
+      // The positive first (#28): the on connector is there.
+      expect(servers['linear']).toEqual(linear)
+      // …and the off one is not.
+      expect(Object.keys(servers)).not.toContain('neon')
+      // Left out of the list, so nothing is toggled on the query for it — and
+      // a stored `flow` is never switched off on the query (the in-process
+      // board server cannot be built under jest's CJS runtime, so its presence
+      // is asserted by the toggle that must never happen).
+      expect(fakes[0].toggleMcpServer).not.toHaveBeenCalled()
+
+      manager.dispose()
+      fakes.forEach((fake) => fake.release())
+      await flushMicrotasks()
+    })
+
+    function settingsOf(queryFn: jest.Mock, call: number): Options['settings'] {
+      return (queryFn.mock.calls[call] as unknown as [{ options: Options }])[0].options.settings
+    }
+
+    it('off connectors are denied for the session only, never toggled (the toggle is saved to the account)', async () => {
+      const { fakes, queryFn, manager } = harness()
+      const thread = store.createThread({ projectRoot: tempDir })
+      store.setConnectorsOff(thread.id, ['claude.ai Linear', 'neon'])
+
+      await manager.sendMessage(thread.id, 'go')
+      await flushMicrotasks()
+
+      // The positive first (#28): the on connector reaches the session.
+      expect(serversOf(queryFn, 0)['linear']).toEqual(linear)
+      // Every off name — a runtime-found Claude.ai one included — is denied in
+      // the session's flag settings, which the CLI never writes to disk…
+      expect(settingsOf(queryFn, 0)).toEqual({
+        deniedMcpServers: [{ serverName: 'claude.ai Linear' }, { serverName: 'neon' }],
+      })
+      // …and the persisted switch is never used.
+      expect(fakes[0].toggleMcpServer).not.toHaveBeenCalled()
+
+      manager.dispose()
+      fakes.forEach((fake) => fake.release())
+      await flushMicrotasks()
+    })
+
+    it('a chat with nothing off passes no settings of its own', async () => {
+      const { fakes, queryFn, manager } = harness()
+      const thread = store.createThread({ projectRoot: tempDir })
+      await manager.sendMessage(thread.id, 'go')
+      await flushMicrotasks()
+      expect(serversOf(queryFn, 0)['neon']).toEqual(neon)
+      expect(settingsOf(queryFn, 0)).toBeUndefined()
+      manager.dispose()
+      fakes.forEach((fake) => fake.release())
+      await flushMicrotasks()
+    })
+
+    it('a stored change restarts the resting session on the next turn, with the new deny list', async () => {
+      const { fakes, queryFn, manager } = harness()
+      const thread = store.createThread({ projectRoot: tempDir })
+      await manager.sendMessage(thread.id, 'go')
+      await flushMicrotasks()
+      // The positive first: the first session runs with neon on.
+      expect(queryFn).toHaveBeenCalledTimes(1)
+      expect(serversOf(queryFn, 0)['neon']).toEqual(neon)
+
+      // The store moves; nothing is switched on the live session.
+      store.setConnectorsOff(thread.id, ['neon'])
+      await manager.applyThreadConnector(thread.id, 'neon', false)
+      expect(fakes[0].toggleMcpServer).not.toHaveBeenCalled()
+
+      store.updateThread(thread.id, { status: 'idle' })
+      await manager.sendMessage(thread.id, 'again')
+      await flushMicrotasks()
+      expect(queryFn).toHaveBeenCalledTimes(2)
+      expect(serversOf(queryFn, 1)['linear']).toEqual(linear)
+      expect(Object.keys(serversOf(queryFn, 1))).not.toContain('neon')
+      expect(settingsOf(queryFn, 1)).toEqual({ deniedMcpServers: [{ serverName: 'neon' }] })
+
+      manager.dispose()
+      fakes.forEach((fake) => fake.release())
+      await flushMicrotasks()
+    })
+
+    it('with no account, reads the inherited config folder the runtime itself reads', async () => {
+      const previous = process.env['CLAUDE_CONFIG_DIR']
+      process.env['CLAUDE_CONFIG_DIR'] = '/inherited/config'
+      try {
+        const loader = jest.fn((): Record<string, McpServerConfig> => ({ linear }))
+        const queryFn = jest.fn((): Query => makeFakeQuery() as unknown as Query)
+        const manager = new AgentManager(store, credentialsStub, broker, {
+          queryFn: queryFn as unknown as QueryFunction,
+          loadExternalMcpServers: loader,
+        })
+        expect(manager.connectorContext(tempDir)).toMatchObject({ ok: true, configDir: '/inherited/config' })
+        const thread = store.createThread({ projectRoot: tempDir })
+        await manager.sendMessage(thread.id, 'go')
+        await flushMicrotasks()
+        expect(loader).toHaveBeenCalledWith(tempDir, '/inherited/config')
+        manager.dispose()
+
+        delete process.env['CLAUDE_CONFIG_DIR']
+        expect(manager.connectorContext(tempDir)).toMatchObject({ ok: true, configDir: null })
+      } finally {
+        if (previous === undefined) delete process.env['CLAUDE_CONFIG_DIR']
+        else process.env['CLAUDE_CONFIG_DIR'] = previous
+      }
+    })
+
+    it('turning back on a connector left out at start restarts, since it cannot be done live', async () => {
+      const { fakes, queryFn, manager } = harness()
+      const thread = store.createThread({ projectRoot: tempDir })
+      store.setConnectorsOff(thread.id, ['neon'])
+      await manager.sendMessage(thread.id, 'go')
+      await flushMicrotasks()
+      expect(Object.keys(serversOf(queryFn, 0))).not.toContain('neon')
+
+      store.setConnectorsOff(thread.id, [])
+      await manager.applyThreadConnector(thread.id, 'neon', true)
+      expect(fakes[0].toggleMcpServer).not.toHaveBeenCalled()
+
+      store.updateThread(thread.id, { status: 'idle' })
+      await manager.sendMessage(thread.id, 'again')
+      await flushMicrotasks()
+      expect(queryFn).toHaveBeenCalledTimes(2)
+      expect(serversOf(queryFn, 1)['neon']).toEqual(neon)
+
+      manager.dispose()
+      fakes.forEach((fake) => fake.release())
+      await flushMicrotasks()
+    })
+  })
+
   describe('asking, switched per conversation while it runs', () => {
     function liveHarness(): { fakes: FakeQuery[]; queryFn: jest.Mock } {
       const fakes: FakeQuery[] = []

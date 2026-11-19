@@ -695,4 +695,41 @@ describe('PermissionBroker', () => {
       expect(broker.listRules(PROJECT_ROOT)).toEqual([])
     })
   })
+
+  describe('connector tools marked ask-first (plan_connectors note 4)', () => {
+    const SAVE = 'mcp__linear__save_issue'
+
+    it('a saved allow rule runs the tool while it is not marked…', async () => {
+      insertRule(db, { toolName: SAVE, pattern: null, verdict: 'allow' })
+      broker.setAskFirstLookup(() => false)
+      const result = await callTool(SAVE, {})
+      expect(result.behavior).toBe('allow')
+      expect(requests).toEqual([])
+    })
+
+    it('…and asks once it is marked, even with that rule', async () => {
+      insertRule(db, { toolName: SAVE, pattern: null, verdict: 'allow' })
+      const asked: Array<[string, string]> = []
+      broker.setAskFirstLookup((threadId, toolName) => {
+        asked.push([threadId, toolName])
+        return toolName === SAVE
+      })
+      const { result, request } = await callAndPark(SAVE, {})
+      expect(asked).toEqual([[THREAD_ID, SAVE]])
+      broker.respond(request.requestId, 'allow-always')
+      await expect(result).resolves.toMatchObject({ behavior: 'allow' })
+      // An "always" on an ask-first tool is not remembered: the next call asks again.
+      expect(broker.listRules(PROJECT_ROOT).filter((rule) => rule.toolName === SAVE)).toHaveLength(1)
+      await callAndPark(SAVE, {})
+    })
+
+    it('a lookup that throws asks rather than runs', async () => {
+      insertRule(db, { toolName: SAVE, pattern: null, verdict: 'allow' })
+      jest.spyOn(console, 'error').mockImplementation(() => undefined)
+      broker.setAskFirstLookup(() => {
+        throw new Error('boom')
+      })
+      await callAndPark(SAVE, {})
+    })
+  })
 })

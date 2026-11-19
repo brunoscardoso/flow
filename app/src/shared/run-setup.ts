@@ -33,7 +33,17 @@ export interface RunStep {
   kind?: 'service' | 'once'
   /** One-time actions only: show the command and ask before running it. */
   confirm?: boolean
+  /**
+   * What `command` holds. Absent (or 'command'): one command line, as before.
+   * 'script': a whole script — several lines, run as ONE file (never line by
+   * line), its first line naming the program when it starts with `#!`. One-time
+   * actions only. Older builds ignore the field and pass the text to the shell.
+   */
+  body?: RunBody
 }
+
+/** What a step's text is: one command line, or a whole script. */
+export type RunBody = 'command' | 'script'
 
 /** True for a one-time action — never started by Run. */
 export function isOnceStep(step: Pick<RunStep, 'kind'>): boolean {
@@ -48,6 +58,8 @@ export interface RunSetup {
 /** One person's (or one conversation's) change to a shared step. `ready: null` removes the check. */
 export interface RunTweak {
   command?: string
+  /** What the tweak's `command` is; absent reads as a command line. Only read alongside `command`. */
+  body?: RunBody
   skip?: boolean
   ready?: RunReady | null
 }
@@ -86,6 +98,8 @@ export interface ResolvedRunStep {
   kind?: 'once'
   /** One-time actions only: ask before running. */
   confirm?: boolean
+  /** Set (one-time actions only) when `command` is a whole script, run as one file. */
+  body?: 'script'
 }
 
 export type RunStepStatus =
@@ -148,6 +162,36 @@ export function clampReadyTimeout(ms: number | undefined): number {
 
 export function emptyRunSetup(): RunSetup {
   return { version: 1, steps: [] }
+}
+
+// ─── scripts ─────────────────────────────────────────────────────────────────
+
+/**
+ * A script as it is kept: its inner lines and their indentation exactly as
+ * written, with only the blank lines before the first line and the blank
+ * space after the last one taken off. Windows line endings read as plain ones.
+ */
+export function normalizeScript(text: string): string {
+  return text
+    .replace(/\r\n?/g, '\n')
+    .replace(/^(?:[ \t]*\n)+/, '')
+    .trimEnd()
+}
+
+/** How many lines a script has (an empty one has none). */
+export function scriptLineCount(text: string): number {
+  const script = normalizeScript(text)
+  return script === '' ? 0 : script.split('\n').length
+}
+
+/** True when the text spans more than one line once blank edges are gone — a script, not a command. */
+export function isMultiline(text: string): boolean {
+  return normalizeScript(text).includes('\n')
+}
+
+/** True when a script names its own program on its first line. */
+export function scriptHasShebang(script: string): boolean {
+  return normalizeScript(script).startsWith('#!')
 }
 
 // ─── ids ─────────────────────────────────────────────────────────────────────
@@ -219,11 +263,6 @@ function parseStepEntry(
     problems.push(`Step ${position} has no name and was left out.`)
     return null
   }
-  const command = typeof entry.command === 'string' ? entry.command.trim() : ''
-  if (command === '') {
-    problems.push(`The step "${name}" has nothing to run and was left out.`)
-    return null
-  }
   let kind: 'service' | 'once' = 'service'
   if (entry.kind === 'once') kind = 'once'
   else if (entry.kind !== undefined && entry.kind !== null && entry.kind !== 'service') {
@@ -231,6 +270,21 @@ function parseStepEntry(
     // something that was never meant to start with Run.
     problems.push(`The step "${name}" is of a kind this version of Flow can't run, so it was left out.`)
     return null
+  }
+  // A script keeps its lines and indentation; a command line is trimmed. A
+  // running step never holds a script: it keeps its text and runs it as one
+  // command, as a build that knows nothing of scripts would (and says so).
+  // Any other value is read as a command, also as an older build would.
+  const wantsScript = entry.body === 'script'
+  const script = wantsScript && kind === 'once'
+  const rawCommand = typeof entry.command === 'string' ? entry.command : ''
+  const command = script ? normalizeScript(rawCommand) : rawCommand.trim()
+  if (command === '') {
+    problems.push(`The step "${name}" has nothing to run and was left out.`)
+    return null
+  }
+  if (wantsScript && !script) {
+    problems.push(`The step "${name}" holds a script, but only one-time actions run scripts, so it runs as one command.`)
   }
   // A one-time action never waits to be ready: its check (if any) is ignored.
   const parsedReady: { ready?: RunReady; problem?: string } = kind === 'once' ? {} : parseReady(entry.ready)
@@ -255,6 +309,7 @@ function parseStepEntry(
   if (kind === 'once') {
     step.kind = 'once'
     if (entry.confirm === true) step.confirm = true
+    if (script) step.body = 'script'
   }
   if (parsedReady.ready !== undefined) step.ready = parsedReady.ready
   if (entry.disabled === true) step.disabled = true
@@ -360,6 +415,7 @@ export function serializeRunSetup(setup: RunSetup): string {
     if (step.kind === 'once') {
       out.kind = 'once'
       if (step.confirm === true) out.confirm = true
+      if (step.body === 'script') out.body = 'script'
     }
     if (step.ready !== undefined && step.kind !== 'once') {
       out.ready = step.ready.kind === 'port' ? { kind: 'port', port: step.ready.port } : { kind: 'line', text: step.ready.text }
@@ -443,14 +499,19 @@ function resolveEnabled(
     const skip = conversation?.skip ?? personal?.skip ?? step.disabled ?? false
     if (skip) continue
 
+    // The text and what it is travel together: the layer whose text wins says
+    // whether it is a script (a tweak that says nothing holds a command line).
     let command = step.command
+    let body: RunBody = step.body === 'script' ? 'script' : 'command'
     let commandFrom: RunLayer = 'shared'
     if (personal?.command !== undefined) {
       command = personal.command
+      body = personal.body === 'script' ? 'script' : 'command'
       commandFrom = 'personal'
     }
     if (conversation?.command !== undefined) {
       command = conversation.command
+      body = conversation.body === 'script' ? 'script' : 'command'
       commandFrom = 'conversation'
     }
 
@@ -484,6 +545,8 @@ function resolveEnabled(
     if (once) {
       out.kind = 'once'
       if (step.confirm === true) out.confirm = true
+      // Only a one-time action runs a script; a running step's text is one command.
+      if (body === 'script') out.body = 'script'
     }
     resolved.push(out)
   }
@@ -515,7 +578,8 @@ export function resolveOnceSteps(
 /**
  * Whether a one-time action should ask before running when it is first set
  * up: true for commands that change a database or its data — migrations,
- * schema pushes, seeds. A person can always change it.
+ * schema pushes, seeds — or delete things: a volume, a table, a folder. A
+ * script is read whole, every line. A person can always change it.
  */
 export function confirmByDefault(command: string): boolean {
   const text = command.toLowerCase().replace(/\s+/g, ' ').trim()
@@ -534,6 +598,12 @@ export function confirmByDefault(command: string): boolean {
     /\bseed(s|er|ing)?\b/,
     /\b(dbmate|goose|flyway|atlas) (up|down|migrate|apply|reset)\b/,
     /\bsupabase db (push|reset)\b/,
+    // Deleting: containers with their volumes, tables, whole folders.
+    /\bdown\b(?: -\S+)* (?:-v|--volumes)\b/,
+    /\bdrop (table|database|schema)\b/,
+    /\btruncate( table)?\b/,
+    /\brm -(?:[a-z]*r[a-z]*f|[a-z]*f[a-z]*r)\b/,
+    /\bmigrate[-:_ ]reset\b/,
   ]
   return patterns.some((pattern) => pattern.test(text))
 }
@@ -557,7 +627,14 @@ export function parseRunTweaks(raw: unknown): RunTweaks {
   for (const [stepId, value] of Object.entries(raw)) {
     if (!isRecord(value) || stepId === '') continue
     const tweak: RunTweak = {}
-    if (typeof value.command === 'string' && value.command.trim() !== '') tweak.command = value.command.trim()
+    if (typeof value.command === 'string' && value.command.trim() !== '') {
+      if (value.body === 'script') {
+        tweak.command = normalizeScript(value.command)
+        tweak.body = 'script'
+      } else {
+        tweak.command = value.command.trim()
+      }
+    }
     if (typeof value.skip === 'boolean') tweak.skip = value.skip
     if (value.ready === null) tweak.ready = null
     else if (value.ready !== undefined) {
@@ -660,3 +737,15 @@ export interface RunView {
 
 /** A Save's answer: the new view, or a plain sentence saying why nothing was saved. */
 export type RunSaveAnswer = { ok: true; view: RunView } | { ok: false; reason: string }
+
+/**
+ * A script the agent wrote for one one-time action, delivered to the Launchpad
+ * editor of ONE conversation. Never saved or run on its own: the person reviews
+ * it in the editor and saves it.
+ */
+export interface RunScriptProposal {
+  threadId: string
+  /** The one-time action's name, as the agent named it. */
+  action: string
+  script: string
+}

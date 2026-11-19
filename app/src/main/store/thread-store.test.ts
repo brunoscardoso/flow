@@ -2162,3 +2162,43 @@ describe('threadIdsReviewing (#1906 — who a repo\'s commit concerns)', () => {
     expect(threads.threadIdsReviewing(ROOT_A)).toEqual([thread.id])
   })
 })
+
+describe('ThreadStore.listConnectorToolUse', () => {
+  let tempDir: string
+  let db: FlowDatabase
+  let store: ThreadStore
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'flow-thread-store-connectors-'))
+    db = openDatabase(join(tempDir, 'flow.sqlite'))
+    store = new ThreadStore(db)
+  })
+  afterEach(() => {
+    db.close()
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  it('answers distinct connector tool names per chat of one project only', () => {
+    const one = store.createThread({ projectRoot: ROOT_A })
+    const two = store.createThread({ projectRoot: ROOT_A })
+    const other = store.createThread({ projectRoot: ROOT_B })
+    store.recordToolCall({ threadId: one.id, toolName: 'mcp__linear__list_issues' })
+    store.recordToolCall({ threadId: one.id, toolName: 'mcp__linear__list_issues' })
+    store.recordToolCall({ threadId: two.id, toolName: 'mcp__sentry__get_issue' })
+    store.recordToolCall({ threadId: two.id, toolName: 'Read' })
+    // `_` is a LIKE wildcard: a name that only looks like the prefix stays out.
+    store.recordToolCall({ threadId: two.id, toolName: 'mcpXXlinear' })
+    store.recordToolCall({ threadId: other.id, toolName: 'mcp__github__list_prs' })
+
+    const rows = store.listConnectorToolUse(ROOT_A)
+    expect(rows).toHaveLength(2)
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { threadId: one.id, toolName: 'mcp__linear__list_issues' },
+        { threadId: two.id, toolName: 'mcp__sentry__get_issue' },
+      ]),
+    )
+    expect(rows.some((row) => row.toolName === 'mcp__github__list_prs')).toBe(false)
+    expect(store.listConnectorToolUse(ROOT_A, 1)).toHaveLength(1)
+  })
+})

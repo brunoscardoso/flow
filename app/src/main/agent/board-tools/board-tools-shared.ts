@@ -40,6 +40,14 @@ export const SUBTASK_TOOL_NAME = 'start_subtask'
 export const RUN_OUTPUT_TOOL_NAME = 'run_output'
 export const RUN_RELOAD_TOOL_NAME = 'run_reload'
 
+/**
+ * The Launchpad script tool: on the `flow` server of every Claude thread
+ * session when the Launchpad is wired. It only puts a script into the open
+ * editor of the session's own conversation — it never saves or runs — so it
+ * never asks.
+ */
+export const LAUNCHPAD_SET_SCRIPT_TOOL_NAME = 'launchpad_set_script'
+
 /** The full, namespaced name the SDK reports for one of this server's tools. */
 export function flowToolName(base: string): string {
   return `mcp__${FLOW_MCP_SERVER_NAME}__${base}`

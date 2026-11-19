@@ -41,7 +41,7 @@ import { notifyEditorContextFlushed } from '../project/editor-context-flush'
 import { captureScreenRegion } from '../attachments/capture'
 import { isCaptureSupported } from '../attachments/capture-support'
 import { browserController } from '../browser/controller'
-import { captureScreenshot } from '../browser/screenshot'
+import { captureScreenshot, screenshotOptions } from '../browser/screenshot'
 import { importClaudeSessions } from '../claude-import'
 import { readSlowLog, recordSlow, timed } from './slow-handler'
 
@@ -1097,8 +1097,8 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
   handle('browser:reload', () => browserController.reload())
   handle('browser:setInspect', ({ on }) => browserController.setInspect(on))
   handle('browser:capabilities', () => browserController.capabilities())
-  handle('browser:captureScreenshot', () =>
-    captureScreenshot(browserController.currentGuest()),
+  handle('browser:captureScreenshot', (request) =>
+    captureScreenshot(browserController.currentGuest(), screenshotOptions(request)),
   )
   handle('browser:tagRecent', ({ kind, window }) => browserController.tagRecent(kind, window))
   handle('browser:tagEntry', ({ kind, id }) => browserController.tagEntry(kind, id))

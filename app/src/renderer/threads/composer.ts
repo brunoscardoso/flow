@@ -133,6 +133,7 @@ import {
 import { enterKeyIntent } from './composer-keys'
 import { createModelEffortMenu, type ModelEffortMenu } from './model-effort-menu'
 import { sendFailedToast } from './redo-feedback'
+import { createConnectorChip, type ConnectorChipHandle } from './connector-chip'
 import {
   ASKING_SWITCH_FAILED,
   AUTOPILOT_SWITCH_FAILED,
@@ -202,6 +203,8 @@ export class Composer {
   /** Autopilot for THIS conversation (its own column, off by default). */
   #autopilot = false
   #autopilotButton!: HTMLButtonElement
+  /** The chat's connectors (plan_connectors, Phase 6) — hidden off Claude. */
+  #connectorChip: ConnectorChipHandle = createConnectorChip({ mode: 'thread', className: 'fl-composer-switch' })
   /** Whether THIS conversation skips the ask before the agent acts. */
   #bypass = false
   #askingButton!: HTMLButtonElement
@@ -759,6 +762,7 @@ export class Composer {
     controls.appendChild(this.#modelEffort.element)
     controls.appendChild(this.#askingButton)
     controls.appendChild(this.#autopilotButton)
+    controls.appendChild(this.#connectorChip.element)
     controls.appendChild(attachButton)
     controls.appendChild(captureButton)
     controls.appendChild(blueprintButton)
@@ -959,6 +963,11 @@ export class Composer {
     // The thread's runtime decides mid-run sends; re-asked only when the
     // project changes, never per threads:updated batch (forbidden #14).
     if (thread?.projectRoot !== this.#threadProviderRoot) this.#resolveThreadProvider()
+    // The connectors chip follows the chat — a switch, never a same-thread
+    // refresh, so a threads:updated batch costs it nothing (forbidden #14).
+    if (switched) {
+      this.#connectorChip.setScope(thread === null ? null : { projectRoot: thread.projectRoot, threadId: thread.id })
+    }
     // The open-file chip depends on the thread's roots — repaint on a switch
     // or a new project only, never on a same-thread refresh (forbidden #14).
     if (switched || thread?.projectRoot !== previous?.projectRoot) this.#renderChips()
@@ -1054,6 +1063,8 @@ export class Composer {
     const root = this.#thread?.projectRoot ?? null
     this.#threadProviderRoot = root
     this.#threadProvider = null
+    // The per-chat connector list is Claude's only; hidden until the runtime is known.
+    this.#connectorChip.setAvailable(false)
     this.#syncEnabled()
     const getProjectProvider = window.flow.settings.getProjectProvider
     if (root === null || getProjectProvider === undefined) return
@@ -1061,6 +1072,7 @@ export class Composer {
       .then(({ provider }) => {
         if (this.#threadProviderRoot !== root) return // the composer moved on
         this.#threadProvider = provider
+        this.#connectorChip.setAvailable(provider === 'claude')
         this.#syncEnabled()
       })
       .catch((error: unknown) => console.warn('flow: could not read the thread runtime', error))

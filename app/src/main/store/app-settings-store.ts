@@ -122,6 +122,21 @@ const RUN_TWEAKS_PREFIX = 'run_tweaks:'
 const RUN_USAGE_PREFIX = 'run_usage:'
 /** A project's Run setup — local to this computer, never shared (plan_project_run). */
 const RUN_SETUP_PREFIX = 'run_setup:'
+/**
+ * The tools of one connector a person marked to always ask first
+ * (plan_connectors), keyed by the account's config folder and the connector's
+ * name: `connector_ask_first:<account>::<connector>` → a JSON array of tool
+ * names. Flow's own permission data, never written into Claude's files.
+ * Key/value rows older builds ignore: no schema change.
+ */
+const CONNECTOR_ASK_FIRST_PREFIX = 'connector_ask_first:'
+/**
+ * The connector suggestions a person answered "Not now" to, per project:
+ * `connector_suggestions_dismissed:<projectRoot>` → a JSON array of
+ * `<connector name>|<reason kind>` fingerprints. Key/value rows older builds
+ * ignore: no schema change.
+ */
+const CONNECTOR_SUGGESTIONS_DISMISSED_PREFIX = 'connector_suggestions_dismissed:'
 /** The one order of Run steps across projects, as `<root>::<id>` references (plan_project_run). */
 const RUN_ORDER_KEY = 'run_order'
 
@@ -805,5 +820,55 @@ export class AppSettingsStore {
   setKnowledgeLastSyncedAt(scope: KnowledgeSyncScope, id: string, at: number): void {
     if (!Number.isFinite(at)) return
     this.#setString(`${KNOWLEDGE_LAST_SYNCED_PREFIX}${scope}:${id}`, new Date(at).toISOString())
+  }
+
+  /**
+   * The tools of `connector` that ask first for `account` (a config folder, or
+   * the connector service's name for the inherited one). Empty when none, or
+   * when the row is unreadable.
+   */
+  getConnectorAskFirst(account: string, connector: string): string[] {
+    const raw = this.#getString(`${CONNECTOR_ASK_FIRST_PREFIX}${account}::${connector}`)
+    if (raw === null) return []
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      return Array.isArray(parsed)
+        ? parsed.filter((item): item is string => typeof item === 'string' && item !== '')
+        : []
+    } catch {
+      return []
+    }
+  }
+
+  /** Mark or unmark one tool of a connector as ask-first. One row per connector. */
+  setConnectorAskFirst(account: string, connector: string, tool: string, on: boolean): void {
+    const key = `${CONNECTOR_ASK_FIRST_PREFIX}${account}::${connector}`
+    const next = new Set(this.getConnectorAskFirst(account, connector))
+    if (on) next.add(tool)
+    else next.delete(tool)
+    if (next.size === 0) this.#deleteKey(key)
+    else this.#setString(key, JSON.stringify([...next].sort()))
+  }
+
+  /** The suggestion fingerprints dismissed for a project. Empty when none, or when the row is unreadable. */
+  getDismissedConnectorSuggestions(projectRoot: string): string[] {
+    const raw = this.#getString(`${CONNECTOR_SUGGESTIONS_DISMISSED_PREFIX}${projectRoot}`)
+    if (raw === null) return []
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      return Array.isArray(parsed)
+        ? [...new Set(parsed.filter((item): item is string => typeof item === 'string' && item !== ''))]
+        : []
+    } catch {
+      return []
+    }
+  }
+
+  /** Replace the dismissed suggestion fingerprints for a project. An empty list removes the row. */
+  setDismissedConnectorSuggestions(projectRoot: string, fingerprints: readonly string[]): void {
+    const key = `${CONNECTOR_SUGGESTIONS_DISMISSED_PREFIX}${projectRoot}`
+    const clean = [...new Set(fingerprints.filter((item) => typeof item === 'string' && item !== ''))]
+    if (clean.length === 0) this.#deleteKey(key)
+    else this.#setString(key, JSON.stringify(clean))
   }
 }

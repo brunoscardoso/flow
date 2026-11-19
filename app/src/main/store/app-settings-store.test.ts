@@ -608,4 +608,14 @@ describe('the person’s app-wide worktree defaults', () => {
       expect(rows).toEqual([])
     })
   })
+
+  it('keeps dismissed connector suggestions per project', () => {
+    expect(store.getDismissedConnectorSuggestions('/work/a')).toEqual([])
+    store.setDismissedConnectorSuggestions('/work/a', ['linear|repo', 'linear|repo', 'sentry|files'])
+    expect(store.getDismissedConnectorSuggestions('/work/a')).toEqual(['linear|repo', 'sentry|files'])
+    expect(store.getDismissedConnectorSuggestions('/work/b')).toEqual([])
+    store.setDismissedConnectorSuggestions('/work/a', [])
+    expect(store.getDismissedConnectorSuggestions('/work/a')).toEqual([])
+    expect(db.prepare("SELECT key FROM app_settings WHERE key LIKE 'connector_suggestions_dismissed:%'").all()).toEqual([])
+  })
 })

@@ -13,6 +13,7 @@ import {
   groupHasRun,
   launchpadMenu,
   launchpadMenuEntries,
+  linesLabel,
   moveMenuFocus,
   onceAsk,
   onceOfTerminal,
@@ -291,6 +292,8 @@ function uiStrings(): string[] {
     for (const group of menu.groups) for (const item of group.items) all.push(item.title)
   }
   const ask = onceAsk(onceStep('migrate'))
+  const scriptAsk = onceAsk(onceStep('reset', { body: 'script', command: 'set -e\ndocker compose down -v' }))
+  all.push(scriptAsk.where, scriptAsk.run, linesLabel(1), linesLabel(12))
   all.push(ask.title, ask.where, onceAsk(onceStep('migrate', { cwd: '/work/.jupiter-threads/blue' })).where)
   // The sentence the page shows for a stored entry of a kind this build can't run.
   all.push(...parseRunSetup(JSON.stringify({ version: 1, steps: [{ name: 'x', command: 'y', kind: 'later' }] })).problems)
@@ -385,6 +388,8 @@ describe('the ask before a one-time action runs', () => {
       title: 'Run “migrate”?',
       where: "This runs in jupiter, in this conversation's checkout:",
       command: 'uv run alembic upgrade head',
+      script: false,
+      run: 'Run',
     })
     expect(onceAsk(onceStep('migrate')).where).toBe('This runs in jupiter, in its folder:')
   })
@@ -423,5 +428,24 @@ describe('a one-time action’s tab', () => {
     // Actions alone (no running steps) still order their tabs.
     const onlyOnce: RunGroupState = { scopeKey: 'k', active: false, steps: [], once: [onceState('migrate')] }
     expect(orderRunTabs(['plain-1', 'o-migrate'], (t) => t, onlyOnce).map((o) => o.kind)).toEqual(['once', 'plain'])
+  })
+})
+
+describe('scripts in the Launchpad menu and the ask', () => {
+  const SCRIPT = Array.from({ length: 12 }, (_, i) => `echo line ${i + 1}`).join('\n')
+
+  it('says "command" or "script · N lines" under each action', () => {
+    const v = withOnce(view([step('web', 'idle')]), [onceStep('lint'), onceStep('reset', { body: 'script', command: SCRIPT }), onceStep('one', { body: 'script', command: 'echo hi' })])
+    const items = launchpadMenu(v).groups[0]!.items
+    expect(items.map((item) => [item.name, item.detail, item.script])).toEqual([
+      ['lint', 'command', false],
+      ['reset', 'script · 12 lines', true],
+      ['one', 'script · 1 line', true],
+    ])
+  })
+
+  it('shows the whole script before it runs, with "Run script"', () => {
+    const ask = onceAsk(onceStep('reset', { body: 'script', command: SCRIPT }))
+    expect(ask).toMatchObject({ script: true, run: 'Run script', command: SCRIPT, where: 'This script runs in jupiter, in its folder:' })
   })
 })

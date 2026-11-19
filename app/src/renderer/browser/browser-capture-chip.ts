@@ -27,11 +27,13 @@ import type {
   BrowserElementPayload,
   BrowserNetworkPayload,
 } from '../../shared/browser-capture-types'
-import type { MessageAttachmentInput } from '../../shared/ipc-contract'
+import type { IpcRequest, MessageAttachmentInput } from '../../shared/ipc-contract'
+import type { DraftPickRect } from '../../shared/draft-pick'
+import { draftChipLabel, draftElementText, draftPictureLabel } from './draft-edit-model'
 
 /** The slice of the browser IPC surface this model needs. */
 export interface CaptureChipBrowserApi {
-  captureScreenshot(request: Record<string, never>): Promise<MessageAttachmentInput | null>
+  captureScreenshot(request: IpcRequest<'browser:captureScreenshot'>): Promise<MessageAttachmentInput | null>
   onTagPosted(listener: (capture: BrowserCapture) => void): () => void
 }
 
@@ -90,6 +92,10 @@ function consoleText(p: BrowserConsolePayload): string {
 }
 
 function elementText(p: BrowserElementPayload): string {
+  // A UI draft has no source file and no component: the agent edits the screen
+  // file, and finds the element by its stamped id — never by a selector, which
+  // can match another element after an edit (note 8).
+  if (p.draft !== undefined) return draftElementText(p.domSummary, p.draft)
   const lines: string[] = [`Component: ${p.componentPath}`]
   if (typeof p.sourceFile === 'string' && p.sourceFile.length > 0) {
     lines.push(`Source: ${p.sourceFile}${typeof p.sourceLine === 'number' ? `:${String(p.sourceLine)}` : ''}`)
@@ -118,6 +124,13 @@ function contextOf(capture: BrowserCapture): { label: string; text: string } {
         text: consoleText(capture.payload),
       }
     case 'element':
+      if (capture.payload.draft !== undefined) {
+        const draft = capture.payload.draft
+        return {
+          label: truncate(draftChipLabel(draft.screenTitle ?? draft.screen, draft)),
+          text: elementText(capture.payload),
+        }
+      }
       return {
         label: truncate(`Element ${capture.payload.componentPath}`),
         text: elementText(capture.payload),
@@ -159,6 +172,44 @@ function dropCapture(capture: BrowserCapture, browser: CaptureChipBrowserApi): v
   const { label, text } = contextOf(bounded)
   dispatch('flow:add-to-chat', { source: 'browser', label, text })
   if (bounded.kind === 'element') void attachElementExtras(bounded.payload, browser)
+}
+
+/**
+ * "Ask the agent" about a draft element: one chip naming the canvas, the screen
+ * file and the element's id, and a picture of that screen — cropped to its
+ * frame when it was picked in the canvas (`rect`), the whole page when the
+ * screen is open alone.
+ *
+ * The picture is attached whatever the thread's runtime: the composer's image
+ * path (`flow:attach-image`) does not ask the runtime either, and the element
+ * capture chip has always attached its screenshot the same way.
+ */
+export async function askAgentAboutDraft(
+  payload: BrowserElementPayload,
+  browser: CaptureChipBrowserApi,
+  rect: DraftPickRect | null,
+): Promise<void> {
+  const draft = payload.draft
+  if (draft === undefined) return
+  const capture: BrowserElementCapture = {
+    id: `element:draft:${draft.screen}#${draft.id}`,
+    kind: 'element',
+    componentPath: payload.componentPath,
+    redacted: false,
+    payload,
+  }
+  const bounded = redactAndBound(capture)
+  const { label, text } = contextOf(bounded)
+  dispatch('flow:add-to-chat', { source: 'browser', label, text })
+  try {
+    const shot = await browser.captureScreenshot({
+      fileName: draftPictureLabel(draft.screenTitle ?? draft.screen),
+      ...(rect === null ? {} : { rect }),
+    })
+    if (shot) dispatch('flow:attach-image', shot)
+  } catch (error) {
+    console.warn('flow: draft screen picture failed', error)
+  }
 }
 
 /**

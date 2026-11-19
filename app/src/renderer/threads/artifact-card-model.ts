@@ -19,6 +19,7 @@ import type {
 } from '../../shared/ipc-contract'
 import { isWalkthroughBeingWritten, walkthroughPathFor } from '../../shared/walkthrough-page'
 import { quoteMentionPath } from './mention-quoting'
+import { uiDraftsCanvasFor } from './ui-drafts-card-model'
 
 /**
  * The doc's `## Story` state relative to the compiled story.json:
@@ -60,6 +61,10 @@ export interface ArtifactCardModel {
   /** The doc's artifact door (generate / writing / open), or null when the
    *  doc is not a discovery. See `deriveFeatureViewAction`. */
   featureViewAction: ArtifactFeatureViewAction | null
+  /** The canvas this discovery's UI drafts live in (`flow/drafts/<slug>/`),
+   *  or null when the doc is not a discovery. The `/ui-draft` skill derives
+   *  the same slug from the same feature name. See `uiDraftsCanvasFor`. */
+  uiDraftsCanvas: string | null
   /** A plan's description for the card — its Overview's first paragraph (or
    *  its Intent goal), as plain text; null for other kinds or when the plan
    *  has neither. See `planSummary`. */
@@ -227,6 +232,21 @@ export function artifactCommandFor(docPath: string): string {
   return `/artifact @${quoteMentionPath(docPath)}`
 }
 
+/** The card button that asks the thread's agent to draft the feature's screens. */
+export const UI_DRAFTS_GENERATE_LABEL = 'Generate UI drafts'
+
+/** The same button once the canvas is complete. */
+export const UI_DRAFTS_OPEN_LABEL = 'Open UI drafts'
+
+/**
+ * The message Generate UI drafts sends into the card's thread — the `/ui-draft`
+ * command naming the discovery by its repo-relative path, in the same
+ * `@`-reference spelling as `artifactCommandFor`.
+ */
+export function uiDraftsCommandFor(docPath: string): string {
+  return `/ui-draft @${quoteMentionPath(docPath)}`
+}
+
 /**
  * Where a discovery's artifact stands:
  *   - `generate` — there is no page yet; the card offers to have one written.
@@ -335,6 +355,7 @@ export function buildArtifactModel(
       // stops spinning on a page an interrupted turn left half-filled.
       isWalkthroughBeingWritten(event.walkthroughWriting === true, event.walkthroughMtime, now),
     ),
+    uiDraftsCanvas: uiDraftsCanvasFor(event.kind, feature),
     summary: event.kind === 'plan' && docText !== null ? planSummary(docText) : null,
   }
 }
@@ -692,7 +713,7 @@ export function selectedDocOf(
 }
 
 /** One button in the card's action row. */
-export type ArtifactRowAction = 'create-plan' | 'review-change' | 'execute-plan' | 'open-doc' | 'artifact'
+export type ArtifactRowAction = 'create-plan' | 'review-change' | 'execute-plan' | 'open-doc' | 'artifact' | 'ui-drafts'
 
 export interface ArtifactRowInput {
   /** The kind of the selected document. */
@@ -703,6 +724,8 @@ export interface ArtifactRowInput {
   openDoc: boolean
   /** Whether the card's discovery has an artifact door. */
   artifact: boolean
+  /** Whether the card's discovery offers UI drafts (Generate / Writing / Open). */
+  uiDrafts?: boolean
   /** The selected plan's note counts, or null while unknown / unreadable. */
   notes: PlanNoteCounts | null
   /**
@@ -750,6 +773,7 @@ export function artifactRowActions(input: ArtifactRowInput): ArtifactRowAction[]
   }
   if (input.openDoc) row.push('open-doc')
   if (input.selected === 'discovery' && input.artifact) row.push('artifact')
+  if (input.selected === 'discovery' && input.uiDrafts === true) row.push('ui-drafts')
   return row
 }
 

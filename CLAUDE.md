@@ -19,6 +19,7 @@ Use slash commands to invoke skills:
 | `/brainstorm` | Free-form idea exploration with collaborative dialogue |
 | `/note` | Manual brain entry (capture meeting notes, ideas, brainstorms) |
 | `/artifact` | Write a discovery's artifact — the walkthrough page of what users will see (on request) |
+| `/ui-draft` | Draft a feature's screens as look-alike HTML on a canvas, from a discovery or a request (on request) |
 | `/learn` | Extract reusable patterns from current session |
 | `/heartbeat` | Manage scheduled automated tasks via the heartbeat daemon |
 | `/resume-work` | Resume interrupted work using saved execution state |

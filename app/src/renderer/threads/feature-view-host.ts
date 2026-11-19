@@ -62,6 +62,7 @@ import {
   featureViewPageChange,
   featureViewTabId,
   featureViewTabLabel,
+  pageShowsCanvas,
   featureViewsToClose,
   type FeatureViewPageState,
 } from './feature-view-refresh'
@@ -812,6 +813,27 @@ export function initFeatureViewHost(editorApi: EditorApi): void {
       // A new page may be newer than the shared one — that is when
       // "update it?" is asked, so the share is asked again with it.
       if (decision !== 'skip') askShareWhenSeen(entry)
+    }
+  })
+
+  // A DRAFT SCREEN SHOWN IN A STEP IS LIVE. When a canvas changes on disk (an
+  // agent redrawing it, a person editing it in place) an open artifact that
+  // shows a screen of it reloads — only on screen, otherwise it is marked stale
+  // (allowed-pattern #17). The page is read only to learn whether it names the
+  // canvas; a closed tab costs nothing.
+  window.flow?.drafts?.onChanged((event) => {
+    for (const [id, entry] of hosted) {
+      if (entry.rootPath !== event.rootPath || !entry.page.present) continue
+      const decision = decideFeatureViewRefresh({ tabOpen: editorApi.hasTab(id), onScreen: isOnScreen(entry) })
+      if (decision === 'skip') continue
+      void window.flow.project
+        .readFile({ rootPath: event.rootPath, relPath: entry.path, missingOk: true })
+        .then((file) => {
+          if (!pageShowsCanvas(file.content, event.canvas)) return
+          if (decision === 'now') showPage(entry)
+          else entry.stale = true
+        })
+        .catch((error: unknown) => console.warn('flow: could not check an artifact for a changed canvas', { error }))
     }
   })
 

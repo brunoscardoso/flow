@@ -235,6 +235,44 @@ describe('what is read and what is sent', () => {
     })
   })
 
+  it('shares the page without its draft slots: what the author is shown and what is sent are the same copy', async () => {
+    const withSlots =
+      '<!doctype html><html><body><section><h2>Home</h2><div data-flow-draft="demo/home"></div><p>Step one.</p></section>' +
+      "<section><h2>Missing</h2><div class=\"x\" data-flow-draft='demo/nope'></div></section></body></html>"
+    const shared = '<!doctype html><html><body><section><h2>Home</h2><p>Step one.</p></section><section><h2>Missing</h2></section></body></html>'
+    const files = { ...FILES, [join(ROOT, PAGE)]: withSlots }
+    // The positive first: the page on disk does carry the slots.
+    expect(withSlots).toContain('data-flow-draft=')
+    const look = harness({ files, respond: () => ({ status: 404, json: { error: 'not-found' } }) })
+    const seen = await look.client.get(ROOT, DOC)
+    if (!seen.ok) throw new Error('get refused')
+    expect(seen.local.files[0]).toEqual({
+      part: 'walkthrough',
+      name: 'discovery_feature-view-sharing_v2.walkthrough.html',
+      bytes: bytes(shared),
+      sha256: sha(shared),
+    })
+
+    const h = harness({ files, respond: () => ({ status: 201, json: summary() }) })
+    const result = await h.client.publish({
+      rootPath: ROOT,
+      docPath: DOC,
+      reviewed: { ...REVIEWED, walkthroughBytes: bytes(shared), walkthroughSha256: sha(shared) },
+      notify: false,
+    })
+    expect(result).toEqual({ ok: true, share: summary() })
+    const body = JSON.parse(h.requests[0]?.body ?? '{}') as { walkthroughHtml?: string }
+    expect(body.walkthroughHtml).toBe(shared)
+    expect(body.walkthroughHtml).not.toContain('data-flow-draft')
+  })
+
+  it('a page without draft slots is shared byte for byte', async () => {
+    const h = harness({ respond: () => ({ status: 404, json: { error: 'not-found' } }) })
+    const seen = await h.client.get(ROOT, DOC)
+    if (!seen.ok) throw new Error('get refused')
+    expect(seen.local.files[0]?.sha256).toBe(sha(WALKTHROUGH))
+  })
+
   it('refuses a path that is not a discovery doc in a known root, reading nothing', async () => {
     const ok = harness({ respond: () => ({ status: 404, json: { error: 'not-found' } }) })
     expect((await ok.client.get(ROOT, DOC)).ok).toBe(true)

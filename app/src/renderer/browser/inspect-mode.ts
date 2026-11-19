@@ -17,7 +17,12 @@
  * can turn it into a composer chip. No chip is built here.
  */
 import type { BrowserElementPayload } from '../../shared/browser-capture-types'
+import { parseDraftCanvasPick, type DraftCanvasPick } from '../../shared/draft-pick'
+import { DRAFT_CANVAS_HISTORY, parseDraftHistoryRequest, type DraftHistoryRequest } from '../../shared/draft-history-messages'
 import {
+  BROWSER_DRAFT_HISTORY,
+  BROWSER_DRAFT_INSPECT,
+  BROWSER_DRAFT_PICK,
   BROWSER_RECORD_INTERACTION,
   type BrowserInteractionEvent,
   BROWSER_INSPECT_CAPTURE,
@@ -42,6 +47,9 @@ interface InspectBrowserApi {
 
 export type ElementCaptureListener = (payload: BrowserElementPayload) => void
 export type DeactivateListener = () => void
+export type DraftPickListener = (pick: DraftCanvasPick) => void
+export type DraftInspectListener = (on: boolean) => void
+export type DraftHistoryListener = (request: DraftHistoryRequest) => void
 
 export interface InspectMode {
   /** Activate/deactivate inspect mode — routes to the guest via main. */
@@ -50,6 +58,12 @@ export interface InspectMode {
   onElementCapture(listener: ElementCaptureListener): () => void
   /** Register a consumer for "the guest ended inspect itself" (Escape). */
   onDeactivated(listener: DeactivateListener): () => void
+  /** Register a consumer of picks made inside a draft canvas's screen frames. */
+  onDraftPick(listener: DraftPickListener): () => void
+  /** Register a consumer of the draft canvas's own inspect toggle. */
+  onDraftInspect(listener: DraftInspectListener): () => void
+  /** Register a consumer of the canvas page's history requests (undo, versions). */
+  onDraftHistory(listener: DraftHistoryListener): () => void
   /** Detach the webview listener and drop all consumers. */
   dispose(): void
 }
@@ -57,6 +71,19 @@ export interface InspectMode {
 export function initInspectMode(webview: InspectWebview, browser: InspectBrowserApi): InspectMode {
   const captureListeners = new Set<ElementCaptureListener>()
   const deactivateListeners = new Set<DeactivateListener>()
+  const draftPickListeners = new Set<DraftPickListener>()
+  const draftInspectListeners = new Set<DraftInspectListener>()
+  const draftHistoryListeners = new Set<DraftHistoryListener>()
+
+  function notify<T>(listeners: Set<(value: T) => void>, value: T, what: string): void {
+    for (const listener of listeners) {
+      try {
+        listener(value)
+      } catch (error) {
+        console.error(`flow: browser ${what} listener failed`, error)
+      }
+    }
+  }
 
   const onIpcMessage = (event: Event): void => {
     const message = event as WebviewIpcMessageEvent
@@ -68,6 +95,23 @@ export function initInspectMode(webview: InspectWebview, browser: InspectBrowser
           console.error('flow: browser inspect deactivate listener failed', error)
         }
       }
+      return
+    }
+    // UI drafts: a pick inside a canvas's screen frame, relayed by the guest
+    // preload from the canvas page. Validated again here — the guest is a page.
+    if (message.channel === BROWSER_DRAFT_PICK) {
+      const pick = parseDraftCanvasPick(message.args[0])
+      if (pick !== null) notify(draftPickListeners, pick, 'draft pick')
+      return
+    }
+    if (message.channel === BROWSER_DRAFT_HISTORY) {
+      const request = parseDraftHistoryRequest({ ...(message.args[0] as object), type: DRAFT_CANVAS_HISTORY })
+      if (request !== null) notify(draftHistoryListeners, request, 'draft history')
+      return
+    }
+    if (message.channel === BROWSER_DRAFT_INSPECT) {
+      const state = message.args[0] as { on?: unknown } | undefined
+      notify(draftInspectListeners, state?.on === true, 'draft inspect')
       return
     }
     // ── A CLICK ON ITS WAY TO A LIVE DEBUG SESSION ─────────────────────────
@@ -124,10 +168,31 @@ export function initInspectMode(webview: InspectWebview, browser: InspectBrowser
         deactivateListeners.delete(listener)
       }
     },
+    onDraftPick(listener) {
+      draftPickListeners.add(listener)
+      return () => {
+        draftPickListeners.delete(listener)
+      }
+    },
+    onDraftInspect(listener) {
+      draftInspectListeners.add(listener)
+      return () => {
+        draftInspectListeners.delete(listener)
+      }
+    },
+    onDraftHistory(listener) {
+      draftHistoryListeners.add(listener)
+      return () => {
+        draftHistoryListeners.delete(listener)
+      }
+    },
     dispose() {
       webview.removeEventListener('ipc-message', onIpcMessage)
       captureListeners.clear()
       deactivateListeners.clear()
+      draftPickListeners.clear()
+      draftInspectListeners.clear()
+      draftHistoryListeners.clear()
     },
   }
 }

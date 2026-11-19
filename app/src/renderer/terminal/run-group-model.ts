@@ -7,14 +7,15 @@
  *
  * Main owns the Run (allowed-pattern #14); this only draws the state it reports.
  */
-import type {
-  ResolvedRunStep,
-  RunGroupState,
-  RunOnceState,
-  RunStepState,
-  RunStepStatus,
-  RunSuggestion,
-  RunView,
+import {
+  scriptLineCount,
+  type ResolvedRunStep,
+  type RunGroupState,
+  type RunOnceState,
+  type RunStepState,
+  type RunStepStatus,
+  type RunSuggestion,
+  type RunView,
 } from '../../shared/run-setup'
 
 // ─── strings ─────────────────────────────────────────────────────────────────
@@ -39,6 +40,8 @@ export const RUN_STRINGS = {
   onceRunTitle: 'Run this once, in its own tab',
   confirmCancel: 'Cancel',
   confirmRun: 'Run',
+  confirmRunScript: 'Run script',
+  bodyCommand: 'command',
   reloadAll: 'Reload all',
   reloadAllTitle: 'Restart every step, in order',
   stopAll: 'Stop all',
@@ -65,6 +68,16 @@ export function countWord(n: number): string {
 
 function plural(n: number, one: string, many: string): string {
   return n === 1 ? one : many
+}
+
+/** "12 lines", "1 line". */
+export function linesLabel(count: number): string {
+  return `${count} ${plural(count, 'line', 'lines')}`
+}
+
+/** What a one-time action holds, as the Launchpad menu says it: "command", or "script · 12 lines". */
+export function onceBodyLabel(step: Pick<ResolvedRunStep, 'body' | 'command'>): string {
+  return step.body === 'script' ? `script · ${linesLabel(scriptLineCount(step.command))}` : RUN_STRINGS.bodyCommand
 }
 
 // ─── the pill ────────────────────────────────────────────────────────────────
@@ -343,8 +356,12 @@ export function stepOfTerminal(state: RunGroupState | null, terminalId: string |
 export interface LaunchpadMenuItem {
   key: string
   name: string
-  /** The person's own command — data, shown in mono. */
+  /** The person's own command or script — data. */
   command: string
+  /** The small text under its name: "command", or "script · 12 lines". */
+  detail: string
+  /** It holds a script (run as one file). */
+  script: boolean
   /** "asks first" is shown beside it. */
   asksFirst: boolean
   /** A run of it is going: pressing it shows its tab. */
@@ -387,6 +404,8 @@ export function launchpadMenu(view: RunView | null): LaunchpadMenu {
       key: step.key,
       name: step.name,
       command: step.command,
+      detail: onceBodyLabel(step),
+      script: step.body === 'script',
       asksFirst: step.confirm === true,
       running,
       disabled,
@@ -444,22 +463,33 @@ export function moveMenuFocus(current: number, count: number, key: 'ArrowDown' |
 export interface RunOnceAsk {
   title: string
   where: string
+  /** The command, or the WHOLE script — shown in full before anything runs. */
   command: string
+  /** It is a script: shown in a scrolling block, and the button says "Run script". */
+  script: boolean
+  /** The button that runs it. */
+  run: string
 }
 
 /**
  * The ask before a one-time action runs: its name, where it runs — the
  * conversation's checkout of its project, or the project's folder when it has
- * none — and the command itself.
+ * none — and the command itself, or the whole script.
  */
-export function onceAsk(step: Pick<ResolvedRunStep, 'name' | 'projectName' | 'projectRoot' | 'cwd' | 'command'>): RunOnceAsk {
+export function onceAsk(
+  step: Pick<ResolvedRunStep, 'name' | 'projectName' | 'projectRoot' | 'cwd' | 'command' | 'body'>,
+): RunOnceAsk {
   const checkout = step.cwd !== step.projectRoot
+  const script = step.body === 'script'
+  const what = script ? 'This script runs' : 'This runs'
   return {
     title: `Run “${step.name}”?`,
     where: checkout
-      ? `This runs in ${step.projectName}, in this conversation's checkout:`
-      : `This runs in ${step.projectName}, in its folder:`,
+      ? `${what} in ${step.projectName}, in this conversation's checkout:`
+      : `${what} in ${step.projectName}, in its folder:`,
     command: step.command,
+    script,
+    run: script ? RUN_STRINGS.confirmRunScript : RUN_STRINGS.confirmRun,
   }
 }
 

@@ -24,6 +24,11 @@ import {
   showAllLabel,
   addedAsLabel,
   validateDraft,
+  pasteIntoCommand,
+  switchBody,
+  stepText,
+  nameFromStep,
+  scriptHint,
   type RunSetupDraft,
 } from './run-setup-model'
 
@@ -529,5 +534,86 @@ describe('one-time actions in the draft', () => {
     ])
     expect(stepSuggestions(draft, step, suggestions).map((x) => x.command)).toEqual(['npm run storybook'])
     expect(offeredSuggestions(draft, suggestions).total).toBe(1)
+  })
+})
+
+describe('scripts in one-time actions', () => {
+  const SCRIPT = '#!/usr/bin/env bash\nset -euo pipefail\n\ndocker compose down -v\nuntil true; do\n  sleep 1\ndone\n'
+  function withAction(): { draft: RunSetupDraft; id: string } {
+    const draft = addOnceAction(startDraft(project()), { name: 'Reset' })
+    return { draft, id: draft.steps[draft.steps.length - 1]!.id }
+  }
+  const stepOf = (draft: RunSetupDraft, id: string) => draft.steps.find((step) => step.id === id)!
+
+  it('pasting several lines into the command field makes the action a script holding them', () => {
+    const { draft, id } = withAction()
+    const next = pasteIntoCommand(draft, id, SCRIPT)
+    expect(next).not.toBeNull()
+    expect(stepOf(next!, id)).toMatchObject({ body: 'script', script: SCRIPT, command: '' })
+    // Several lines change data: it asks first.
+    expect(stepOf(next!, id).confirm).toBe(true)
+    // One line is just a command; a running step never becomes a script.
+    expect(pasteIntoCommand(draft, id, 'npm run lint\n')).toBeNull()
+    expect(pasteIntoCommand(draft, draft.steps[0]!.id, SCRIPT)).toBeNull()
+  })
+
+  it('switching to Script and back loses nothing; a long script is never squashed into one line', () => {
+    const { draft, id } = withAction()
+    const typed = changeStep(draft, id, { command: 'make reset' })
+    const asScript = switchBody(typed, id, 'script')
+    expect(stepOf(asScript, id)).toMatchObject({ body: 'script', script: 'make reset' })
+    const written = changeStep(asScript, id, { script: SCRIPT })
+    const back = switchBody(written, id, 'command')
+    expect(stepOf(back, id)).toMatchObject({ body: 'command', command: 'make reset', script: SCRIPT })
+    expect(stepOf(switchBody(back, id, 'script'), id).script).toBe(SCRIPT)
+
+    // No command line yet: a one-line script moves into the field, a long one stays put.
+    const fresh = withAction()
+    const oneLine = switchBody(changeStep(switchBody(fresh.draft, fresh.id, 'script'), fresh.id, { script: '  npm run lint  \n' }), fresh.id, 'command')
+    expect(stepOf(oneLine, fresh.id).command).toBe('npm run lint')
+    const long = switchBody(changeStep(switchBody(fresh.draft, fresh.id, 'script'), fresh.id, { script: SCRIPT }), fresh.id, 'command')
+    expect(stepOf(long, fresh.id)).toMatchObject({ command: '', script: SCRIPT })
+    // A running step has no Script.
+    expect(switchBody(draft, draft.steps[0]!.id, 'script')).toBe(draft)
+  })
+
+  it('saves the chosen text: a script with its lines, a command trimmed', () => {
+    const { draft, id } = withAction()
+    const scripted = changeStep(switchBody(draft, id, 'script'), id, { script: `\n${SCRIPT}\n\n` })
+    const saved = saveChange(scripted).steps.find((step) => step.id === id)!
+    expect(saved).toMatchObject({ kind: 'once', body: 'script', command: SCRIPT.trimEnd() })
+    const commanded = changeStep(switchBody(scripted, id, 'command'), id, { command: '  make reset ' })
+    const savedCommand = saveChange(commanded).steps.find((step) => step.id === id)!
+    expect(savedCommand.body).toBeUndefined()
+    expect(savedCommand.command).toBe('make reset')
+  })
+
+  it('reads a saved script back into the editor, unchanged when nothing is touched', () => {
+    const base = project()
+    base.setup!.steps.push({ id: 'reset', name: 'Reset', command: SCRIPT.trimEnd(), start: 'now', kind: 'once', body: 'script' })
+    const draft = startDraft(base)
+    expect(stepOf(draft, 'reset')).toMatchObject({ body: 'script', script: SCRIPT.trimEnd(), command: '' })
+    expect(isDirty(draft)).toBe(false)
+    expect(isDirty(switchBody(draft, 'reset', 'command'))).toBe(true)
+  })
+
+  it('an empty script is named in the problems; a nameless one takes its first working line', () => {
+    const { draft, id } = withAction()
+    const empty = changeStep(switchBody(draft, id, 'script'), id, { script: '   \n' })
+    expect(validateDraft(empty)).toEqual(['“Reset” needs a script to run.'])
+    expect(nameFromStep({ body: 'script', command: '', script: SCRIPT })).toBe('compose')
+    expect(stepText({ body: 'script', command: 'x', script: 'y' })).toBe('y')
+  })
+
+  it('offers no command suggestions to a script', () => {
+    const { draft, id } = withAction()
+    const scripted = switchBody(draft, id, 'script')
+    const suggestion: RunSuggestion = { projectRoot: ROOT, projectName: 'jupiter', name: 'lint', command: 'npm run lint', source: 'package.json', use: 'once' }
+    expect(stepSuggestions(draft, id, [suggestion])).toHaveLength(1)
+    expect(stepSuggestions(scripted, id, [suggestion])).toEqual([])
+  })
+
+  it('the hint names the project, not a command line or a path', () => {
+    expect(scriptHint('jupiter-app')).toBe('Runs as one script in jupiter-app. The first line picks the program; without one, bash runs it.')
   })
 })

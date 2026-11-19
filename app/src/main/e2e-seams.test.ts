@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { automaticBasicDiscovery, E2E_RENDERER_ARG, e2eRendererArguments, e2eSeams } from './e2e-seams'
+import { automaticBasicDiscovery, E2E_RENDERER_ARG, e2eRendererArguments, e2eSeams, exposeE2EHandle } from './e2e-seams'
 
 describe('e2eSeams', () => {
   const g = globalThis as Record<string, unknown>
@@ -57,5 +57,26 @@ describe('e2eRendererArguments', () => {
     expect(preload).toContain(`const E2E_ARG = '${E2E_RENDERER_ARG}'`)
     expect(preload).toContain('process.argv.includes(E2E_ARG)')
     expect(preload).not.toContain('process.env.FLOW_E2E')
+  })
+})
+
+describe('exposeE2EHandle', () => {
+  const g = globalThis as Record<string, unknown>
+  afterEach(() => {
+    delete g['__flowE2EHandles']
+  })
+  const handle = { processChange: async () => true }
+
+  it('publishes a handle in a hidden, unpackaged run', () => {
+    expect(exposeE2EHandle('draftsObserver', handle, { FLOW_E2E: '1' }, false)).toBe(true)
+    expect((g['__flowE2EHandles'] as { draftsObserver?: unknown }).draftsObserver).toBe(handle)
+  })
+
+  it('publishes nothing outside a hidden run, or in a packaged app', () => {
+    // The positive first: the same call does publish in a hidden run (above).
+    expect(exposeE2EHandle('draftsObserver', handle, {}, false)).toBe(false)
+    expect(exposeE2EHandle('draftsObserver', handle, { FLOW_E2E: 'true' }, false)).toBe(false)
+    expect(exposeE2EHandle('draftsObserver', handle, { FLOW_E2E: '1' }, true)).toBe(false)
+    expect(g['__flowE2EHandles']).toBeUndefined()
   })
 })

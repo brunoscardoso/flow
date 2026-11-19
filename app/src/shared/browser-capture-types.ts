@@ -9,6 +9,7 @@
  * is a plain structural type (string, number, Record<string, string>, string[])
  * so both compilers accept it unchanged.
  */
+import type { DraftElementFacts } from './draft-pick'
 
 /** The three things a person can tag out of the embedded browser. */
 export type BrowserCaptureKind = 'element' | 'console' | 'network'
@@ -29,6 +30,24 @@ export interface BrowserElementPayload {
   domSummary: string
   /** Serialized React props, stringified per value to stay DOM-free. */
   props?: Record<string, string>
+  /**
+   * Present only for an element of a UI draft screen (it or an ancestor carries
+   * a stamped `data-flow-id`): the id and screen the agent and in-place edits
+   * address it by, never the selector. Ordinary pages never carry it.
+   */
+  draft?: BrowserDraftElement
+}
+
+/** A draft element: what the pick read, plus where it lives (filled by the host). */
+export interface BrowserDraftElement extends DraftElementFacts {
+  /** The screen's slug (its file is `<screen>.html`). */
+  screen: string
+  /** The canvas's slug — filled by the host from the page address. */
+  canvas?: string
+  /** The screen's title from the layout — filled by the host. */
+  screenTitle?: string
+  /** The screen file, relative to the project — filled by the host. */
+  file?: string
 }
 
 /** A captured console entry. */

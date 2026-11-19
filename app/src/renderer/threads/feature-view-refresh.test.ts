@@ -1,4 +1,4 @@
-import { decideFeatureViewRefresh, featureViewPageChange, featureViewTabId, featureViewTabLabel, featureViewsToClose } from './feature-view-refresh'
+import { decideFeatureViewRefresh, featureViewPageChange, featureViewTabId, featureViewTabLabel, featureViewsToClose, pageShowsCanvas } from './feature-view-refresh'
 
 describe('decideFeatureViewRefresh', () => {
   it('re-reads now when the view is on screen', () => {
@@ -110,5 +110,15 @@ describe('featureViewTabLabel', () => {
 
   it('falls back to the slug for a page with no version', () => {
     expect(featureViewTabLabel('pay', 'flow/discovery/discovery_pay.walkthrough.html')).toBe('pay')
+  })
+})
+
+describe('pageShowsCanvas', () => {
+  const page = '<div data-flow-draft="checkout/cart"></div><div data-flow-draft=\'other/home\'></div>'
+  it('is true only for a canvas a step names', () => {
+    expect(pageShowsCanvas(page, 'checkout')).toBe(true)
+    expect(pageShowsCanvas(page, 'other')).toBe(true)
+    expect(pageShowsCanvas(page, 'check')).toBe(false)
+    expect(pageShowsCanvas('<p>no screens</p>', 'checkout')).toBe(false)
   })
 })

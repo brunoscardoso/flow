@@ -25,6 +25,8 @@
  * `any` sprawl.
  */
 import type { BrowserElementPayload } from '../shared/browser-capture-types'
+import { readDraftElement, type DraftPickElement } from '../shared/draft-pick'
+import { DRAFT_ID_ATTRIBUTE, parseDraftPageUrl } from '../shared/ui-drafts'
 
 // ── React fiber shapes (untyped internals — narrow local interfaces) ─────────
 
@@ -213,7 +215,25 @@ export function captureElement(el: Element): BrowserElementPayload {
   }
   const props = serializeProps(fiber?.memoizedProps)
   if (props) payload.props = props
+  const draft = draftOf(el)
+  if (draft !== null) payload.draft = draft
   return payload
+}
+
+/**
+ * A draft screen's element: its stamped id (its own or its nearest
+ * ancestor's), the screen, and the values the edit panel shows. Only on a
+ * draft screen page, so every ordinary page keeps exactly today's payload.
+ */
+function draftOf(el: Element): BrowserElementPayload['draft'] | null {
+  const page = parseDraftPageUrl(globalThis.location?.href ?? '')
+  if (page === null || page.kind !== 'screen') return null
+  const facts = readDraftElement(
+    el as unknown as DraftPickElement,
+    (node) => getComputedStyle(node as unknown as Element),
+    DRAFT_ID_ATTRIBUTE,
+  )
+  return facts === null ? null : { ...facts, screen: page.screen }
 }
 
 // ── The picker: hover highlight + click-to-select (sticky) ───────────────────

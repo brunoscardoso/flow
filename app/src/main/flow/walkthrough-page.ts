@@ -34,6 +34,10 @@ import {
   withTheme,
   type WalkthroughPageRequest,
 } from '../../shared/walkthrough-page'
+import { FLOW_BROWSER_PARTITION } from '../../shared/browser-partition'
+import { DRAFTS_PAGE_HOST, flowPageHost } from '../../shared/ui-drafts'
+import { serveDraftRequest } from '../drafts/draft-serve'
+import { resolveArtifactDraftSlots } from '../drafts/artifact-slots'
 
 export {
   WALKTHROUGH_PAGE_SCHEME,
@@ -49,7 +53,9 @@ export {
  * remote images, remote fonts, frames and form posts all fail closed.
  */
 export const WALKTHROUGH_PAGE_CSP =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:"
+  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; " +
+  // Frames from the drafts host ONLY: a step's draft screen is shown live in one.
+  'frame-src flow-page://drafts'
 
 /** The outcome of resolving one request, before anything is read. */
 export type WalkthroughResolution =
@@ -76,6 +82,8 @@ export interface WalkthroughPageDeps {
   isKnownRoot: (rootPath: string) => boolean
   /** Async file read; injectable for tests. Defaults to fs/promises. */
   readFile?: (absPath: string) => Promise<string>
+  /** Async folder listing (names); injectable for tests. Defaults to fs/promises. */
+  readDir?: (absPath: string) => Promise<string[]>
 }
 
 function notFound(): Response {
@@ -91,12 +99,18 @@ function notFound(): Response {
  * nothing to the page about why.
  */
 export async function serveWalkthroughPage(url: string, deps: WalkthroughPageDeps): Promise<Response> {
+  const read = deps.readFile ?? ((absPath: string) => fsPromises.readFile(absPath, 'utf8'))
+  // ONE SCHEME, ONE ROOT GATE, A RULE PER HOST. The drafts host resolves
+  // through its own path rule (`resolveDraftPath`) and its own policies; the
+  // walkthrough host below keeps its single-segment rule exactly as it was.
+  if (flowPageHost(url) === DRAFTS_PAGE_HOST) {
+    return serveDraftRequest(url, { isKnownRoot: deps.isKnownRoot, readFile: read })
+  }
   const resolution = resolveWalkthroughRequest(url, deps.isKnownRoot)
   if (!resolution.ok) {
     console.warn('[WalkthroughPage] refused request', { url, reason: resolution.reason })
     return notFound()
   }
-  const read = deps.readFile ?? ((absPath: string) => fsPromises.readFile(absPath, 'utf8'))
   let html: string
   try {
     html = await read(resolution.absPath)
@@ -108,6 +122,12 @@ export async function serveWalkthroughPage(url: string, deps: WalkthroughPageDep
     })
     return notFound()
   }
+  // A step that names a draft screen gets it shown live (and badged when it
+  // changed since the plan) — resolved here, never by the page itself.
+  html = await resolveArtifactDraftSlots(html, resolution.request.root, resolution.request.path, {
+    readFile: read,
+    readDir: deps.readDir ?? ((absPath: string) => fsPromises.readdir(absPath)),
+  })
   const theme = resolution.request.theme
   return new Response(theme === undefined ? html : withTheme(html, theme), {
     headers: {
@@ -131,12 +151,23 @@ export function registerWalkthroughPageScheme(): void {
 }
 
 /**
- * Install the handler on the default session (after ready). Returns a dispose
- * function that unregisters it.
+ * Install the handler (after ready) on the default session AND on the built-in
+ * browser's partition session. A scheme handler is per session: without the
+ * second, a `flow-page://` load in the built-in browser fails silently with
+ * ERR_FAILED and no request ever reaches main (measured in the UI drafts
+ * spike). The scheme is already privileged app-wide, so no new registration is
+ * needed — one handler function, installed on both. Returns a dispose function
+ * that unregisters both.
  */
 export function handleWalkthroughPages(deps: WalkthroughPageDeps): () => void {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { protocol } = require('electron') as typeof import('electron')
-  protocol.handle(WALKTHROUGH_PAGE_SCHEME, (request) => serveWalkthroughPage(request.url, deps))
-  return () => protocol.unhandle(WALKTHROUGH_PAGE_SCHEME)
+  const { protocol, session } = require('electron') as typeof import('electron')
+  const serve = (request: Request): Promise<Response> => serveWalkthroughPage(request.url, deps)
+  protocol.handle(WALKTHROUGH_PAGE_SCHEME, serve)
+  const browserProtocol = session.fromPartition(FLOW_BROWSER_PARTITION).protocol
+  browserProtocol.handle(WALKTHROUGH_PAGE_SCHEME, serve)
+  return () => {
+    protocol.unhandle(WALKTHROUGH_PAGE_SCHEME)
+    browserProtocol.unhandle(WALKTHROUGH_PAGE_SCHEME)
+  }
 }

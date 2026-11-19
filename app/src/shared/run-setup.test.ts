@@ -2,8 +2,13 @@ import {
   DEFAULT_READY_TIMEOUT_MS,
   clampReadyTimeout,
   confirmByDefault,
+  isMultiline,
   mergeRunOrder,
   newStepId,
+  normalizeScript,
+  parseRunTweaks,
+  scriptHasShebang,
+  scriptLineCount,
   notHereSentence,
   parseRunSaveSteps,
   parseRunSetup,
@@ -359,5 +364,110 @@ describe('confirmByDefault', () => {
   it('does not ask for codegen, tests or an empty command', () => {
     for (const command of ['', 'npm run codegen', 'npx prisma generate', 'pytest', 'npm test', 'python manage.py makemigrations', 'npm run build'])
       expect([command, confirmByDefault(command)]).toEqual([command, false])
+  })
+})
+
+describe('scripts (body: script)', () => {
+  const SCRIPT = [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    '',
+    'until docker compose exec -T postgres pg_isready -U "$PGUSER" >/dev/null 2>&1; do',
+    "  echo 'waiting'; sleep 1",
+    'done',
+    '\tuv run alembic upgrade head',
+  ].join('\n')
+
+  it('round-trips a script with its newlines, indentation, variables and quotes', () => {
+    const setup: RunSetup = {
+      version: 1,
+      steps: [{ id: 'reset', name: 'Reset', command: SCRIPT, start: 'now', kind: 'once', confirm: true, body: 'script' }],
+    }
+    const text = serializeRunSetup(setup)
+    expect(JSON.parse(text).steps[0].body).toBe('script')
+    const { setup: back, problems } = parseRunSetup(text)
+    expect(problems).toEqual([])
+    expect(back).toEqual(setup)
+    expect(back.steps[0]!.command).toBe(SCRIPT)
+  })
+
+  it('trims only the blank space around the whole script, never the first line’s indentation', () => {
+    const raw = `\n\n   \n  echo one\n    echo two\n\n  \n`
+    const { setup } = parseRunSetup(JSON.stringify({ steps: [{ name: 'x', command: raw, kind: 'once', body: 'script' }] }))
+    expect(setup.steps[0]!.command).toBe('  echo one\n    echo two')
+    expect(normalizeScript('a\r\nb\r\n')).toBe('a\nb')
+  })
+
+  it('reads old data without the field unchanged, and writes no field for a command', () => {
+    const { setup } = parseRunSetup(JSON.stringify({ steps: [{ name: 'Lint', command: '  npm run lint ', kind: 'once' }] }))
+    expect(setup.steps[0]).toEqual({ id: 'lint', name: 'Lint', command: 'npm run lint', start: 'now', kind: 'once' })
+    expect(serializeRunSetup(setup)).not.toContain('body')
+  })
+
+  it('a running step never holds a script: it keeps its text as one command and says so', () => {
+    const { setup, problems } = parseRunSetup(JSON.stringify({ steps: [{ name: 'Web', command: '  npm run dev  ', body: 'script' }] }))
+    expect(setup.steps[0]).toEqual({ id: 'web', name: 'Web', command: 'npm run dev', start: 'now' })
+    expect(problems).toEqual(['The step "Web" holds a script, but only one-time actions run scripts, so it runs as one command.'])
+    expect(serializeRunSetup({ version: 1, steps: [{ id: 'w', name: 'W', command: 'x', start: 'now', body: 'script' }] })).not.toContain('body')
+  })
+
+  it('a body this build does not know reads as a command', () => {
+    const { setup, problems } = parseRunSetup(JSON.stringify({ steps: [{ name: 'X', command: ' x ', kind: 'once', body: 'python' }] }))
+    expect(setup.steps[0]!.body).toBeUndefined()
+    expect(setup.steps[0]!.command).toBe('x')
+    expect(problems).toEqual([])
+  })
+
+  it('resolves a script through, and a tweak carries its own body with its text', () => {
+    const setup: RunSetup = {
+      version: 1,
+      steps: [
+        { id: 'reset', name: 'Reset', command: SCRIPT, start: 'now', kind: 'once', body: 'script' },
+        { id: 'web', name: 'Web', command: 'npm run dev', start: 'now' },
+      ],
+    }
+    expect(resolveOnceSteps(project({ setup }))[0]).toMatchObject({ body: 'script', command: SCRIPT })
+    // A personal tweak with a plain command turns it back into a command line.
+    const plain = resolveOnceSteps(project({ setup, personal: { reset: { command: 'make reset' } } }))[0]!
+    expect(plain.body).toBeUndefined()
+    expect(plain.command).toBe('make reset')
+    // A conversation tweak that is a script wins over a personal command.
+    const conversation: Record<string, RunTweak> = { reset: { command: 'echo a\n  echo b', body: 'script' } }
+    const scripted = resolveOnceSteps(project({ setup, personal: { reset: { command: 'make reset' } }, conversation }))[0]!
+    expect(scripted).toMatchObject({ body: 'script', command: 'echo a\n  echo b', from: { command: 'conversation' } })
+    // A running step is never a script, whatever a tweak says.
+    const web = resolveRunSteps(project({ setup, personal: { web: { command: 'a\nb', body: 'script' } } }))[0]!
+    expect(web.body).toBeUndefined()
+  })
+
+  it('stored tweaks keep a script’s lines; a command tweak is trimmed', () => {
+    expect(parseRunTweaks({ a: { command: '\n  x\n  y\n\n', body: 'script' }, b: { command: '  z  ' } })).toEqual({
+      a: { command: '  x\n  y', body: 'script' },
+      b: { command: 'z' },
+    })
+  })
+
+  it('counts lines, tells multi-line text and a first-line program apart', () => {
+    expect(scriptLineCount(SCRIPT)).toBe(7)
+    expect(scriptLineCount('\n\n')).toBe(0)
+    expect(isMultiline('npm run lint\n')).toBe(false)
+    expect(isMultiline('a\nb')).toBe(true)
+    expect(scriptHasShebang(SCRIPT)).toBe(true)
+    expect(scriptHasShebang('echo hi')).toBe(false)
+  })
+
+  it('asks first for a script that deletes things, reading every line', () => {
+    expect(confirmByDefault(SCRIPT)).toBe(true) // alembic upgrade, on its last line
+    for (const text of [
+      'set -e\ndocker compose down -v\ndocker compose up -d',
+      'docker compose down --remove-orphans --volumes',
+      'psql -c "DROP TABLE users"',
+      'rm -rf ./data\nmkdir data',
+      'npm run migrate-reset',
+      'psql -c "TRUNCATE accounts"',
+    ])
+      expect([text, confirmByDefault(text)]).toEqual([text, true])
+    for (const text of ['docker compose down', 'echo hello\nnpm run build', 'rm build.log'])
+      expect([text, confirmByDefault(text)]).toEqual([text, false])
   })
 })

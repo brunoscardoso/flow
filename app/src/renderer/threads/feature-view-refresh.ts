@@ -101,3 +101,14 @@ export function decideFeatureViewRefresh(input: FeatureViewRefreshInput): Featur
   if (!input.tabOpen) return 'skip'
   return input.onScreen ? 'now' : 'defer'
 }
+
+/**
+ * Whether an artifact page shows a screen of this canvas — a step names one
+ * with `data-flow-draft="<canvas>/<screen>"`. Only such a page is reloaded when
+ * the canvas changes on disk; every other open artifact is left alone
+ * (allowed-pattern #17: reload only what the change can alter).
+ */
+export function pageShowsCanvas(pageHtml: string, canvas: string): boolean {
+  const escaped = canvas.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`data-flow-draft\\s*=\\s*["']${escaped}/`).test(pageHtml)
+}

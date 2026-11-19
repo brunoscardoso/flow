@@ -446,6 +446,17 @@ doc and stages a candidate on the next `blueprint features discover`.
 
 ---
 
+### Step 6d: Record the Draft Screens the Plan Read
+
+When the discovery's artifact (`<discovery-basename>.walkthrough.html`) shows draft screens at its steps (elements with `data-flow-draft`), the plan records which version of each screen it was written against, so the artifact can later say "Changed since the plan" on a screen that moved on.
+
+1. **Run it once, after the plan is saved** (`/create-plan` Step 5): `planflow-ai plan screens flow/plans/plan_<feature>_v<version>.md`. It finds the screens, hashes each one and writes a `## Draft screens` block after `## Intent`. Re-running replaces the block.
+2. **Never write the block by hand** — the verb is its one writer (forbidden-pattern #18).
+3. **Silent when there is nothing to record.** No artifact, no draft slots or no drawn screens means no block and no output; say nothing about it. A refusal prints one `plan refused: <reason>` line — report it and go on, the plan is still valid.
+4. The block changes nothing about the plan's phases or notes, and a screen changing later never changes the plan's hash.
+
+---
+
 ### Step 7: Record Plan Decisions
 
 When the user settles a question while the plan is being written (an

@@ -91,13 +91,26 @@ export function isExternalMcpServer(value: unknown): value is McpServerConfig {
   return false
 }
 
+/** The three file scopes, as the connector service names them. */
+export type ExternalMcpScope = 'user' | 'project' | 'local'
+
+/** One configured server and the scope whose file defined it (the winning one). */
+export interface ScopedExternalMcpServer {
+  config: McpServerConfig
+  scope: ExternalMcpScope
+}
+
 /** Fold one scope's `mcpServers` map into `into`, dropping the reserved `flow`
  *  name and any malformed entry. A non-object `servers` is a no-op. */
-function collectServers(servers: unknown, into: Record<string, McpServerConfig>): void {
+function collectServers(
+  servers: unknown,
+  scope: ExternalMcpScope,
+  into: Record<string, ScopedExternalMcpServer>,
+): void {
   if (typeof servers !== 'object' || servers === null) return
   for (const [name, config] of Object.entries(servers as Record<string, unknown>)) {
     if (name === FLOW_MCP_SERVER_NAME) continue
-    if (isExternalMcpServer(config)) into[name] = config
+    if (isExternalMcpServer(config)) into[name] = { config, scope }
   }
 }
 
@@ -113,20 +126,37 @@ export function loadExternalMcpServers(
   configDir: string | undefined,
   deps: ExternalMcpDeps = {},
 ): Record<string, McpServerConfig> {
+  const merged: Record<string, McpServerConfig> = {}
+  for (const [name, entry] of Object.entries(loadScopedExternalMcpServers(projectRoot, configDir, deps))) {
+    merged[name] = entry.config
+  }
+  return merged
+}
+
+/**
+ * The same merge as `loadExternalMcpServers`, with the scope each winning entry
+ * came from — what the connector service needs to say where a connector lives
+ * and which file a Remove must write. Never throws.
+ */
+export function loadScopedExternalMcpServers(
+  projectRoot: string,
+  configDir: string | undefined,
+  deps: ExternalMcpDeps = {},
+): Record<string, ScopedExternalMcpServer> {
   const read = deps.readFileFn ?? ((path: string) => readFileSync(path, 'utf8'))
   const configHome = configDir !== undefined && configDir !== '' ? configDir : (deps.homedirFn?.() ?? homedir())
-  const merged: Record<string, McpServerConfig> = {}
+  const merged: Record<string, ScopedExternalMcpServer> = {}
 
   // Read <config>/.claude.json once — it holds BOTH the user-scope map and the
   // per-project (local) map, and it can be large.
   const userConfig = readJsonObject(join(configHome, '.claude.json'), read)
 
   // user scope — applies to every project
-  if (userConfig) collectServers(userConfig['mcpServers'], merged)
+  if (userConfig) collectServers(userConfig['mcpServers'], 'user', merged)
 
   // project scope — the repo's own `.mcp.json`, read off the REGISTERED project
   const projectConfig = readJsonObject(join(projectRoot, '.mcp.json'), read)
-  if (projectConfig) collectServers(projectConfig['mcpServers'], merged)
+  if (projectConfig) collectServers(projectConfig['mcpServers'], 'project', merged)
 
   // local scope — this project's private servers inside ~/.claude.json; highest
   // precedence, so a local override of a project/user server wins.
@@ -134,9 +164,14 @@ export function loadExternalMcpServers(
   if (typeof projects === 'object' && projects !== null) {
     const entry = (projects as Record<string, unknown>)[projectRoot]
     if (typeof entry === 'object' && entry !== null) {
-      collectServers((entry as Record<string, unknown>)['mcpServers'], merged)
+      collectServers((entry as Record<string, unknown>)['mcpServers'], 'local', merged)
     }
   }
 
   return merged
+}
+
+/** Where `.claude.json` lives for a config dir (undefined/empty = the home folder). */
+export function claudeJsonPath(configDir: string | undefined, homedirFn: () => string = homedir): string {
+  return join(configDir !== undefined && configDir !== '' ? configDir : homedirFn(), '.claude.json')
 }

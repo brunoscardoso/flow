@@ -13,6 +13,7 @@
 //   item.completed {item: agent_message}    → message-start / message-delta / text-stop
 //   item.started/completed {file_change}    → tool-start / tool-end   (Write)
 //   item.started/completed {command_exec}   → tool-start / tool-end   (Bash)
+//   item.started/completed {mcp_tool_call}  → tool-start / tool-end   (mcp__<server>__<tool>)
 //   turn.completed {usage}                  → usage
 
 import type { AgentStreamEvent, ToolCallRecord } from '../../../shared/ipc-contract'
@@ -49,6 +50,74 @@ function toolCallFor(
     inputJson: JSON.stringify(item),
     outputJson: done ? JSON.stringify({ status: item.status ?? 'completed' }) : null,
     status: done ? 'success' : 'running',
+    startedAt: now,
+    completedAt: done ? now : null,
+  }
+}
+
+/**
+ * The connector form of a Codex MCP call's name — `mcp__<server>__<tool>`, the
+ * SAME form a Claude session uses, so the renderer reads one form
+ * (connector-label.ts). The server part is sanitized exactly as Claude does:
+ * every character outside letters, digits, `_` and `-` becomes `_`.
+ */
+export function codexMcpToolName(server: string, tool: string): string {
+  return `mcp__${server.replace(/[^A-Za-z0-9_-]/g, '_')}__${tool}`
+}
+
+function safeStringify(value: unknown): string | null {
+  if (value === undefined) return null
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * A Codex `mcp_tool_call` item as a tool call (plan_connectors, note 8).
+ *
+ * The item, as `codex exec --json` emits it (codex-rs `McpToolCallItem`):
+ *   { id, type: 'mcp_tool_call', server, tool, arguments,
+ *     result?: { content, structured_content }, error?: { message },
+ *     status: 'in_progress' | 'completed' | 'failed' }
+ * Read defensively: a field that is missing or of another type is left out,
+ * never guessed. Input = the arguments; output = the result, or the error.
+ */
+function mcpToolCallFor(
+  item: Record<string, unknown>,
+  threadId: string,
+  now: string,
+  done: boolean,
+): ToolCallRecord | null {
+  const server = typeof item.server === 'string' ? item.server : ''
+  const tool = typeof item.tool === 'string' ? item.tool : ''
+  if (server === '' || tool === '') return null
+  const id = typeof item.id === 'string' ? item.id : 'codex-item'
+  const error = typeof item.error === 'object' && item.error !== null ? (item.error as Record<string, unknown>) : null
+  const errorMessage =
+    error !== null && typeof error.message === 'string'
+      ? error.message
+      : typeof item.error === 'string'
+        ? item.error
+        : null
+  const failed = item.status === 'failed' || errorMessage !== null
+  let outputJson: string | null = null
+  if (done) {
+    outputJson =
+      errorMessage !== null
+        ? JSON.stringify({ error: errorMessage })
+        : (safeStringify(item.result ?? null) ?? null)
+    if (outputJson === 'null') outputJson = null
+  }
+  return {
+    id,
+    threadId,
+    messageId: null,
+    toolName: codexMcpToolName(server, tool),
+    inputJson: safeStringify(item.arguments),
+    outputJson,
+    status: done ? (failed ? 'error' : 'success') : 'running',
     startedAt: now,
     completedAt: done ? now : null,
   }
@@ -95,6 +164,14 @@ export function parseCodexEvent(raw: unknown, threadId: string, now: string): Co
 
       if (itemType === 'file_change' || itemType === 'command_execution') {
         const toolCall = toolCallFor(it, threadId, now, done)
+        return {
+          events: [done ? { kind: 'tool-end', threadId, toolCall } : { kind: 'tool-start', threadId, toolCall }],
+        }
+      }
+
+      if (itemType === 'mcp_tool_call') {
+        const toolCall = mcpToolCallFor(it, threadId, now, done)
+        if (toolCall === null) return { events: [] }
         return {
           events: [done ? { kind: 'tool-end', threadId, toolCall } : { kind: 'tool-start', threadId, toolCall }],
         }

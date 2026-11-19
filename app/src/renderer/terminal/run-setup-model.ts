@@ -20,16 +20,21 @@
  */
 import {
   confirmByDefault,
+  isMultiline,
   newStepId,
+  normalizeScript,
   type RunGroupState,
   type RunPlace,
   type RunProjectLayers,
+  type RunBody,
   type RunReady,
   type RunSaveChange,
   type RunStep,
   type RunSuggestion,
 } from '../../shared/run-setup'
-import { countWord } from './run-group-model'
+import { countWord, linesLabel } from './run-group-model'
+
+export { linesLabel }
 
 export type ReadyKind = 'none' | 'port' | 'line'
 
@@ -59,6 +64,15 @@ export interface DraftStep {
    * already): the command no longer decides it.
    */
   confirmTouched: boolean
+  /**
+   * What the entry runs: its one command line (`command`) or its whole script
+   * (`script`). One-time actions only; a running step is always 'command'.
+   * Both texts are kept while the draft lives, so switching back and forth
+   * never loses either — Save writes the one chosen.
+   */
+  body: RunBody
+  /** The script, as typed (Save trims only the blank space around it). */
+  script: string
 }
 
 export interface RunSetupDraft {
@@ -120,7 +134,33 @@ export const SETUP_STRINGS = {
   onceEmpty: 'No one-time actions yet.',
   dragHandle: 'Drag to reorder',
   notHere: 'not in this conversation',
+  bodyGroup: 'What it runs',
+  bodyCommand: 'Command',
+  bodyScript: 'Script',
+  script: 'Script',
+  agentFix: 'Fix with the agent',
+  agentWrite: 'Write with the agent',
+  agentMakeScript: 'Make a script with the agent',
+  agentTitle: 'Send one message asking the agent in this conversation to write this script. Nothing is saved or run.',
+  agentNeedsConversation: 'Needs a conversation. Open this from a conversation to ask the agent.',
+  agentNeedsName: 'Give this action a name first, so the agent knows which one to write.',
+  agentWaiting: 'The agent is writing this script.',
+  agentStopWaiting: 'Stop waiting',
+  agentKept: 'The agent wrote a new script.',
+  agentUse: 'Use the agent’s script',
+  agentDismiss: 'Dismiss',
+  agentUndo: 'Undo',
 } as const
+
+/** The line under a script: where it runs and how the program is chosen. */
+export function scriptHint(projectName: string): string {
+  return `Runs as one script in ${projectName}. The first line picks the program; without one, bash runs it.`
+}
+
+/** The text an entry runs: its script or its command line, whichever it holds. */
+export function stepText(step: Pick<DraftStep, 'body' | 'command' | 'script'>): string {
+  return step.body === 'script' ? step.script : step.command
+}
 
 /** The page's title: "Launchpad for jupiter-app, jupiter-core" — the conversation's projects. */
 export function setupTitle(places: readonly Pick<RunPlace, 'name'>[], fallback = ''): string {
@@ -167,7 +207,6 @@ export function startDraft(project: RunProjectLayers): RunSetupDraft {
     id: step.id,
     isNew: false,
     name: step.name,
-    command: step.command,
     start: step.start,
     ...readyFields(step.ready),
     ...(step.readyTimeoutMs !== undefined ? { readyTimeoutMs: step.readyTimeoutMs } : {}),
@@ -178,6 +217,9 @@ export function startDraft(project: RunProjectLayers): RunSetupDraft {
     confirm: step.kind === 'once' && step.confirm === true,
     // A saved action keeps the choice it was saved with.
     confirmTouched: true,
+    ...(step.kind === 'once' && step.body === 'script'
+      ? { body: 'script' as const, command: '', script: step.command }
+      : { body: 'command' as const, command: step.command, script: '' }),
   }))
   return {
     projectRoot: project.root,
@@ -228,6 +270,8 @@ export function addStep(
     kind,
     confirm: kind === 'once' && confirmByDefault(command),
     confirmTouched: false,
+    body: 'command',
+    script: '',
   }
   return { ...draft, steps: [...draft.steps, step] }
 }
@@ -275,7 +319,8 @@ export function stepSuggestions(
   limit = STEP_SUGGESTION_LIMIT,
 ): RunSuggestion[] {
   const step = draft.steps.find((candidate) => candidate.id === stepId)
-  if (step === undefined) return []
+  // A script is written, not picked: the suggestions are command lines.
+  if (step === undefined || step.body === 'script') return []
   const project = step.runsIn ?? draft.projectName
   const projectOf = (other: DraftStep): string => other.runsIn ?? draft.projectName
   const taken = new Set(
@@ -339,7 +384,10 @@ export function moveStep(draft: RunSetupDraft, id: string, to: number): RunSetup
 }
 
 export type StepPatch = Partial<
-  Pick<DraftStep, 'name' | 'command' | 'start' | 'readyKind' | 'readyValue' | 'skipped' | 'runsIn' | 'confirm'>
+  Pick<
+    DraftStep,
+    'name' | 'command' | 'start' | 'readyKind' | 'readyValue' | 'skipped' | 'runsIn' | 'confirm' | 'body' | 'script'
+  >
 >
 
 export function changeStep(draft: RunSetupDraft, id: string, patch: StepPatch): RunSetupDraft {
@@ -353,6 +401,8 @@ export function changeStep(draft: RunSetupDraft, id: string, patch: StepPatch): 
       const next: DraftStep = { ...step, ...allowed }
       if (step.kind !== 'once') {
         next.confirm = false
+        // A running step is one command line, always.
+        next.body = 'command'
         return next
       }
       // A one-time action has no start mode or ready check.
@@ -360,10 +410,46 @@ export function changeStep(draft: RunSetupDraft, id: string, patch: StepPatch): 
       next.readyKind = 'none'
       next.readyValue = ''
       if ('confirm' in allowed) next.confirmTouched = true
-      else if ('command' in allowed && !step.confirmTouched) next.confirm = confirmByDefault(next.command)
+      else if (('command' in allowed || 'script' in allowed || 'body' in allowed) && !step.confirmTouched) {
+        next.confirm = confirmByDefault(stepText(next))
+      }
       return next
     }),
   }
+}
+
+/**
+ * Switch a one-time action between Command and Script. Nothing is asked and
+ * nothing is lost: both texts stay in the draft and Save writes the chosen one.
+ *   - To Script: the editor shows the script it had; with none yet, it starts
+ *     from the command line (so a typed command becomes the script's first line).
+ *   - To Command: the field shows the command line it had; with none yet and a
+ *     ONE-line script, that line. A longer script stays put, out of sight, and
+ *     shows again on switching back — never squashed into one line, which would
+ *     change what it does.
+ * A running step has no Script: the switch does nothing for it.
+ */
+export function switchBody(draft: RunSetupDraft, id: string, body: RunBody): RunSetupDraft {
+  const step = draft.steps.find((candidate) => candidate.id === id)
+  if (step === undefined || step.kind !== 'once' || step.body === body) return draft
+  if (body === 'script') {
+    const script = step.script.trim() === '' ? step.command : step.script
+    return changeStep(draft, id, { body, script })
+  }
+  const command = step.command.trim() === '' && !isMultiline(step.script) ? normalizeScript(step.script).trim() : step.command
+  return changeStep(draft, id, { body, command })
+}
+
+/**
+ * The command field's text after a paste. Several lines pasted into a
+ * one-time action's command become its script (the field's whole text, the
+ * paste included); anything else is just the new command line. Returns null
+ * when the paste is plain typing the field handles itself.
+ */
+export function pasteIntoCommand(draft: RunSetupDraft, id: string, nextValue: string): RunSetupDraft | null {
+  const step = draft.steps.find((candidate) => candidate.id === id)
+  if (step === undefined || step.kind !== 'once' || !isMultiline(nextValue)) return null
+  return changeStep(draft, id, { body: 'script', script: nextValue })
 }
 
 // ─── validation ──────────────────────────────────────────────────────────────
@@ -392,10 +478,12 @@ export function validateDraft(draft: RunSetupDraft): string[] {
     // A row nobody has typed in is not a problem: Save leaves it out.
     if (isBlankStep(step)) return
     // An empty name is filled from the command on Save.
-    const name = step.name.trim() === '' ? nameFromCommand(step.command) : step.name.trim()
+    const name = step.name.trim() === '' ? nameFromStep(step) : step.name.trim()
     const label = name === '' ? `Step ${index + 1}` : `“${name}”`
     if (name !== '') names.set(name.toLowerCase(), (names.get(name.toLowerCase()) ?? 0) + 1)
-    if (step.command.trim() === '') problems.push(`${label} needs a command to run.`)
+    if (stepText(step).trim() === '') {
+      problems.push(step.body === 'script' ? `${label} needs a script to run.` : `${label} needs a command to run.`)
+    }
     if (step.kind === 'service' && step.readyKind === 'port' && parsePort(step.readyValue) === null) {
       problems.push(
         step.readyValue.trim() === ''
@@ -426,7 +514,8 @@ export function validateDraft(draft: RunSetupDraft): string[] {
 function sameRun(a: DraftStep, b: DraftStep): boolean {
   return (
     a.name.trim() === b.name.trim() &&
-    a.command.trim() === b.command.trim() &&
+    a.body === b.body &&
+    (a.body === 'script' ? normalizeScript(a.script) === normalizeScript(b.script) : a.command.trim() === b.command.trim()) &&
     a.start === b.start &&
     (a.runsIn ?? '') === (b.runsIn ?? '') &&
     a.readyKind === b.readyKind &&
@@ -484,10 +573,25 @@ export function isDirty(draft: RunSetupDraft): boolean {
 
 // ─── the save request ────────────────────────────────────────────────────────
 
-/** A row with neither a name nor a command — the empty step the panel opens with. */
-export function isBlankStep(step: Pick<DraftStep, 'name' | 'command'>): boolean {
-  return step.name.trim() === '' && step.command.trim() === ''
+/** A row with neither a name nor anything to run — the empty step the panel opens with. */
+export function isBlankStep(step: Pick<DraftStep, 'name' | 'command'> & Partial<Pick<DraftStep, 'body' | 'script'>>): boolean {
+  const text = step.body === 'script' ? (step.script ?? '') : step.command
+  return step.name.trim() === '' && text.trim() === ''
 }
+
+/**
+ * A short name for an entry: its command's, or for a script the first line
+ * that does something (not the program line, a comment or a shell option).
+ */
+export function nameFromStep(step: Pick<DraftStep, 'body' | 'command' | 'script'>): string {
+  if (step.body !== 'script') return nameFromCommand(step.command)
+  const line = normalizeScript(step.script)
+    .split('\n')
+    .map((candidate) => candidate.trim())
+    .find((candidate) => candidate !== '' && !candidate.startsWith('#') && !/^set\s+-/.test(candidate))
+  return line === undefined ? '' : nameFromCommand(line)
+}
+
 
 /** A short name for a command: `npm run dev` → "dev", `docker compose up kafka` → "kafka". */
 export function nameFromCommand(command: string): string {
@@ -516,7 +620,7 @@ function savedSteps(steps: readonly DraftStep[]): DraftStep[] {
     .filter((step) => !isBlankStep(step))
     .map((step) => {
       if (step.name.trim() !== '') return step
-      const base = nameFromCommand(step.command) || 'step'
+      const base = nameFromStep(step) || (step.body === 'script' ? 'script' : 'step')
       let name = base
       for (let n = 2; taken.has(name.toLowerCase()); n += 1) name = `${base} ${n}`
       taken.add(name.toLowerCase())
@@ -526,7 +630,15 @@ function savedSteps(steps: readonly DraftStep[]): DraftStep[] {
 
 function toRunStep(step: DraftStep): RunStep {
   if (step.kind === 'once') {
-    const once: RunStep = { id: step.id, name: step.name.trim(), command: step.command.trim(), start: 'now', kind: 'once' }
+    const script = step.body === 'script'
+    const once: RunStep = {
+      id: step.id,
+      name: step.name.trim(),
+      command: script ? normalizeScript(step.script) : step.command.trim(),
+      start: 'now',
+      kind: 'once',
+    }
+    if (script) once.body = 'script'
     if (step.confirm) once.confirm = true
     if (step.runsIn !== null && step.runsIn.trim() !== '') once.runsIn = step.runsIn.trim()
     if (step.skipped) once.disabled = true
@@ -751,4 +863,176 @@ export function offeredSuggestions(
     else groups.push({ projectName: item.suggestion.projectName, items: [item] })
   }
   return { top: items.slice(0, limit), groups, total: items.length }
+}
+
+/** What ⌘L sends: the selected text, or the whole script when nothing is selected; null when empty. */
+export function scriptChatText(value: string, start: number, end: number): string | null {
+  const picked = end > start ? value.slice(start, end) : value
+  const trimmed = picked.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+
+// ─── asking the agent for a script ───────────────────────────────────────────
+
+/** What the agent is asked to do for one one-time action. */
+export type AgentScriptMode = 'fix' | 'write' | 'make'
+
+/** A command becomes a script; an empty script is written; a script is fixed. */
+export function agentScriptMode(step: Pick<DraftStep, 'body' | 'script'>): AgentScriptMode {
+  if (step.body !== 'script') return 'make'
+  return step.script.trim() === '' ? 'write' : 'fix'
+}
+
+/** The button's label for a mode. */
+export function agentScriptLabel(mode: AgentScriptMode): string {
+  if (mode === 'make') return SETUP_STRINGS.agentMakeScript
+  return mode === 'write' ? SETUP_STRINGS.agentWrite : SETUP_STRINGS.agentFix
+}
+
+/** A code fence longer than any run of backticks inside the text. */
+function fenceFor(text: string): string {
+  let fence = '```'
+  while (text.includes(fence)) fence += '`'
+  return fence
+}
+
+function fenced(text: string): string {
+  const body = text.replace(/\n+$/, '')
+  const fence = fenceFor(body)
+  return `${fence}bash\n${body}\n${fence}`
+}
+
+/**
+ * The ONE message the button sends into the conversation. It names the action
+ * and its project, carries the script (or command) as it is today, names the
+ * tool that puts the result into the editor, and says not to run it.
+ */
+export function agentScriptPrompt(input: {
+  action: string
+  project: string
+  mode: AgentScriptMode
+  script: string
+  command: string
+}): string {
+  const action = input.action.trim()
+  const where = `the Launchpad action "${action}" in ${input.project}`
+  const lines: string[] = []
+  if (input.mode === 'fix') {
+    lines.push(`Fix ${where}, using what we discussed in this conversation. Its script today:`, fenced(input.script))
+  } else if (input.mode === 'write') {
+    lines.push(`Write a script for ${where}, using what we discussed in this conversation. It has no script yet.`)
+  } else if (input.command.trim() === '') {
+    lines.push(`Write a script for ${where}, using what we discussed in this conversation. It has no command yet.`)
+  } else {
+    lines.push(`Turn ${where} into a script, using what we discussed in this conversation. Its command today:`, fenced(input.command.trim()))
+  }
+  lines.push(`Put the new script into the Launchpad with the launchpad_set_script tool, with the action name "${action}". Do not run it.`)
+  return lines.join('\n')
+}
+
+/** Above this many line pairs the diff counts lines instead of aligning them. */
+const LINE_DIFF_LIMIT = 4_000_000
+
+/**
+ * The lines of `after` (by index, 0-based) that are not in `before`: the
+ * lines the agent added or changed. Aligned by the longest common run of
+ * lines, so a line that only moved past an insertion is not marked.
+ */
+export function changedLines(before: string, after: string): number[] {
+  const a = normalizeScript(before) === '' ? [] : normalizeScript(before).split('\n')
+  const b = normalizeScript(after) === '' ? [] : normalizeScript(after).split('\n')
+  if (b.length === 0) return []
+  if (a.length === 0) return b.map((_, index) => index)
+  if (a.length * b.length > LINE_DIFF_LIMIT) {
+    const left = new Map<string, number>()
+    for (const line of a) left.set(line, (left.get(line) ?? 0) + 1)
+    const marked: number[] = []
+    b.forEach((line, index) => {
+      const count = left.get(line) ?? 0
+      if (count > 0) left.set(line, count - 1)
+      else marked.push(index)
+    })
+    return marked
+  }
+  // Longest common subsequence over lines, filled from the end.
+  const width = b.length + 1
+  const table = new Uint32Array((a.length + 1) * width)
+  for (let i = a.length - 1; i >= 0; i -= 1) {
+    for (let j = b.length - 1; j >= 0; j -= 1) {
+      table[i * width + j] =
+        a[i] === b[j] ? table[(i + 1) * width + j + 1]! + 1 : Math.max(table[(i + 1) * width + j]!, table[i * width + j + 1]!)
+    }
+  }
+  const kept = new Set<number>()
+  let i = 0
+  let j = 0
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      kept.add(j)
+      i += 1
+      j += 1
+    } else if (table[(i + 1) * width + j]! >= table[i * width + j + 1]!) {
+      i += 1
+    } else {
+      j += 1
+    }
+  }
+  return b.map((_, index) => index).filter((index) => !kept.has(index))
+}
+
+/** "Written by the agent: 2 lines changed. Not saved yet." */
+export function agentWrittenNote(changed: number): string {
+  const lines = changed === 0 ? 'no lines' : `${changed} ${changed === 1 ? 'line' : 'lines'}`
+  return `Written by the agent: ${lines} changed. Not saved yet.`
+}
+
+/** What an action held before the agent's script replaced it — what Undo puts back. */
+export interface AgentScriptUndo {
+  body: RunBody
+  script: string
+  command: string
+  confirm: boolean
+  confirmTouched: boolean
+}
+
+/**
+ * Put the agent's script into one one-time action: the body becomes Script and
+ * the script is replaced. "Ask before running" stays exactly as it was — the
+ * agent's text never changes it. Returns the new draft and what Undo restores;
+ * null when there is no such one-time action.
+ */
+export function applyAgentScript(
+  draft: RunSetupDraft,
+  id: string,
+  script: string,
+): { draft: RunSetupDraft; undo: AgentScriptUndo; changed: number[] } | null {
+  const step = draft.steps.find((candidate) => candidate.id === id)
+  if (step === undefined || step.kind !== 'once') return null
+  const undo: AgentScriptUndo = {
+    body: step.body,
+    script: step.script,
+    command: step.command,
+    confirm: step.confirm,
+    confirmTouched: step.confirmTouched,
+  }
+  const changed = changedLines(stepText(step), script)
+  const next = changeStep(draft, id, { body: 'script', script })
+  return { draft: keepConfirm(next, id, undo), undo, changed }
+}
+
+/** Undo: the action's body, script, command and "Ask before running" as they were. */
+export function undoAgentScript(draft: RunSetupDraft, id: string, undo: AgentScriptUndo): RunSetupDraft {
+  const step = draft.steps.find((candidate) => candidate.id === id)
+  if (step === undefined) return draft
+  return keepConfirm(changeStep(draft, id, { body: undo.body, script: undo.script, command: undo.command }), id, undo)
+}
+
+function keepConfirm(draft: RunSetupDraft, id: string, was: Pick<AgentScriptUndo, 'confirm' | 'confirmTouched'>): RunSetupDraft {
+  return {
+    ...draft,
+    steps: draft.steps.map((step) =>
+      step.id === id ? { ...step, confirm: was.confirm, confirmTouched: was.confirmTouched } : step,
+    ),
+  }
 }

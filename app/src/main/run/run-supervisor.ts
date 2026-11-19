@@ -19,6 +19,9 @@
  *     ended starts it again in a fresh tab. Stop all leaves it alone — ending
  *     a migration halfway is worse than letting it finish; closing its tab
  *     ends it (the terminal kills its process group).
+ *   - A one-time action that holds a SCRIPT runs it as one file (see
+ *     `run-script-files.ts`): the file is written just before its tab opens
+ *     and removed when the run ends — it exits, is stopped, or its tab goes.
  *   - State is broadcast only when it CHANGED (allowed-pattern #17): changes
  *     inside one tick are coalesced, and a report identical to the last one
  *     is never sent.
@@ -44,6 +47,7 @@ import {
   type RunStepStatus,
 } from '../../shared/run-setup'
 import type { ReadyWait } from './ready-check'
+import type { RunScriptFiles } from './run-script-files'
 
 export interface RunTerminalPort {
   createUserTerminal(request: {
@@ -76,6 +80,11 @@ export interface RunSupervisorDeps {
   terminals: RunTerminalPort
   setups: { resolve(scope: RunScope): Promise<RunResolution> }
   ready: RunReadyChecks
+  /**
+   * Where a one-time action's script is written to run as one file. Required:
+   * a supervisor built without it would have to run a script some other way.
+   */
+  scripts: Pick<RunScriptFiles, 'prepare' | 'remove'>
   /** Defer the coalesced report — `queueMicrotask` by default. */
   defer?: (fn: () => void) => void
   /** The clock, for how long a one-time action ran — `Date.now` by default. */
@@ -138,6 +147,8 @@ interface OnceRun {
   exitCode: number | null
   startedAt: number
   durationMs: number | null
+  /** The script file this run executes, until it is removed (null: none, or removed already). */
+  scriptFile: string | null
 }
 
 interface ScopeRun {
@@ -220,6 +231,8 @@ export class RunSupervisor {
   readonly #runs = new Map<string, ScopeRun>()
   readonly #owned = new Map<string, { run: ScopeRun; step: StepRun }>()
   readonly #ownedOnce = new Map<string, { run: ScopeRun; once: OnceRun }>()
+  /** One-time actions whose script is being written (`scopeKey::stepKey`): a second press waits for nothing. */
+  readonly #preparingOnce = new Set<string>()
   readonly #now: () => number
   readonly #listeners = new Set<(state: RunGroupState) => void>()
   readonly #unsubscribe: Array<() => void>
@@ -302,24 +315,36 @@ export class RunSupervisor {
     return this.#snapshot(run)
   }
 
-  /** Stop all: end every step's process (the tabs stay, showing stopped). */
-  async stop(scope: RunScope): Promise<RunGroupState> {
+  /**
+   * Stop all (no `stepKey`): end every step's process (the tabs stay, showing
+   * stopped). Stop one: end only that step's process — the rest keep running,
+   * and a sequence still going is not cancelled (a step that waits on this one
+   * is told it will not become ready, exactly as when it exits).
+   */
+  async stop(scope: RunScope, stepKey?: string): Promise<RunGroupState> {
     const run = this.#runs.get(runScopeKey(scope))
     if (run === undefined) return this.state(scope)
-    run.generation += 1
-    for (const step of run.steps) {
-      step.epoch += 1
-      this.#cancelWait(step)
-      if (step.alive && step.terminalId !== null) {
-        step.stopping = true
-        this.#deps.terminals.stopProcess(step.terminalId)
-        this.#set(run, step, { status: 'stopped', detail: null })
-      } else if (step.status === 'waiting' || step.status === 'starting') {
-        this.#set(run, step, { status: 'idle', detail: null })
-      }
-      step.gate.resolve(false)
+    if (stepKey !== undefined) {
+      const step = run.steps.find((candidate) => candidate.step.key === stepKey)
+      if (step !== undefined) this.#stopStep(run, step)
+      return this.#snapshot(run)
     }
+    run.generation += 1
+    for (const step of run.steps) this.#stopStep(run, step)
     return this.#snapshot(run)
+  }
+
+  #stopStep(run: ScopeRun, step: StepRun): void {
+    step.epoch += 1
+    this.#cancelWait(step)
+    if (step.alive && step.terminalId !== null) {
+      step.stopping = true
+      this.#deps.terminals.stopProcess(step.terminalId)
+      this.#set(run, step, { status: 'stopped', detail: null })
+    } else if (step.status === 'waiting' || step.status === 'starting') {
+      this.#set(run, step, { status: 'idle', detail: null })
+    }
+    step.gate.resolve(false)
   }
 
   /**
@@ -374,9 +399,31 @@ export class RunSupervisor {
     if (step === undefined) throw new RunOnceError('That action is not part of this Launchpad any more.')
     if (step.unavailable !== undefined) throw new RunOnceError(step.unavailable)
     const run = this.#ensureRun(scope, resolution)
-    const existing = run.once.find((entry) => entry.step.key === stepKey)
     // Checked after the await: two quick presses never start two copies.
-    if (existing !== undefined && existing.alive) return this.#snapshot(run)
+    if (run.once.find((entry) => entry.step.key === stepKey)?.alive === true) return this.#snapshot(run)
+    const preparing = `${run.key}::${stepKey}`
+    if (this.#preparingOnce.has(preparing)) return this.#snapshot(run)
+
+    // A script runs as one file: write it first, then hand the shell the file.
+    let command = step.command
+    let scriptFile: string | null = null
+    if (step.body === 'script') {
+      this.#preparingOnce.add(preparing)
+      try {
+        const prepared = await this.#deps.scripts.prepare(step.command)
+        command = prepared.command
+        scriptFile = prepared.file
+      } catch {
+        throw new RunOnceError('Flow could not get this script ready to run. Nothing was started.')
+      } finally {
+        this.#preparingOnce.delete(preparing)
+      }
+      if (this.#disposed) {
+        if (scriptFile !== null) void this.#deps.scripts.remove(scriptFile)
+        return this.state(scope)
+      }
+    }
+    const existing = run.once.find((entry) => entry.step.key === stepKey)
     let info: TerminalInfo
     try {
       info = this.#deps.terminals.createUserTerminal({
@@ -384,12 +431,13 @@ export class RunSupervisor {
         cols: TERMINAL_COLS,
         rows: TERMINAL_ROWS,
         owner: { rootPath: run.scope.rootPath, threadId: run.scope.threadId },
-        command: step.command,
+        command,
         cwd: step.cwd,
         title: step.name,
         run: { scopeKey: run.key, stepId: step.id, projectRoot: step.projectRoot },
       })
     } catch {
+      if (scriptFile !== null) void this.#deps.scripts.remove(scriptFile)
       throw new RunOnceError('This action could not be started.')
     }
     const fresh: OnceRun = {
@@ -400,10 +448,12 @@ export class RunSupervisor {
       exitCode: null,
       startedAt: this.#now(),
       durationMs: null,
+      scriptFile,
     }
     if (existing !== undefined) {
       // The old run's tab gives way to the new one, in the same place.
       this.#ownedOnce.delete(existing.terminalId)
+      this.#releaseScript(existing)
       run.once[run.once.indexOf(existing)] = fresh
       this.#deps.terminals.dispose(existing.terminalId)
     } else {
@@ -427,7 +477,10 @@ export class RunSupervisor {
         if (step.terminalId !== null) this.#deps.terminals.dispose(step.terminalId)
         step.terminalId = null
       }
-      for (const once of run.once) this.#deps.terminals.dispose(once.terminalId)
+      for (const once of run.once) {
+        this.#deps.terminals.dispose(once.terminalId)
+        this.#releaseScript(once)
+      }
       run.once = []
     }
     this.#runs.clear()
@@ -653,6 +706,8 @@ export class RunSupervisor {
       once.once.status = 'exited'
       once.once.exitCode = exitCode
       once.once.durationMs = Math.max(0, this.#now() - once.once.startedAt)
+      // The script has run (or was stopped): its file goes.
+      this.#releaseScript(once.once)
       this.#report(once.run)
       return
     }
@@ -680,6 +735,7 @@ export class RunSupervisor {
     if (once !== undefined) {
       // A person closed its tab: the action's run is gone (the terminal ended its process group).
       this.#ownedOnce.delete(terminalId)
+      this.#releaseScript(once.once)
       once.run.once = once.run.once.filter((entry) => entry !== once.once)
       this.#report(once.run)
       return
@@ -699,6 +755,14 @@ export class RunSupervisor {
     } else {
       this.#report(run)
     }
+  }
+
+  /** Remove a one-time run's script file, once. */
+  #releaseScript(once: OnceRun): void {
+    const file = once.scriptFile
+    if (file === null) return
+    once.scriptFile = null
+    void this.#deps.scripts.remove(file)
   }
 
   /** The other Flow Run whose step holds this port, in plain words — or null. */

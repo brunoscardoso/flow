@@ -61,6 +61,21 @@ export interface TabDescriptor {
   /** Set up but not started (a Run step with no process yet): the accent dot
    *  is drawn as a dashed ring and the label in italics. Structural. */
   pending?: boolean
+  /** One small status dot per member (CSS colours), drawn before the label —
+   *  a tab that stands for a group (the Launchpad). Structural. */
+  dots?: string[]
+  /** A count drawn after the label in a quieter colour. Structural. */
+  count?: number
+  /** A caret after the label that opens the owner's menu (emits
+   *  fl-tab-caret); the value is its tooltip. Structural. */
+  caret?: string
+}
+
+/** The caret of a tab was pressed — the owner opens its menu at `x`/`y` (viewport). */
+export interface TabCaretDetail {
+  id: string
+  x: number
+  y: number
 }
 
 export interface TabSelectDetail {
@@ -186,6 +201,20 @@ export class FlTabs extends HTMLElement {
         border-radius: 50%;
         flex: none;
       }
+      .status-dots { display: inline-flex; gap: 2px; flex: none; }
+      .status-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+      .count { color: var(--fl-color-text-secondary); font-variant-numeric: tabular-nums; }
+      .caret {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        border-radius: var(--fl-radius-sm);
+        color: var(--fl-color-text-secondary);
+        cursor: pointer;
+      }
+      .caret:hover { background: var(--fl-color-surface-raised); color: var(--fl-color-text); }
       .tab.pending { font-style: italic; }
       .tab.pending .project-dot {
         box-sizing: border-box;
@@ -440,10 +469,54 @@ export class FlTabs extends HTMLElement {
         button.appendChild(icon)
       }
 
+      if (tab.dots !== undefined && tab.dots.length > 0) {
+        const dots = document.createElement('span')
+        dots.className = 'status-dots'
+        dots.setAttribute('aria-hidden', 'true')
+        for (const colour of tab.dots) {
+          const dot = document.createElement('span')
+          dot.className = 'status-dot'
+          dot.style.background = colour
+          dots.appendChild(dot)
+        }
+        button.appendChild(dots)
+      }
+
       const label = document.createElement('span')
       label.className = 'label'
       label.textContent = tab.label
       button.appendChild(label)
+
+      if (tab.count !== undefined) {
+        const count = document.createElement('span')
+        count.className = 'count'
+        count.textContent = String(tab.count)
+        button.appendChild(count)
+      }
+
+      if (tab.caret !== undefined) {
+        const caret = document.createElement('span')
+        caret.className = 'caret'
+        caret.setAttribute('role', 'button')
+        caret.setAttribute('aria-label', tab.caret)
+        caret.title = tab.caret
+        const caretIcon = document.createElement('fl-icon')
+        caretIcon.setAttribute('name', 'chevron-down')
+        caretIcon.setAttribute('size', '10')
+        caret.appendChild(caretIcon)
+        caret.addEventListener('click', (event) => {
+          event.stopPropagation()
+          const rect = caret.getBoundingClientRect()
+          this.dispatchEvent(
+            new CustomEvent<TabCaretDetail>('fl-tab-caret', {
+              detail: { id: tabId, x: rect.left, y: rect.bottom },
+              bubbles: true,
+              composed: true,
+            }),
+          )
+        })
+        button.appendChild(caret)
+      }
 
       if (tab.dirty) {
         const dot = document.createElement('span')

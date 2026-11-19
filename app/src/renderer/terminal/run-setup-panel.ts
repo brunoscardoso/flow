@@ -17,30 +17,47 @@
  * will do, and Save (or Save and run). The setup is the person's own, on this computer —
  * there is no choice of who it is saved for.
  *
+ * A ONE-TIME ACTION runs a Command (one line) or a Script (a code editor with
+ * line numbers and light colouring, run as one file): a Command | Script
+ * switch beside its name. Pasting several lines into its command field makes
+ * it a script holding them. Running steps are always one command.
+ *
  * All editing logic lives in `run-setup-model.ts` (pure, tested); this file
  * only draws the draft and turns clicks into model calls. Nothing here runs a
  * command: Save sends one request and main decides what starts, restarts or
  * stops (allowed-pattern #14).
  */
-import type { RunGroupState, RunSaveAnswer, RunSaveChange, RunSuggestion, RunView } from '../../shared/run-setup'
-import { RUN_STRINGS } from './run-group-model'
+import { scriptLineCount, type RunScriptProposal, type RunGroupState, type RunSaveAnswer, type RunSaveChange, type RunSuggestion, type RunView } from '../../shared/run-setup'
+import { linesLabel, RUN_STRINGS } from './run-group-model'
+import { createScriptEditor } from './script-editor'
+import { proposalOutcome, scriptProposals } from './script-proposals'
 import {
   addOnceAction,
   addStep,
+  agentScriptLabel,
+  agentScriptMode,
+  agentScriptPrompt,
+  agentWrittenNote,
+  applyAgentScript,
+  undoAgentScript,
+  type AgentScriptUndo,
   changeStep,
   draftToSetUp,
   isDirty,
   moveStep,
+  pasteIntoCommand,
   removeStep,
   runsInChoices,
   saveChange,
   saveSentence,
+  scriptHint,
   setupTitle,
   SETUP_STRINGS,
   startDraft,
   startsOptions,
   stepsOfKind,
   stepSuggestions,
+  switchBody,
   validateDraft,
   type DraftStep,
   type ReadyKind,
@@ -58,6 +75,8 @@ export interface RunSetupPanelDeps {
   startRun(): void
   /** Ask the agent in this conversation, or null when there is none. */
   askAgent(): (() => void) | null
+  /** The conversation the page belongs to, or null when there is none (the agent buttons are off). */
+  agentThread(): string | null
   onSaved(view: RunView): void
   onClosed(): void
 }
@@ -91,6 +110,24 @@ function iconButton(icon: string, label: string, onClick: () => void): HTMLButto
   return node
 }
 
+/**
+ * What one action shows under its script after asking the agent:
+ *   - `written` — the agent's script is in the editor; its changed lines are
+ *     marked until the person types; Undo puts back what was there;
+ *   - `offer` — the person typed meanwhile, so the script is only offered.
+ * (Waiting is not here: it outlives the page, in `scriptProposals`.)
+ */
+type AgentNote =
+  | { kind: 'written'; changed: number[]; count: number; undo: AgentScriptUndo }
+  | { kind: 'offer'; script: string }
+
+function sparkle(): HTMLElement {
+  const glyph = document.createElement('fl-icon')
+  glyph.setAttribute('name', 'sparkles')
+  glyph.setAttribute('size', '12')
+  return glyph
+}
+
 function select<T extends string>(
   options: ReadonlyArray<{ value: T; label: string; disabled?: boolean }>,
   value: T,
@@ -120,6 +157,10 @@ export class RunSetupPanel {
   #dragId: string | null = null
   /** The step whose name field takes focus after the next render. */
   #focusId: string | null = null
+  /** The step whose script editor takes focus after the next render (it just became a script). */
+  #focusScriptId: string | null = null
+  /** Per action: the agent's script that arrived (written in, or offered). */
+  readonly #notes = new Map<string, AgentNote>()
   readonly #onKey = (event: KeyboardEvent): void => {
     if (event.key === 'Escape' && this.#root !== null && this.#root.contains(document.activeElement)) {
       event.stopPropagation()
@@ -161,6 +202,10 @@ export class RunSetupPanel {
     this.#draft = options.draft ?? draftToSetUp(view.resolution.project)
     this.#error = null
     this.#focusId = this.#draft.steps.find((step) => step.isNew && step.name === '')?.id ?? null
+    this.#notes.clear()
+    // Scripts the agent wrote while the page was closed are shown now, by the same rules.
+    const thread = this.#deps.agentThread()
+    if (thread !== null) for (const proposal of scriptProposals.take(thread)) this.#applyProposal(proposal)
     if (this.#root === null) {
       this.#root = el('div', 'fl-run-setup')
       this.#root.setAttribute('role', 'dialog')
@@ -177,7 +222,157 @@ export class RunSetupPanel {
     this.#root = null
     this.#footer = null
     this.#draft = null
+    this.#notes.clear()
     this.#deps.onClosed()
+  }
+
+  /**
+   * The agent's script for one action arrived. Shown at once when the page is
+   * open (or tucked) for that conversation; otherwise false, and the caller
+   * keeps it for the next time the page opens.
+   */
+  receiveProposal(proposal: RunScriptProposal): boolean {
+    if (this.#root === null || this.#draft === null || this.#deps.agentThread() !== proposal.threadId) return false
+    this.#applyProposal(proposal)
+    if (!this.#root.hidden) this.#render()
+    return true
+  }
+
+  /** Put an arrived script into the draft, or offer it — never saved, never run. */
+  #applyProposal(proposal: RunScriptProposal): void {
+    const draft = this.#draft
+    if (draft === null) return
+    const outcome = proposalOutcome(draft, proposal, scriptProposals.waits(proposal.threadId))
+    if (outcome.kind === 'offer') {
+      scriptProposals.stopWaiting(proposal.threadId, outcome.stepId)
+      this.#notes.set(outcome.stepId, { kind: 'offer', script: proposal.script })
+      return
+    }
+    let base = draft
+    let stepId: string
+    if (outcome.kind === 'add') {
+      base = addStep(draft, { name: proposal.action.trim(), kind: 'once' })
+      stepId = base.steps[base.steps.length - 1]?.id ?? ''
+    } else {
+      stepId = outcome.stepId
+    }
+    scriptProposals.stopWaiting(proposal.threadId, stepId)
+    this.#writeAgentScript(base, stepId, proposal.script)
+  }
+
+  #writeAgentScript(draft: RunSetupDraft, stepId: string, script: string): void {
+    const applied = applyAgentScript(draft, stepId, script)
+    if (applied === null) return
+    this.#notes.set(stepId, { kind: 'written', changed: applied.changed, count: applied.changed.length, undo: applied.undo })
+    this.#draft = applied.draft
+    this.#error = null
+  }
+
+  /** "Fix with the agent": one message into the conversation; this action waits for the answer. */
+  #askAgentForScript(stepId: string): void {
+    const thread = this.#deps.agentThread()
+    const draft = this.#draft
+    const step = draft?.steps.find((candidate) => candidate.id === stepId)
+    if (thread === null || draft === null || step === undefined || step.kind !== 'once' || step.name.trim() === '') return
+    const action = step.name.trim()
+    scriptProposals.wait(thread, { stepId, action, body: step.body, script: step.script, command: step.command })
+    this.#notes.delete(stepId)
+    const text = agentScriptPrompt({
+      action,
+      project: step.runsIn ?? draft.projectName,
+      mode: agentScriptMode(step),
+      script: step.script,
+      command: step.command,
+    })
+    document.dispatchEvent(new CustomEvent('flow:send-prompt', { detail: { threadId: thread, text } }))
+    this.#render()
+  }
+
+  #isWaiting(stepId: string): boolean {
+    const thread = this.#deps.agentThread()
+    return thread !== null && scriptProposals.waitingFor(thread, stepId) !== null
+  }
+
+  /** The agent button of one action: its label follows the text, and it says why when it is off. */
+  #agentButton(stepId: string): HTMLButtonElement {
+    const node = button('fl-run-agent-btn', '', () => this.#askAgentForScript(stepId))
+    node.dataset['agentFor'] = stepId
+    this.#paintAgentButton(node, stepId)
+    return node
+  }
+
+  #paintAgentButton(node: HTMLButtonElement, stepId: string): void {
+    const step = this.#draft?.steps.find((candidate) => candidate.id === stepId)
+    if (step === undefined) return
+    node.textContent = ''
+    node.append(sparkle(), document.createTextNode(agentScriptLabel(agentScriptMode(step))))
+    const thread = this.#deps.agentThread()
+    if (thread === null) {
+      node.disabled = true
+      node.title = SETUP_STRINGS.agentNeedsConversation
+    } else if (step.name.trim() === '') {
+      node.disabled = true
+      node.title = SETUP_STRINGS.agentNeedsName
+    } else {
+      node.disabled = this.#isWaiting(stepId)
+      node.title = node.disabled ? SETUP_STRINGS.agentWaiting : SETUP_STRINGS.agentTitle
+    }
+  }
+
+  #repaintAgentButton(card: HTMLElement, stepId: string): void {
+    const node = card.querySelector<HTMLButtonElement>('.fl-run-agent-btn')
+    if (node !== null) this.#paintAgentButton(node, stepId)
+  }
+
+  /** The note under an action: waiting, written in, or offered. Null when there is none. */
+  #agentNote(stepId: string): HTMLElement | null {
+    const thread = this.#deps.agentThread()
+    if (thread !== null && scriptProposals.waitingFor(thread, stepId) !== null) {
+      const note = el('div', 'fl-run-agent-note waiting')
+      note.setAttribute('role', 'status')
+      const dot = el('span', 'fl-run-agent-dot')
+      dot.setAttribute('aria-hidden', 'true')
+      note.append(
+        dot,
+        el('span', undefined, SETUP_STRINGS.agentWaiting),
+        button('fl-run-btn small', SETUP_STRINGS.agentStopWaiting, () => {
+          scriptProposals.stopWaiting(thread, stepId)
+          this.#render()
+        }),
+      )
+      return note
+    }
+    const state = this.#notes.get(stepId)
+    if (state === undefined) return null
+    if (state.kind === 'written') {
+      const note = el('div', 'fl-run-agent-note written')
+      note.setAttribute('role', 'status')
+      note.append(
+        el('span', undefined, agentWrittenNote(state.count)),
+        button('fl-run-btn small', SETUP_STRINGS.agentUndo, () => {
+          const draft = this.#draft
+          this.#notes.delete(stepId)
+          if (draft !== null) this.#update(undoAgentScript(draft, stepId, state.undo))
+        }),
+      )
+      return note
+    }
+    const note = el('div', 'fl-run-agent-note')
+    note.setAttribute('role', 'status')
+    note.append(
+      el('span', undefined, SETUP_STRINGS.agentKept),
+      button('fl-run-btn small', SETUP_STRINGS.agentUse, () => {
+        const draft = this.#draft
+        if (draft === null) return
+        this.#writeAgentScript(draft, stepId, state.script)
+        this.#render()
+      }),
+      button('fl-run-btn small', SETUP_STRINGS.agentDismiss, () => {
+        this.#notes.delete(stepId)
+        this.#render()
+      }),
+    )
+    return note
   }
 
   /** Add a new one-time action to fill in (the menu's "Add one"). */
@@ -293,6 +488,13 @@ export class RunSetupPanel {
     if (focusId !== null) {
       queueMicrotask(() => root.querySelector<HTMLInputElement>(`[data-step-id="${CSS.escape(focusId)}"] .fl-run-name`)?.focus())
     }
+    const focusScriptId = this.#focusScriptId
+    this.#focusScriptId = null
+    if (focusScriptId !== null) {
+      queueMicrotask(() =>
+        root.querySelector<HTMLTextAreaElement>(`[data-step-id="${CSS.escape(focusScriptId)}"] .fl-run-editor-input`)?.focus(),
+      )
+    }
   }
 
   #section(title: string, note: string): HTMLElement {
@@ -358,7 +560,10 @@ export class RunSetupPanel {
     name.value = step.name
     name.placeholder = SETUP_STRINGS.namePlaceholder
     name.setAttribute('aria-label', SETUP_STRINGS.name)
-    name.addEventListener('input', () => this.#update(changeStep(current(), step.id, { name: name.value }), false))
+    name.addEventListener('input', () => {
+      this.#update(changeStep(current(), step.id, { name: name.value }), false)
+      if (once) this.#repaintAgentButton(card, step.id)
+    })
     // The next step's "Starts" names this one: redraw once the name is settled.
     name.addEventListener('change', () => this.#render())
     const command = el('input', 'fl-run-input mono fl-run-command')
@@ -366,8 +571,26 @@ export class RunSetupPanel {
     command.placeholder = SETUP_STRINGS.commandPlaceholder
     command.setAttribute('aria-label', SETUP_STRINGS.command)
     command.spellcheck = false
-    line1.append(name, command)
+    // While the agent writes this action's script, what it runs is not edited.
+    if (once && this.#isWaiting(step.id)) command.readOnly = true
+    const script = once && step.body === 'script'
+    line1.appendChild(name)
+    if (!script) line1.appendChild(command)
+    if (once) line1.appendChild(this.#bodySwitch(step, current))
     body.appendChild(line1)
+    if (script) body.appendChild(this.#scriptBox(step, current))
+    // Several lines pasted into a one-time action's command make it a script holding them.
+    command.addEventListener('paste', (event) => {
+      const pasted = event.clipboardData?.getData('text/plain') ?? ''
+      if (!pasted.includes('\n')) return
+      const start = command.selectionStart ?? command.value.length
+      const end = command.selectionEnd ?? start
+      const next = pasteIntoCommand(current(), step.id, `${command.value.slice(0, start)}${pasted}${command.value.slice(end)}`)
+      if (next === null) return
+      event.preventDefault()
+      this.#focusScriptId = step.id
+      this.#update(next)
+    })
 
     // This step's own suggestions: only for the project its Runs in names,
     // matching what is typed, at most five. Anything else is typed by hand.
@@ -435,15 +658,25 @@ export class RunSetupPanel {
       box.checked = step.confirm
       box.title = SETUP_STRINGS.askFirstTitle
       box.addEventListener('change', () => this.#update(changeStep(current(), step.id, { confirm: box.checked })))
-      // Until the person sets it, the command decides it (a migration asks first): keep the box in step.
-      command.addEventListener('input', () => {
+      // Until the person sets it, the command (or script) decides it (a migration asks first): keep the box in step.
+      const follow = (): void => {
         box.checked = current().steps.find((candidate) => candidate.id === step.id)?.confirm ?? box.checked
+      }
+      command.addEventListener('input', follow)
+      card.addEventListener('input', (event) => {
+        if ((event.target as HTMLElement | null)?.classList.contains('fl-run-editor-input') === true) follow()
       })
       check.append(box, el('span', 'fl-run-label', SETUP_STRINGS.askFirst))
       check.title = SETUP_STRINGS.askFirstTitle
       line2.append(inline(SETUP_STRINGS.runsIn, runsIn), check)
       if (step.skipped) line2.appendChild(el('span', 'fl-run-skipped', SETUP_STRINGS.skipped))
+      // A command's agent button sits at the end of the line under it; a script's is under its editor.
+      if (!script) line2.appendChild(this.#agentButton(step.id))
       body.appendChild(line2)
+      if (!script) {
+        const note = this.#agentNote(step.id)
+        if (note !== null) body.appendChild(note)
+      }
       card.appendChild(body)
       card.appendChild(this.#tools(step, current))
       return card
@@ -486,6 +719,63 @@ export class RunSetupPanel {
 
     card.appendChild(this.#tools(step, current))
     return card
+  }
+
+  /** A one-time action's Command | Script switch. */
+  #bodySwitch(step: DraftStep, current: () => RunSetupDraft): HTMLElement {
+    const group = el('div', 'fl-run-segment')
+    group.setAttribute('role', 'group')
+    group.setAttribute('aria-label', SETUP_STRINGS.bodyGroup)
+    const choices: Array<{ body: DraftStep['body']; label: string }> = [
+      { body: 'command', label: SETUP_STRINGS.bodyCommand },
+      { body: 'script', label: SETUP_STRINGS.bodyScript },
+    ]
+    for (const choice of choices) {
+      const on = step.body === choice.body
+      const node = button(`fl-run-segment-btn${on ? ' active' : ''}`, choice.label, () => {
+        if (current().steps.find((candidate) => candidate.id === step.id)?.body === choice.body) return
+        if (choice.body === 'script') this.#focusScriptId = step.id
+        this.#update(switchBody(current(), step.id, choice.body))
+      })
+      node.setAttribute('aria-pressed', String(on))
+      group.appendChild(node)
+    }
+    return group
+  }
+
+  /** A script's editor and the line under it: where it runs, how many lines it has, and the agent button. */
+  #scriptBox(step: DraftStep, current: () => RunSetupDraft): HTMLElement {
+    const box = el('div', 'fl-run-script')
+    const lines = el('span', 'fl-run-script-lines', linesLabel(scriptLineCount(step.script)))
+    const written = this.#notes.get(step.id)
+    const agentButton = this.#agentButton(step.id)
+    const editor = createScriptEditor({
+      value: step.script,
+      label: SETUP_STRINGS.script,
+      chatLabel: () => current().steps.find((candidate) => candidate.id === step.id)?.name.trim() || SETUP_STRINGS.script,
+      marks: written?.kind === 'written' ? written.changed : [],
+      readOnly: this.#isWaiting(step.id),
+      onInput: (value) => {
+        this.#update(changeStep(current(), step.id, { script: value }), false)
+        lines.textContent = linesLabel(scriptLineCount(value))
+        this.#paintAgentButton(agentButton, step.id)
+        // Typing takes the agent's line marks away; the note and its Undo stay.
+        const note = this.#notes.get(step.id)
+        if (note?.kind === 'written' && note.changed.length > 0) {
+          this.#notes.set(step.id, { ...note, changed: [] })
+          editor.setMarks([])
+        }
+      },
+    })
+    const hint = el('div', 'fl-run-script-hint')
+    const project = step.runsIn ?? current().projectName
+    const tail = el('span', 'fl-run-script-tail')
+    tail.append(lines, agentButton)
+    hint.append(el('span', undefined, scriptHint(project)), tail)
+    box.append(editor.element, hint)
+    const note = this.#agentNote(step.id)
+    if (note !== null) box.appendChild(note)
+    return box
   }
 
   /** Right of a card: the on/off switch (an entry turned off stays for later), then remove. */

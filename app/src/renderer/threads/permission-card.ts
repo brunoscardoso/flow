@@ -9,6 +9,8 @@
  */
 import '../components'
 import type { PermissionRequest, PermissionVerdict } from '../../shared/ipc-contract'
+import { connectorCall, connectorPermissionTitle } from './connector-label'
+import { connectorIconLoader, connectorLabelOptions, createConnectorIcon } from './connector-icon'
 
 export type RespondPermissionFn = (
   requestId: string,
@@ -44,12 +46,29 @@ export class PermissionCard {
     const header = document.createElement('div')
     header.slot = 'header'
     header.className = 'fl-permission-head'
-    const icon = document.createElement('fl-icon')
-    icon.setAttribute('name', 'warning')
-    icon.setAttribute('size', '14')
-    icon.style.color = 'var(--fl-color-accent)'
+    // A connector tool asks in plain words, with the connector's icon:
+    // "Allow Linear to search issues?" (plan_connectors, FR-9). The label
+    // rule is the one the tool card uses (connector-label.ts).
+    const connector = connectorCall(request.toolName, connectorLabelOptions())
+    let icon: HTMLElement
+    if (connector === null) {
+      icon = document.createElement('fl-icon')
+      icon.setAttribute('name', 'warning')
+      icon.setAttribute('size', '14')
+      icon.style.color = 'var(--fl-color-accent)'
+    } else {
+      icon = createConnectorIcon({
+        name: connector.serverName,
+        displayName: connector.connectorName,
+        size: 16,
+        load: connectorIconLoader(),
+      })
+    }
     const title = document.createElement('span')
-    title.textContent = `${request.toolName} — permission required`
+    title.textContent =
+      connector === null
+        ? `${request.toolName} — permission required`
+        : connectorPermissionTitle(connector)
     header.appendChild(icon)
     header.appendChild(title)
     card.appendChild(header)

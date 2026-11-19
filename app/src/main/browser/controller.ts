@@ -9,7 +9,7 @@
 
 import { join } from 'node:path'
 
-import { app, type WebContents } from 'electron'
+import { app, webFrameMain, type WebContents } from 'electron'
 
 import type {
   BrowserCapabilities,
@@ -19,6 +19,7 @@ import type {
 } from '../../shared/browser-capture-types'
 import { redactAndBound } from '../../shared/browser-capture-boundary'
 import type { IpcEventPayload } from '../../shared/ipc-contract'
+import { attachDraftFramePicker } from '../drafts/draft-frame-inject'
 import { attachCdpCapture, type CdpCaptureHandle } from './cdp-capture'
 import { setGuestInspect, setGuestRecording } from './inspect-host'
 import { RollingBuffer } from './rolling-buffer'
@@ -88,6 +89,9 @@ class BrowserController {
         this.#cdp = attachCdpCapture(guest, buffer, (kind, counts) => {
           this.emitBufferUpdated({ kind, counts })
         })
+        // UI drafts: the canvas's screen frames get the picker main injects
+        // (the guest preload never runs inside them).
+        attachDraftFramePicker(guest, (processId, routingId) => webFrameMain.fromId(processId, routingId))
         guest.once('destroyed', () => {
           if (this.#guest === guest) {
             this.#cdp?.detach()

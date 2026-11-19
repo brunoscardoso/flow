@@ -27,16 +27,39 @@ import type { SideIdentity } from './side-identity'
 import type { ConflictHunkChoice, ConflictHunkOrder } from './conflict-hunks'
 import type { UpdateStatus } from './updater'
 import type { ProblemsSnapshot } from './problems-model'
+import type { TerminalProblemCounts, TerminalProblemsSnapshot } from './terminal-problems'
 import type {
   RunGroupState,
   RunSaveAnswer,
   RunSaveChange,
   RunScope,
   RunScopeSummary,
+  RunScriptProposal,
   RunSuggestion,
   RunView,
 } from './run-setup'
 import type { FeatureRole, FeatureRoleSource } from './feature-role'
+import type {
+  DraftCanvasSummary,
+  DraftEdit,
+  DraftLayoutAnswer,
+  DraftSaveVersionAnswer,
+  DraftsChangedEvent,
+  DraftVersionInfo,
+  DraftFilesAnswer,
+  DraftWriteAnswer,
+} from './ui-drafts'
+import type {
+  ConnectorAddConfig,
+  ConnectorChangeEvent,
+  ConnectorIconAnswer,
+  ConnectorIconTheme,
+  ConnectorListAnswer,
+  ConnectorScope,
+  ConnectorSignInAnswer,
+  ConnectorSuggestAnswer,
+  ConnectorWriteAnswer,
+} from './connectors'
 import type {
   BrowserBufferCounts,
   BrowserCapabilities,
@@ -6016,6 +6039,11 @@ export interface IpcInvokeMap {
    * one. Saved with the shell, so the name comes back after a restart.
    */
   'terminal:rename': { request: { terminalId: string; title: string | null }; response: void }
+  /** The Problems list's Terminals section: errors and warnings main found in
+   *  every user terminal's output, bounded to `limit` problems (0 = counts only). */
+  'terminal:problems': { request: { limit?: number }; response: TerminalProblemsSnapshot }
+  /** "Clear terminal problems": empties every terminal's rows (not the terminals). */
+  'terminal:clearProblems': { request: Record<string, never>; response: void }
 
   // run (plan_project_run) — a project's Run: the supervisor in main owns
   // every step; the renderer reads state and sends intents. Nothing in a setup
@@ -6030,13 +6058,59 @@ export interface IpcInvokeMap {
   'run:start': { request: { scope: RunScope }; response: RunGroupState }
   /** Reload all (no `stepKey`) or one step; `force` starts a step even though its port is in use. */
   'run:reload': { request: { scope: RunScope; stepKey?: string; force?: boolean }; response: RunGroupState }
-  /** Stop all: end every step's process. */
-  'run:stop': { request: { scope: RunScope }; response: RunGroupState }
+  /** Stop all (no `stepKey`) or one step: end the process(es); the tabs stay, showing stopped. */
+  'run:stop': { request: { scope: RunScope; stepKey?: string }; response: RunGroupState }
   // Run one one-time action of the scope's Launchpad, once, in its own tab.
   // Never started by `run:start`; a press while it runs starts nothing.
   'run:once': { request: { scope: RunScope; stepKey: string }; response: RunGroupState }
   /** Which scopes have a Run going. */
   'run:states': { request: Record<string, never>; response: RunScopeSummary[] }
+
+  // connectors (plan_connectors) — MCP connectors. The connector service in
+  // main is the one owner of the list, its status and every write; no secret
+  // (env, headers, tokens) crosses. Writes broadcast `connectors:changed`.
+  /** Every connector a session for this project (and chat) would load, with status. */
+  'connectors:list': { request: { projectRoot: string; threadId?: string }; response: ConnectorListAnswer }
+  /** Add one connector to one of Claude's own files. */
+  'connectors:add': {
+    request: { projectRoot: string; scope: ConnectorScope; name: string; config: ConnectorAddConfig }
+    response: ConnectorWriteAnswer
+  }
+  /** Remove one connector from the file it came from. `confirmed` must be `true` — a person confirmed. */
+  'connectors:remove': {
+    request: { projectRoot: string; scope: ConnectorScope; name: string; confirmed: true }
+    response: ConnectorWriteAnswer
+  }
+  /** Turn one connector on or off for one chat (applies live when it can, else next turn). */
+  'connectors:setForThread': { request: { threadId: string; name: string; on: boolean }; response: ConnectorWriteAnswer }
+  /** Try a connector again. */
+  'connectors:reconnect': { request: { projectRoot: string; name: string; threadId?: string }; response: ConnectorWriteAnswer }
+  /** Mark or unmark one tool of a connector as always ask first, for the project's account. */
+  'connectors:setAskFirst': {
+    request: { projectRoot: string; name: string; tool: string; on: boolean }
+    response: ConnectorWriteAnswer
+  }
+  /** One connector's icon as a `data:` image, or null (draw the initial). Fetched and cached in main. */
+  'connectors:icon': {
+    request: { projectRoot: string; name: string; theme: ConnectorIconTheme }
+    response: ConnectorIconAnswer
+  }
+  /** Start signing in to one connector in the browser. A watched sign-in ends on `connectors:changed`. */
+  'connectors:signIn': { request: { projectRoot: string; name: string; threadId?: string }; response: ConnectorSignInAnswer }
+  /** Sign out of one connector. `confirmed` must be `true` — a person confirmed. */
+  'connectors:signOut': {
+    request: { projectRoot: string; name: string; threadId?: string; confirmed: true }
+    response: ConnectorWriteAnswer
+  }
+  /** Stop waiting for a sign-in to finish. */
+  'connectors:cancelSignIn': { request: { projectRoot: string; name: string }; response: ConnectorWriteAnswer }
+  /** Connectors not set up yet that this project looks like it uses, strongest first. Asked only while Settings → Connectors is on screen. */
+  'connectors:suggest': { request: { projectRoot: string }; response: ConnectorSuggestAnswer }
+  /** "Not now": keep these suggestion fingerprints dismissed for the project. */
+  'connectors:dismissSuggestions': {
+    request: { projectRoot: string; fingerprints: string[] }
+    response: ConnectorWriteAnswer
+  }
 
   // attachments (#456) — image attachments on user messages
   /** Read a persisted attachment's bytes for rendering (data URL). */
@@ -6409,6 +6483,31 @@ export interface IpcInvokeMap {
    * or `{ ok: false, detail }` with the refusal's sentence.
    */
   'plan:setNote': { request: PlanSetNoteRequest; response: PlanSetNoteAnswer }
+  // UI drafts (plan `ui_drafts`): canvas folders under flow/drafts/, read and
+  // written only through main's drafts store. Every verb validates the root
+  // (the readFile gate) and the canvas/screen/version names; a refusal is a
+  // sentence for a person.
+  /** The canvases in a project's drafts folder. An unknown root answers none. */
+  'drafts:list': { request: { rootPath: string }; response: { canvases: DraftCanvasSummary[] } }
+  /** One canvas's layout, checked. */
+  'drafts:readLayout': { request: { rootPath: string; canvas: string }; response: DraftLayoutAnswer }
+  /** Patch one element of one screen in place (text, colour or spacing), undoable. */
+  'drafts:applyEdit': {
+    request: { rootPath: string; canvas: string; screen: string; edit: DraftEdit }
+    response: DraftWriteAnswer
+  }
+  /** Undo the newest change to one canvas file (`<screen>.html`, `layout.json` or `tokens.css`). */
+  'drafts:undo': { request: { rootPath: string; canvas: string; file: string }; response: DraftWriteAnswer }
+  /** Undo the newest change to the canvas, the agent's or the person's: every file of that step goes back together. */
+  'drafts:undoCanvas': { request: { rootPath: string; canvas: string }; response: DraftFilesAnswer }
+  /** How many times Undo can step back on a canvas. */
+  'drafts:undoCount': { request: { rootPath: string; canvas: string }; response: { count: number } }
+  /** Save the canvas as a named version. */
+  'drafts:saveVersion': { request: { rootPath: string; canvas: string; name: string }; response: DraftSaveVersionAnswer }
+  /** A canvas's named versions, newest first. */
+  'drafts:listVersions': { request: { rootPath: string; canvas: string }; response: { versions: DraftVersionInfo[] } }
+  /** Restore a named version over the canvas; every restored file can be undone. */
+  'drafts:restoreVersion': { request: { rootPath: string; canvas: string; version: string }; response: DraftFilesAnswer }
   /**
    * One file (`file`, project-relative) or one feature/part (`partRef`) read
    * as a storyline — exactly one of the two. Main runs the bundled CLI's
@@ -7617,9 +7716,10 @@ export interface IpcInvokeMap {
    *  CDP). Gates the element→source and rich console/network paths. */
   'browser:capabilities': { request: Record<string, never>; response: BrowserCapabilities }
   /** Grab a screenshot of the webview as a pending attachment (null on
-   *  failure) — mirrors `attachments:captureScreen`. */
+   *  failure) — mirrors `attachments:captureScreen`. `rect` crops it to a box
+   *  of the page (a draft screen's frame in the canvas); `fileName` names it. */
   'browser:captureScreenshot': {
-    request: Record<string, never>
+    request: { rect?: { x: number; y: number; width: number; height: number }; fileName?: string }
     response: MessageAttachmentInput | null
   }
   /** Tag a window of a kind's most-recent captures; also emits `browser:tagPosted`. */
@@ -7716,8 +7816,15 @@ export interface IpcEventMap {
   'terminal:created': TerminalInfo
   /** A terminal was disposed (user close, thread teardown) — drop its tab (#304). */
   'terminal:removed': { terminalId: string }
+  /** Terminal problems changed (coalesced in main) — the new counts. */
+  'terminal:problemsChanged': TerminalProblemCounts
   /** A Run's state changed (sent on transitions only). */
   'run:updated': RunGroupState
+  /** The agent wrote a script for one one-time action of a conversation's
+   *  Launchpad — the editor shows it unsaved; nothing is saved or run. */
+  'run:scriptProposal': RunScriptProposal
+  /** Connectors changed — a write, a chat's on/off, a retry. Refetch `connectors:list`. */
+  'connectors:changed': ConnectorChangeEvent
   'git:changed': { rootId: string }
   /** A thread's change review may have changed (#1906) — the card refetches
    *  `threads:changeReview` for this thread. Fired (debounced at the source) off
@@ -7742,6 +7849,8 @@ export interface IpcEventMap {
   'flow:stateChanged': FlowState
   /** A discovery/plan/brainstorm doc was added or changed under flow/. */
   'flow:artifactChanged': FlowArtifactChangedEvent
+  /** A canvas's files changed on disk (not by Flow's own writes) — coalesced per canvas. */
+  'drafts:changed': DraftsChangedEvent
   /** One conversation's autopilot chain started, moved a step, or ended. */
   'flow:chainChanged': ChainState
   /** A root's blueprint data (graph/annotations/status events) changed — re-read. */
@@ -7972,6 +8081,8 @@ export const IPC_INVOKE_CHANNELS = [
   'terminal:dispose',
   'terminal:claim',
   'terminal:rename',
+  'terminal:problems',
+  'terminal:clearProblems',
   'run:get',
   'run:save',
   'run:suggest',
@@ -7980,6 +8091,18 @@ export const IPC_INVOKE_CHANNELS = [
   'run:stop',
   'run:once',
   'run:states',
+  'connectors:list',
+  'connectors:add',
+  'connectors:remove',
+  'connectors:setForThread',
+  'connectors:reconnect',
+  'connectors:setAskFirst',
+  'connectors:icon',
+  'connectors:signIn',
+  'connectors:signOut',
+  'connectors:cancelSignIn',
+  'connectors:suggest',
+  'connectors:dismissSuggestions',
   'attachments:read',
   'attachments:revealPath',
   'attachments:captureScreen',
@@ -8103,6 +8226,15 @@ export const IPC_INVOKE_CHANNELS = [
   'blueprint:featurePorts',
   'plan:notes',
   'plan:setNote',
+  'drafts:list',
+  'drafts:readLayout',
+  'drafts:applyEdit',
+  'drafts:undo',
+  'drafts:undoCanvas',
+  'drafts:undoCount',
+  'drafts:saveVersion',
+  'drafts:listVersions',
+  'drafts:restoreVersion',
   'blueprint:features',
   'blueprint:discoverFeatures',
   'blueprint:setFeatureHome',
@@ -8235,7 +8367,10 @@ export const IPC_EVENT_CHANNELS = [
   'terminal:exit',
   'terminal:created',
   'terminal:removed',
+  'terminal:problemsChanged',
   'run:updated',
+  'run:scriptProposal',
+  'connectors:changed',
   'git:changed',
   'threads:changeReviewUpdated',
   'threads:contextChosen',
@@ -8243,6 +8378,7 @@ export const IPC_EVENT_CHANNELS = [
   'flow:notification',
   'flow:stateChanged',
   'flow:artifactChanged',
+  'drafts:changed',
   'flow:chainChanged',
   'blueprint:changed',
   'project:fileChanged',
@@ -8454,6 +8590,10 @@ export interface FlowTerminalApi {
   onExit(listener: (event: IpcEventPayload<'terminal:exit'>) => void): Unsubscribe
   onRemoved(listener: (event: IpcEventPayload<'terminal:removed'>) => void): Unsubscribe
   onCreated(listener: (terminal: TerminalInfo) => void): Unsubscribe
+  /** Terminal problems (bounded; limit 0 = counts only). Optional: an older preload predates it. */
+  problems?(request: IpcRequest<'terminal:problems'>): Promise<IpcResponse<'terminal:problems'>>
+  clearProblems?(): Promise<void>
+  onProblemsChanged?(listener: (counts: IpcEventPayload<'terminal:problemsChanged'>) => void): Unsubscribe
 }
 
 export interface FlowRunApi {
@@ -8466,6 +8606,26 @@ export interface FlowRunApi {
   once(request: IpcRequest<'run:once'>): Promise<IpcResponse<'run:once'>>
   states(): Promise<IpcResponse<'run:states'>>
   onUpdated(listener: (state: IpcEventPayload<'run:updated'>) => void): Unsubscribe
+  /** A script the agent wrote for a one-time action, for one conversation. */
+  onScriptProposal(listener: (proposal: IpcEventPayload<'run:scriptProposal'>) => void): Unsubscribe
+}
+
+export interface FlowConnectorsApi {
+  list(request: IpcRequest<'connectors:list'>): Promise<IpcResponse<'connectors:list'>>
+  add(request: IpcRequest<'connectors:add'>): Promise<IpcResponse<'connectors:add'>>
+  remove(request: IpcRequest<'connectors:remove'>): Promise<IpcResponse<'connectors:remove'>>
+  setForThread(request: IpcRequest<'connectors:setForThread'>): Promise<IpcResponse<'connectors:setForThread'>>
+  reconnect(request: IpcRequest<'connectors:reconnect'>): Promise<IpcResponse<'connectors:reconnect'>>
+  setAskFirst(request: IpcRequest<'connectors:setAskFirst'>): Promise<IpcResponse<'connectors:setAskFirst'>>
+  icon(request: IpcRequest<'connectors:icon'>): Promise<IpcResponse<'connectors:icon'>>
+  signIn(request: IpcRequest<'connectors:signIn'>): Promise<IpcResponse<'connectors:signIn'>>
+  signOut(request: IpcRequest<'connectors:signOut'>): Promise<IpcResponse<'connectors:signOut'>>
+  cancelSignIn(request: IpcRequest<'connectors:cancelSignIn'>): Promise<IpcResponse<'connectors:cancelSignIn'>>
+  suggest(request: IpcRequest<'connectors:suggest'>): Promise<IpcResponse<'connectors:suggest'>>
+  dismissSuggestions(
+    request: IpcRequest<'connectors:dismissSuggestions'>,
+  ): Promise<IpcResponse<'connectors:dismissSuggestions'>>
+  onChanged(listener: (change: IpcEventPayload<'connectors:changed'>) => void): Unsubscribe
 }
 
 export interface FlowGitApi {
@@ -9249,6 +9409,20 @@ export interface FlowPlansApi {
   setNote(request: IpcRequest<'plan:setNote'>): Promise<IpcResponse<'plan:setNote'>>
 }
 
+/** UI drafts: canvases, in-place edits, undo and named versions. */
+export interface FlowDraftsApi {
+  list(request: IpcRequest<'drafts:list'>): Promise<IpcResponse<'drafts:list'>>
+  readLayout(request: IpcRequest<'drafts:readLayout'>): Promise<IpcResponse<'drafts:readLayout'>>
+  applyEdit(request: IpcRequest<'drafts:applyEdit'>): Promise<IpcResponse<'drafts:applyEdit'>>
+  undo(request: IpcRequest<'drafts:undo'>): Promise<IpcResponse<'drafts:undo'>>
+  undoCanvas(request: IpcRequest<'drafts:undoCanvas'>): Promise<IpcResponse<'drafts:undoCanvas'>>
+  undoCount(request: IpcRequest<'drafts:undoCount'>): Promise<IpcResponse<'drafts:undoCount'>>
+  saveVersion(request: IpcRequest<'drafts:saveVersion'>): Promise<IpcResponse<'drafts:saveVersion'>>
+  listVersions(request: IpcRequest<'drafts:listVersions'>): Promise<IpcResponse<'drafts:listVersions'>>
+  restoreVersion(request: IpcRequest<'drafts:restoreVersion'>): Promise<IpcResponse<'drafts:restoreVersion'>>
+  onChanged(listener: (event: IpcEventPayload<'drafts:changed'>) => void): Unsubscribe
+}
+
 export interface FlowApi {
   /** Current renderer zoom factor (#1352). Optional: an older preload can't
    *  report it, and the caller falls back to 1. */
@@ -9266,6 +9440,8 @@ export interface FlowApi {
   terminal: FlowTerminalApi
   /** A project's Run. Optional: an older preload predates the channels. */
   run?: FlowRunApi
+  /** MCP connectors. Optional: an older preload predates the channels. */
+  connectors?: FlowConnectorsApi
   attachments: FlowAttachmentsApi
   git: FlowGitApi
   flow: FlowFlowApi
@@ -9294,4 +9470,6 @@ export interface FlowApi {
   workspaces?: FlowWorkspacesApi
   /** Plan change notes. Optional: an older preload predates the channels. */
   plans?: FlowPlansApi
+  /** UI drafts. Optional: an older preload predates the channels. */
+  drafts?: FlowDraftsApi
 }

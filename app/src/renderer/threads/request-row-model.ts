@@ -21,6 +21,7 @@ import { modelLabel } from './model-label'
 import { requestRowLabel, requestRowSegments, type RequestRowSegment, type RequestSummary } from './request-summary'
 import { turnSummary } from './turn-summary'
 import { requestFileChanges } from './request-file-changes'
+import { usedConnectors, type ConnectorLabelOptions, type UsedConnector } from './connector-label'
 
 /** What the row knows about one step: its head text (null for a step whose
  *  tools ran before any message) and the tools after it. */
@@ -55,10 +56,16 @@ export interface RequestRowView {
   /** The model id as stored, for the tooltip. */
   modelId: string | null
   steps: RequestRowStepView[]
+  /** The connectors the request's calls used, in order of first use, at most
+   *  `MAX_ROW_CONNECTORS` — the small icons on the row (plan_connectors, FR-7). */
+  connectors: UsedConnector[]
   /** While live: the newest step's first line. Null otherwise, or when no
    *  step has spoken yet. */
   newestStep: string | null
 }
+
+/** How many connector icons the row's line shows. */
+export const MAX_ROW_CONNECTORS = 3
 
 /** The line a head-less step shows. */
 export const HEADLESS_STEP_TEXT = 'Tools'
@@ -156,6 +163,7 @@ export function requestRowView(
   summary: RequestSummary,
   steps: readonly RequestRowStepInput[],
   live: boolean,
+  options: ConnectorLabelOptions = {},
 ): RequestRowView {
   const segments = requestRowSegments(summary, live)
   const leadCount = live && summary.elapsedMs !== null ? 2 : 1
@@ -193,6 +201,10 @@ export function requestRowView(
     model: summary.model === null ? null : modelLabel(summary.model),
     modelId: summary.model,
     steps: stepViews,
+    connectors: usedConnectors(
+      steps.flatMap((step) => step.records),
+      options,
+    ).slice(0, MAX_ROW_CONNECTORS),
     newestStep,
   }
 }

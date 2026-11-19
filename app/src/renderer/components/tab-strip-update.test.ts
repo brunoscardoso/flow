@@ -81,6 +81,16 @@ describe('planStripUpdate (#993)', () => {
     })
   })
 
+  it('a group tab’s dots, count or caret changing → rebuild; unchanged → none', () => {
+    const group = (dots: string[], count = 2, caret: string | null = 'Jump to a step'): TabDescriptor =>
+      tab('g', { dots, count, ...(caret === null ? {} : { caret }), closable: false, renamable: false })
+    const before = snap([group(['ok', 'ok'])], 'g')
+    expect(planStripUpdate(before, snap([group(['ok', 'ok'])], 'g'))).toEqual({ kind: 'none' })
+    expect(planStripUpdate(before, snap([group(['ok', 'bad'])], 'g'))).toEqual({ kind: 'rebuild', scrollActiveIntoView: false })
+    expect(planStripUpdate(before, snap([group(['ok', 'ok', 'off'], 3)], 'g')).kind).toBe('rebuild')
+    expect(planStripUpdate(before, snap([group(['ok', 'ok'], 2, null)], 'g')).kind).toBe('rebuild')
+  })
+
   it('tab added → rebuild; scroll only if the active tab changed too', () => {
     const prev = snap([tab('a')], 'a')
     expect(planStripUpdate(prev, snap([tab('a'), tab('b')], 'a'))).toEqual({

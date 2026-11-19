@@ -18,12 +18,16 @@ export const ICON_PATHS = {
   'chevron-down': 'M3.5 6 L8 10.5 L12.5 6',
   'chevron-up': 'M3.5 10 L8 5.5 L12.5 10',
   close: 'M4 4 L12 12 M12 4 L4 12',
+  // A 2x2 grid of squares: a canvas of screens (the discovery card's UI drafts).
+  grid: 'M2.5 2.5 H7 V7 H2.5 Z M9 2.5 H13.5 V7 H9 Z M2.5 9 H7 V13.5 H2.5 Z M9 9 H13.5 V13.5 H9 Z',
   plus: 'M8 3 L8 13 M3 8 L13 8',
   search: 'M10.5 10.5 L14 14 M7 11.5 A4.5 4.5 0 1 0 7 2.5 A4.5 4.5 0 0 0 7 11.5',
   file: 'M4 1.5 H9.5 L12.5 4.5 V14.5 H4 Z M9.5 1.5 V4.5 H12.5',
   folder: 'M1.5 3.5 H6 L7.5 5.5 H14.5 V13 H1.5 Z',
   'folder-open': 'M1.5 3.5 H6 L7.5 5.5 H13 V6.5 M1.5 13 L3 6.5 H14.5 L13 13 Z M1.5 3.5 V13',
   terminal: 'M2 3 H14 V13 H2 Z M4.5 6 L7 8.5 L4.5 11 M8.5 11 H11.5',
+  // Two sheets, the front one whole: Copy.
+  copy: 'M5.5 5.5 H13.5 V13.5 H5.5 Z M3 10.5 H2.5 V2.5 H10.5 V3',
   // A pencil on a 16-box: the nib at lower-left, the body running up to the
   // right, and the ferrule line across it. Stroked like every other glyph here
   // (no fill), so it inherits colour and reads at 12px.

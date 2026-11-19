@@ -1057,6 +1057,18 @@ export const MIGRATIONS: Migration[] = [
     compatibleDownTo: 35,
     up: `ALTER TABLE threads ADD COLUMN run_tweaks TEXT;`,
   },
+  {
+    // CONNECTORS (plan_connectors, Phase 2). The names of the connectors a
+    // conversation turned OFF, as a JSON array. An OFF list, not an on list, so
+    // "a new chat starts with every connector on" stays true for a connector
+    // added later. ThreadStore.setConnectorsOff is the only writer.
+    // ADDITIVE (one nullable column): an older build never reads it and its
+    // INSERTs name their columns, so the v35 floor carries forward.
+    version: 43,
+    description: 'threads.connectors_off — the connectors a conversation turned off',
+    compatibleDownTo: 35,
+    up: `ALTER TABLE threads ADD COLUMN connectors_off TEXT;`,
+  },
 ]
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0

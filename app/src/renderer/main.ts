@@ -135,7 +135,9 @@ if (appRoot) {
     // while the terminal's own right-click Select All, two pixels away on the
     // same pixels, selected the whole buffer. The capability was present,
     // wired, and reachable by mouse only.
-    if (active?.closest('.fl-term-root') != null) {
+    // Only the shell itself: the Launchpad editor and its inputs sit inside the
+    // terminal panel too, and a script's ⌘A must select the script (2026-11-18).
+    if (active?.closest('.xterm') != null) {
       document.dispatchEvent(new CustomEvent('flow:terminal-edit-action', { detail: { action } }))
       return
     }

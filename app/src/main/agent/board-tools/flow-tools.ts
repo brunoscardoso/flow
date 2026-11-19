@@ -36,6 +36,7 @@ import type { RunStepState } from '../../../shared/run-setup'
 import {
   BOARD_TOOL_NAMES,
   FLOW_MCP_SERVER_NAME,
+  LAUNCHPAD_SET_SCRIPT_TOOL_NAME,
   RUN_OUTPUT_TOOL_NAME,
   RUN_RELOAD_TOOL_NAME,
   SUBTASK_TOOL_NAME,
@@ -221,6 +222,54 @@ export function runToolHandlers(deps: RunToolDeps): RunToolHandlers {
   }
 }
 
+/**
+ * The Launchpad script tool of ONE conversation, bound by the AgentManager.
+ * It delivers a script to that conversation's Launchpad editor and nothing
+ * else: it never saves the Launchpad, never runs anything and never touches
+ * another step. The person reviews the script and saves it.
+ */
+export interface LaunchpadToolDeps {
+  /** The session's conversation; null when it is not known (nothing is delivered). */
+  threadId: string | null
+  /** Hand the script to the renderer for this conversation. */
+  deliver(proposal: { threadId: string; action: string; script: string }): void
+}
+
+/** The largest script the tool accepts. */
+export const LAUNCHPAD_SCRIPT_MAX_BYTES = 64 * 1024
+
+export const LAUNCHPAD_SET_SCRIPT_DESCRIPTION =
+  'Put a script into one one-time action of the Launchpad editor in this conversation. ' +
+  'Use it only when the person asked you to write or fix a Launchpad script. ' +
+  'Pass the action name and the whole script. It never saves and never runs: the person reviews the script and saves it.'
+
+export interface LaunchpadToolHandlers {
+  setScript(args: { action: string; script: string }): Promise<ToolResult>
+}
+
+export function launchpadToolHandlers(deps: LaunchpadToolDeps): LaunchpadToolHandlers {
+  return {
+    setScript: async (args) => {
+      try {
+        const action = typeof args.action === 'string' ? args.action.trim() : ''
+        const script = typeof args.script === 'string' ? args.script : ''
+        if (action === '') return text('Name the one-time action the script is for.', true)
+        if (script.trim() === '') return text('The script is empty. Send the whole script.', true)
+        if (Buffer.byteLength(script) > LAUNCHPAD_SCRIPT_MAX_BYTES) {
+          return text(`The script is too long. The limit is ${LAUNCHPAD_SCRIPT_MAX_BYTES / 1024} KB.`, true)
+        }
+        if (deps.threadId === null) {
+          return text('This session has no conversation, so the script cannot reach the Launchpad.', true)
+        }
+        deps.deliver({ threadId: deps.threadId, action, script })
+        return text(`The script is in the Launchpad editor for ${action}. The person reviews and saves it.`)
+      } catch (error) {
+        return text(`Could not deliver the script: ${error instanceof Error ? error.message : String(error)}`, true)
+      }
+    },
+  }
+}
+
 /** A plain-text result (the subtask tool speaks sentences, not JSON). */
 function text(body: string, isError = false): ToolResult {
   return { content: [{ type: 'text', text: body }], ...(isError ? { isError: true } : {}) }
@@ -367,6 +416,7 @@ export async function createFlowBoardTools(
   board: FlowBoardToolsDeps | null,
   subtasks: SubtaskToolDeps | null = null,
   run: RunToolDeps | null = null,
+  launchpad: LaunchpadToolDeps | null = null,
 ): Promise<McpSdkServerConfigWithInstance> {
   const { createSdkMcpServer, tool } = await loadSdkMcpApi()
 
@@ -406,11 +456,25 @@ export async function createFlowBoardTools(
             (args) => runToolHandlers(run).runReload(args),
           ),
         ]
+  const launchpadTools =
+    launchpad === null
+      ? []
+      : [
+          tool(
+            LAUNCHPAD_SET_SCRIPT_TOOL_NAME,
+            LAUNCHPAD_SET_SCRIPT_DESCRIPTION,
+            {
+              action: z.string().min(1).describe('The name of the one-time action, as the Launchpad shows it.'),
+              script: z.string().min(1).describe('The whole new script.'),
+            },
+            (args) => launchpadToolHandlers(launchpad).setScript(args),
+          ),
+        ]
   if (board === null) {
     return createSdkMcpServer({
       name: FLOW_MCP_SERVER_NAME,
       version: '1.0.0',
-      tools: [...subtaskTools, ...runTools],
+      tools: [...subtaskTools, ...runTools, ...launchpadTools],
     })
   }
   const h = boardToolHandlers(board)
@@ -418,6 +482,7 @@ export async function createFlowBoardTools(
   const tools = [
     ...subtaskTools,
     ...runTools,
+    ...launchpadTools,
     tool(
       BOARD_TOOL_NAMES.createTask,
       'Create a task card on this project’s Flow board (with its own chat thread). Returns the new card.',

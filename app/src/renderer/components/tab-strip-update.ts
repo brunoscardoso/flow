@@ -56,7 +56,10 @@ function sameStructure(prev: TabDescriptor, next: TabDescriptor): boolean {
     (prev.renamable ?? false) === (next.renamable ?? false) &&
     prev.accent === next.accent &&
     prev.tooltip === next.tooltip &&
-    (prev.pending ?? false) === (next.pending ?? false)
+    (prev.pending ?? false) === (next.pending ?? false) &&
+    (prev.dots ?? []).join('|') === (next.dots ?? []).join('|') &&
+    prev.count === next.count &&
+    prev.caret === next.caret
   )
 }
 

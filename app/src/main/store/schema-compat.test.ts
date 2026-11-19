@@ -141,9 +141,10 @@ describe('the shipped ladder', () => {
   // v39 (turn-end mark) and v40 (the subtasks table, plan_mid-run-subtasks)
   // follow the same rule: additive, floored at v35. So does v41
   // (threads.autopilot — autopilot chosen per conversation, default off), and
-  // v42 (threads.run_tweaks — a conversation's own Run setup tweaks, nullable).
-  it('tops out at v42, floored at v35 for the installed pre-rename build', () => {
-    expect(LATEST_SCHEMA_VERSION).toBe(42)
+  // v42 (threads.run_tweaks — a conversation's own Run setup tweaks, nullable),
+  // and v43 (threads.connectors_off — the connectors a chat turned off, nullable).
+  it('tops out at v43, floored at v35 for the installed pre-rename build', () => {
+    expect(LATEST_SCHEMA_VERSION).toBe(43)
   })
 
   // Workspaces (plan_workspaces-knowledge-hub, Phase 4) deliberately added NO
@@ -155,7 +156,7 @@ describe('the shipped ladder', () => {
     try {
       const db = openDatabase(join(dir, 'fresh.db'))
       try {
-        expect(versionOf(db)).toBe(42)
+        expect(versionOf(db)).toBe(43)
         const tables = (
           db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>
         ).map((row) => row.name)
@@ -174,7 +175,7 @@ describe('the shipped ladder', () => {
     }
   })
 
-  it('the installed build (ladder ending at v35) opens a v42 database and writes into it', () => {
+  it('the installed build (ladder ending at v35) opens a v43 database and writes into it', () => {
     const dir = mkdtempSync(join(tmpdir(), 'flow-schema-compat-'))
     try {
       const path = join(dir, 'shared.db')
@@ -215,7 +216,7 @@ describe('the shipped ladder', () => {
     try {
       const db = openDatabase(join(dir, 'fresh.db'))
       try {
-        expect(versionOf(db)).toBe(42)
+        expect(versionOf(db)).toBe(43)
         expect(readCompatibleFloor(db)).toBe(35)
         const tables = (
           db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>

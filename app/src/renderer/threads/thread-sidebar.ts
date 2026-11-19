@@ -1120,6 +1120,19 @@ export class ThreadSidebar {
             .update({ threadId, patch: { autopilot: true } })
             .catch((e: unknown) => console.error('flow: failed to set autopilot', e))
         }
+        // Connectors switched off on the new-thread page (plan_connectors,
+        // note 9), before the first turn — the session reads the chat's off
+        // list when it starts. Fail-soft: the chat exists either way.
+        const connectorsOff = draft?.connectorsOff ?? []
+        const connectorsApi = window.flow.connectors
+        if (connectorsOff.length > 0 && connectorsApi !== undefined) {
+          for (const name of connectorsOff) {
+            const result = await connectorsApi
+              .setForThread({ threadId, name, on: false })
+              .catch((error: unknown) => ({ ok: false as const, reason: String(error) }))
+            if (!result.ok) console.warn(`flow: could not turn ${name} off for the new chat`, result.reason)
+          }
+        }
         // THE BRANCH, BEFORE THE FIRST TURN. `prepareWorktree` cuts the checkout
         // and names it; asking for neither keeps the old path exactly — the
         // thread works in the project's own files.

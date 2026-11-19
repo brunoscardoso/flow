@@ -188,3 +188,43 @@ describe('liveRequestSummary', () => {
     expect(liveRequestSummary([], { startedAt: 10, now: 5, model: null }).elapsedMs).toBe(0)
   })
 })
+
+describe('requestRowView — connectors used (plan_connectors, FR-7)', () => {
+  const named = (id: string, toolName: string): ToolCallRecord => ({ ...record(id), toolName })
+
+  it('lists the distinct connectors in order of first use, at most three', () => {
+    const view = requestRowView(
+      summary(),
+      [
+        { text: 'a', records: [named('1', 'Bash'), named('2', 'mcp__claude_ai_Linear__search_issues')] },
+        {
+          text: 'b',
+          records: [
+            named('3', 'mcp__plugin_vercel_vercel__list_projects'),
+            named('4', 'mcp__claude_ai_Linear__get_issue'),
+            named('5', 'mcp__flow__board_list'),
+            named('6', 'mcp__github__list_prs'),
+            named('7', 'mcp__sentry__get_event'),
+          ],
+        },
+      ],
+      false,
+    )
+    expect(view.connectors).toEqual([
+      { serverName: 'claude_ai_Linear', connectorName: 'Linear' },
+      { serverName: 'plugin_vercel_vercel', connectorName: 'Vercel' },
+      { serverName: 'github', connectorName: 'Github' },
+    ])
+  })
+
+  it('is empty for a request that called no connector, and takes display names', () => {
+    expect(requestRowView(summary(), [{ text: 'a', records: [record('1')] }], false).connectors).toEqual([])
+    const view = requestRowView(
+      summary(),
+      [{ text: 'a', records: [named('1', 'mcp__github__list_prs')] }],
+      false,
+      { displayNames: new Map([['github', 'GitHub']]) },
+    )
+    expect(view.connectors).toEqual([{ serverName: 'github', connectorName: 'GitHub' }])
+  })
+})

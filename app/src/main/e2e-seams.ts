@@ -95,3 +95,40 @@ export function e2eRendererArguments(env: NodeJS.ProcessEnv, isPackaged: boolean
   if (isPackaged) return []
   return env['FLOW_E2E'] === '1' ? [E2E_RENDERER_ARG] : []
 }
+
+/**
+ * HANDLES — the other direction: an object main hands TO a hidden run, so a
+ * spec can drive one step deterministically instead of waiting on something
+ * the test machine does unreliably. Today there is one:
+ *
+ *   · `draftsObserver` — `processChange(root, absPath)` runs a canvas file's
+ *                        change through the drafts observer's own chain and
+ *                        processing (snapshot of the previous version, stamp,
+ *                        broadcast), because the file watcher on a macOS temp
+ *                        folder is not reliable enough to wait on.
+ *
+ * FAIL-CLOSED (forbidden-pattern #15): published on `globalThis.__flowE2EHandles`
+ * only with `FLOW_E2E=1` AND an unpackaged app; both inputs are required, so no
+ * caller publishes one by default. Outside a hidden run nothing is written.
+ */
+export interface E2EHandles {
+  draftsObserver?: { processChange(rootPath: string, absPath: string, removed?: boolean): Promise<boolean> }
+}
+
+const HANDLES_KEY = '__flowE2EHandles'
+
+/** Publish one handle for a hidden run. Returns whether it was published. */
+export function exposeE2EHandle<K extends keyof E2EHandles>(
+  name: K,
+  value: NonNullable<E2EHandles[K]>,
+  env: NodeJS.ProcessEnv,
+  isPackaged: boolean,
+): boolean {
+  if (isPackaged || env['FLOW_E2E'] !== '1') return false
+  const holder = globalThis as Record<string, unknown>
+  const current = holder[HANDLES_KEY]
+  const handles = (typeof current === 'object' && current !== null ? current : {}) as E2EHandles
+  handles[name] = value
+  holder[HANDLES_KEY] = handles
+  return true
+}

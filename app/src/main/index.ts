@@ -140,6 +140,9 @@ import { CredentialsManager } from './credentials'
 import { FlowObserver, registerFlowChannels, rootsProviderFrom } from './flow/flow-observer'
 import { registerArtifactChannels } from './flow/artifact-observer'
 import { handleWalkthroughPages, registerWalkthroughPageScheme } from './flow/walkthrough-page'
+import { registerDraftChannels } from './drafts/drafts-ipc'
+import { nodeDraftFs } from './drafts/draft-store'
+import { createDraftWriteLedger } from './drafts/draft-write-ledger'
 import { GitManager, gitRootsProviderFrom, registerGitChannels } from './git'
 import { GitPublishService } from './git/publish'
 import { GIT_CHANGED_EVENT, type GitChangedEvent } from './git/git-manager'
@@ -201,11 +204,19 @@ import {
   type TerminalRemovedEvent,
 } from './terminal'
 import { registerRunChannels } from './run/ipc'
+import { registerConnectorChannels } from './connectors/ipc'
+import { ConnectorService } from './connectors/connector-service'
+import { ConnectorStatusService } from './connectors/connector-status'
+import { createIconCache, resolveConnectorIcon } from './connectors/connector-icons'
+import { ConnectorSignIn } from './connectors/connector-sign-in'
+import { ConnectorSuggester } from './connectors/connector-suggest'
+import { loadExternalMcpServers, loadScopedExternalMcpServers } from './agent/external-mcp'
 import { createTcpConnect, waitForLine, waitForPort, waitForPortFree } from './run/ready-check'
 import { RunSetupStore } from './run/run-setup-store'
 import { CommandUsageStore, onceUsageSuggestions, rankOnceSuggestions, rankSuggestions, usageSuggestions } from './run/command-usage'
 import { nodeSuggestFs, suggestOnceSteps, suggestRunSteps } from './run/run-suggest'
 import { RunSupervisor } from './run/run-supervisor'
+import { createRunScriptFiles } from './run/run-script-files'
 import { wireShellPersistence } from './terminal/shell-persistence'
 import { registerFileChannels } from './project/files'
 import {
@@ -566,6 +577,7 @@ let disposeFileIpc: (() => void) | null = null
 let disposeFlowIpc: (() => Promise<void>) | null = null
 let disposeArtifactIpc: (() => void) | null = null
 let disposeWalkthroughPages: (() => void) | null = null
+let disposeDraftIpc: (() => void) | null = null
 let disposeBlueprintIpc: (() => void) | null = null
 let disposeBrainIpc: (() => void) | null = null
 let disposeAskIpc: (() => void) | null = null
@@ -581,6 +593,9 @@ let runSupervisor: RunSupervisor | null = null
 /** The commands typed into Flow's terminals, per project — flushed on quit. */
 let commandUsage: CommandUsageStore | null = null
 let disposeRunIpc: (() => void) | null = null
+/** MCP connectors (plan_connectors) — the service owns held status queries, closed on quit. */
+let connectorService: ConnectorService | null = null
+let disposeConnectorIpc: (() => void) | null = null
 let disposeLspIpc: (() => Promise<void>) | null = null
 let disposeGitIpc: (() => void) | null = null
 let disposeReviewIpc: (() => void) | null = null
@@ -1943,6 +1958,13 @@ function bootstrapMainProcess(): void {
           reload: (stepKey) => supervisor.reload(scope, stepKey),
         }
       },
+      // The agent puts a script into one one-time action of this conversation's
+      // Launchpad editor. Delivery only: the renderer shows it unsaved, and the
+      // person saves it. Nothing here saves or runs.
+      launchpadTools: ({ threadId }) => ({
+        threadId,
+        deliver: (proposal) => broadcast('run:scriptProposal', proposal),
+      }),
       accountResolver,
       getModelRouting: () => appSettings.getModelRouting(),
       // The picker's evidence: what each runtime reported running (see
@@ -3432,6 +3454,15 @@ const understandFeature = async (request: {
   disposeWalkthroughPages = handleWalkthroughPages({
     isKnownRoot: (rootPath) => addressableRoots.isAddressable(rootPath),
   })
+  // UI drafts (plan `ui_drafts`): canvas folders under flow/drafts/, served on
+  // the same scheme's `drafts` host (above) and read, edited, undone and
+  // versioned only through main's drafts store. One write ledger, so the
+  // drafts observer can tell Flow's own writes from the agent's.
+  disposeDraftIpc = registerDraftChannels({
+    roots: rootsProviderFrom(projectRegistry),
+    isKnownRoot: (rootPath) => addressableRoots.isAddressable(rootPath),
+    store: { fs: nodeDraftFs, ledger: createDraftWriteLedger(), now: Date.now },
+  })
   // Artifact watcher (blueprint-interaction #563+#568): discovery/plan/brainstorm
   // doc adds/changes push flow:artifactChanged; learn:narrate spawns the bundled
   // CLI's `blueprint narrate` for the board's "Narrate" action.
@@ -3707,6 +3738,8 @@ const understandFeature = async (request: {
           waitForLine(terminalId, text, { timeoutMs, observe: (observer) => manager.observeOutput(observer) }),
         waitPortFree: (port, timeoutMs) => waitForPortFree(port, { timeoutMs, connect }),
       },
+      // A one-time action's script runs as one private file under the app's data.
+      scripts: createRunScriptFiles({ dir: join(app.getPath('userData'), 'run-scripts') }),
     })
     const suggestFs = nodeSuggestFs()
     disposeRunIpc = registerRunChannels({
@@ -3748,6 +3781,65 @@ const understandFeature = async (request: {
           (url) => isAppEntryUrl(url, rendererEntry()),
         ),
       broadcastUpdated: (state) => broadcast('run:updated', state),
+    })
+  }
+
+  // CONNECTORS (plan_connectors): one service in main owns the list, its
+  // status, the writes to Claude's own files, each chat's off list and the
+  // ask-first marks. Status queries open only on request and close when idle.
+  {
+    const agents = agentManager
+    const connectorStatus = new ConnectorStatusService({
+      queryFn: () => agents.getQueryFunction(),
+      loadServers: (projectRoot, configDir) => loadExternalMcpServers(projectRoot, configDir),
+      liveQueryFor: (threadId) => agents.getClaudeQuery(threadId),
+    })
+    const iconCache = createIconCache()
+    const iconCacheDir = join(app.getPath('userData'), 'connector-icons')
+    const signIn = new ConnectorSignIn({
+      queryFor: (context, threadId) => connectorStatus.queryFor(context, threadId),
+      openExternal: (url) => shell.openExternal(url),
+      onChanged: (change) => broadcast('connectors:changed', change),
+    })
+    const service = new ConnectorService({
+      status: connectorStatus,
+      contextFor: (projectRoot) => agents.connectorContext(projectRoot),
+      loadScoped: (projectRoot, configDir) => loadScopedExternalMcpServers(projectRoot, configDir),
+      threads: {
+        getThread: (id) => threadStore.getThread(id),
+        getConnectorsOff: (id) => threadStore.getConnectorsOff(id),
+        setConnectorsOff: (id, names) => threadStore.setConnectorsOff(id, names),
+      },
+      askFirst: {
+        get: (account, connector) => appSettings.getConnectorAskFirst(account, connector),
+        set: (account, connector, tool, on) => appSettings.setConnectorAskFirst(account, connector, tool, on),
+      },
+      applyThreadConnector: (threadId, name, on) => agents.applyThreadConnector(threadId, name, on),
+      onChanged: (change) => broadcast('connectors:changed', change),
+      resolveIcon: (entry, theme) => resolveConnectorIcon(entry, theme, { cache: iconCache, cacheDir: iconCacheDir }),
+      signIn,
+    })
+    connectorService = service
+    permissions.setAskFirstLookup((threadId, toolName) => service.isAskFirst(threadId, toolName))
+    const suggester = new ConnectorSuggester({
+      entriesFor: (projectRoot) => service.entriesFor(projectRoot),
+      usedToolRows: (projectRoot) => threadStore.listConnectorToolUse(projectRoot),
+      dismissed: {
+        get: (projectRoot) => appSettings.getDismissedConnectorSuggestions(projectRoot),
+        set: (projectRoot, fingerprints) => appSettings.setDismissedConnectorSuggestions(projectRoot, fingerprints),
+      },
+    })
+    disposeConnectorIpc = registerConnectorChannels({
+      service,
+      suggestions: suggester,
+      resolveRoot: (rootPath) =>
+        addressableRoots.isAddressable(rootPath) ? (addressableRoots.ownerCheckoutFor(rootPath) ?? rootPath) : null,
+      isTrustedSender: (event) =>
+        isAppMainFrame(
+          event,
+          (sender) => sender.getType() === 'window' && BrowserWindow.fromWebContents(sender) !== null,
+          (url) => isAppEntryUrl(url, rendererEntry()),
+        ),
     })
   }
 
@@ -4372,6 +4464,10 @@ async function disposeMainProcess(): Promise<void> {
   // manager, so the supervisor stops listening to terminals it is removing.
   disposeRunIpc?.()
   disposeRunIpc = null
+  disposeConnectorIpc?.()
+  disposeConnectorIpc = null
+  connectorService?.dispose()
+  connectorService = null
   commandUsage?.flush()
   commandUsage = null
   if (runSupervisor) {
@@ -4444,6 +4540,8 @@ async function disposeMainProcess(): Promise<void> {
   disposeArtifactIpc = null
   disposeWalkthroughPages?.()
   disposeWalkthroughPages = null
+  disposeDraftIpc?.()
+  disposeDraftIpc = null
   disposeFileIpc?.()
   disposeFileIpc = null
   disposeAccountsIpc?.()

@@ -21,6 +21,7 @@ import { ConversationPane } from './conversation-pane'
 import { redoFailedToast } from './redo-feedback'
 import { resolveThreadSelection } from './thread-selection'
 import { createNewThreadPage } from './new-thread-page'
+import { initConnectorStore } from './connector-store'
 import { askCarryInline } from './carry-menu-view'
 import { prepareThreadWorktree } from './prepare-worktree-flow'
 import { hasAvailableRoot } from './root-availability-select'
@@ -41,6 +42,10 @@ export function initThreads(surfaces: ShellSurfaces): void {
     console.warn('flow: preload bridge missing — threads UI disabled')
     return
   }
+
+  // Connector icons and names for every chat surface, before any composer
+  // opens — a transcript's tool cards draw them as soon as it loads.
+  initConnectorStore()
 
   // ── Sidebar mount ────────────────────────────────────────────────────────
   const sidebarContainer = document.createElement('div')

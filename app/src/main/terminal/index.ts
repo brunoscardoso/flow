@@ -39,6 +39,7 @@ import { armCommandTimeout } from './command-timeout'
 import { feedLine, newLineBuffer, type LineBuffer } from './line-buffer'
 import { BoundedOutputCollector } from './output-collector'
 import { PtySession, ScrollbackBuffer } from './pty-manager'
+import { TerminalProblemsService } from './terminal-problems-service'
 
 export const TERMINAL_DATA_EVENT = 'terminal-data'
 export const TERMINAL_EXIT_EVENT = 'terminal-exit'
@@ -719,22 +720,40 @@ export function registerTerminalChannels(deps: TerminalChannelDependencies): () 
     terminalManager.rename(terminalId, title)
   })
 
+  // Terminal problems: every user terminal's output is read here, in main, so
+  // terminals nobody has on screen are covered too (terminal-problems-service.ts).
+  const problems = new TerminalProblemsService({
+    onChanged: (counts) => broadcast('terminal:problemsChanged', counts),
+  })
+  for (const terminal of terminalManager.listTerminals()) problems.track(terminal)
+  handle('terminal:problems', ({ limit }) => problems.snapshot(limit))
+  handle('terminal:clearProblems', () => {
+    problems.clear()
+  })
+  const onProblemsInfo = (info: TerminalInfo): void => problems.updateInfo(info)
+
   const onData = (event: TerminalDataEvent): void => {
     broadcast('terminal:data', event)
+    problems.data(event.terminalId, event.data)
   }
   const onExit = (event: TerminalExitEvent): void => {
     broadcast('terminal:exit', event)
+    problems.exited(event.terminalId)
   }
   const onCreated = (info: TerminalInfo): void => {
+    problems.track(info)
     broadcast('terminal:created', info)
   }
   const onRemoved = (event: TerminalRemovedEvent): void => {
     broadcast('terminal:removed', event)
+    problems.removed(event.terminalId)
   }
   terminalManager.on(TERMINAL_DATA_EVENT, onData)
   terminalManager.on(TERMINAL_EXIT_EVENT, onExit)
   terminalManager.on(TERMINAL_CREATED_EVENT, onCreated)
   terminalManager.on(TERMINAL_REMOVED_EVENT, onRemoved)
+  terminalManager.on(TERMINAL_RENAMED_EVENT, onProblemsInfo)
+  terminalManager.on(TERMINAL_OWNER_SET_EVENT, onProblemsInfo)
 
   return function disposeTerminalChannels(): void {
     for (const channel of registeredChannels) {
@@ -745,5 +764,8 @@ export function registerTerminalChannels(deps: TerminalChannelDependencies): () 
     terminalManager.off(TERMINAL_EXIT_EVENT, onExit)
     terminalManager.off(TERMINAL_CREATED_EVENT, onCreated)
     terminalManager.off(TERMINAL_REMOVED_EVENT, onRemoved)
+    terminalManager.off(TERMINAL_RENAMED_EVENT, onProblemsInfo)
+    terminalManager.off(TERMINAL_OWNER_SET_EVENT, onProblemsInfo)
+    problems.dispose()
   }
 }

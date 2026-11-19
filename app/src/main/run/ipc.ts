@@ -158,7 +158,12 @@ export function registerRunChannels(deps: RunChannelDependencies): () => void {
     return supervisor.reload(scope, stepKey, force)
   })
 
-  handle('run:stop', (request) => supervisor.stop(scopeOf(request['scope'], 'run:stop')))
+  handle('run:stop', (request) => {
+    const channel = 'run:stop'
+    const scope = scopeOf(request['scope'], channel)
+    const stepKey = request['stepKey'] === undefined ? undefined : requiredString(request['stepKey'], channel, 'stepKey')
+    return supervisor.stop(scope, stepKey)
+  })
 
   // A person pressed a one-time action in the Launchpad menu. Only its key
   // crosses: the command is read from the person's own saved setup here, never

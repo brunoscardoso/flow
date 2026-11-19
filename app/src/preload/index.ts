@@ -297,6 +297,9 @@ const flowApi: FlowApi = {
     onExit: (listener) => subscribe('terminal:exit', listener),
     onRemoved: (listener) => subscribe('terminal:removed', listener),
     onCreated: (listener) => subscribe('terminal:created', listener),
+    problems: (request) => invoke('terminal:problems', request),
+    clearProblems: () => invoke('terminal:clearProblems', {}),
+    onProblemsChanged: (listener) => subscribe('terminal:problemsChanged', listener),
   },
   // A project's Run — intents to main's supervisor, and its state on transitions.
   run: {
@@ -309,6 +312,23 @@ const flowApi: FlowApi = {
     once: (request) => invoke('run:once', request),
     states: () => invoke('run:states', {}),
     onUpdated: (listener) => subscribe('run:updated', listener),
+    onScriptProposal: (listener) => subscribe('run:scriptProposal', listener),
+  },
+  // MCP connectors — intents to main's connector service, and its change event.
+  connectors: {
+    list: (request) => invoke('connectors:list', request),
+    add: (request) => invoke('connectors:add', request),
+    remove: (request) => invoke('connectors:remove', request),
+    setForThread: (request) => invoke('connectors:setForThread', request),
+    reconnect: (request) => invoke('connectors:reconnect', request),
+    setAskFirst: (request) => invoke('connectors:setAskFirst', request),
+    icon: (request) => invoke('connectors:icon', request),
+    signIn: (request) => invoke('connectors:signIn', request),
+    signOut: (request) => invoke('connectors:signOut', request),
+    cancelSignIn: (request) => invoke('connectors:cancelSignIn', request),
+    suggest: (request) => invoke('connectors:suggest', request),
+    dismissSuggestions: (request) => invoke('connectors:dismissSuggestions', request),
+    onChanged: (listener) => subscribe('connectors:changed', listener),
   },
   // #1352: the renderer's current zoom factor. View ▸ Zoom In/Out changes how
   // many device pixels a CSS px is, and the macOS traffic lights do NOT scale
@@ -531,6 +551,19 @@ const flowApi: FlowApi = {
   plans: {
     notes: (request) => invoke('plan:notes', request),
     setNote: (request) => invoke('plan:setNote', request),
+  },
+  // UI drafts: every read and write goes through main's one drafts store.
+  drafts: {
+    list: (request) => invoke('drafts:list', request),
+    readLayout: (request) => invoke('drafts:readLayout', request),
+    applyEdit: (request) => invoke('drafts:applyEdit', request),
+    undo: (request) => invoke('drafts:undo', request),
+    undoCanvas: (request) => invoke('drafts:undoCanvas', request),
+    undoCount: (request) => invoke('drafts:undoCount', request),
+    saveVersion: (request) => invoke('drafts:saveVersion', request),
+    listVersions: (request) => invoke('drafts:listVersions', request),
+    restoreVersion: (request) => invoke('drafts:restoreVersion', request),
+    onChanged: (listener) => subscribe('drafts:changed', listener),
   },
   project: {
     list: () => invoke('project:list', {}),
