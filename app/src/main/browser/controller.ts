@@ -15,8 +15,10 @@ import type {
   BrowserCapabilities,
   BrowserCapture,
   BrowserCaptureKind,
+  BrowserPageTimings,
   TagWindow,
 } from '../../shared/browser-capture-types'
+import { replayRequest } from '../../shared/network-detail'
 import { redactAndBound } from '../../shared/browser-capture-boundary'
 import type { IpcEventPayload } from '../../shared/ipc-contract'
 import { opensInFlow, tabShortcut } from '../../shared/browser-tabs'
@@ -98,6 +100,14 @@ class BrowserController {
     if (this.#initialized) return
     this.#initialized = true
     app.on('web-contents-created', (_event, contents) => {
+      // CAPTURE FROM THE FIRST REQUEST. A guest is created before it loads
+      // anything; attaching on 'did-attach-webview' was after its navigation
+      // had begun, so the first load of every tab had no document and no
+      // stylesheets in the Network panel.
+      if (contents.getType() === 'webview') {
+        this.#captureGuest(contents)
+        return
+      }
       // The host window is a 'window' webContents; its <webview> children arrive
       // via `did-attach-webview`. DevTools / other window contents never emit it,
       // so attaching to every window is harmless.
@@ -114,19 +124,8 @@ class BrowserController {
       })
       contents.on('did-attach-webview', (_e, guest) => {
         const guestId = guest.id
-        // Always-on console/network capture over CDP (Phase 5), one buffer per
-        // tab. The handle self-detaches on guest 'destroyed' / DevTools
-        // contention, so a missed teardown can't leak the attach.
-        const buffer = new RollingBuffer()
-        const entry: GuestEntry = { guest, buffer, cdp: null as unknown as CdpCaptureHandle, errors: 0 }
-        entry.cdp = attachCdpCapture(guest, buffer, (kind, counts) => {
-          if (kind === 'console') {
-            const newest = buffer.slice('console', { mode: 'last-n', n: 1 })[0]
-            if (newest !== undefined && newest.kind === 'console' && newest.payload.level === 'error') entry.errors += 1
-          }
-          this.emitBufferUpdated({ kind, counts, guestId, errors: entry.errors })
-        })
-        this.#guests.set(guestId, entry)
+        // Usually already capturing — started when the guest was created (below).
+        this.#captureGuest(guest)
         // The newest page is on screen until the renderer says otherwise: a
         // single-tab browser never has to say.
         this.#activeId = guestId
@@ -171,6 +170,28 @@ class BrowserController {
         })
       })
     })
+  }
+
+  /**
+   * Start console/network capture over CDP for one guest, once. One buffer per
+   * tab. The handle self-detaches on guest 'destroyed' / DevTools contention,
+   * so a missed teardown can't leak the attach.
+   */
+  #captureGuest(guest: WebContents): GuestEntry {
+    const guestId = guest.id
+    const existing = this.#guests.get(guestId)
+    if (existing !== undefined && existing.guest === guest) return existing
+    const buffer = new RollingBuffer()
+    const entry: GuestEntry = { guest, buffer, cdp: null as unknown as CdpCaptureHandle, errors: 0 }
+    entry.cdp = attachCdpCapture(guest, buffer, (kind, counts) => {
+      if (kind === 'console') {
+        const newest = buffer.slice('console', { mode: 'last-n', n: 1 })[0]
+        if (newest !== undefined && newest.kind === 'console' && newest.payload.level === 'error') entry.errors += 1
+      }
+      this.emitBufferUpdated({ kind, counts, guestId, errors: entry.errors })
+    })
+    this.#guests.set(guestId, entry)
+    return entry
   }
 
   /** Wire the renderer broadcast channel (done once at IPC registration). */
@@ -249,9 +270,50 @@ class BrowserController {
     setGuestRecording(this.currentGuest(), on)
   }
 
-  /** Read a slice of a kind's capture buffer without tagging it. */
-  bufferSlice(kind: BrowserCaptureKind, selector: TagWindow): BrowserCapture[] {
-    return this.#buffer?.slice(kind, selector) ?? []
+  /**
+   * Read a slice of a kind's capture buffer without tagging it.
+   *
+   * `bodies: false` is the Network panel's list read: up to 500 requests, each
+   * with up to two 64 KB bodies, is megabytes per refresh for a list that
+   * prints none of them. The bodies stay here and are read one request at a
+   * time when a row is opened (allowed-pattern #18).
+   */
+  bufferSlice(kind: BrowserCaptureKind, selector: TagWindow, bodies = true): BrowserCapture[] {
+    const slice = this.#buffer?.slice(kind, selector) ?? []
+    if (bodies || kind !== 'network') return slice
+    return slice.map((capture) => {
+      if (capture.kind !== 'network') return capture
+      const { requestBody: _request, responseBody: _response, ...payload } = capture.payload
+      return { ...capture, bodiesOmitted: true, payload }
+    })
+  }
+
+  /** When the page on screen reached DOMContentLoaded and load. */
+  pageTimings(): BrowserPageTimings {
+    return this.#cdp?.pageTimings() ?? { domContentLoaded: null, load: null }
+  }
+
+  /**
+   * Send a captured request again, from the page itself, so its cookies and
+   * origin are the page's own. The new request is captured like any other and
+   * appears as a new row. Main holds the unredacted capture, which is why this
+   * lives here and not in the renderer: the page's real credentials go back to
+   * the page they came from, and nowhere else.
+   */
+  async replay(id: string): Promise<{ ok: boolean; detail?: string }> {
+    const capture = this.#buffer?.get(id) ?? null
+    const guest = this.currentGuest()
+    if (capture === null || capture.kind !== 'network') return { ok: false, detail: 'That request is no longer in the list.' }
+    if (guest === null) return { ok: false, detail: 'The page is not open.' }
+    const request = replayRequest(capture.payload)
+    if (request === null) return { ok: false, detail: 'Only web requests can be sent again.' }
+    try {
+      const script = `fetch(${JSON.stringify(request.url)}, ${JSON.stringify(request.init)}).then(() => true, () => true)`
+      await guest.executeJavaScript(script)
+      return { ok: true }
+    } catch {
+      return { ok: false, detail: 'The page refused to send it.' }
+    }
   }
 
   /**

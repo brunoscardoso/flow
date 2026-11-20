@@ -623,15 +623,25 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     const counts = (cur.guestId === null ? undefined : countsByGuest.get(cur.guestId)) ?? { element: 0, console: 0, network: 0 }
     for (const kind of ['console', 'network'] as const) for (const listener of drawerListeners) listener({ kind, counts })
   }
-  const debugDrawer = new DebugDrawer({
-    bufferSlice: (request) => browser.bufferSlice(request),
-    tagRecent: (request) => browser.tagRecent(request),
-    tagEntry: (request) => browser.tagEntry(request),
-    onBufferUpdated: (listener) => {
-      drawerListeners.add(listener)
-      return () => drawerListeners.delete(listener)
+  const debugDrawer = new DebugDrawer(
+    {
+      bufferSlice: (request) => browser.bufferSlice(request),
+      tagRecent: (request) => browser.tagRecent(request),
+      tagEntry: (request) => browser.tagEntry(request),
+      ...(browser.pageTimings === undefined ? {} : { pageTimings: (request) => browser.pageTimings?.(request) ?? Promise.resolve({ domContentLoaded: null, load: null }) }),
+      ...(browser.replay === undefined ? {} : { replay: (request) => browser.replay?.(request) ?? Promise.resolve({ ok: false }) }),
+      onBufferUpdated: (listener) => {
+        drawerListeners.add(listener)
+        return () => drawerListeners.delete(listener)
+      },
     },
-  })
+    {
+      // "Open in new tab" from the Network panel's menu: a tab right after this one.
+      openUrl: (url) => void openNewTab(url, { after: tabs.activeId, activate: true }),
+      pageUrl: () => currentUrl(),
+      reload: () => void browser.reload({}).catch((error: unknown) => console.warn('flow: browser reload failed', error)),
+    },
+  )
 
   pageRow.append(viewport, draftPanel.element)
   const tabRow = new BrowserTabRow({
@@ -821,6 +831,7 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
       syncNavState()
     }
     replayCounts()
+    debugDrawer.pageChanged()
     // Past the cap, the tabs used longest ago sleep.
     const sleeping = tabsToSleep(tabs)
     for (const sleepId of sleeping) {

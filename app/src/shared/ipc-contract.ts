@@ -65,6 +65,7 @@ import type {
   BrowserCapabilities,
   BrowserCapture,
   BrowserCaptureKind,
+  BrowserPageTimings,
   TagWindow,
 } from './browser-capture-types'
 import type { BrowserTabShortcut } from './browser-tabs'
@@ -7736,7 +7737,9 @@ export interface IpcInvokeMap {
   }
   /** Read a slice of a kind's capture buffer without tagging it. */
   'browser:bufferSlice': {
-    request: { kind: BrowserCaptureKind; selector: TagWindow }
+    /** `bodies: false` leaves request/response bodies in main (the Network
+     *  panel's list read); each capture then carries `bodiesOmitted`. */
+    request: { kind: BrowserCaptureKind; selector: TagWindow; bodies?: boolean }
     response: BrowserCapture[]
   }
   /**
@@ -7750,6 +7753,10 @@ export interface IpcInvokeMap {
    * page (its id is the webview's webContents id). Unknown ids are ignored.
    */
   'browser:setActive': { request: { guestId: number }; response: void }
+  /** When the page on screen reached DOMContentLoaded and load. */
+  'browser:pageTimings': { request: Record<string, never>; response: BrowserPageTimings }
+  /** Send a captured request again from the page; it is captured as a new row. */
+  'browser:replay': { request: { id: string }; response: { ok: boolean; detail?: string } }
 
   // ── Reset Flow ────────────────────────────────────────────────────────────
   /** What each kind of data holds now — read when the reset section opens. */
@@ -8376,6 +8383,8 @@ export const IPC_INVOKE_CHANNELS = [
   'browser:bufferSlice',
   'browser:clearCaptures',
   'browser:setActive',
+  'browser:pageTimings',
+  'browser:replay',
   'reset:inventory',
   'reset:schedule',
   'reset:outcome',
@@ -9376,6 +9385,8 @@ export interface FlowBrowserApi {
   clearCaptures(request: IpcRequest<'browser:clearCaptures'>): Promise<void>
   /** The tab on screen changed — later calls act on its page. */
   setActive?(request: IpcRequest<'browser:setActive'>): Promise<void>
+  pageTimings?(request: IpcRequest<'browser:pageTimings'>): Promise<IpcResponse<'browser:pageTimings'>>
+  replay?(request: IpcRequest<'browser:replay'>): Promise<IpcResponse<'browser:replay'>>
   /** A page asked for a window that opens as a Flow tab. */
   onOpenTab?(listener: (event: IpcEventPayload<'browser:openTab'>) => void): Unsubscribe
   /** A tab shortcut pressed inside a page. */

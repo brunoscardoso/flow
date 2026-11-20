@@ -160,6 +160,13 @@ function boundConsole(capture: BrowserConsoleCapture): BrowserConsoleCapture {
   }
 }
 
+/** The named fields of `source` that are set, and nothing else. */
+function pickDefined<T extends object, K extends keyof T>(source: T, keys: readonly K[]): Partial<Pick<T, K>> {
+  const out: Partial<Pick<T, K>> = {}
+  for (const key of keys) if (source[key] !== undefined) out[key] = source[key]
+  return out
+}
+
 function boundNetwork(capture: BrowserNetworkCapture): BrowserNetworkCapture {
   const { payload } = capture
   const requestBody = boundBody(payload.requestBody)
@@ -179,6 +186,13 @@ function boundNetwork(capture: BrowserNetworkCapture): BrowserNetworkCapture {
     responseHeaders: redactHeaders(payload.responseHeaders),
     ...(requestBody.value === undefined ? {} : { requestBody: requestBody.value }),
     ...(responseBody.value === undefined ? {} : { responseBody: responseBody.value }),
+    // The Network panel's facts carry no secrets — types, sizes, timings, the
+    // script that sent it — so they are copied as they are, one by one, for the
+    // same reason as above: a spread would bring back the bodies.
+    ...pickDefined(payload, [
+      'resourceType', 'mimeType', 'transferBytes', 'resourceBytes', 'servedFrom', 'failure',
+      'canceled', 'phases', 'initiator', 'remoteAddress', 'protocol', 'redirectedTo',
+    ]),
   }
   return {
     ...capture,

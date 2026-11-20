@@ -28,7 +28,7 @@ import type {
 } from '../../shared/browser-capture-types'
 import type { FlowBrowserApi } from '../../shared/ipc-contract'
 import { renderConsoleRow } from './console-row'
-import { renderNetworkRow } from './network-row'
+import { createNetworkPanel, type NetworkPanel, type NetworkPanelHost } from './network-panel'
 import { DEFAULT_DRAWER_HEIGHT, HEIGHT_KEY, clampDrawerHeight } from './drawer-height'
 import { addCapturesToContext } from './browser-capture-chip'
 
@@ -39,7 +39,7 @@ type DebugKind = 'console' | 'network'
  *  so `window.flow.browser` is assignable without adaptation. */
 export type DebugDrawerBrowserApi = Pick<
   FlowBrowserApi,
-  'bufferSlice' | 'tagRecent' | 'tagEntry' | 'onBufferUpdated'
+  'bufferSlice' | 'tagRecent' | 'tagEntry' | 'onBufferUpdated' | 'pageTimings' | 'replay'
 >
 
 /** How many entries the row list shows (a bounded slice, newest at the bottom). */
@@ -81,6 +81,11 @@ export class DebugDrawer {
   #collapseBtn: FlButton
   #tabButtons: Record<DebugKind, HTMLButtonElement>
   #badges: Record<DebugKind, HTMLElement>
+  /** The console's own actions; the Network panel has its own toolbar. */
+  #consoleActions: HTMLElement[]
+  #networkHost: NetworkPanelHost
+  /** Built the first time the Network tab is opened. */
+  #network: NetworkPanel | null = null
 
   #activeKind: DebugKind = 'console'
   #collapsed = true
@@ -93,8 +98,9 @@ export class DebugDrawer {
   #unsubscribe: () => void
   #observer: IntersectionObserver
 
-  constructor(browser: DebugDrawerBrowserApi) {
+  constructor(browser: DebugDrawerBrowserApi, networkHost: NetworkPanelHost = { openUrl: () => undefined, pageUrl: () => null, reload: () => undefined }) {
     this.#browser = browser
+    this.#networkHost = networkHost
     ensureStyles()
 
     const root = document.createElement('div')
@@ -133,6 +139,7 @@ export class DebugDrawer {
     this.#collapseBtn.setAttribute('icon', '')
     this.#collapseBtn.addEventListener('click', () => this.#toggleCollapsed())
 
+    this.#consoleActions = [tagRecentBtn, addAllBtn]
     head.append(consoleTab.button, networkTab.button, spacer, tagRecentBtn, addAllBtn, this.#collapseBtn)
 
     // ── A GRIP, BECAUSE 180px IS SOMEBODY'S GUESS ────────────────────────────
@@ -189,6 +196,7 @@ export class DebugDrawer {
 
   /** Detach the hot subscription and the reveal observer. */
   dispose(): void {
+    this.#network?.dispose()
     this.#unsubscribe()
     this.#observer.disconnect()
     // A document listener outlives its tab unless it is taken off.
@@ -230,6 +238,14 @@ export class DebugDrawer {
    *  after a newer render started, is discarded. */
   async #renderRows(): Promise<void> {
     const kind = this.#activeKind
+    if (kind === 'network') {
+      this.#showNetwork()
+      return
+    }
+    if (this.#network !== null && this.#body.contains(this.#network.element)) {
+      this.#body.classList.remove('is-network')
+      this.#body.setAttribute('role', 'list')
+    }
     const seq = ++this.#renderSeq
     let slice: BrowserCapture[]
     try {
@@ -245,7 +261,6 @@ export class DebugDrawer {
     const rows: HTMLElement[] = []
     for (const capture of slice) {
       if (capture.kind === 'console') rows.push(renderConsoleRow(capture, onTag))
-      else if (capture.kind === 'network') rows.push(renderNetworkRow(capture, onTag))
     }
 
     if (rows.length === 0) {
@@ -257,6 +272,25 @@ export class DebugDrawer {
     }
     this.#body.replaceChildren(...rows)
     if (stick) this.#body.scrollTop = this.#body.scrollHeight
+  }
+
+  /** Mount the Network panel in the body (once) and ask it to re-read. */
+  #showNetwork(): void {
+    if (this.#network === null) this.#network = createNetworkPanel(this.#browser, this.#networkHost)
+    if (!this.#body.contains(this.#network.element)) {
+      this.#body.classList.add('is-network')
+      this.#body.removeAttribute('role')
+      this.#body.replaceChildren(this.#network.element)
+    }
+    this.#network.refresh()
+  }
+
+  /** The tab on screen changed: the Network panel starts over on its page. */
+  pageChanged(): void {
+    if (this.#network === null) return
+    this.#network.reset()
+    // Re-read only when someone can see it (allowed-pattern #17).
+    if (this.#activeKind === 'network' && !this.#collapsed && this.#isTabVisible()) this.#network.refresh()
   }
 
   #isNearBottom(): boolean {
@@ -275,6 +309,7 @@ export class DebugDrawer {
       this.#tabButtons[kind].classList.toggle('is-active', active)
       this.#tabButtons[kind].setAttribute('aria-selected', String(active))
     }
+    for (const action of this.#consoleActions) action.hidden = this.#activeKind === 'network'
     this.#syncBadges()
   }
 
@@ -664,6 +699,16 @@ function ensureStyles(): void {
       border-top: var(--fl-border-width) solid var(--fl-color-border);
       font-family: var(--fl-font-mono);
       font-size: var(--fl-text-mono-size);
+    }
+    /* The Network panel fills the body and scrolls inside itself. */
+    .fl-bdrawer-body.is-network {
+      /* A toolbar, the chips, a table and a detail pane do not fit in the
+         180px a console list opens at; below this the detail tabs are crushed. */
+      min-height: 300px;
+      overflow: hidden;
+      padding: 0;
+      font-family: var(--fl-font-ui);
+      font-size: var(--fl-text-ui-size);
     }
     .fl-bdrawer-empty {
       padding: var(--fl-space-md);

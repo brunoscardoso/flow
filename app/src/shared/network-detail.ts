@@ -201,3 +201,63 @@ export function toCurl(payload: BrowserNetworkPayload): string {
     ? `# Credentials in this request were redacted at capture, so this command\n# will not authenticate as the page did.\n${command}\n`
     : `${command}\n`
 }
+
+/**
+ * Headers a page's own `fetch` may not set — the browser refuses them or sets
+ * them itself. Sending a captured request again drops these and lets the
+ * browser fill them in, exactly as it did the first time.
+ */
+const FORBIDDEN_REQUEST_HEADERS = new Set([
+  'accept-charset', 'accept-encoding', 'access-control-request-headers', 'access-control-request-method',
+  'connection', 'content-length', 'cookie', 'cookie2', 'date', 'dnt', 'expect', 'host', 'keep-alive',
+  'origin', 'referer', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'via', 'user-agent',
+])
+
+function sendableHeaders(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    const lower = name.toLowerCase()
+    if (lower.startsWith(':') || lower.startsWith('sec-') || lower.startsWith('proxy-')) continue
+    if (FORBIDDEN_REQUEST_HEADERS.has(lower)) continue
+    out[name] = String(value)
+  }
+  return out
+}
+
+/** A request the page can send with its own `fetch`: url plus init. */
+export interface ReplayRequest {
+  url: string
+  init: { method: string; headers: Record<string, string>; body?: string; credentials: 'include' }
+}
+
+/**
+ * The captured request, ready to send again from the page. Null for anything
+ * that is not http(s), or a preflight (the browser sends those itself).
+ */
+export function replayRequest(payload: BrowserNetworkPayload): ReplayRequest | null {
+  if (!/^https?:\/\//i.test(payload.url)) return null
+  const method = payload.method.toUpperCase()
+  if (method === 'OPTIONS' && payload.resourceType === 'Preflight') return null
+  const init: ReplayRequest['init'] = { method, headers: sendableHeaders(payload.requestHeaders), credentials: 'include' }
+  if (method !== 'GET' && method !== 'HEAD' && payload.requestBody !== undefined && payload.requestBody.length > 0) {
+    init.body = payload.requestBody
+  }
+  return { url: payload.url, init }
+}
+
+/**
+ * The request as a `fetch` call, for a console or a test. Same caveat as the
+ * cURL: credentials were redacted at capture, and the call says so.
+ */
+export function toFetch(payload: BrowserNetworkPayload): string {
+  const request = replayRequest(payload) ?? {
+    url: payload.url,
+    init: { method: payload.method.toUpperCase(), headers: {}, credentials: 'include' as const },
+  }
+  const init: Record<string, unknown> = { method: request.init.method, headers: request.init.headers }
+  if (request.init.body !== undefined) init['body'] = request.init.body
+  init['credentials'] = 'include'
+  const text = `fetch(${JSON.stringify(request.url)}, ${JSON.stringify(init, null, 2)})\n`
+  const redacted = JSON.stringify(init).includes('[redacted]')
+  return redacted ? `// Credentials in this request were redacted at capture, so this call\n// will not authenticate as the page did.\n${text}` : text
+}

@@ -28,8 +28,17 @@ import type {
   BrowserConsolePayload,
   BrowserNetworkCapture,
   BrowserNetworkPayload,
+  BrowserPageTimings,
 } from '../../shared/browser-capture-types'
 import type { RollingBuffer } from './rolling-buffer'
+import {
+  applyResponseFacts,
+  initiatorFrom,
+  phasesFromTiming,
+  type CdpInitiator,
+  type CdpResourceTiming,
+  type CdpResponseFacts,
+} from './network-timing'
 
 /** Called after each capture lands so the controller can broadcast the new counts. */
 export type BufferUpdatedFn = (kind: BrowserCaptureKind, counts: BrowserBufferCounts) => void
@@ -40,6 +49,8 @@ export interface CdpCaptureHandle {
   detach(): void
   /** Whether capture is currently active (false once degraded/detached). */
   available(): boolean
+  /** When the page reached DOMContentLoaded and load, epoch ms. */
+  pageTimings(): BrowserPageTimings
 }
 
 /** The CDP protocol version we speak. */
@@ -91,6 +102,13 @@ interface LogEntryAdded {
 
 interface RequestWillBeSent {
   requestId: string
+  /** The frame that made the request — the main frame's marks a new page. */
+  frameId?: string
+  /** Document, Script, Fetch, XHR, Image, Preflight… */
+  type?: string
+  initiator?: CdpInitiator
+  /** Present when this event continues a redirect: the hop that redirected. */
+  redirectResponse?: CdpResponseFacts & { url: string; status: number; headers: Record<string, string> }
   request: {
     url: string
     method: string
@@ -105,7 +123,8 @@ interface RequestWillBeSent {
 
 interface ResponseReceived {
   requestId: string
-  response: {
+  type?: string
+  response: CdpResponseFacts & {
     url: string
     status: number
     headers: Record<string, string>
@@ -116,12 +135,26 @@ interface ResponseReceived {
 interface LoadingFinished {
   requestId: string
   timestamp: number
+  /** Bytes over the network, headers included. */
+  encodedDataLength?: number
 }
 
 interface LoadingFailed {
   requestId: string
   timestamp: number
   errorText?: string
+  canceled?: boolean
+  blockedReason?: string
+}
+
+interface DataReceived {
+  requestId: string
+  dataLength: number
+}
+
+interface PageLifecycle {
+  /** Monotonic seconds. */
+  timestamp: number
 }
 
 /** A network request accumulating across its CDP event lifecycle. */
@@ -129,6 +162,9 @@ interface PendingRequest {
   payload: BrowserNetworkPayload
   startTs: number // monotonic seconds
   order: number // insertion order, for oldest-first pending eviction
+  timing?: CdpResourceTiming
+  /** Decoded body bytes, summed from dataReceived. */
+  decoded: number
 }
 
 // ── console mapping ────────────────────────────────────────────────────────
@@ -224,9 +260,28 @@ export function attachCdpCapture(
   let detached = false
   let pendingOrder = 0
   const pending = new Map<string, PendingRequest>()
+  /** Wall-clock seconds minus monotonic seconds, from the newest request. */
+  let wallOffset: number | null = null
+  const timings: BrowserPageTimings = { domContentLoaded: null, load: null }
+  /**
+   * THE START OF A PAGE CAN GO UNRECORDED. A new page's own process sends its
+   * first stylesheets and scripts before network capture is listening there
+   * (measured: capture answers ~100 ms after the navigation starts, and holding
+   * the navigation only deadlocks, since capture waits for that very process).
+   * The browser still reports those requests' extra-info events, by id, with
+   * no request to match — so they are counted here, until the page's own
+   * requests start arriving, and the panel offers a reload.
+   */
+  const missedIds = new Set<string>()
+  const seenIds = new Set<string>()
+  let listening = false
+  /** Bumped at every new page, so a late body knows which page it belongs to. */
+  let page = 0
+  /** The page's top frame, from CDP — null until CDP has said. */
+  let mainFrameId: string | null = null
 
-  const record = (kind: BrowserCaptureKind, capture: BrowserConsoleCapture | BrowserNetworkCapture): void => {
-    buffer.push(capture)
+  const record = (kind: BrowserCaptureKind, capture: BrowserConsoleCapture | BrowserNetworkCapture, beforeNavigation = false): void => {
+    buffer.push(capture, { beforeNavigation })
     onBufferUpdated(kind, buffer.counts())
   }
 
@@ -274,6 +329,34 @@ export function attachCdpCapture(
   }
 
   const handleRequestWillBeSent = (params: RequestWillBeSent): void => {
+    if (params.wallTime !== undefined) wallOffset = params.wallTime - params.timestamp
+    // A NEW PAGE STARTS AT ITS DOCUMENT REQUEST. Marking it on the guest's
+    // 'did-navigate' was late: main hears that event after the new page's
+    // first scripts have already sent requests, so those landed before the
+    // mark, and the in-flight ones were dropped as the old page's.
+    if (params.type === 'Document' && params.redirectResponse === undefined && params.frameId !== undefined) {
+      // The first document a fresh tab loads is its main frame's — an iframe
+      // cannot load before its parent — so that names the main frame before
+      // Page.getFrameTree has answered.
+      if (mainFrameId === null) mainFrameId = params.frameId
+      if (params.frameId === mainFrameId) startPage()
+    }
+    // A redirect reuses the request id: the hop that redirected is finished,
+    // and is a row of its own, as it is in Chrome.
+    const previous = pending.get(params.requestId)
+    if (previous !== undefined && params.redirectResponse !== undefined) {
+      pending.delete(params.requestId)
+      const hop = previous.payload
+      hop.status = params.redirectResponse.status
+      hop.responseHeaders = params.redirectResponse.headers ?? {}
+      applyResponseFacts(hop, params.redirectResponse)
+      hop.redirectedTo = params.request.url
+      if (params.redirectResponse.encodedDataLength !== undefined) hop.transferBytes = params.redirectResponse.encodedDataLength
+      hop.timingMs = Math.max(0, Math.round((params.timestamp - previous.startTs) * 1000))
+      const phases = phasesFromTiming(previous.startTs, params.redirectResponse.timing, params.timestamp)
+      if (phases !== undefined) hop.phases = phases
+      commitNetwork(hop)
+    }
     const payload: BrowserNetworkPayload = {
       method: params.request.method.toUpperCase(),
       url: params.request.url,
@@ -283,8 +366,15 @@ export function attachCdpCapture(
       responseHeaders: {},
       ts: params.wallTime !== undefined ? Math.round(params.wallTime * 1000) : Date.now(),
     }
+    seenIds.add(params.requestId)
+    missedIds.delete(params.requestId)
+    // The page's own process is reporting now: what it sends from here on is seen.
+    if (params.type !== undefined && params.type !== 'Document') listening = true
     if (params.request.postData !== undefined) payload.requestBody = params.request.postData
-    pending.set(params.requestId, { payload, startTs: params.timestamp, order: pendingOrder++ })
+    if (params.type !== undefined) payload.resourceType = params.type
+    const initiator = initiatorFrom(params.initiator)
+    if (initiator !== undefined) payload.initiator = initiator
+    pending.set(params.requestId, { payload, startTs: params.timestamp, order: pendingOrder++, decoded: 0 })
     evictOldestPending()
   }
 
@@ -293,16 +383,36 @@ export function attachCdpCapture(
     if (!req) return
     req.payload.status = params.response.status
     req.payload.responseHeaders = params.response.headers ?? {}
+    if (params.type !== undefined) req.payload.resourceType = params.type
+    applyResponseFacts(req.payload, params.response)
+    if (params.response.timing !== undefined) req.timing = params.response.timing
   }
+
+  const handleDataReceived = (params: DataReceived): void => {
+    const req = pending.get(params.requestId)
+    if (req !== undefined && Number.isFinite(params.dataLength)) req.decoded += params.dataLength
+  }
+
+  const handleServedFromCache = (params: { requestId: string }): void => {
+    const req = pending.get(params.requestId)
+    if (req !== undefined) req.payload.servedFrom = 'memory cache'
+  }
+
+  const toWall = (monotonic: number): number =>
+    wallOffset === null ? Date.now() : Math.round((monotonic + wallOffset) * 1000)
 
   const handleLoadingFinished = (params: LoadingFinished): void => {
     const req = pending.get(params.requestId)
     if (!req) return
     pending.delete(params.requestId)
     req.payload.timingMs = Math.max(0, Math.round((params.timestamp - req.startTs) * 1000))
+    if (params.encodedDataLength !== undefined) req.payload.transferBytes = Math.max(0, Math.round(params.encodedDataLength))
+    if (req.decoded > 0) req.payload.resourceBytes = req.decoded
+    const phases = phasesFromTiming(req.startTs, req.timing, params.timestamp)
+    if (phases !== undefined) req.payload.phases = phases
     // Fetch the response body for this retained entry, then commit. The body is
     // only available until shortly after loadingFinished, so we fetch now.
-    void fetchBodyThenCommit(params.requestId, req.payload)
+    void fetchBodyThenCommit(params.requestId, req.payload, page)
   }
 
   const handleLoadingFailed = (params: LoadingFailed): void => {
@@ -310,10 +420,16 @@ export function attachCdpCapture(
     if (!req) return
     pending.delete(params.requestId)
     req.payload.timingMs = Math.max(0, Math.round((params.timestamp - req.startTs) * 1000))
+    // A response that arrived and was then cut off keeps its status; only a
+    // request that never got one reads as failed.
+    if (params.blockedReason) req.payload.failure = `blocked: ${params.blockedReason}`
+    else if (params.errorText) req.payload.failure = params.errorText
+    if (params.canceled) req.payload.canceled = true
+    if (req.decoded > 0) req.payload.resourceBytes = req.decoded
     commitNetwork(req.payload)
   }
 
-  const fetchBodyThenCommit = async (requestId: string, payload: BrowserNetworkPayload): Promise<void> => {
+  const fetchBodyThenCommit = async (requestId: string, payload: BrowserNetworkPayload, finishedOn: number): Promise<void> => {
     try {
       const body = (await dbg.sendCommand('Network.getResponseBody', { requestId })) as {
         body?: string
@@ -328,10 +444,12 @@ export function attachCdpCapture(
       // Body already gone or not retrievable — commit without it. The buffer's
       // body cap still applies to whatever we did capture.
     }
-    if (!detached) commitNetwork(payload)
+    // A new page may have started while the body was read: this request still
+    // belongs to the page it finished on.
+    if (!detached) commitNetwork(payload, finishedOn !== page)
   }
 
-  const commitNetwork = (payload: BrowserNetworkPayload): void => {
+  const commitNetwork = (payload: BrowserNetworkPayload, beforeNavigation = false): void => {
     const capture: BrowserNetworkCapture = {
       kind: 'network',
       id: `net-${randomUUID()}`,
@@ -339,7 +457,7 @@ export function attachCdpCapture(
       redacted: false,
       payload,
     }
-    record('network', capture)
+    record('network', capture, beforeNavigation)
   }
 
   const evictOldestPending = (): void => {
@@ -376,16 +494,50 @@ export function attachCdpCapture(
       case 'Network.loadingFailed':
         handleLoadingFailed(params as LoadingFailed)
         break
+      case 'Network.requestWillBeSentExtraInfo': {
+        const id = (params as { requestId?: string }).requestId
+        if (id !== undefined && !listening && !seenIds.has(id) && missedIds.size < 500) missedIds.add(id)
+        break
+      }
+      case 'Network.dataReceived':
+        handleDataReceived(params as DataReceived)
+        break
+      case 'Network.requestServedFromCache':
+        handleServedFromCache(params as { requestId: string })
+        break
+      case 'Page.domContentEventFired':
+        timings.domContentLoaded = toWall((params as PageLifecycle).timestamp)
+        break
+      case 'Page.loadEventFired':
+        timings.load = toWall((params as PageLifecycle).timestamp)
+        break
+      case 'Page.frameNavigated': {
+        const frame = (params as { frame?: { id?: string; parentId?: string } }).frame
+        if (frame?.id !== undefined && frame.parentId === undefined) mainFrameId = frame.id
+        break
+      }
       default:
         break
     }
   }
 
-  const onNavigate = (): void => {
-    // A main-frame navigation resets the `since-nav` window; drop in-flight
-    // requests that belong to the page we just left.
+  /** A main-frame navigation resets the `since-nav` window and drops the
+   *  requests the page we just left still had in flight. */
+  const startPage = (): void => {
+    page += 1
+    missedIds.clear()
+    seenIds.clear()
+    listening = false
     buffer.markNavigation()
     pending.clear()
+    timings.domContentLoaded = null
+    timings.load = null
+  }
+
+  const onNavigate = (): void => {
+    // Only when CDP could not name the main frame: the document request above
+    // is the exact moment, and this event comes after it (see there).
+    if (mainFrameId === null) startPage()
   }
 
   const teardownListeners = (): void => {
@@ -421,7 +573,7 @@ export function attachCdpCapture(
   } catch {
     // A debugger is already attached (real DevTools open) or attach is
     // unsupported — degrade gracefully, no capture, no crash.
-    return { detach: () => {}, available: () => false }
+    return { detach: () => {}, available: () => false, pageTimings: () => ({ domContentLoaded: null, load: null }) }
   }
 
   active = true
@@ -431,18 +583,29 @@ export function attachCdpCapture(
   guest.once('destroyed', detach)
 
   // Enable the domains we consume. If this fails, tear everything back down.
-  void (async () => {
-    try {
-      await dbg.sendCommand('Runtime.enable')
-      await dbg.sendCommand('Log.enable')
-      await dbg.sendCommand('Network.enable')
-    } catch {
-      detach()
-    }
-  })()
+  //
+  // NETWORK FIRST, AND NOT IN LINE. The three used to be awaited one after
+  // another, Runtime first — and Runtime and Log wait on the page's renderer
+  // process, which is still starting. A fast local page had finished its
+  // document, its stylesheet and its first fetches before Network was on, so
+  // the first load of every tab was missing its most important requests.
+  // Network is handled in the browser process and answers at once.
+  const network = dbg.sendCommand('Network.enable')
+  // For DOMContentLoaded and load, and the main frame's id. Optional: a page
+  // without them still captures.
+  const pageDomain = dbg
+    .sendCommand('Page.enable')
+    .then(() => dbg.sendCommand('Page.getFrameTree'))
+    .then((tree) => {
+      const id = (tree as { frameTree?: { frame?: { id?: string } } } | null)?.frameTree?.frame?.id
+      if (typeof id === 'string' && mainFrameId === null) mainFrameId = id
+    })
+    .catch(() => undefined)
+  void Promise.all([network, dbg.sendCommand('Runtime.enable'), dbg.sendCommand('Log.enable'), pageDomain]).catch(() => detach())
 
   return {
     detach,
     available: () => active,
+    pageTimings: () => ({ ...timings, missedRequests: missedIds.size }),
   }
 }

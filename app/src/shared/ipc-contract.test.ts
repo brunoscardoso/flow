@@ -359,6 +359,8 @@ const INVOKE_MAP_KEYS: Record<IpcInvokeChannel, true> = {
   'browser:bufferSlice': true,
   'browser:clearCaptures': true,
   'browser:setActive': true,
+  'browser:pageTimings': true,
+  'browser:replay': true,
   'reset:inventory': true,
   'reset:schedule': true,
   'reset:outcome': true,

@@ -73,12 +73,20 @@ export class RollingBuffer {
     this.#limits = limits
   }
 
-  /** Append one capture, capping its bodies and evicting as needed. */
-  push(capture: BrowserCapture): void {
+  /**
+   * Append one capture, capping its bodies and evicting as needed.
+   *
+   * `beforeNavigation`: the capture belongs to the page before the last
+   * navigation mark, though it lands after it (a request that finished on the
+   * old page and whose body arrived late). It is kept, and `since-nav` leaves
+   * it out.
+   */
+  push(capture: BrowserCapture, options: { beforeNavigation?: boolean } = {}): void {
     const bounded = this.#capBodies(capture)
     const store = this.#byKind[bounded.kind]
     const bytes = byteSizeOf(bounded)
-    store.entries.push({ capture: bounded, bytes, seq: this.#nextSeq++ })
+    const seq = options.beforeNavigation === true ? this.#navSeq - 1 : this.#nextSeq++
+    store.entries.push({ capture: bounded, bytes, seq })
     store.bytes += bytes
     this.#evict(store)
   }

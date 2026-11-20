@@ -241,3 +241,35 @@ describe('redactAndBound — the one path for all three kinds', () => {
     }
   })
 })
+
+describe('the Network panel facts', () => {
+  it('keeps types, sizes, timing and the initiator, and still withholds a huge body', () => {
+    const base = network()
+    const capture: BrowserNetworkCapture = {
+      ...base,
+      payload: {
+        ...base.payload,
+        responseBody: 'x'.repeat(MAX_BODY_CHARS + 10),
+        resourceType: 'Fetch',
+        transferBytes: 1840,
+        failure: 'net::ERR_ABORTED',
+        phases: { wait: 40 },
+        initiator: { type: 'script', url: 'http://localhost:3000/app.js', line: 10 },
+        servedFrom: 'disk cache',
+      },
+    }
+    const out = redactAndBound(capture)
+    if (out.kind !== 'network') throw new Error('expected a network capture')
+    expect(out.payload).toMatchObject({
+      resourceType: 'Fetch',
+      transferBytes: 1840,
+      failure: 'net::ERR_ABORTED',
+      phases: { wait: 40 },
+      initiator: { type: 'script', url: 'http://localhost:3000/app.js', line: 10 },
+      servedFrom: 'disk cache',
+    })
+    expect(out.payload.responseBody).toBeUndefined()
+    expect(out.withheld).toBe(true)
+    expect(out.payload.requestHeaders['Authorization']).toBe(REDACTED)
+  })
+})

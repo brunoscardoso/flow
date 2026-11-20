@@ -1,4 +1,4 @@
-import { contentTypeOf, detailSections, detailTabs, formatBody, toCurl } from './network-detail'
+import { contentTypeOf, detailSections, detailTabs, formatBody, replayRequest, toCurl, toFetch } from './network-detail'
 import type { BrowserNetworkPayload } from './browser-capture-types'
 
 function net(over: Partial<BrowserNetworkPayload> = {}): BrowserNetworkPayload {
@@ -156,5 +156,37 @@ describe('detailTabs — what a reader is actually asking', () => {
   it('never calls the Headers tab empty — General is always there', () => {
     const tabs = detailTabs(net({ requestHeaders: {}, responseHeaders: {} }))
     expect(tabs[0]?.empty).toBe(false)
+  })
+})
+
+describe('sending a request again', () => {
+  it('drops headers the page may not set and keeps the body for a POST', () => {
+    const request = replayRequest(
+      net({
+        method: 'post',
+        url: 'http://localhost:3000/api',
+        requestHeaders: { 'Content-Type': 'application/json', Cookie: 'sid=1', Host: 'localhost', 'sec-ch-ua': 'x', ':path': '/api', 'X-Trace': 'abc' },
+        requestBody: '{"a":1}',
+      }),
+    )
+    expect(request).toEqual({
+      url: 'http://localhost:3000/api',
+      init: { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Trace': 'abc' }, body: '{"a":1}', credentials: 'include' },
+    })
+  })
+
+  it('never sends a body with GET, and refuses what is not a web request or is a preflight', () => {
+    expect(replayRequest(net({ method: 'GET', requestBody: 'x' }))?.init.body).toBeUndefined()
+    expect(replayRequest(net({ url: 'data:text/plain,hi' }))).toBeNull()
+    expect(replayRequest(net({ method: 'OPTIONS', resourceType: 'Preflight' }))).toBeNull()
+  })
+})
+
+describe('toFetch', () => {
+  it('writes a fetch call, and says so when credentials were redacted', () => {
+    expect(toFetch(net({ method: 'GET', url: 'http://localhost:3000/a', requestHeaders: {} }))).toBe(
+      'fetch("http://localhost:3000/a", {\n  "method": "GET",\n  "headers": {},\n  "credentials": "include"\n})\n',
+    )
+    expect(toFetch(net({ requestHeaders: { Authorization: '[redacted]' } }))).toMatch(/^\/\/ Credentials in this request were redacted/)
   })
 })

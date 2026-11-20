@@ -57,5 +57,8 @@ test.describe('embedded browser tab', () => {
     // Switching to Network keeps it open.
     await window.locator('.fl-bdrawer-tab', { hasText: 'Network' }).click()
     await expect(body).toBeVisible()
+    // Network has its own panel and toolbar; the console's Add buttons step aside.
+    await expect(drawer.locator('.fl-net')).toBeVisible()
+    await expect(drawer.locator('fl-button', { hasText: 'Add all' })).toBeHidden()
   })
 })

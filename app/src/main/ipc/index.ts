@@ -1104,11 +1104,13 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
   )
   handle('browser:tagRecent', ({ kind, window }) => browserController.tagRecent(kind, window))
   handle('browser:tagEntry', ({ kind, id }) => browserController.tagEntry(kind, id))
-  handle('browser:bufferSlice', ({ kind, selector }) =>
-    browserController.bufferSlice(kind, selector),
+  handle('browser:bufferSlice', ({ kind, selector, bodies }) =>
+    browserController.bufferSlice(kind, selector, bodies !== false),
   )
   handle('browser:clearCaptures', () => browserController.clearCaptures())
   handle('browser:setActive', ({ guestId }) => browserController.setActive(guestId))
+  handle('browser:pageTimings', () => browserController.pageTimings())
+  handle('browser:replay', ({ id }) => browserController.replay(id))
 
   // ── Debug session ─────────────────────────────────────────────────────────
   //
