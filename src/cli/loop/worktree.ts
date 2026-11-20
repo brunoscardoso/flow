@@ -34,8 +34,10 @@
  */
 
 import {
+  appendFileSync,
   constants,
   copyFileSync,
+  mkdirSync,
   lstatSync,
   readFileSync,
   readdirSync,
@@ -1411,6 +1413,13 @@ export interface WorktreeFs {
    * nobody can read is one nobody can prove is disposable.
    */
   readFile(path: string): string | null;
+  /**
+   * Append text to a file, creating it (and its folder) when absent.
+   *
+   * Optional, and used for one thing only: git's local exclude list (see
+   * `excludeLinkedEntries`). A surface without it simply leaves the list alone.
+   */
+  appendFile?(path: string, text: string): void;
 }
 
 /** The real filesystem. */
@@ -1455,6 +1464,10 @@ export const nodeWorktreeFs: WorktreeFs = {
     } catch {
       return null;
     }
+  },
+  appendFile: (path, text) => {
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, text);
   },
   copyFile: (source, target) => {
     // COPYFILE_EXCL: refuse rather than overwrite. The caller has already
@@ -1505,6 +1518,8 @@ export function linkUntrackedSet(input: {
   }
 
   const links: WorktreeLink[] = [];
+  // Every entry this step put in the worktree, so git can be told to ignore it.
+  const made: string[] = [];
   for (const { entry, mode } of input.entries ?? DEFAULT_LINKED_ENTRIES) {
     for (const name of expandEntry(entry, names)) {
       const source = join(input.repoRoot, name);
@@ -1514,6 +1529,8 @@ export function linkUntrackedSet(input: {
         continue;
       }
       if (fs.exists(target)) {
+        // A link already there was made by an earlier resolve: still ours to hide.
+        if (fs.isSymlink(target)) made.push(name);
         links.push({ entry: name, status: 'present' });
         continue;
       }
@@ -1527,6 +1544,7 @@ export function linkUntrackedSet(input: {
         if (copying) fs.copyFile(source, target);
         else fs.symlink(source, target, fs.isDirectory(source) ? 'dir' : 'file');
         links.push({ entry: name, status: copying ? 'copied' : 'linked' });
+        made.push(name);
       } catch {
         // A filesystem that refuses links (or a race with another resolve)
         // leaves the entry unmade and says so, rather than failing a resolve
@@ -1537,7 +1555,54 @@ export function linkUntrackedSet(input: {
       }
     }
   }
+  excludeLinkedEntries({ repoRoot: input.repoRoot, entries: made, fs });
   return links;
+}
+
+/** The block heading Flow writes its lines under in git's local exclude list. */
+export const LINKED_EXCLUDE_HEADER = '# Flow: links and copies in thread worktrees';
+
+/**
+ * Tell git to ignore what the link step put in a worktree.
+ *
+ * WHY: a project's `.gitignore` often names a folder with a trailing slash
+ * (`.claude/`), and that pattern does not match a SYMLINK, which git sees as a
+ * file. So every thread worktree showed `.claude` as a new, uncommitted change
+ * — an invitation to commit a link into somebody else's checkout.
+ *
+ * WHERE: `.git/info/exclude` of the main checkout. Git reads it for every
+ * worktree of the repository, and it is local: never committed, never shared,
+ * and no tracked file of the project changes. Anchored (`/name`) and without a
+ * trailing slash, so it matches the link itself and nothing deeper in the tree.
+ *
+ * ONLY WHAT THIS STEP MADE: a real directory the project tracks (`.claude`
+ * holding `.claude/rules`) is never excluded, or new files in it would vanish
+ * from the person's changes. Idempotent: a line already present is not added
+ * again. Best effort: a repository whose `.git` is not a folder, or a list that
+ * cannot be written, leaves things as they were.
+ */
+export function excludeLinkedEntries(input: {
+  repoRoot: string;
+  entries: readonly string[];
+  fs?: WorktreeFs;
+}): string[] {
+  const fs = input.fs ?? nodeWorktreeFs;
+  if (input.entries.length === 0 || fs.appendFile === undefined) return [];
+  const gitDir = join(input.repoRoot, '.git');
+  if (!fs.isDirectory(gitDir)) return [];
+  const path = join(gitDir, 'info', 'exclude');
+  const current = fs.readFile(path) ?? '';
+  const have = new Set(current.split(/\r?\n/).map((line) => line.trim()));
+  const wanted = [...new Set(input.entries.map((entry) => `/${entry}`))].filter((line) => !have.has(line));
+  if (wanted.length === 0) return [];
+  const lead = current === '' || current.endsWith('\n') ? '' : '\n';
+  const header = have.has(LINKED_EXCLUDE_HEADER) ? '' : `${LINKED_EXCLUDE_HEADER}\n`;
+  try {
+    fs.appendFile(path, `${lead}${header}${wanted.join('\n')}\n`);
+    return wanted;
+  } catch {
+    return [];
+  }
 }
 
 /** What a thread's resolve answers with. */

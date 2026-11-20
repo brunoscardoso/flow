@@ -18,6 +18,7 @@ const {
   DEFAULT_LINKED_ENTRIES,
   changedManifests,
   linkUntrackedSet,
+  LINKED_EXCLUDE_HEADER,
   loopWorktreePath,
   nodeWorktreeFs,
   nameWorktreeBranch,
@@ -1249,6 +1250,66 @@ describe("plan-flow's own .claude assets reach a worktree (2026-09-30)", () => {
       { entry: '.claude/resources', status: 'present' },
     ]));
     expect(existsSync(join(worktree, '.claude', 'resources', 'patterns', 'walkthrough-template.html'))).toBe(true);
+  });
+});
+
+describe('the links a worktree gets are hidden from git, locally', () => {
+  const repoWithGit = (): string => {
+    const repo = mkdtempSync(join(tmpdir(), 'flow-exclude-'));
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    mkdirSync(join(repo, '.claude', 'commands'), { recursive: true });
+    mkdirSync(join(repo, 'node_modules'), { recursive: true });
+    return repo;
+  };
+  const exclude = (repo: string): string => readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8');
+
+  it('adds each linked entry, anchored and without a trailing slash, under one heading', () => {
+    const repo = repoWithGit();
+    writeFileSync(join(repo, '.git', 'info', 'exclude'), '# git ls-files --others --exclude-from=.git/info/exclude\n*.log');
+    const worktree = mkdtempSync(join(tmpdir(), 'flow-exclude-wt-'));
+    const links = linkUntrackedSet({ repoRoot: repo, worktreePath: worktree, fs: nodeWorktreeFs });
+    expect(links).toEqual(expect.arrayContaining([{ entry: '.claude', status: 'linked' }]));
+    const text = exclude(repo);
+    expect(text.startsWith('# git ls-files --others --exclude-from=.git/info/exclude\n*.log\n')).toBe(true);
+    expect(text).toContain(`${LINKED_EXCLUDE_HEADER}\n`);
+    expect(text.split('\n')).toEqual(expect.arrayContaining(['/node_modules', '/.claude']));
+    expect(text).not.toContain('/.claude/');
+  });
+
+  it('adds nothing twice, and still covers a link made by an earlier resolve', () => {
+    const repo = repoWithGit();
+    const worktree = mkdtempSync(join(tmpdir(), 'flow-exclude-wt-'));
+    linkUntrackedSet({ repoRoot: repo, worktreePath: worktree, fs: nodeWorktreeFs });
+    const first = exclude(repo);
+    rmSync(join(repo, '.git', 'info', 'exclude'));
+    linkUntrackedSet({ repoRoot: repo, worktreePath: worktree, fs: nodeWorktreeFs });
+    expect(exclude(repo)).toBe(first);
+    linkUntrackedSet({ repoRoot: repo, worktreePath: worktree, fs: nodeWorktreeFs });
+    expect(exclude(repo)).toBe(first);
+  });
+
+  it('never excludes a real folder the worktree tracks', () => {
+    const repo = repoWithGit();
+    const worktree = mkdtempSync(join(tmpdir(), 'flow-exclude-wt-'));
+    mkdirSync(join(worktree, '.claude', 'rules'), { recursive: true });
+    const links = linkUntrackedSet({ repoRoot: repo, worktreePath: worktree, fs: nodeWorktreeFs });
+    expect(links).toEqual(expect.arrayContaining([
+      { entry: '.claude', status: 'present' },
+      { entry: '.claude/commands', status: 'linked' },
+    ]));
+    const lines = exclude(repo).split('\n');
+    expect(lines).toContain('/.claude/commands');
+    expect(lines).not.toContain('/.claude');
+  });
+
+  it('leaves a repository whose .git is not a folder alone', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'flow-exclude-'));
+    writeFileSync(join(repo, '.git'), 'gitdir: /elsewhere');
+    mkdirSync(join(repo, 'node_modules'));
+    const worktree = mkdtempSync(join(tmpdir(), 'flow-exclude-wt-'));
+    const links = linkUntrackedSet({ repoRoot: repo, worktreePath: worktree, fs: nodeWorktreeFs });
+    expect(links).toEqual(expect.arrayContaining([{ entry: 'node_modules', status: 'linked' }]));
+    expect(existsSync(join(repo, '.git', 'info', 'exclude'))).toBe(false);
   });
 });
 

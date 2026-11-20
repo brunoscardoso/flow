@@ -211,7 +211,7 @@ describe('detectProblem — colour, and what never counts', () => {
     expect(judge('error handling is done in the middleware')).toBeNull()
     expect(judge('The ERROR column shows failures per day')).toBeNull()
     expect(judge('Checking for errors... none found')).toBeNull()
-    expect(judge('bruno@mac app % printf "ConnectionRefusedError: x"')).toBeNull()
+    expect(judge('dev@mac app % printf "ConnectionRefusedError: x"')).toBeNull()
     expect(judge('')).toBeNull()
     expect(judge('   ')).toBeNull()
   })
