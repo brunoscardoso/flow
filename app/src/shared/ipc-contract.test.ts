@@ -358,6 +358,10 @@ const INVOKE_MAP_KEYS: Record<IpcInvokeChannel, true> = {
   'browser:tagEntry': true,
   'browser:bufferSlice': true,
   'browser:clearCaptures': true,
+  'browser:setActive': true,
+  'reset:inventory': true,
+  'reset:schedule': true,
+  'reset:outcome': true,
   'debug:start': true,
   'debug:stop': true,
   'debug:status': true,
@@ -423,6 +427,8 @@ const EVENT_MAP_KEYS: Record<IpcEventChannel, true> = {
   'project:flushEditorContext': true,
   'browser:bufferUpdated': true,
   'browser:tagPosted': true,
+  'browser:openTab': true,
+  'browser:shortcut': true,
 }
 
 const CHANNEL_NAME_PATTERN = /^[a-z][a-zA-Z]*:[a-z][a-zA-Z]*$/
@@ -478,6 +484,7 @@ describe('IPC contract channel allowlists', () => {
       'updater',
       'learn',
       'browser',
+      'reset',
       'debug',
       'auth',
       'share',

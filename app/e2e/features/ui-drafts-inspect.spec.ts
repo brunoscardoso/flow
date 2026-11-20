@@ -56,8 +56,13 @@ function seedCanvas(root: string): void {
 
 /** Run a script in the guest's top document, bounded (a CSP-sandboxed top page never settles). */
 async function inPage<T>(app: ElectronApplication, code: string): Promise<T | null> {
-  return app.evaluate(async ({ webContents }, script) => {
-    const guest = webContents.getAllWebContents().find((contents) => contents.getType() === 'webview')
+  return app.evaluate(async ({ BrowserWindow, webContents }, script) => {
+    // The page ON SCREEN: with tabs there is one guest per open tab.
+    const host = BrowserWindow.getAllWindows()[0]?.webContents
+    const id = (await host?.executeJavaScript(
+      "[...document.querySelectorAll('.fl-browser-tab webview')].find((w) => w.style.visibility !== 'hidden')?.getWebContentsId() ?? null",
+    )) as number | null
+    const guest = id === null ? undefined : webContents.fromId(id)
     if (!guest || guest.isDestroyed()) return null
     try {
       return await Promise.race([
@@ -72,8 +77,13 @@ async function inPage<T>(app: ElectronApplication, code: string): Promise<T | nu
 
 /** Run a script in one screen frame of the canvas. */
 async function inFrame<T>(app: ElectronApplication, screen: string, code: string): Promise<T | null> {
-  return app.evaluate(async ({ webContents }, { screen, script }) => {
-    const guest = webContents.getAllWebContents().find((contents) => contents.getType() === 'webview')
+  return app.evaluate(async ({ BrowserWindow, webContents }, { screen, script }) => {
+    // The page ON SCREEN: with tabs there is one guest per open tab.
+    const host = BrowserWindow.getAllWindows()[0]?.webContents
+    const id = (await host?.executeJavaScript(
+      "[...document.querySelectorAll('.fl-browser-tab webview')].find((w) => w.style.visibility !== 'hidden')?.getWebContentsId() ?? null",
+    )) as number | null
+    const guest = id === null ? undefined : webContents.fromId(id)
     if (!guest || guest.isDestroyed()) return null
     const frame = guest.mainFrame.framesInSubtree.find(
       (candidate) => candidate !== guest.mainFrame && new RegExp(`/${screen}\\.html`).test(candidate.url),
@@ -101,7 +111,7 @@ const BOX = (selector: string): string =>
   `(() => { const n = document.querySelector(${JSON.stringify(selector)}); if (!n) return null; const r = n.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height } })()`
 
 async function webviewBox(window: Page): Promise<{ x: number; y: number }> {
-  const host = await window.locator('.fl-browser-tab webview').boundingBox()
+  const host = await window.locator('.fl-browser-tab webview:not([style*="visibility: hidden"])').boundingBox()
   if (host === null) throw new Error('no webview box')
   return host
 }

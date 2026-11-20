@@ -651,6 +651,19 @@ program
   });
 
 program
+  .command('uninstall')
+  .description(
+    'Remove the files plan-flow added to a project (its commands, resources, hooks, marked sections and the flow link) — never your own rules, code or a real flow folder'
+  )
+  .option('--target <dir>', 'Project root (defaults to current directory)', process.cwd())
+  .option('--confirm', 'Required: without it nothing is removed')
+  .option('--json', 'Print the result as one JSON line')
+  .action(async (options: import('./commands/uninstall.js').UninstallOptions) => {
+    const { runUninstall } = await import('./commands/uninstall.js');
+    runUninstall(options);
+  });
+
+program
   .command('path <verb>')
   .description(
     'The planflow-ai shim on PATH (repair — rewrite a shim plan-flow wrote whose target no longer exists; never creates one, never touches a file plan-flow did not write)'

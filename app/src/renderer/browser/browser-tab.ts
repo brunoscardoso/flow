@@ -37,7 +37,29 @@ import { DebugDrawer } from './debug-drawer'
 import { detectDevServerUrl } from './dev-server-detect'
 import { initInspectMode } from './inspect-mode'
 import { addCapturesToContext } from './browser-capture-chip'
-import { adoptBrowserScope } from './browser-scope'
+import { BrowserTabRow } from './browser-tab-row'
+import { sameScope } from '../tab-scope-model'
+import {
+  activate as activateTab,
+  addTab,
+  closeTab as closeTabIn,
+  emptyTabs,
+  markAsleep,
+  moveTab,
+  neighbourTab,
+  popClosed,
+  restoreTabs,
+  flatTabs,
+  saveTabs,
+  tabAtShortcut,
+  tabShortcut,
+  tabTitle,
+  tabsToSleep,
+  updateTab,
+  type BrowserTabShortcut,
+  type BrowserTabsState,
+} from '../../shared/browser-tabs'
+import type { BrowserBufferCounts, BrowserCaptureKind } from '../../shared/browser-capture-types'
 import { loadIndicator } from './load-indicator'
 import { runInWantedScope, tabScopeGate } from '../tab-scope-gate'
 import type { TabScopeKey } from '../tab-scope-model'
@@ -128,25 +150,33 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   viewport.className = 'fl-browser-viewport'
   viewport.style.cssText = 'position:relative;flex:1;min-height:0;min-width:0;width:100%;overflow:hidden;'
 
-  const webview = document.createElement('webview') as unknown as WebviewElement
-  webview.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:0;'
-  // Guest isolation: context-isolated, no node integration (off by
-  // default). allowpopups stays off so window.open can't spawn extra guests.
-  // NOTE: no sandbox — a sandboxed <webview> preload crashes on load in this
-  // Electron ("preloadScripts of startupData is null"), which took inspect mode
-  // down with it. contextIsolation + node integration off keeps the guest isolated.
-  webview.setAttribute('webpreferences', 'contextIsolation=yes')
-  // A persisted partition keeps the dev app's cookies/storage across reloads,
-  // isolated from the host and from other partitions.
-  webview.setAttribute('partition', FLOW_BROWSER_PARTITION)
-  // The guest preload carries the inspect bridge (element → React source). Its
-  // file:// URL is resolved by the main preload (out/preload/browser-guest.js);
-  // without it the toolbar still navigates, only inspect mode is unavailable.
+  // ── One <webview> per live tab ──────────────────────────────────────────────
+  // `webview` is always the ACTIVE tab's page: everything below that drives
+  // "the page" drives the one on screen.
+  let webview!: WebviewElement
   const guestPreloadUrl = window.flowBrowserGuestPreloadUrl
-  if (typeof guestPreloadUrl === 'string' && guestPreloadUrl.length > 0) {
-    webview.setAttribute('preload', guestPreloadUrl)
-  } else {
+  if (typeof guestPreloadUrl !== 'string' || guestPreloadUrl.length === 0) {
     console.warn('flow: browser guest preload URL missing — inspect mode disabled')
+  }
+  const makeWebview = (): WebviewElement => {
+    const element = document.createElement('webview') as unknown as WebviewElement
+    element.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:0;'
+    // Guest isolation: context-isolated, no node integration (off by
+    // default). NOTE: no sandbox — a sandboxed <webview> preload crashes on
+    // load in this Electron ("preloadScripts of startupData is null"), which
+    // took inspect mode down with it.
+    element.setAttribute('webpreferences', 'contextIsolation=yes')
+    // New windows reach main's handler, which ALWAYS denies them: the page's
+    // own site opens as a Flow tab, any other site in the person's browser.
+    element.setAttribute('allowpopups', '')
+    // A persisted partition keeps the dev app's cookies/storage across reloads,
+    // isolated from the host and from other partitions. Every tab shares it.
+    element.setAttribute('partition', FLOW_BROWSER_PARTITION)
+    // The guest preload carries the inspect bridge (element → React source).
+    if (typeof guestPreloadUrl === 'string' && guestPreloadUrl.length > 0) {
+      element.setAttribute('preload', guestPreloadUrl)
+    }
+    return element
   }
 
   // The best-guess dev-server URL — declared before the overlay, which reads it
@@ -175,7 +205,160 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   const loadBar = document.createElement('div')
   loadBar.className = 'fl-browser-loadbar'
   loadBar.hidden = true
-  viewport.append(webview as unknown as HTMLElement, overlay.element, loadBar, inspectHint)
+  viewport.append(overlay.element, loadBar, inspectHint)
+
+  // ── Pages: one per live tab ─────────────────────────────────────────────────
+  interface PageState {
+    tabId: string
+    webview: WebviewElement
+    /** A real page is on screen beneath the overlay. */
+    hasPage: boolean
+    loadFailed: boolean
+    /** The guest has been given a page (`src` is set once, then the controller drives it). */
+    hasNavigated: boolean
+    /** The webContents id, once the guest is ready — what main calls it. */
+    guestId: number | null
+    /** What the overlay shows for this page, put back when the tab is opened. */
+    overlay: { state: OverlayState; detail: OverlayDetail }
+    unwire: Array<() => void>
+  }
+  interface PageListener {
+    type: string
+    fn: (event: Event) => void
+  }
+  /** Listeners for "the page": attached to every page, run only for the one on screen. */
+  const pageListeners: PageListener[] = []
+  const pages = new Map<string, PageState>()
+  let cur!: PageState
+  let tabs: BrowserTabsState = emptyTabs()
+  let tabSeq = 0
+  const newTabId = (): string => `tab-${String((tabSeq += 1))}`
+
+  const attachListener = (page: PageState, listener: PageListener): void => {
+    const handler = (event: Event): void => {
+      if (page === cur) listener.fn(event)
+    }
+    page.webview.addEventListener(listener.type, handler)
+    page.unwire.push(() => page.webview.removeEventListener(listener.type, handler))
+  }
+  const listen = (type: string, fn: (event: Event) => void): void => {
+    const listener = { type, fn }
+    pageListeners.push(listener)
+    for (const page of pages.values()) attachListener(page, listener)
+  }
+  /** Show the overlay for the page on screen, and remember it for that page. */
+  const showOverlay = (state: OverlayState, detail: OverlayDetail = {}): void => {
+    cur.overlay = { state, detail }
+    overlay.set(state, detail)
+  }
+
+  // Inspect mode listens to ONE element: a stand-in that forwards to the page on
+  // screen and hears only that page's messages.
+  const inspectBus = document.createElement('div') as unknown as HTMLElement & { send(channel: string, ...args: unknown[]): void }
+  inspectBus.send = (channel: string, ...args: unknown[]): void => webview.send(channel, ...args)
+
+  const createPage = (tabId: string): PageState => {
+    const element = makeWebview()
+    const page: PageState = {
+      tabId,
+      webview: element,
+      hasPage: false,
+      loadFailed: false,
+      hasNavigated: false,
+      guestId: null,
+      overlay: { state: 'idle', detail: {} },
+      unwire: [],
+    }
+    pages.set(tabId, page)
+    const own = (type: string, fn: (event: Event) => void): void => {
+      element.addEventListener(type, fn)
+      page.unwire.push(() => element.removeEventListener(type, fn))
+    }
+    own('dom-ready', () => {
+      try {
+        page.guestId = (element as unknown as { getWebContentsId(): number }).getWebContentsId()
+      } catch {
+        return
+      }
+      if (page === cur) void browser.setActive?.({ guestId: page.guestId }).catch(() => undefined)
+    })
+    own('ipc-message', (event) => {
+      if (page !== cur) return
+      const message = event as Event & { channel: string; args: unknown[] }
+      const copy = Object.assign(new Event('ipc-message'), { channel: message.channel, args: message.args })
+      inspectBus.dispatchEvent(copy)
+    })
+    // The tab row follows every page, on screen or not.
+    own('page-title-updated', (event) => {
+      const tab = tabs.tabs.find((entry) => entry.id === tabId)
+      if (tab === undefined) return
+      tabs = updateTab(tabs, tabId, { title: tabTitle(tab.url, (event as Event & { title?: string }).title) })
+      renderTabs()
+    })
+    const onPageNavigated = (event: Event): void => {
+      const url = (event as WebviewNavigationEvent).url
+      if (typeof url !== 'string' || url === BLANK_URL) return
+      const tab = tabs.tabs.find((entry) => entry.id === tabId)
+      const keepTitle = tab !== undefined && tab.url !== null && new URL(tab.url, 'http://x').host === new URL(url, 'http://x').host
+      tabs = updateTab(tabs, tabId, { url, ...(keepTitle ? {} : { title: tabTitle(url, null) }) })
+      renderTabs()
+    }
+    own('did-navigate', onPageNavigated)
+    own('did-navigate-in-page', onPageNavigated)
+    // A page loading behind another keeps its own state, for when it is opened.
+    own('did-start-loading', () => {
+      if (page === cur) return
+      page.loadFailed = false
+      if (!page.hasPage) page.overlay = { state: 'loading', detail: {} }
+    })
+    own('did-stop-loading', () => {
+      if (page === cur || page.loadFailed) return
+      let url = ''
+      try {
+        url = element.getURL()
+      } catch {
+        // Not attached yet.
+      }
+      page.hasPage = url !== BLANK_URL && url !== ''
+      page.overlay = { state: page.hasPage ? 'hidden' : 'idle', detail: {} }
+    })
+    own('did-fail-load', (event) => {
+      if (page === cur) return
+      const failure = event as WebviewFailLoadEvent
+      if (failure.isMainFrame === false || failure.errorCode === ERR_ABORTED) return
+      page.loadFailed = true
+      page.hasPage = false
+      page.overlay = { state: 'failed', detail: { url: failure.validatedURL ?? '', description: failure.errorDescription ?? '' } }
+    })
+    for (const listener of pageListeners) attachListener(page, listener)
+    // Behind the overlay, so the overlay can cover a blank frame.
+    viewport.insertBefore(element as unknown as HTMLElement, overlay.element)
+    return page
+  }
+
+  const destroyPage = (page: PageState): void => {
+    for (const unwire of page.unwire) unwire()
+    page.unwire = []
+    ;(page.webview as unknown as HTMLElement).remove()
+    pages.delete(page.tabId)
+  }
+
+  /** Only the page on screen is visible; the others keep running behind it. */
+  const showOnly = (shown: PageState): void => {
+    for (const page of pages.values()) {
+      const style = (page.webview as unknown as HTMLElement).style
+      style.visibility = page === shown ? 'visible' : 'hidden'
+      style.pointerEvents = page === shown ? '' : 'none'
+    }
+  }
+
+  // The window's first page exists from the start, as the single page always did.
+  {
+    const id = newTabId()
+    tabs = addTab(tabs, { id, url: null, activate: true, now: Date.now() })
+    cur = createPage(id)
+    webview = cur.webview
+  }
 
   // The page and, beside it, the draft edit panel — outside the webview, so
   // the panel is Flow's own UI and never part of a draft.
@@ -185,7 +368,7 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
 
   // Inspect mode: the toggle routes through main to the guest picker; captured
   // elements arrive as the webview's `ipc-message` events.
-  const inspectMode = initInspectMode(webview, browser)
+  const inspectMode = initInspectMode(inspectBus, browser)
 
   const chrome = new BrowserChrome({
     onBack: () => {
@@ -229,7 +412,7 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   const onInspectPageLoad = (): void => {
     if (inspectOn) setInspect(true)
   }
-  webview.addEventListener('did-finish-load', onInspectPageLoad)
+  listen('did-finish-load', onInspectPageLoad)
 
   // Sticky inspect: each click posts a capture and the picker STAYS on, so a
   // whole set of elements can be added in one session. Each capture rides a
@@ -373,7 +556,7 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     if (page === null || page.root !== selection.rootPath || page.canvas !== selection.canvas) closeDraftPanel()
     else if (page.kind === 'screen' && page.screen !== selection.screen) closeDraftPanel()
   }
-  webview.addEventListener('did-navigate', onDraftNavigate)
+  listen('did-navigate', onDraftNavigate)
 
   // ── Undo and versions, asked for by the canvas page ─────────────────────
   // The page has no IPC: it asks through the guest relay, and the answer goes
@@ -396,7 +579,7 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     if (target === null || drafts === undefined) return
     void readDraftHistoryState(drafts, target).then((state) => tellCanvasHistory(state))
   }
-  webview.addEventListener('did-finish-load', pushUndoCount)
+  listen('did-finish-load', pushUndoCount)
   const stopDraftHistory = inspectMode.onDraftHistory((request) => {
     const target = canvasHistoryTarget()
     const drafts = api.drafts
@@ -412,10 +595,55 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
 
   // Debug drawer: console/network capture list beneath the webview, the UI
   // trigger for console/network tagging (rows + "Tag recent" + "Add all").
-  const debugDrawer = new DebugDrawer(browser)
+  // The drawer shows the tab on screen: its counts come only from that tab's
+  // page, and opening a tab replays what that page has logged.
+  type BufferListener = (event: { kind: BrowserCaptureKind; counts: BrowserBufferCounts }) => void
+  const drawerListeners = new Set<BufferListener>()
+  const countsByGuest = new Map<number, BrowserBufferCounts>()
+  const errorsSeen = new Map<number, number>()
+  const stopBufferEvents = browser.onBufferUpdated((event) => {
+    if (event.guestId !== undefined) countsByGuest.set(event.guestId, event.counts)
+    const onScreen = event.guestId === undefined || event.guestId === cur.guestId
+    if (onScreen) {
+      if (event.guestId !== undefined && event.errors !== undefined) errorsSeen.set(event.guestId, event.errors)
+      for (const listener of drawerListeners) listener(event)
+      return
+    }
+    // A page behind another logged errors since it was last looked at: its red dot.
+    const page = [...pages.values()].find((entry) => entry.guestId === event.guestId)
+    if (page === undefined || event.errors === undefined || event.guestId === undefined) return
+    const unseen = event.errors - (errorsSeen.get(event.guestId) ?? 0)
+    const tab = tabs.tabs.find((entry) => entry.id === page.tabId)
+    if (tab !== undefined && unseen !== tab.unseenErrors) {
+      tabs = updateTab(tabs, page.tabId, { unseenErrors: Math.max(0, unseen) })
+      renderTabs()
+    }
+  })
+  const replayCounts = (): void => {
+    const counts = (cur.guestId === null ? undefined : countsByGuest.get(cur.guestId)) ?? { element: 0, console: 0, network: 0 }
+    for (const kind of ['console', 'network'] as const) for (const listener of drawerListeners) listener({ kind, counts })
+  }
+  const debugDrawer = new DebugDrawer({
+    bufferSlice: (request) => browser.bufferSlice(request),
+    tagRecent: (request) => browser.tagRecent(request),
+    tagEntry: (request) => browser.tagEntry(request),
+    onBufferUpdated: (listener) => {
+      drawerListeners.add(listener)
+      return () => drawerListeners.delete(listener)
+    },
+  })
 
   pageRow.append(viewport, draftPanel.element)
-  container.append(chrome.element, pageRow, debugDrawer.element)
+  const tabRow = new BrowserTabRow({
+    onSelect: (id) => selectTab(id),
+    onClose: (id) => closeTabById(id),
+    onNew: () => openNewTab(null, { after: null, activate: true }),
+    onMove: (id, index) => {
+      tabs = moveTab(tabs, id, index)
+      renderTabs()
+    },
+  })
+  container.append(tabRow.element, chrome.element, pageRow, debugDrawer.element)
 
   // ── ⌘/Ctrl+L → add the whole console to context ─────────────────────────────
   // Gated so it only fires while the Browser tab is on screen AND focus is
@@ -433,20 +661,18 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   document.addEventListener('keydown', onKeyDown, true)
 
   // ── Empty-state overlay driven by the webview's own load lifecycle ──────────
-  let loadFailed = false
   // Whether a real page is on screen beneath the overlay — what decides
   // between the loading screen and the bar (`load-indicator.ts`).
-  let hasPage = false
   /** Show that `url` is loading, keeping a page on screen when there is one. */
   const showLoading = (url: string): void => {
-    if (loadIndicator(hasPage) === 'bar') {
+    if (loadIndicator(cur.hasPage) === 'bar') {
       loadBar.hidden = false
       return
     }
-    overlay.set('loading', { url })
+    showOverlay('loading', { url })
   }
   const onStartLoading = (): void => {
-    loadFailed = false
+    cur.loadFailed = false
     let url = ''
     try {
       url = webview.getURL()
@@ -457,7 +683,7 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   }
   const onStopLoading = (): void => {
     loadBar.hidden = true
-    if (loadFailed) return
+    if (cur.loadFailed) return
     // The blank page a conversation starts on is not a page to look at: the
     // empty state (with its URL form) stays up over it.
     let url = ''
@@ -466,26 +692,26 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     } catch {
       // Not attached yet — treat as a real load.
     }
-    hasPage = url !== BLANK_URL
-    overlay.set(hasPage ? 'hidden' : 'idle')
+    cur.hasPage = url !== BLANK_URL
+    showOverlay(cur.hasPage ? 'hidden' : 'idle')
   }
   const onFailLoad = (event: Event): void => {
     const failure = event as WebviewFailLoadEvent
     // Sub-resource failures and benign aborts must not blank the whole tab.
     if (failure.isMainFrame === false) return
     if (failure.errorCode === ERR_ABORTED) return
-    loadFailed = true
-    hasPage = false
+    cur.loadFailed = true
+    cur.hasPage = false
     loadBar.hidden = true
-    overlay.set('failed', {
+    showOverlay('failed', {
       url: failure.validatedURL ?? '',
       description: failure.errorDescription ?? '',
     })
   }
-  webview.addEventListener('did-start-loading', onStartLoading)
-  webview.addEventListener('did-stop-loading', onStopLoading)
-  webview.addEventListener('did-finish-load', onStopLoading)
-  webview.addEventListener('did-fail-load', onFailLoad)
+  listen('did-start-loading', onStartLoading)
+  listen('did-stop-loading', onStopLoading)
+  listen('did-finish-load', onStopLoading)
+  listen('did-fail-load', onFailLoad)
 
   // ── Live toolbar state from the webview's own navigation events ─────────────
   // The blank page under the empty state is not an address anyone typed: the
@@ -507,17 +733,16 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     if (typeof url === 'string') showUrl(url)
     syncNavState()
   }
-  webview.addEventListener('did-navigate', onNavigated)
-  webview.addEventListener('did-navigate-in-page', onNavigated)
-  webview.addEventListener('did-frame-finish-load', syncNavState)
-  webview.addEventListener('dom-ready', syncNavState)
+  listen('did-navigate', onNavigated)
+  listen('did-navigate-in-page', onNavigated)
+  listen('did-frame-finish-load', syncNavState)
+  listen('dom-ready', syncNavState)
 
   // ── Initial target: the best-guess dev-server URL, loaded on first OPEN ─────
   // Deferred (not set at construction) because a <webview> that loads its guest
   // while detached from the document can come up blank. The URL bar goes anywhere.
   chrome.setUrl(initialUrl ?? '')
-  overlay.set(initialUrl !== null ? 'loading' : 'idle', { url: initialUrl ?? '' })
-  let hasNavigated = false
+  showOverlay(initialUrl !== null ? 'loading' : 'idle', { url: initialUrl ?? '' })
 
   /** Where the browser is now — what a conversation's tab set remembers. */
   const currentUrl = (): string | null => {
@@ -528,83 +753,200 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     } catch {
       // getURL throws before the guest attaches — fall back to the first target.
     }
-    return hasNavigated ? (initialUrl ?? null) : null
+    return cur.hasNavigated ? (initialUrl ?? null) : null
   }
 
   /**
-   * The conversation whose page the guest holds. One webview per window: when
-   * another conversation takes the browser it must not see this one's page,
-   * and its "Add all" must not attach this one's console (`browser-scope.ts`).
+   * The conversation whose tabs are on screen. Each conversation has its own
+   * tabs; when another one takes the browser, these pages are closed (their
+   * addresses are kept in that conversation's tab set) and its tabs come back.
+   * Closing the pages also drops their captures, so the next conversation's
+   * "Add all" never attaches what this one's pages logged.
    */
   let owner: TabScopeKey | null = null
-
-  /** Forget the back/forward list once the current load lands. */
-  const clearHistorySoon = (load: Promise<void>): void => {
-    void load
-      .catch((error: unknown) => console.warn('flow: browser load failed', error))
-      .finally(() => {
-        try {
-          webview.clearHistory()
-        } catch {
-          // Not attached — there is no history to clear.
-        }
-        syncNavState()
-      })
-  }
+  let everOpened = false
 
   /** Go to `url`. `fresh`: the page is a new owner's, so the way back to the
    *  previous owner's pages is cut. */
   const go = (url: string, fresh: boolean): void => {
     chrome.setUrl(url)
     // A new owner's page must not show the previous owner's while it loads.
-    if (fresh) hasPage = false
+    if (fresh) cur.hasPage = false
     showLoading(url)
     // BEFORE THE FIRST MOUNT THERE IS NOTHING TO NAVIGATE. `src` is how the
     // guest gets its first page (the webview comes up blank if it loads while
     // detached); after that the controller drives it, because `src` does not
     // re-navigate to a URL it already holds.
-    if (!hasNavigated) {
-      hasNavigated = true
+    if (!cur.hasNavigated) {
+      cur.hasNavigated = true
       webview.src = url
-      return
-    }
-    if (fresh) {
-      clearHistorySoon(webview.loadURL(url))
       return
     }
     void browser.navigate({ url }).catch((error: unknown) => console.warn('flow: browser navigate failed', error))
   }
 
-  /** Start empty: the previous owner's page goes, the empty state shows. */
-  const goBlank = (): void => {
-    chrome.setUrl(initialUrl ?? '')
-    hasPage = false
-    loadBar.hidden = true
-    overlay.set('idle')
-    if (!hasNavigated) return
-    clearHistorySoon(webview.loadURL(BLANK_URL))
+  // ── Tabs ───────────────────────────────────────────────────────────────────
+  const renderTabs = (): void => tabRow.render(tabs)
+
+  /** Put a tab on screen: wake it when it sleeps, load it when it is new. */
+  const selectTab = (id: string): void => {
+    const tab = tabs.tabs.find((entry) => entry.id === id)
+    if (tab === undefined) return
+    if (inspectOn) setInspect(false)
+    if (cur.guestId !== null) errorsSeen.set(cur.guestId, errorsSeen.get(cur.guestId) ?? 0)
+    tabs = activateTab(tabs, id, Date.now())
+    let page = pages.get(id)
+    const fresh = page === undefined
+    if (page === undefined) page = createPage(id)
+    cur = page
+    webview = page.webview
+    showOnly(page)
+    if (page.guestId !== null) {
+      // Looked at now: what it logged so far is seen.
+      const counted = countsByGuest.has(page.guestId)
+      if (counted) errorsSeen.set(page.guestId, errorsSeen.get(page.guestId) ?? 0)
+      void browser.setActive?.({ guestId: page.guestId }).catch(() => undefined)
+    }
+    overlay.set(page.overlay.state, page.overlay.detail)
+    loadBar.hidden = !(page.hasPage && guestLoading())
+    if (fresh) {
+      if (tab.url !== null) go(tab.url, false)
+      else {
+        chrome.setUrl('')
+        chrome.setCanGoBack(false)
+        chrome.setCanGoForward(false)
+        showOverlay('idle')
+      }
+    } else {
+      syncNavState()
+    }
+    replayCounts()
+    // Past the cap, the tabs used longest ago sleep.
+    const sleeping = tabsToSleep(tabs)
+    for (const sleepId of sleeping) {
+      const asleep = pages.get(sleepId)
+      if (asleep !== undefined) destroyPage(asleep)
+    }
+    tabs = markAsleep(tabs, sleeping)
+    renderTabs()
   }
+
+  /** Open a tab at `url` (null: a blank tab), after `after` or at the end. */
+  const openNewTab = (url: string | null, options: { after: string | null; activate: boolean; title?: string }): string => {
+    const id = newTabId()
+    tabs = addTab(tabs, {
+      id,
+      url,
+      after: options.after,
+      activate: false,
+      now: Date.now(),
+      ...(options.title === undefined ? {} : { title: options.title }),
+    })
+    if (options.activate) selectTab(id)
+    else renderTabs()
+    return id
+  }
+
+  /** Close a tab. The last one closes the browser. */
+  const closeTabById = (id: string): void => {
+    const page = pages.get(id)
+    const wasActive = tabs.activeId === id
+    tabs = closeTabIn(tabs, id)
+    if (page !== undefined) destroyPage(page)
+    if (tabs.tabs.length === 0) {
+      // A fresh blank page waits for the next open, and the browser closes.
+      const fresh = newTabId()
+      tabs = addTab({ ...tabs, tabs: [] }, { id: fresh, url: null, activate: true, now: Date.now() })
+      cur = createPage(fresh)
+      webview = cur.webview
+      showOnly(cur)
+      chrome.setUrl('')
+      showOverlay('idle')
+      renderTabs()
+      editorApi.closeFile(BROWSER_TAB_ID)
+      return
+    }
+    if (wasActive && tabs.activeId !== null) selectTab(tabs.activeId)
+    else renderTabs()
+  }
+
+  const reopenClosedTab = (): void => {
+    const popped = popClosed(tabs)
+    tabs = popped.state
+    if (popped.tab !== null) openNewTab(popped.tab.url, { after: tabs.activeId, activate: true, title: popped.tab.title })
+  }
+
+  const runShortcut = (action: BrowserTabShortcut): void => {
+    if (action.kind === 'new') openNewTab(null, { after: null, activate: true })
+    else if (action.kind === 'close') {
+      if (tabs.activeId !== null) closeTabById(tabs.activeId)
+    } else if (action.kind === 'reopen') reopenClosedTab()
+    else {
+      const id =
+        action.kind === 'goto' ? tabAtShortcut(tabs, action.digit) : neighbourTab(tabs, action.kind === 'next' ? 1 : -1)
+      if (id !== null && id !== tabs.activeId) selectTab(id)
+    }
+  }
+
+  /** Replace every tab with another conversation's (or none). */
+  const replaceTabs = (next: BrowserTabsState): void => {
+    for (const page of [...pages.values()]) destroyPage(page)
+    tabs = next
+    if (tabs.tabs.length === 0) {
+      const id = newTabId()
+      tabs = addTab(tabs, { id, url: null, activate: true, now: Date.now() })
+    }
+    selectTab(tabs.activeId ?? (tabs.tabs[0]?.id as string))
+  }
+
+  /** The window still shows only the blank page it started with. */
+  const untouched = (): boolean =>
+    tabs.tabs.length === 1 && tabs.tabs[0]?.url === null && !cur.hasNavigated
+
+  // A page asked for a window that opens here: a tab right after it, on screen.
+  const stopOpenTab =
+    browser.onOpenTab?.((event) => {
+      const opener = [...pages.values()].find((page) => page.guestId === event.openerGuestId)
+      openNewTab(event.url, { after: opener?.tabId ?? tabs.activeId, activate: true })
+    }) ?? (() => undefined)
+  // A tab shortcut pressed inside a page (main read it; the page swallows keys).
+  const stopShortcut =
+    browser.onShortcut?.((event) => {
+      if (!pages.has([...pages.values()].find((page) => page.guestId === event.openerGuestId)?.tabId ?? '')) return
+      runShortcut(event.action)
+    }) ?? (() => undefined)
+  // …and the same shortcuts while focus is on the browser's own controls.
+  const isMac = /mac/i.test(navigator.platform)
+  const onTabKeys = (event: KeyboardEvent): void => {
+    if (container.offsetParent === null || !container.contains(document.activeElement)) return
+    const action = tabShortcut(
+      { key: event.key, meta: event.metaKey, control: event.ctrlKey, shift: event.shiftKey, alt: event.altKey },
+      isMac,
+    )
+    if (action === null) return
+    event.preventDefault()
+    event.stopPropagation()
+    runShortcut(action)
+  }
+  document.addEventListener('keydown', onTabKeys, true)
 
   // ── Open trigger (same pattern as flow:open-blueprint) ──────────────────────
   const openBrowserTab = (event?: Event): void => {
     // A DESTINATION, WHEN THE CALLER HAS ONE. The rail's Browser action opens
     // wherever the browser already was; a chat link to a generated page opens
-    // at that page. Same tab either way — a second browser tab per file would
-    // be a tab strip of pages nobody closed.
+    // it in a new tab (or in the tab on screen when that one is blank).
     const asked = (event as CustomEvent<{ url?: string }> | undefined)?.detail?.url
     const target = typeof asked === 'string' && asked.trim() !== '' ? asked.trim() : null
     // Opened into the conversation it was pressed in, once its set is on screen.
-    void runInWantedScope(() => openAt(target, { reveal: true, restoring: false, scope: tabScopeGate.shown }))
+    void runInWantedScope(() => openAt(target, { reveal: true, restoring: false, scope: tabScopeGate.shown, saved: null }))
   }
 
-  /** Open the tab (revealing the editor for a person's press, never for a
-   *  tab-set restore) and go to `target` when there is one. */
+  /** Open the browser (revealing the editor for a person's press, never for a
+   *  tab-set restore), with that conversation's tabs, and go to `target`. */
   const openAt = (
     target: string | null,
-    options: { reveal: boolean; restoring: boolean; scope: TabScopeKey | null },
+    options: { reveal: boolean; restoring: boolean; scope: TabScopeKey | null; saved: unknown },
   ): void => {
-    // The browser is taken by this set when the set brings it back, or when it
-    // is opened while not open in it (a switch closed the previous set's tab).
     const adopting = options.restoring || !editorApi.hasTab(BROWSER_TAB_ID)
     // Reveal the editor host first — the tab opens into it even when the editor
     // is hidden (⌘⌥D), matching every other view tab.
@@ -614,38 +956,29 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
       label: 'Browser',
       icon: 'globe',
       element: container,
-      // The browser belongs to a conversation's tab set, with the page it was on.
-      persist: { kind: BROWSER_VIEW_KIND, state: () => ({ url: currentUrl() }) },
+      // The browser belongs to a conversation's tab set, with its tabs.
+      persist: { kind: BROWSER_VIEW_KIND, state: () => flatTabs(saveTabs(tabs)) },
     })
-    if (adopting) {
-      const decision = adoptBrowserScope({
-        owner,
-        next: options.scope,
-        // A press with a destination is a destination like a saved page.
-        saved: target,
-        current: currentUrl(),
-        restoring: options.restoring || target !== null,
-        hasNavigated,
-      })
+    const firstOpen = !everOpened
+    everOpened = true
+    if (adopting && (!sameScope(owner, options.scope) || (options.restoring && untouched()))) {
       owner = options.scope
-      if (decision.clearCaptures) {
-        void browser.clearCaptures({}).catch((error: unknown) => console.warn('flow: browser capture clear failed', error))
-      }
-      if (decision.load.kind === 'url') {
-        go(decision.load.url, true)
-        return
-      }
-      if (decision.load.kind === 'blank') {
-        goBlank()
-        return
-      }
-      if (target !== null) return // already on it
-    } else if (target !== null) {
-      go(target, false)
+      // That conversation's tabs (asleep, the saved one on screen), or one blank tab.
+      replaceTabs(options.restoring ? restoreTabs(options.saved, newTabId) : emptyTabs())
+      if (target !== null) {
+        if (untouched()) go(target, false)
+        else openNewTab(target, { after: tabs.activeId, activate: true })
+      } else if (firstOpen && untouched() && initialUrl !== null) go(initialUrl, false)
+      return
+    }
+    if (adopting) owner = options.scope
+    if (target !== null) {
+      if (tabs.tabs.find((tab) => tab.id === tabs.activeId)?.url === null && !cur.hasNavigated) go(target, false)
+      else openNewTab(target, { after: tabs.activeId, activate: true })
       return
     }
     // First open with no destination: kick the dev-server guess.
-    if (!hasNavigated && initialUrl !== null) go(initialUrl, false)
+    if (!cur.hasNavigated && initialUrl !== null && untouched()) go(initialUrl, false)
   }
   document.addEventListener('flow:open-browser', openBrowserTab)
 
@@ -693,7 +1026,7 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
       else pendingDrafts = mergeDraftChange(pendingDrafts, event)
     }) ?? (() => undefined)
   // …and applied when the load stops, against the page that loaded.
-  webview.addEventListener('did-stop-loading', flushDrafts)
+  listen('did-stop-loading', flushDrafts)
   const draftsVisibility = new IntersectionObserver((entries) => {
     if (entries.some((entry) => entry.isIntersecting)) flushDrafts()
   })
@@ -704,34 +1037,28 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   // the page that conversation was looking at (one browser per window), or
   // blank when it never had one.
   editorApi.registerViewRestorer(BROWSER_VIEW_KIND, (state, scope) => {
-    const saved = typeof state.url === 'string' && state.url !== '' ? state.url : null
-    openAt(saved, { reveal: false, restoring: true, scope })
+    openAt(null, { reveal: false, restoring: true, scope, saved: state })
     return BROWSER_TAB_ID
   })
 
+  renderTabs()
+
   return () => {
     document.removeEventListener('flow:open-browser', openBrowserTab)
+    document.removeEventListener('keydown', onTabKeys, true)
+    stopOpenTab()
+    stopShortcut()
+    stopBufferEvents()
+    for (const page of [...pages.values()]) destroyPage(page)
     document.removeEventListener('visibilitychange', flushDrafts)
-    webview.removeEventListener('did-stop-loading', flushDrafts)
     draftsVisibility.disconnect()
     stopDrafts()
     document.removeEventListener('keydown', onKeyDown, true)
-    webview.removeEventListener('did-start-loading', onStartLoading)
-    webview.removeEventListener('did-stop-loading', onStopLoading)
-    webview.removeEventListener('did-finish-load', onStopLoading)
-    webview.removeEventListener('did-fail-load', onFailLoad)
-    webview.removeEventListener('did-navigate', onNavigated)
-    webview.removeEventListener('did-navigate-in-page', onNavigated)
-    webview.removeEventListener('did-frame-finish-load', syncNavState)
-    webview.removeEventListener('dom-ready', syncNavState)
     stopCapture()
     stopDeactivate()
     stopDraftInspect()
     stopDraftPick()
     stopDraftHistory()
-    webview.removeEventListener('did-finish-load', pushUndoCount)
-    webview.removeEventListener('did-finish-load', onInspectPageLoad)
-    webview.removeEventListener('did-navigate', onDraftNavigate)
     inspectMode.dispose()
     debugDrawer.dispose()
   }

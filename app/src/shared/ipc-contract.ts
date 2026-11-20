@@ -67,6 +67,7 @@ import type {
   BrowserCaptureKind,
   TagWindow,
 } from './browser-capture-types'
+import type { BrowserTabShortcut } from './browser-tabs'
 
 export type { SideIdentity, SideIdentityContext, SideIdentityProvider } from './side-identity'
 export type { ReviewFile, ReviewGroup, ReviewListResult } from './review-types'
@@ -86,6 +87,7 @@ export type {
   TagWindow,
 } from './browser-capture-types'
 import type { ShareAccess, ShareRefusalReason, ShareSummary, ShareView } from './share-contract'
+import type { ResetInventory, ResetItem, ResetOutcome } from './reset-items'
 import type {
   AskListRequest,
   AskListResponse,
@@ -7743,6 +7745,22 @@ export interface IpcInvokeMap {
    * never attach what another thread's page logged.
    */
   'browser:clearCaptures': { request: Record<string, never>; response: void }
+  /**
+   * The tab on screen changed: every other browser:* call now acts on this
+   * page (its id is the webview's webContents id). Unknown ids are ignored.
+   */
+  'browser:setActive': { request: { guestId: number }; response: void }
+
+  // ── Reset Flow ────────────────────────────────────────────────────────────
+  /** What each kind of data holds now — read when the reset section opens. */
+  'reset:inventory': { request: Record<string, never>; response: ResetInventory }
+  /** Record the reset and restart; the next launch deletes. Needs `confirmed: true`. */
+  'reset:schedule': {
+    request: { items: ResetItem[]; confirmed: true }
+    response: { ok: true } | { ok: false; detail: string }
+  }
+  /** The last reset's result, taken once (null when there is none). */
+  'reset:outcome': { request: Record<string, never>; response: ResetOutcome | null }
 
   // ── Debug session ─────────────────────────────────────────────────────────
   // One window in time across the browser AND the thread's terminals. See
@@ -7977,7 +7995,20 @@ export interface IpcEventMap {
   'project:flushEditorContext': Record<string, never>
   /** A capture buffer's size changed — drives the per-kind tag badge. Carries
    *  the kind that changed plus the full per-kind snapshot. */
-  'browser:bufferUpdated': { kind: BrowserCaptureKind; counts: BrowserBufferCounts }
+  'browser:bufferUpdated': {
+    kind: BrowserCaptureKind
+    counts: BrowserBufferCounts
+    /** The tab's page the captures belong to; absent from older senders. */
+    guestId?: number
+    /** Console errors that page has logged so far (drives a tab's red dot). */
+    errors?: number
+  }
+  /** A page asked for a new window that opens as a Flow tab (same site or a
+   *  local server). Other sites went to the person's own browser in main. */
+  'browser:openTab': { url: string; openerGuestId: number }
+  /** A tab shortcut pressed while focus was inside a page (the page swallows
+   *  its keys, so main forwards ours). */
+  'browser:shortcut': { action: BrowserTabShortcut; openerGuestId: number }
   /** A capture was tagged — the renderer turns this into a composer chip. */
   'browser:tagPosted': BrowserCapture
 }
@@ -8344,6 +8375,10 @@ export const IPC_INVOKE_CHANNELS = [
   'browser:tagEntry',
   'browser:bufferSlice',
   'browser:clearCaptures',
+  'browser:setActive',
+  'reset:inventory',
+  'reset:schedule',
+  'reset:outcome',
   'debug:start',
   'debug:stop',
   'debug:status',
@@ -8408,6 +8443,8 @@ export const IPC_EVENT_CHANNELS = [
   'project:flushEditorContext',
   'browser:bufferUpdated',
   'browser:tagPosted',
+  'browser:openTab',
+  'browser:shortcut',
 ] as const satisfies readonly IpcEventChannel[]
 
 /** Compile-time exhaustiveness: errors if a map key is missing from its array. */
@@ -9337,6 +9374,12 @@ export interface FlowBrowserApi {
   ): Promise<IpcResponse<'browser:bufferSlice'>>
   /** Empty the capture buffer (the browser changed conversation). */
   clearCaptures(request: IpcRequest<'browser:clearCaptures'>): Promise<void>
+  /** The tab on screen changed — later calls act on its page. */
+  setActive?(request: IpcRequest<'browser:setActive'>): Promise<void>
+  /** A page asked for a window that opens as a Flow tab. */
+  onOpenTab?(listener: (event: IpcEventPayload<'browser:openTab'>) => void): Unsubscribe
+  /** A tab shortcut pressed inside a page. */
+  onShortcut?(listener: (event: IpcEventPayload<'browser:shortcut'>) => void): Unsubscribe
   /** A capture buffer's per-kind size changed — drives the tag badge. */
   onBufferUpdated(listener: (event: IpcEventPayload<'browser:bufferUpdated'>) => void): Unsubscribe
   /** A capture was tagged — the renderer turns it into a composer chip. */
@@ -9423,6 +9466,12 @@ export interface FlowDraftsApi {
   onChanged(listener: (event: IpcEventPayload<'drafts:changed'>) => void): Unsubscribe
 }
 
+export interface FlowResetApi {
+  inventory(request: IpcRequest<'reset:inventory'>): Promise<IpcResponse<'reset:inventory'>>
+  schedule(request: IpcRequest<'reset:schedule'>): Promise<IpcResponse<'reset:schedule'>>
+  outcome(request: IpcRequest<'reset:outcome'>): Promise<IpcResponse<'reset:outcome'>>
+}
+
 export interface FlowApi {
   /** Current renderer zoom factor (#1352). Optional: an older preload can't
    *  report it, and the caller falls back to 1. */
@@ -9463,6 +9512,8 @@ export interface FlowApi {
   /** Embedded browser (Phase 1 contract). Optional: an older preload predates
    *  the channels, so the browser tab degrades to unavailable. */
   browser?: FlowBrowserApi
+  /** Reset Flow. Optional: an older preload predates the channels. */
+  reset?: FlowResetApi
   /** Feature view sharing. Optional: an older preload predates the channels,
    *  and the feature view then simply offers no Share button. */
   share?: FlowShareApi

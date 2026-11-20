@@ -659,6 +659,11 @@ const flowApi: FlowApi = {
     basicDiscoveryState: (request) => invoke('learn:basicDiscoveryState', request),
     onBasicDiscoveryChanged: (listener) => subscribe('learn:basicDiscoveryChanged', listener),
   },
+  reset: {
+    inventory: (request) => invoke('reset:inventory', request),
+    schedule: (request) => invoke('reset:schedule', request),
+    outcome: (request) => invoke('reset:outcome', request),
+  },
   browser: {
     navigate: (request) => invoke('browser:navigate', request),
     back: (request) => invoke('browser:back', request),
@@ -671,6 +676,9 @@ const flowApi: FlowApi = {
     tagEntry: (request) => invoke('browser:tagEntry', request),
     bufferSlice: (request) => invoke('browser:bufferSlice', request),
     clearCaptures: (request) => invoke('browser:clearCaptures', request),
+    setActive: (request) => invoke('browser:setActive', request),
+    onOpenTab: (listener) => subscribe('browser:openTab', listener),
+    onShortcut: (listener) => subscribe('browser:shortcut', listener),
     onBufferUpdated: (listener) => subscribe('browser:bufferUpdated', listener),
     onTagPosted: (listener) => subscribe('browser:tagPosted', listener),
   },

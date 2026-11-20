@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, nativeImage, safeStorage, shell } from 'electron'
+import { app, BrowserWindow, dialog, nativeImage, safeStorage, session, shell } from 'electron'
 import { realpath as realpathAsync } from 'fs/promises'
 import { readLearnLog, recordLearnEvent } from './project/learn-log'
 import { basename, dirname, join, resolve } from 'path'
@@ -250,6 +250,10 @@ import { readThreadWorktreesEnabled } from './flow/thread-worktree-config'
 import { readWorktreeSettings } from './flow/worktree-settings'
 import { ProjectRegistry } from './project/project-registry'
 import { Provisioner, runBundledCli } from './project/provisioner'
+import { registerResetChannels } from './reset/ipc'
+import { readInventory, runPendingReset, scheduleReset } from './reset/reset-launch'
+import { takeResetOutcome } from './reset/pending-reset'
+import { FLOW_BROWSER_PARTITION } from '../shared/browser-partition'
 import { awaitProvisioningSettled } from './worktree/provision-gate'
 import {
   defaultEnumerateModuleEntries,
@@ -573,6 +577,7 @@ let learnRunTriggers: LearnRunTriggers | null = null
 let disposeIpc: (() => void) | null = null
 let disposeAgentIpc: (() => void) | null = null
 let disposeAccountsIpc: (() => void) | null = null
+let disposeResetIpc: (() => void) | null = null
 let disposeFileIpc: (() => void) | null = null
 let disposeFlowIpc: (() => Promise<void>) | null = null
 let disposeArtifactIpc: (() => void) | null = null
@@ -3439,6 +3444,25 @@ const understandFeature = async (request: {
     accountResolver,
     loginOrchestrator,
   })
+  // RESET FLOW: confirming records the request and restarts; the deleting
+  // happens at the next launch, before the database opens (reset-launch.ts).
+  {
+    const resetDb = db
+    disposeResetIpc = registerResetChannels({
+      inventory: () => readInventory({ env: process.env, userData: app.getPath('userData'), db: resetDb }),
+      schedule: (items) => {
+        scheduleReset({ env: process.env, userData: app.getPath('userData') }, items)
+        // After the reply is sent: relaunch, then quit through the normal
+        // disposal so agents and terminals stop cleanly.
+        setTimeout(() => {
+          app.relaunch()
+          app.quit()
+        }, 50)
+        return Promise.resolve()
+      },
+      takeOutcome: () => takeResetOutcome(app.getPath('userData')),
+    })
+  }
   disposeFileIpc = registerFileChannels({ roots: addressableRoots })
   disposeFlowIpc = registerFlowChannels({
     roots: rootsProviderFrom(projectRegistry),
@@ -4362,10 +4386,24 @@ if (!hasSingleInstanceLock) {
   })
 }
 
-void app.whenReady().then(() => {
+void app.whenReady().then(async () => {
   // The second instance is already quitting — never bootstrap against the
   // locked DB (that's the zombie-window bug, #544).
   if (!hasSingleInstanceLock) return
+  // A reset confirmed in Settings runs here, before anything opens the
+  // database or a session. It never throws; failures go to its outcome.
+  await runPendingReset({
+    env: process.env,
+    userData: app.getPath('userData'),
+    databasePath: join(app.getPath('userData'), DATABASE_FILE_NAME),
+    appSession: () => session.defaultSession,
+    browserSession: () => session.fromPartition(FLOW_BROWSER_PARTITION),
+    uninstallProject: async (root) => {
+      const result = await runBundledCli(resolveBundledCli(), root, ['uninstall', '--target', root, '--confirm'])
+      if (!result.ok) throw new Error(result.error ?? 'the project could not be cleaned')
+    },
+    log: (line) => console.log(line),
+  })
   try {
     bootstrapMainProcess()
   } catch (error) {
@@ -4546,6 +4584,8 @@ async function disposeMainProcess(): Promise<void> {
   disposeFileIpc = null
   disposeAccountsIpc?.()
   disposeAccountsIpc = null
+  disposeResetIpc?.()
+  disposeResetIpc = null
   disposeAgentIpc?.()
   disposeAgentIpc = null
   disposeIpc?.()

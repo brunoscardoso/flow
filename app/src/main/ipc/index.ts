@@ -1090,6 +1090,8 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
   browserController.setBroadcast({
     bufferUpdated: (payload) => broadcast('browser:bufferUpdated', payload),
     tagPosted: (payload) => broadcast('browser:tagPosted', payload),
+    openTab: (payload) => broadcast('browser:openTab', payload),
+    shortcut: (payload) => broadcast('browser:shortcut', payload),
   })
   handle('browser:navigate', ({ url }) => browserController.navigate(url))
   handle('browser:back', () => browserController.back())
@@ -1106,6 +1108,7 @@ export function registerIpcHandlers(deps: IpcDependencies): () => void {
     browserController.bufferSlice(kind, selector),
   )
   handle('browser:clearCaptures', () => browserController.clearCaptures())
+  handle('browser:setActive', ({ guestId }) => browserController.setActive(guestId))
 
   // ── Debug session ─────────────────────────────────────────────────────────
   //

@@ -40,6 +40,7 @@ import { maybeStartOnboarding } from './onboarding'
 import { maybeAskAboutTelemetry } from './onboarding/consent-prompt'
 import { installOverlayFocusTrap } from './settings/overlay-focus-trap'
 import { initUpdateBanner } from './update/update-banner'
+import { announceResetOutcome } from './settings/reset-section'
 import { initLearn } from './learn'
 import { initCommandPalette } from './palette/command-palette'
 import { isModalOverlayOpen } from './modal-overlay'
@@ -260,6 +261,8 @@ if (appRoot) {
   void maybeAskAboutTelemetry()
   // Auto-update banner (#auto-update) — driven by the main process's status push.
   initUpdateBanner()
+  // A reset ran at this launch: say what it deleted, once.
+  void announceResetOutcome()
   // Progressive-learning (#513 phase 2): the one-time basic-discovery ask card.
   initLearn()
   // ⌘P command palette — quick-open blending files/threads/commands. After

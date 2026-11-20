@@ -9,7 +9,7 @@
 
 import { join } from 'node:path'
 
-import { app, webFrameMain, type WebContents } from 'electron'
+import { app, shell, webFrameMain, type WebContents } from 'electron'
 
 import type {
   BrowserCapabilities,
@@ -19,6 +19,7 @@ import type {
 } from '../../shared/browser-capture-types'
 import { redactAndBound } from '../../shared/browser-capture-boundary'
 import type { IpcEventPayload } from '../../shared/ipc-contract'
+import { opensInFlow, tabShortcut } from '../../shared/browser-tabs'
 import { attachDraftFramePicker } from '../drafts/draft-frame-inject'
 import { attachCdpCapture, type CdpCaptureHandle } from './cdp-capture'
 import { setGuestInspect, setGuestRecording } from './inspect-host'
@@ -32,6 +33,17 @@ import { RollingBuffer } from './rolling-buffer'
 export interface BrowserBroadcast {
   bufferUpdated(payload: IpcEventPayload<'browser:bufferUpdated'>): void
   tagPosted(payload: IpcEventPayload<'browser:tagPosted'>): void
+  openTab?(payload: IpcEventPayload<'browser:openTab'>): void
+  shortcut?(payload: IpcEventPayload<'browser:shortcut'>): void
+}
+
+/** One tab's page: its guest and the captures it made. Captures are kept per tab. */
+interface GuestEntry {
+  guest: WebContents
+  buffer: RollingBuffer
+  cdp: CdpCaptureHandle
+  /** Console errors logged so far — a background tab's red dot. */
+  errors: number
 }
 
 /**
@@ -45,13 +57,34 @@ export interface BrowserBroadcast {
 const GUEST_PRELOAD_PATH = join(__dirname, '..', 'preload', 'browser-guest.js')
 
 class BrowserController {
-  #guest: WebContents | null = null
+  /** Every tab's live page, by webContents id. */
+  #guests = new Map<number, GuestEntry>()
+  /** The tab on screen — what every browser:* call acts on. */
+  #activeId: number | null = null
   #initialized = false
   #broadcast: BrowserBroadcast | null = null
-  /** The always-on console/network buffer for the current guest (Phase 5). */
-  #buffer: RollingBuffer | null = null
-  /** The live CDP attach for the current guest (Phase 5). */
-  #cdp: CdpCaptureHandle | null = null
+
+  #active(): GuestEntry | null {
+    if (this.#activeId === null) return null
+    const entry = this.#guests.get(this.#activeId) ?? null
+    if (entry !== null && entry.guest.isDestroyed()) return null
+    return entry
+  }
+
+  /** The active page's capture buffer (Phase 5). */
+  get #buffer(): RollingBuffer | null {
+    return this.#active()?.buffer ?? null
+  }
+
+  /** The active page's CDP attach (Phase 5). */
+  get #cdp(): CdpCaptureHandle | null {
+    return this.#active()?.cdp ?? null
+  }
+
+  /** The tab on screen changed. An id this controller has not seen is ignored. */
+  setActive(guestId: number): void {
+    if (this.#guests.has(guestId)) this.#activeId = guestId
+  }
 
   /**
    * Begin tracking guest `<webview>` attachments. Idempotent.
@@ -80,26 +113,61 @@ class BrowserController {
         webPreferences.sandbox = false
       })
       contents.on('did-attach-webview', (_e, guest) => {
-        this.#guest = guest
-        // Always-on console/network capture over CDP (Phase 5). The handle
-        // self-detaches on guest 'destroyed' / DevTools contention, so a missed
-        // teardown can't leak the attach.
+        const guestId = guest.id
+        // Always-on console/network capture over CDP (Phase 5), one buffer per
+        // tab. The handle self-detaches on guest 'destroyed' / DevTools
+        // contention, so a missed teardown can't leak the attach.
         const buffer = new RollingBuffer()
-        this.#buffer = buffer
-        this.#cdp = attachCdpCapture(guest, buffer, (kind, counts) => {
-          this.emitBufferUpdated({ kind, counts })
+        const entry: GuestEntry = { guest, buffer, cdp: null as unknown as CdpCaptureHandle, errors: 0 }
+        entry.cdp = attachCdpCapture(guest, buffer, (kind, counts) => {
+          if (kind === 'console') {
+            const newest = buffer.slice('console', { mode: 'last-n', n: 1 })[0]
+            if (newest !== undefined && newest.kind === 'console' && newest.payload.level === 'error') entry.errors += 1
+          }
+          this.emitBufferUpdated({ kind, counts, guestId, errors: entry.errors })
         })
+        this.#guests.set(guestId, entry)
+        // The newest page is on screen until the renderer says otherwise: a
+        // single-tab browser never has to say.
+        this.#activeId = guestId
         // UI drafts: the canvas's screen frames get the picker main injects
         // (the guest preload never runs inside them).
         attachDraftFramePicker(guest, (processId, routingId) => webFrameMain.fromId(processId, routingId))
-        guest.once('destroyed', () => {
-          if (this.#guest === guest) {
-            this.#cdp?.detach()
-            this.#cdp = null
-            this.#buffer?.clear()
-            this.#buffer = null
-            this.#guest = null
+        // A new window the page asks for: the page's own site or a local server
+        // opens as a Flow tab; any other site opens in the person's browser.
+        // Never a new Electron window.
+        guest.setWindowOpenHandler(({ url }) => {
+          let opener: string | null = null
+          try {
+            opener = guest.getURL()
+          } catch {
+            opener = null
           }
+          if (opensInFlow(opener, url)) {
+            this.#broadcast?.openTab?.({ url, openerGuestId: guestId })
+          } else if (/^https?:\/\//i.test(url)) {
+            void shell.openExternal(url).catch((error: unknown) => console.warn('browser: open in default browser failed', error))
+          }
+          return { action: 'deny' }
+        })
+        // The page swallows its own keys: the tab shortcuts are taken here.
+        guest.on('before-input-event', (event, input) => {
+          if (input.type !== 'keyDown') return
+          const action = tabShortcut(
+            { key: input.key, meta: input.meta, control: input.control, shift: input.shift, alt: input.alt },
+            process.platform === 'darwin',
+          )
+          if (action === null || this.#broadcast?.shortcut === undefined) return
+          event.preventDefault()
+          this.#broadcast.shortcut({ action, openerGuestId: guestId })
+        })
+        guest.once('destroyed', () => {
+          const entry = this.#guests.get(guestId)
+          if (entry === undefined || entry.guest !== guest) return
+          entry.cdp.detach()
+          entry.buffer.clear()
+          this.#guests.delete(guestId)
+          if (this.#activeId === guestId) this.#activeId = null
         })
       })
     })
@@ -122,8 +190,7 @@ class BrowserController {
 
   /** The current guest webContents, or null when none is attached / alive. */
   currentGuest(): WebContents | null {
-    if (this.#guest && this.#guest.isDestroyed()) this.#guest = null
-    return this.#guest
+    return this.#active()?.guest ?? null
   }
 
   navigate(url: string): void {
@@ -198,7 +265,7 @@ class BrowserController {
     buffer.clear()
     // One event per listed kind, so whichever list the drawer shows re-reads.
     for (const kind of ['console', 'network'] as const) {
-      this.emitBufferUpdated({ kind, counts: buffer.counts() })
+      this.emitBufferUpdated({ kind, counts: buffer.counts(), ...(this.#activeId === null ? {} : { guestId: this.#activeId }) })
     }
   }
 

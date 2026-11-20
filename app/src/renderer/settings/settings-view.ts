@@ -108,6 +108,7 @@ import { isThemeMode } from '../theme/theme-model'
 
 import { WorkspaceSettingsSection } from './workspace-settings-section'
 import { ConnectorsSettingsSection } from './connectors-settings-section'
+import { ResetSettingsSection } from './reset-section'
 import { WORKSPACES_GROUP_LABEL } from './workspace-settings-model'
 
 const OPEN_EVENT = 'flow:open-settings'
@@ -237,6 +238,7 @@ class SettingsView {
   #workspaces: WorkspaceSettingsSection | null = null
   /** The Connectors section — one instance for the page's life, like #workspaces. */
   #connectors: ConnectorsSettingsSection | null = null
+  #reset: ResetSettingsSection | null = null
   #tabButtons = new Map<SettingsGroup, HTMLButtonElement>()
   /** Retires the integrations renderer mounted by the last render, if any. */
   #integrationsMount: (() => void) | null = null
@@ -579,6 +581,13 @@ class SettingsView {
     into('app', this.#renderSignInSection())
     into('app', this.#renderPrivacySection())
     into('app', this.#renderGettingStarted())
+    // RESET FLOW, KEPT ALIVE ACROSS RENDERS like Connectors: an open section
+    // and its ticks must survive an account-change repaint. An older preload
+    // without the reset channels has no section.
+    if (api.reset !== undefined) {
+      this.#reset ??= new ResetSettingsSection()
+      into('app', this.#reset.element)
+    }
 
     // A GROUP WITH NOTHING IN IT LOSES ITS TAB rather than offering an empty
     // page. Two of them are conditional — Tasks needs an open project, and
