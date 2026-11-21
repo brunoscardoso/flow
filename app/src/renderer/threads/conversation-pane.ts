@@ -115,6 +115,8 @@ import { turnSummary, type TurnRole } from './turn-summary'
 import { planRequests, requestSummary, type Request, type RequestRole } from './request-summary'
 import { RequestRow, sentWhileWorkingNote } from './request-row'
 import { workingMark } from '../components/fl-loading'
+import { CanvasCard } from './canvas-card'
+import { CanvasOpenLedger, canvasesInPaths, type WrittenCanvas } from './canvas-card-model'
 import { liveRequestSummary, type RequestRowStepInput } from './request-row-model'
 import { fileDisplay, requestFileChanges } from './request-file-changes'
 import { fileChangeChips, fileChangeList, LiveFileCards, type FileChangeActions } from './request-file-changes-view'
@@ -154,6 +156,9 @@ import { isWalkthroughBeingWritten } from '../../shared/walkthrough-page'
 import { onCommandNamesChanged } from './command-names'
 import { renderHighlightedText } from './message-token-view'
 import { liveWorkTarget, turnLiveAfter, type TurnEdge } from './turn-liveness'
+
+/** A canvas's key among the cards of one request. */
+const canvasKey = (written: WrittenCanvas): string => `${written.root}\u0000${written.canvas}`
 
 const HISTORY_WINDOW = 200
 /** Frames the reader's place is re-applied after older messages load in. */
@@ -363,6 +368,8 @@ interface LiveRequest {
   active: boolean
   /** The changed-file cards under the row, one per file as edits land. */
   files: LiveFileCards
+  /** A card per UI drafts canvas the request has written so far. */
+  canvases: Map<string, CanvasCard>
 }
 
 /** How often a live row's minutes are redrawn when no event does it. */
@@ -822,6 +829,10 @@ export class ConversationPane {
 
   /** Roots whose canvases are being read right now. */
   #draftLoads = new Set<string>()
+  /** Canvas cards in the feed (rebuilt with it), redrawn when drafts change. */
+  #canvasCards: CanvasCard[] = []
+  /** Which turns already opened the canvases they wrote. */
+  #canvasOpens = new CanvasOpenLedger()
   /** Each project's run state, as last broadcast — read only while something
    *  executes. Keyed by root: a plan in a project attached to the thread is
    *  run from the thread's project, so both may be asked (`planRunStateFor`). */
@@ -2346,6 +2357,55 @@ export class ConversationPane {
   }
 
   /**
+   * A card for each UI drafts canvas the request wrote, under its work row.
+   * The request that ended the turn on screen also opens its canvases in the
+   * browser, once (`CanvasOpenLedger`).
+   */
+  #buildCanvasCards(request: Request<HistoryEntry>, live: boolean): CanvasCard[] {
+    const paths: string[] = []
+    for (const step of request.steps) {
+      for (const tool of step.tools) {
+        if (tool.kind !== 'tool') continue
+        for (const file of requestFileChanges([[tool.toolCall]], { live: false }).files) paths.push(file.path)
+      }
+    }
+    const written = canvasesInPaths(paths)
+    if (written.length === 0) return []
+    const messageIds = request.entries.flatMap((entry) => (entry.kind === 'message' ? [entry.message.id] : []))
+    return written.map((canvas) => {
+      const card = this.#newCanvasCard(canvas, live)
+      if (!live && this.#canvasOpens.take(this.#threadId, messageIds, canvas) && document.visibilityState !== 'hidden') {
+        this.#openUiDrafts(canvas.root, canvas.canvas)
+      }
+      return card
+    })
+  }
+
+  #newCanvasCard(canvas: WrittenCanvas, live: boolean): CanvasCard {
+    const card = new CanvasCard(canvas, live, (target) => this.#openUiDrafts(target.root, target.canvas))
+    this.#canvasCards.push(card)
+    this.#drawCanvasCard(card)
+    return card
+  }
+
+  /** Redraw one canvas card from the cached canvases, reading them once if needed. */
+  #drawCanvasCard(card: CanvasCard): void {
+    const known = this.#draftCanvases.get(card.written.root)
+    if (known === undefined) {
+      void this.#loadDrafts(card.written.root)
+      card.update(undefined)
+      return
+    }
+    card.update(known.get(card.written.canvas))
+  }
+
+  /** The canvas cards still in the feed (a rebuild drops the old ones). */
+  #liveCanvasCards(): CanvasCard[] {
+    this.#canvasCards = this.#canvasCards.filter((card) => card.element.isConnected)
+    return this.#canvasCards
+  }
+
+  /**
    * The work row over a request's steps. Each step's contents — its message,
    * then its tools grouped exactly as the feed groups them elsewhere — are
    * built only when the step opens; the cards it will hold are known now, so
@@ -2400,6 +2460,12 @@ export class ConversationPane {
     const wrapper = entryWrapper('request', row.element)
     const last = request.entries[request.entries.length - 1]
     if (last !== undefined) wrapper.dataset.at = last.at
+    // The canvases it wrote, between the row and its files (the mockup's order).
+    const liveCanvases = new Map<string, CanvasCard>()
+    for (const card of this.#buildCanvasCards(request, live)) {
+      wrapper.appendChild(card.element)
+      liveCanvases.set(canvasKey(card.written), card)
+    }
     // The files the request changed, between its work and its answer: the
     // live cards while it runs, the list once it has finished.
     const liveFiles = live ? new LiveFileCards(this.#fileActions) : null
@@ -2428,6 +2494,7 @@ export class ConversationPane {
         model: summary.model,
         active: true,
         files: liveFiles,
+        canvases: liveCanvases,
       }
       this.#startLiveRequestTimer()
     }
@@ -2732,7 +2799,7 @@ export class ConversationPane {
     // A row appended mid-load belongs to a new turn — keep the reconcile from
     // wiping it (#101), exactly as for a stream node.
     if (this.#historyLoading) this.#liveDuringLoad = true
-    this.#liveRequest = { row, startedAt, records: new Map(), steps: [], model: null, active: true, files }
+    this.#liveRequest = { row, startedAt, records: new Map(), steps: [], model: null, active: true, files, canvases: new Map() }
     this.#startLiveRequestTimer()
     return this.#liveRequest
   }
@@ -2834,6 +2901,18 @@ export class ConversationPane {
     )
     live.row.update(summary, steps, live.active, files)
     live.files.update(files.files)
+    // A canvas appears under the row the moment the request writes its first file.
+    for (const written of canvasesInPaths(files.files.map((file) => file.path))) {
+      const key = canvasKey(written)
+      const known = live.canvases.get(key)
+      if (known !== undefined) {
+        if (!live.active) known.update(this.#draftCanvases.get(written.root)?.get(written.canvas), false)
+        continue
+      }
+      const card = this.#newCanvasCard(written, live.active)
+      live.files.element.before(card.element)
+      live.canvases.set(key, card)
+    }
   }
 
   #startLiveRequestTimer(): void {
@@ -3319,6 +3398,9 @@ export class ConversationPane {
         // carries the last PERSISTED assistant message id, so this is the one
         // moment the pane can name the turn the reconcile is about to rebuild.
         this.#recordThought(event.messageId)
+        // The request that ended here opens the canvases it wrote, once,
+        // when the reconcile below rebuilds it (#buildCanvasCards).
+        if (event.threadId === this.#threadId) this.#canvasOpens.turnEnded(event.threadId, event.messageId)
         this.#resetActivity()
         this.#applyTurnEdge({ kind: 'done' })
         const stream = this.#streams.get(event.messageId)
@@ -4445,6 +4527,7 @@ export class ConversationPane {
       this.#draftLoads.delete(root)
     }
     this.#refreshUiDraftCards(null)
+    for (const card of this.#liveCanvasCards()) if (card.written.root === root) this.#drawCanvasCard(card)
     for (const canvas of this.#draftCanvases.get(root)?.keys() ?? []) this.#openUiDraftsWhenComplete(root, canvas)
   }
 
@@ -4470,7 +4553,9 @@ export class ConversationPane {
    * mount reads it fresh.
    */
   async #onDraftsChanged(event: DraftsChangedEvent): Promise<void> {
-    const showing = this.#mountedDiscoveryCards().some((card) => card.offersUiDrafts(event.canvas))
+    const showing =
+      this.#mountedDiscoveryCards().some((card) => card.offersUiDrafts(event.canvas)) ||
+      this.#liveCanvasCards().some((card) => card.written.root === event.rootPath && card.written.canvas === event.canvas)
     const waiting = this.#uiDraftsAsks.pending(this.#threadId, this.#draftKey(event.rootPath, event.canvas))
     if (!showing && !waiting) {
       this.#draftCanvases.delete(event.rootPath)
