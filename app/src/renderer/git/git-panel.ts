@@ -114,6 +114,7 @@ import {
   sameStringList,
   type UntrackedDisplayRow,
 } from './untracked-expand'
+import { loadingMark } from '../components/fl-loading'
 
 export interface GitRootView {
   /** Absolute rootPath (=== the git domain's rootId). */
@@ -708,7 +709,7 @@ export class GitPanel {
         }
         return
       case 'loading':
-        this.renderEmpty('Loading git status…')
+        this.renderLoading('Loading changes')
         return
       case 'error':
         this.renderEmpty("Couldn't load git status", 'error')
@@ -1113,6 +1114,14 @@ export class GitPanel {
   }
 
   // ── Rendering ──────────────────────────────────────────────────────────
+
+  private renderLoading(message: string): void {
+    this.#container.textContent = ''
+    const empty = document.createElement('div')
+    empty.className = 'gp-empty'
+    empty.appendChild(loadingMark(message))
+    this.#container.appendChild(empty)
+  }
 
   private renderEmpty(message: string, variant: 'muted' | 'error' = 'muted'): void {
     this.#container.textContent = ''

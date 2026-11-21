@@ -107,6 +107,15 @@ test('network panel: columns, grouping, filters, details, menu, send again, clea
   await window.locator('.fl-bdrawer-tab', { hasText: 'Network' }).click()
   await expect(panel(window)).toBeVisible()
 
+  // ── Fetch/XHR leads and is on; All is last ────────────────────────────────
+  const chips = panel(window).locator('.fl-net-chip')
+  await expect(chips.first()).toHaveAttribute('data-type', 'fetch')
+  await expect(chips.last()).toHaveAttribute('data-type', 'all')
+  await expect(chips.first()).toHaveAttribute('aria-pressed', 'true')
+  await expect(row(window, 'desks')).toHaveCount(1, { timeout: 15_000 })
+  await expect(row(window, 'style.css')).toHaveCount(0)
+  await panel(window).locator('.fl-net-chip[data-type="all"]').click()
+
   // ── Columns, and repeats grouped into one row ─────────────────────────────
   await expect(panel(window).locator('th')).toHaveText(['Name', 'Status', 'Method', 'Type', 'Initiator', 'Size', 'Time', 'Waterfall'])
   await expect(row(window, 'poll')).toHaveCount(1, { timeout: 15_000 })
@@ -174,6 +183,34 @@ test('network panel: columns, grouping, filters, details, menu, send again, clea
   await detail.locator('.fl-net-detail-tab', { hasText: 'Initiator' }).click()
   await expect(detail.locator('.fl-net-initiator')).toContainText('A script')
   await expect(detail.locator('.fl-net-stack li').first()).toBeVisible()
+  // The line between the list and the details drags both ways, and a double
+  // click puts it back.
+  const divider = panel(window).locator('.fl-net-divider')
+  const list = panel(window).locator('.fl-net-list')
+  // A zero-width grid track: present and shown, with a hit area drawn over it.
+  await expect(divider).toBeAttached()
+  await expect(divider).toHaveJSProperty('hidden', false)
+  const listBefore = (await list.boundingBox())?.width ?? 0
+  const line = await divider.boundingBox()
+  const split = await panel(window).locator('.fl-net-split').boundingBox()
+  if (line === null || split === null) throw new Error('no divider box')
+  await window.mouse.move(line.x + line.width / 2, line.y + line.height / 2)
+  await window.mouse.down()
+  await window.mouse.move(split.x + split.width * 0.3, line.y + line.height / 2, { steps: 5 })
+  await window.mouse.up()
+  const narrower = (await list.boundingBox())?.width ?? 0
+  expect(narrower).toBeLessThan(listBefore - 40)
+  await window.mouse.move(split.x + split.width * 0.3, line.y + line.height / 2)
+  await window.mouse.down()
+  await window.mouse.move(split.x + split.width * 0.75, line.y + line.height / 2, { steps: 5 })
+  await window.mouse.up()
+  expect((await list.boundingBox())?.width ?? 0).toBeGreaterThan(listBefore + 40)
+  const moved = await divider.boundingBox()
+  if (moved === null) throw new Error('no divider box')
+  await window.mouse.dblclick(moved.x, moved.y + moved.height / 2)
+  await expect.poll(async () => Math.abs(((await list.boundingBox())?.width ?? 0) - listBefore)).toBeLessThan(30)
+  await expect(detail.locator('.fl-net-detail-title')).toHaveText(`${origin}/api/echo`)
+
   if (process.env['FLOW_E2E_SHOTS']) await panel(window).screenshot({ path: `${process.env['FLOW_E2E_SHOTS']}/network-panel.png` })
 
   // Arrow keys move through the list while details are open.

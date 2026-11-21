@@ -9,7 +9,8 @@ import { test, expect } from '../fixtures/electron'
  * Tabs in the built-in browser, in the real app, against a local server the
  * test runs (no dev server, no network):
  *   - opening, switching and closing tabs, each tab its own page;
- *   - a page's new window: its own site opens as a tab right after it, another
+ * Each page is an editor tab of its own (no "Browser" tab, no second row).
+ *   - a page's new window: its own site opens as a new tab, another
  *     site goes to the person's browser (recorded in main, never opened);
  *   - the shortcuts on the browser's controls and inside a page;
  *   - past six live pages the tab used longest ago sleeps, and wakes on open;
@@ -41,8 +42,9 @@ test.afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()))
 })
 
-const tabRows = (window: Page) => window.locator('.fl-browser-tabs-tab')
-const activeRow = (window: Page) => window.locator('.fl-browser-tabs-tab[aria-selected="true"]')
+const tabRows = (window: Page) => window.locator('button.tab[data-id^="flow://browser/"]')
+const activeRow = (window: Page) => window.locator('button.tab[data-id^="flow://browser/"][aria-selected="true"]')
+const newPageButton = (window: Page) => window.locator('button.add[aria-label="New tab"]')
 const webviews = (window: Page) => window.locator('.fl-browser-tab webview')
 
 /** Run a script in the page on screen, as if the person did it (user gesture). */
@@ -50,7 +52,7 @@ async function inActivePage<T>(app: ElectronApplication, code: string): Promise<
   return app.evaluate(async ({ BrowserWindow, webContents }, script) => {
     const host = BrowserWindow.getAllWindows()[0]?.webContents
     const id = (await host?.executeJavaScript(
-      "[...document.querySelectorAll('.fl-browser-tab webview')].find((w) => w.style.visibility !== 'hidden')?.getWebContentsId() ?? null",
+      "(() => { try { return [...document.querySelectorAll('.fl-browser-tab webview')].find((w) => w.style.visibility !== 'hidden')?.getWebContentsId() ?? null } catch { return null } })()",
     )) as number | null
     const guest = id === null ? undefined : webContents.fromId(id)
     if (guest === undefined || guest.isDestroyed()) return null
@@ -85,9 +87,15 @@ test('tabs: open, switch, new windows, shortcuts, sleep, red dot, and closing th
   await expect(tabRows(window)).toHaveCount(1)
   await expect(activeRow(window)).toContainText('Page A')
   await expect.poll(() => inActivePage<string>(app, 'document.title')).toBe('Page A')
+  // A page tab stays small, and its "+" sits right after it.
+  expect((await activeRow(window).boundingBox())?.width ?? 999).toBeLessThanOrEqual(180)
+  await expect(newPageButton(window)).toHaveCount(1)
+  expect(
+    await newPageButton(window).evaluate((el) => (el.previousElementSibling as HTMLElement | null)?.dataset['id']?.startsWith('flow://browser/') ?? false),
+  ).toBe(true)
 
   // ── "+" opens a blank tab on screen; the first keeps its page ──────────
-  await window.locator('[data-action="browser-new-tab"]').click()
+  await newPageButton(window).click()
   await expect(tabRows(window)).toHaveCount(2)
   await expect(activeRow(window)).toContainText('New tab')
   await expect(window.locator('.fl-browser-overlay')).toBeVisible()
@@ -98,10 +106,10 @@ test('tabs: open, switch, new windows, shortcuts, sleep, red dot, and closing th
   await expect.poll(() => inActivePage<string>(app, 'document.title')).toBe('Page A')
   await expect(window.locator('.fl-browser-chrome input[aria-label="Address"]')).toHaveValue(`${origin}/a`)
 
-  // ── A new window for the page's own site: a tab right after it ─────────
+  // ── A new window for the page's own site: a new tab, at the end ────────
   await inActivePage(app, `window.open('${origin}/b'); true`)
   await expect(tabRows(window)).toHaveCount(3)
-  await expect(tabRows(window).nth(1)).toContainText('Page B')
+  await expect(tabRows(window).nth(2)).toContainText('Page B')
   await expect(activeRow(window)).toContainText('Page B')
   await expect.poll(() => inActivePage<string>(app, 'document.title')).toBe('Page B')
 
@@ -113,14 +121,16 @@ test('tabs: open, switch, new windows, shortcuts, sleep, red dot, and closing th
   await expect(tabRows(window)).toHaveCount(3)
 
   // ── Shortcuts on the browser's controls: ⌃Tab, ⌘1, ⌘W, ⌘⇧T ────────────
-  await activeRow(window).focus()
+  await window.locator('.fl-browser-chrome input[aria-label="Address"]').focus()
   await window.keyboard.press('Control+Tab')
+  await expect(activeRow(window)).toContainText('Page A')
+  await window.keyboard.press('Meta+2')
   await expect(activeRow(window)).toContainText('New tab')
   await window.keyboard.press('Meta+1')
   await expect(activeRow(window)).toContainText('Page A')
   await window.keyboard.press('Meta+w')
   await expect(tabRows(window)).toHaveCount(2)
-  await expect(activeRow(window)).toContainText('Page B')
+  await expect(activeRow(window)).toContainText('New tab')
   await window.keyboard.press('Meta+Shift+t')
   await expect(tabRows(window)).toHaveCount(3)
   await expect(activeRow(window)).toContainText('Page A')
@@ -130,7 +140,7 @@ test('tabs: open, switch, new windows, shortcuts, sleep, red dot, and closing th
   await app.evaluate(async ({ BrowserWindow, webContents }) => {
     const host = BrowserWindow.getAllWindows()[0]?.webContents
     const id = (await host?.executeJavaScript(
-      "[...document.querySelectorAll('.fl-browser-tab webview')].find((w) => w.style.visibility !== 'hidden')?.getWebContentsId() ?? null",
+      "(() => { try { return [...document.querySelectorAll('.fl-browser-tab webview')].find((w) => w.style.visibility !== 'hidden')?.getWebContentsId() ?? null } catch { return null } })()",
     )) as number | null
     const guest = id === null ? undefined : webContents.fromId(id)
     guest?.focus()
@@ -140,38 +150,45 @@ test('tabs: open, switch, new windows, shortcuts, sleep, red dot, and closing th
   await expect(activeRow(window)).toContainText('New tab')
 
   // ── A page behind another logs an error: a red dot until it is opened ──
-  await tabRows(window).first().click()
+  const pageA = tabRows(window).filter({ hasText: 'Page A' })
+  await pageA.click()
+  await expect.poll(() => inActivePage<string>(app, 'document.title')).toBe('Page A')
   await inActivePage(app, `window.open('${origin}/noisy'); true`)
   await expect(activeRow(window)).toContainText('Noisy')
-  await tabRows(window).first().click()
+  await pageA.click()
   const noisy = tabRows(window).filter({ hasText: 'Noisy' })
-  await expect(noisy.locator('.fl-browser-tabs-dot')).toBeVisible({ timeout: 10_000 })
+  await expect(noisy.locator('.status-dot')).toBeVisible({ timeout: 10_000 })
   await noisy.click()
-  await expect(noisy.locator('.fl-browser-tabs-dot')).toHaveCount(0)
+  await expect(noisy.locator('.status-dot')).toHaveCount(0)
 
   // ── Past six live pages, the tab used longest ago sleeps ───────────────
   for (const n of [1, 2, 3, 4]) {
-    await window.locator('[data-action="browser-new-tab"]').click()
+    await newPageButton(window).click()
     await window.locator('.fl-browser-chrome input[aria-label="Address"]').fill(`${origin}/p${String(n)}`)
     await window.locator('.fl-browser-chrome input[aria-label="Address"]').press('Enter')
     await expect(activeRow(window)).toContainText(`Page p${String(n)}`)
   }
   await expect(tabRows(window)).toHaveCount(9)
   await expect(webviews(window)).toHaveCount(6)
-  await expect(window.locator('.fl-browser-tabs-tab.is-asleep')).toHaveCount(3)
+  await expect(window.locator('button.tab[data-id^="flow://browser/"].pending')).toHaveCount(3)
   if (process.env['FLOW_E2E_SHOTS']) await window.locator('.fl-browser-tab').screenshot({ path: `${process.env['FLOW_E2E_SHOTS']}/browser-tabs.png` })
   // A sleeping tab keeps its title and wakes on open.
-  const asleep = window.locator('.fl-browser-tabs-tab.is-asleep').first()
-  const title = (await asleep.locator('.fl-browser-tabs-title').textContent()) ?? ''
+  const asleep = window.locator('button.tab[data-id^="flow://browser/"].pending').first()
+  const title = (await asleep.locator('.label').textContent()) ?? ''
   expect(title).not.toBe('')
   await asleep.click()
   await expect(activeRow(window)).toContainText(title)
   await expect(webviews(window)).toHaveCount(6)
 
+  // ── No "Browser" tab and no second row of tabs ─────────────────────────
+  await expect(window.locator('button.tab[data-id="flow://browser"]')).toHaveCount(0)
+  await expect(window.locator('.fl-browser-tabs')).toHaveCount(0)
+
   // ── Closing every tab closes the browser ───────────────────────────────
-  while ((await tabRows(window).count()) > 1) await activeRow(window).locator('.fl-browser-tabs-close').click()
+  while ((await tabRows(window).count()) > 1) await activeRow(window).locator('.close').click()
   await expect(window.locator('.fl-browser-tab')).toBeVisible()
-  await activeRow(window).locator('.fl-browser-tabs-close').click()
+  await activeRow(window).locator('.close').click()
+  await expect(tabRows(window)).toHaveCount(0)
   await expect(window.locator('.fl-browser-tab')).toBeHidden()
 
   expect(errors, errors.join(', ')).toEqual([])

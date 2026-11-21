@@ -114,6 +114,7 @@ import { TurnRow } from './turn-row'
 import { turnSummary, type TurnRole } from './turn-summary'
 import { planRequests, requestSummary, type Request, type RequestRole } from './request-summary'
 import { RequestRow, sentWhileWorkingNote } from './request-row'
+import { workingMark } from '../components/fl-loading'
 import { liveRequestSummary, type RequestRowStepInput } from './request-row-model'
 import { fileDisplay, requestFileChanges } from './request-file-changes'
 import { fileChangeChips, fileChangeList, LiveFileCards, type FileChangeActions } from './request-file-changes-view'
@@ -974,12 +975,9 @@ export class ConversationPane {
     this.#activity = document.createElement('div')
     this.#activity.className = 'fl-conv-activity'
     this.#activity.hidden = true
-    const dots = document.createElement('div')
-    dots.className = 'fl-conv-dots'
-    dots.setAttribute('aria-hidden', 'true')
-    dots.appendChild(document.createElement('span'))
-    dots.appendChild(document.createElement('span'))
-    dots.appendChild(document.createElement('span'))
+    // Flow's loading mark beside the words ("Working…", "Thinking…").
+    const dots = workingMark(18)
+    dots.style.color = 'var(--fl-color-accent)'
     this.#activityLabel = document.createElement('span')
     this.#activityLabel.className = 'fl-conv-activity-label'
     this.#activityLabel.textContent = 'Working…'
@@ -5391,28 +5389,6 @@ function injectConversationStyles(): void {
        wins by order — without this the loader shows forever on thread select. */
     .fl-conv-activity[hidden] { display: none; }
     .fl-conv-activity-label { font-style: italic; opacity: 0.85; }
-    .fl-conv-dots {
-      display: inline-flex;
-      align-items: center;
-      gap: 3px;
-    }
-    .fl-conv-dots span {
-      width: 5px;
-      height: 5px;
-      border-radius: 50%;
-      background: var(--fl-color-accent, var(--fl-color-text-secondary));
-      opacity: 0.35;
-      animation: fl-conv-dot 1.2s ease-in-out infinite;
-    }
-    .fl-conv-dots span:nth-child(2) { animation-delay: 0.18s; }
-    .fl-conv-dots span:nth-child(3) { animation-delay: 0.36s; }
-    @keyframes fl-conv-dot {
-      0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
-      30% { opacity: 1; transform: translateY(-3px); }
-    }
-    @media (prefers-reduced-motion: reduce) {
-      .fl-conv-dots span { animation: none; opacity: 0.6; }
-    }
     /* Newly appended live entries ease in so streamed content and the
        optimistic user bubble don't pop. */
     .fl-conv-enter { animation: fl-conv-enter 0.18s ease-out; }

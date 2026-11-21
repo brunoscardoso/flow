@@ -21,9 +21,10 @@ import { contentTypeOf } from './network-detail'
 export type NetworkType = 'fetch' | 'doc' | 'css' | 'js' | 'font' | 'img' | 'media' | 'socket' | 'other'
 export type NetworkTypeFilter = 'all' | NetworkType
 
-/** The chips, in Chrome's order. */
+/** The chips. Chrome's order, except that Fetch/XHR leads and is what a
+ *  panel opens on (the requests a person debugging an app looks for), and All
+ *  comes last. */
 export const NETWORK_TYPE_FILTERS: readonly { id: NetworkTypeFilter; label: string }[] = [
-  { id: 'all', label: 'All' },
   { id: 'fetch', label: 'Fetch/XHR' },
   { id: 'doc', label: 'Doc' },
   { id: 'css', label: 'CSS' },
@@ -33,7 +34,11 @@ export const NETWORK_TYPE_FILTERS: readonly { id: NetworkTypeFilter; label: stri
   { id: 'media', label: 'Media' },
   { id: 'socket', label: 'Socket' },
   { id: 'other', label: 'Other' },
+  { id: 'all', label: 'All' },
 ]
+
+/** The chip a panel opens on. */
+export const DEFAULT_NETWORK_TYPE: NetworkTypeFilter = 'fetch'
 
 const BY_RESOURCE_TYPE: Record<string, NetworkType> = {
   Fetch: 'fetch',

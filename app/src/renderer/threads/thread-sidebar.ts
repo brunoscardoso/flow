@@ -100,6 +100,7 @@ import {
   type WorkspaceScope,
   PROJECT_MENU_EVENT,
 } from './workspace-switcher-model'
+import { workingMark } from '../components/fl-loading'
 
 /** A task plus its 1:1 thread's pin state (a task's pin IS its thread's pin). */
 type TaskWithPin = TaskSummary & { pinnedAt: string | null }
@@ -2222,11 +2223,8 @@ export class ThreadSidebar {
 
     // THE RING. The same spinner every running tool card uses, at the size a
     // nested row can hold — one shape for "this is moving", wherever it moves.
-    const ring = document.createElement('fl-icon')
-    ring.setAttribute('name', 'spinner')
-    ring.setAttribute('size', '11')
-    ring.setAttribute('spin', '')
-    ring.style.cssText = 'flex:none;color:var(--fl-color-accent);'
+    const ring = workingMark(13)
+    ring.style.color = 'var(--fl-color-accent)'
     rowEl.appendChild(ring)
 
     const label = document.createElement('span')
@@ -2316,11 +2314,8 @@ export class ThreadSidebar {
     if (row.originRunning) {
       // THE SAME RING the agent-task row draws — one shape for "this is
       // moving", wherever it moves (no new visual language).
-      const ring = document.createElement('fl-icon')
-      ring.setAttribute('name', 'spinner')
-      ring.setAttribute('size', '11')
-      ring.setAttribute('spin', '')
-      ring.style.cssText = 'flex:none;color:var(--fl-color-accent);'
+      const ring = workingMark(13)
+      ring.style.color = 'var(--fl-color-accent)'
       rowEl.appendChild(ring)
     } else {
       const glyph = document.createElement('span')

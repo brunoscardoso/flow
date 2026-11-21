@@ -29,6 +29,7 @@ import { requestRowView, type RequestRowStepInput, type RequestRowView } from '.
 import { liveTotalsText, type RequestFileChanges } from './request-file-changes'
 import { fileChangeChips, fileChipsKey, type FileChangeActions } from './request-file-changes-view'
 import { connectorIconLoader, connectorLabelOptions, createConnectorIcon } from './connector-icon'
+import { workingMark } from '../components/fl-loading'
 
 export interface RequestRowOptions {
   /** The INITIAL state; not reported through `onToggle` (see TurnRow). */
@@ -64,6 +65,7 @@ export class RequestRow {
   readonly element: HTMLElement
   #header: HTMLDivElement
   #marker: HTMLSpanElement
+  #liveMark: HTMLElement | null = null
   #lead: HTMLSpanElement
   #facts: HTMLSpanElement
   /** Small icons of the connectors the request used (plan_connectors, FR-7). */
@@ -204,6 +206,16 @@ export class RequestRow {
 
   #draw(view: RequestRowView): void {
     this.element.classList.toggle('live', view.live)
+    // A live row wears Flow's loading mark where the closed row has its caret.
+    if (view.live && this.#liveMark === null) {
+      this.#liveMark = workingMark(14)
+      this.#liveMark.classList.add('fl-request-row-live')
+      this.#liveMark.style.color = 'var(--fl-color-accent)'
+      this.#marker.after(this.#liveMark)
+    } else if (!view.live && this.#liveMark !== null) {
+      this.#liveMark.remove()
+      this.#liveMark = null
+    }
     this.element.classList.toggle('failed', view.facts.some((fact) => fact.failed))
 
     // The line: rewritten only when it changed. Most stream batches carry
@@ -421,20 +433,9 @@ function injectRequestRowStyles(): void {
       transition: transform 0.12s ease;
     }
     .fl-request-row.expanded .fl-request-row-marker { transform: rotate(90deg); }
-    .fl-request-row.live .fl-request-row-marker {
-      width: 7px;
-      height: 7px;
-      margin: 0;
-      border: 0;
-      border-radius: 50%;
-      background: var(--fl-color-accent);
-      transform: none;
-      animation: fl-request-row-pulse 1.2s ease-in-out infinite;
-    }
-    @keyframes fl-request-row-pulse { 50% { opacity: 0.3; } }
+    .fl-request-row.live .fl-request-row-marker { display: none; }
     @media (prefers-reduced-motion: reduce) {
       .fl-request-row-marker { transition: none; }
-      .fl-request-row.live .fl-request-row-marker { animation: none; }
     }
     .fl-request-row-lead {
       flex: none;

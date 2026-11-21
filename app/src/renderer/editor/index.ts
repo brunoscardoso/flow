@@ -26,7 +26,7 @@ import { ambiguousAcrossRoots, disambiguateTabLabels } from './tab-labels'
 import { registerConflictMergeEditor } from './conflict-merge-editor'
 import { registerConflictSidePreview } from './conflict-side-preview'
 import { parseConflicts } from './conflict-parser'
-import { EditorTabs } from './editor-tabs'
+import { EditorTabs, type TabDecor } from './editor-tabs'
 import {
   fileChangedOnDiskToast,
   fileDeletedOnDiskToast,
@@ -109,6 +109,19 @@ export interface EditorViewDescriptor {
    * Settings, a merge resolver — which stay open across every switch.
    */
   persist?: ViewPersistence
+  /** What the tab draws beside its label: a letter mark, status dots, a tooltip. */
+  decor?: TabDecor
+  /**
+   * False: add the tab without putting it on screen (a surface adding several
+   * tabs at once). Default true.
+   */
+  activate?: boolean
+  /** The tab was put on screen — by a click, a neighbour taking over, a cycle. */
+  onActivate?: () => void
+  /** A person closed the tab (never fired by a conversation switch). */
+  onClose?: () => void
+  /** The "+" after this tab was pressed (needs `decor.addAfter`). */
+  onAdd?: () => void
 }
 
 /** How a view in a tab set is captured — see `EditorViewDescriptor.persist`. */
@@ -138,8 +151,16 @@ export type ViewRestorer = (
 export interface EditorApi {
   /** Open (or focus) a file addressed by project root + relative path. */
   openFile(rootPath: string, relPath: string): Promise<void>
-  /** Open (or focus) a non-file view as an editor-area tab. */
+  /**
+   * Open (or focus) a non-file view as an editor-area tab.
+   *
+   * SEVERAL TABS MAY SHARE ONE ELEMENT (the browser: one tab per page, one
+   * browser under them). The element is mounted once; whichever of its tabs is
+   * active shows it, and the owner switches what it shows in `onActivate`.
+   */
   openView(view: EditorViewDescriptor): void
+  /** Change an open view tab's label and decor without activating it. */
+  updateView(id: string, update: { label?: string; decor?: TabDecor; preview?: boolean }): void
   /** Close a tab by absolute path; dirty buffers prompt before discarding. */
   closeFile(path: string): void
   /** Close whatever tab is active — file or view; no-op with none (#673). */
@@ -183,8 +204,12 @@ export interface EditorApi {
    * later `openView` under the same id mounts the element it is handed then —
    * which is what lets a surface release a view's resources (a feature view's
    * page) and rebuild it fresh when its set comes back.
+   *
+   * `keepMounted`: forget the tab but leave the element in place (hidden), for
+   * an element whose children must never be moved — a <webview> that leaves
+   * the document loses its page. The next `openView` with it reuses it.
    */
-  disposeView(id: string): void
+  disposeView(id: string, options?: { keepMounted?: boolean }): void
   /** Reset to the no-project empty state (last/active project removed, #323). */
   clearActiveProject(): void
   /** Snapshot the open tabs (in tab order), the active tab's relPath, and the
@@ -280,6 +305,11 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
   const views = new Map<string, HTMLElement>()
   /** How each view that belongs to a tab set is captured, by tab id. */
   const viewPersist = new Map<string, ViewPersistence>()
+  /** A view tab's owner callbacks, by tab id. */
+  const viewHooks = new Map<string, { onActivate?: () => void; onClose?: () => void; onAdd?: () => void }>()
+  /** Whether another open id shares `id`'s element. */
+  const sharesElement = (id: string, element: HTMLElement): boolean =>
+    [...views.entries()].some(([other, el]) => other !== id && el === element)
   /** How views of each kind are rebuilt when a tab set is restored. */
   const viewRestorers = new Map<string, ViewRestorer>()
   /** True while a tab set's views are being rebuilt — a restore never
@@ -308,6 +338,9 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
     },
     onClose: (id) => {
       closeFile(id)
+    },
+    onAdd: (id) => {
+      viewHooks.get(id)?.onAdd?.()
     },
   })
 
@@ -1089,6 +1122,11 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
 
   function openView(view: EditorViewDescriptor): void {
     let element = views.get(view.id)
+    if (!element && view.element.parentElement === bodyEl) {
+      // Another tab already mounted this element: this tab shares it.
+      element = view.element
+      views.set(view.id, element)
+    }
     if (!element) {
       element = view.element
       // Position the stacked view WITHOUT touching its `display` — some views set
@@ -1106,11 +1144,15 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
     // Same reveal as openFile (#1057): a view tab must never open into a hidden
     // host. Callers (Blueprint, Board) no longer have to remember to dispatch it.
     // A tab-set restore is not a person opening something, so it never reveals.
-    if (!restoringViews) document.dispatchEvent(new CustomEvent('flow:show-editor'))
+    const activate = view.activate !== false
+    if (!restoringViews && activate) document.dispatchEvent(new CustomEvent('flow:show-editor'))
     if (view.persist !== undefined) viewPersist.set(view.id, view.persist)
     else viewPersist.delete(view.id)
+    if (view.onActivate !== undefined || view.onClose !== undefined || view.onAdd !== undefined) {
+      viewHooks.set(view.id, { onActivate: view.onActivate, onClose: view.onClose, onAdd: view.onAdd })
+    } else viewHooks.delete(view.id)
     if (!tabs.has(view.id)) {
-      tabs.add(view.id, view.label, view.icon)
+      tabs.add(view.id, view.label, view.icon, view.decor)
       tabs.setPending(view.id, view.preview === true)
       emitTabsChanged()
     } else {
@@ -1119,8 +1161,16 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
       // label IS its mode). Without this the descriptor's label was dropped and
       // the tab kept the name it was first opened with. No-op when unchanged.
       tabs.setLabel(view.id, view.label)
+      if (view.decor !== undefined) tabs.setDecor(view.id, view.decor)
     }
-    activateTab(view.id)
+    if (activate) activateTab(view.id)
+  }
+
+  function updateView(id: string, update: { label?: string; decor?: TabDecor; preview?: boolean }): void {
+    if (!tabs.has(id)) return
+    if (update.preview !== undefined) tabs.setPending(id, update.preview)
+    if (update.label !== undefined) tabs.setLabel(id, update.label)
+    if (update.decor !== undefined) tabs.setDecor(id, update.decor)
   }
 
   function activateTab(path: string): void {
@@ -1129,6 +1179,7 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
       hideAllViews()
       viewElement.classList.remove(VIEW_HIDDEN_CLASS)
       tabs.setActive(path)
+      viewHooks.get(path)?.onActivate?.()
       emitTabsChanged()
       return
     }
@@ -1182,7 +1233,12 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
       const wasActive = tabs.activeId === path
       const neighbor = tabs.neighborOf(path)
       tabs.remove(path)
-      viewElement.classList.add(VIEW_HIDDEN_CLASS)
+      // A shared element (a browser page's tab) stays shown when another of
+      // its tabs is the one on screen.
+      if (wasActive) viewElement.classList.add(VIEW_HIDDEN_CLASS)
+      // The owner hears first, so a neighbour that shares the element shows
+      // what the owner now has on screen.
+      viewHooks.get(path)?.onClose?.()
       if (wasActive) {
         if (neighbor) {
           activateTab(neighbor)
@@ -1317,13 +1373,17 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
     await rebuildTabs(++switchToken, true, set, scope)
   }
 
-  function disposeView(id: string): void {
+  function disposeView(id: string, options: { keepMounted?: boolean } = {}): void {
     const element = views.get(id)
     if (element === undefined) return
     if (tabs.has(id)) closeFile(id)
+    const shared = sharesElement(id, element)
     views.delete(id)
     viewPersist.delete(id)
-    element.remove()
+    viewHooks.delete(id)
+    if (shared) return
+    if (options.keepMounted === true) element.classList.add(VIEW_HIDDEN_CLASS)
+    else element.remove()
   }
 
   /**
@@ -1857,6 +1917,7 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
   const api: EditorApi = {
     openFile,
     openView,
+    updateView,
     closeFile,
     closeActiveTab: () => {
       // closeFile handles both kinds — file tabs (dirty prompt) and view tabs

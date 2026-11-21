@@ -13,6 +13,7 @@ import { subagentSpawnChip, type SubagentSpawnChip } from './background-activity
 import { basename, changeSummary, classifyTool, computeLineDiff, filePathOf } from './tool-card-presentation'
 import { callDuration, connectorCall, connectorErrorSentence, type ConnectorCall } from './connector-label'
 import { connectorIconLoader, connectorLabelOptions, createConnectorIcon } from './connector-icon'
+import { loadingMark, workingMark } from '../components/fl-loading'
 
 const SUMMARY_KEYS = [
   'command',
@@ -199,7 +200,7 @@ export class ToolCard {
     this.#loadingOutput = true
     if (this.#record.outputWithheld === true) {
       this.#outputSection.hidden = false
-      this.#outputPre.textContent = 'Loading…'
+      this.#outputPre.replaceChildren(loadingMark('Loading output'))
     }
     const get = window.flow?.toolCalls?.get
     try {
@@ -405,13 +406,15 @@ function diffLineRow(sign: string, text: string, kind: 'added' | 'removed'): HTM
  *  with the group card's aggregate glyph (allowed-pattern #14) so a card and a
  *  group can never disagree about what "running" or "failed" looks like. */
 export function statusGlyph(status: ToolCallStatus): HTMLElement {
+  if (status === 'pending' || status === 'running') {
+    // Flow's loading mark — the one shape for "this is moving" in the chat.
+    const mark = workingMark(15)
+    mark.style.color = 'var(--fl-color-accent)'
+    return mark
+  }
   const glyph = document.createElement('fl-icon')
   glyph.setAttribute('size', '13')
-  if (status === 'pending' || status === 'running') {
-    glyph.setAttribute('name', 'spinner')
-    glyph.setAttribute('spin', '')
-    glyph.style.color = 'var(--fl-color-accent)'
-  } else if (status === 'success') {
+  if (status === 'success') {
     glyph.setAttribute('name', 'check')
     glyph.style.color = 'var(--fl-color-success)'
   } else if (status === 'denied') {

@@ -1,6 +1,9 @@
 /**
  * Embedded browser tab — a sandboxed <webview> pointed at the user's dev app,
- * mounted as an EDITOR-AREA tab (id 'flow://browser', icon 'globe').
+ * mounted in the EDITOR AREA with ONE EDITOR TAB PER PAGE (ids
+ * 'flow://browser/<tab>'). Every page tab shares the one browser element; the
+ * page tab on screen decides which page it shows. There is no "Browser" tab
+ * and no second row of tabs (2026-11-20).
  *
  * Same shape as the Blueprint / Tasks / Change-review tabs (renderer/blueprint):
  * ONE element for the life of the window, opened on demand through
@@ -31,13 +34,12 @@
  * webviewTag must be enabled on the host window (main/index.ts) or `<webview>`
  * does not instantiate.
  */
-import type { EditorApi } from '../editor'
+import type { EditorApi, EditorViewDescriptor } from '../editor'
 import { BrowserChrome } from './browser-chrome'
 import { DebugDrawer } from './debug-drawer'
 import { detectDevServerUrl } from './dev-server-detect'
 import { initInspectMode } from './inspect-mode'
 import { addCapturesToContext } from './browser-capture-chip'
-import { BrowserTabRow } from './browser-tab-row'
 import { sameScope } from '../tab-scope-model'
 import {
   activate as activateTab,
@@ -45,7 +47,6 @@ import {
   closeTab as closeTabIn,
   emptyTabs,
   markAsleep,
-  moveTab,
   neighbourTab,
   popClosed,
   restoreTabs,
@@ -61,6 +62,7 @@ import {
 } from '../../shared/browser-tabs'
 import type { BrowserBufferCounts, BrowserCaptureKind } from '../../shared/browser-capture-types'
 import { loadIndicator } from './load-indicator'
+import { loadingMark } from '../components/fl-loading'
 import { runInWantedScope, tabScopeGate } from '../tab-scope-gate'
 import type { TabScopeKey } from '../tab-scope-model'
 import { FLOW_BROWSER_PARTITION } from '../../shared/browser-partition'
@@ -79,7 +81,12 @@ import {
 import type { DraftHistoryState } from '../../shared/draft-history-messages'
 import { draftPanelTarget, inspectRoute, type DraftPanelTarget } from './draft-inspect-model'
 
-const BROWSER_TAB_ID = 'flow://browser'
+/** The widest a page's editor tab grows, in px. */
+const PAGE_TAB_MAX_WIDTH = 180
+
+/** A page's editor tab. */
+const PAGE_VIEW_PREFIX = 'flow://browser/'
+const pageViewId = (tabId: string): string => `${PAGE_VIEW_PREFIX}${tabId}`
 /** The persisted identity of the browser in a conversation's tab set. */
 const BROWSER_VIEW_KIND = 'browser'
 
@@ -644,16 +651,7 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   )
 
   pageRow.append(viewport, draftPanel.element)
-  const tabRow = new BrowserTabRow({
-    onSelect: (id) => selectTab(id),
-    onClose: (id) => closeTabById(id),
-    onNew: () => openNewTab(null, { after: null, activate: true }),
-    onMove: (id, index) => {
-      tabs = moveTab(tabs, id, index)
-      renderTabs()
-    },
-  })
-  container.append(tabRow.element, chrome.element, pageRow, debugDrawer.element)
+  container.append(chrome.element, pageRow, debugDrawer.element)
 
   // ── ⌘/Ctrl+L → add the whole console to context ─────────────────────────────
   // Gated so it only fires while the Browser tab is on screen AND focus is
@@ -796,10 +794,102 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   }
 
   // ── Tabs ───────────────────────────────────────────────────────────────────
-  const renderTabs = (): void => tabRow.render(tabs)
+  // ── Page tabs in the editor ────────────────────────────────────────────────
+  // While the browser changes the editor's tabs itself, the editor's hooks
+  // (a tab activated, a tab closed) are its own echo and are ignored.
+  let quiet = 0
+  const quietly = (fn: () => void): void => {
+    quiet += 1
+    try {
+      fn()
+    } finally {
+      quiet -= 1
+    }
+  }
+  /** Page view ids this browser has opened in the editor and not disposed. */
+  const shownViews = new Set<string>()
+  /** The browser is in the editor: at least one page has its tab open. */
+  const inEditor = (): boolean => tabs.tabs.some((tab) => editorApi.hasTab(pageViewId(tab.id)))
+
+  /**
+   * What a conversation's tab set keeps for each page tab. The FIRST page
+   * carries every page (the shape a single Browser tab saved before, so old
+   * sets still restore); the others only say which page they are.
+   */
+  const pageState = (tabId: string): Record<string, string | number | null> => {
+    const index = tabs.tabs.findIndex((tab) => tab.id === tabId)
+    if (index <= 0) return flatTabs(saveTabs(tabs))
+    return { browserPage: index }
+  }
+
+  const asleep = (tab: BrowserTabsState['tabs'][number]): boolean => !tab.live && tab.id !== tabs.activeId
+  const decorOf = (tab: BrowserTabsState['tabs'][number]): NonNullable<EditorViewDescriptor['decor']> => ({
+    mark: { text: (tab.title.trim()[0] ?? '·').toUpperCase(), color: 'var(--fl-color-text-secondary)' },
+    dots: tab.unseenErrors > 0 ? ['var(--fl-color-error)'] : [],
+    tooltip: tab.url ?? tab.title,
+    // A page title can be a whole address: keep the tab small.
+    maxWidth: PAGE_TAB_MAX_WIDTH,
+    addAfter: 'New tab',
+  })
+
+  const pageDescriptor = (tab: BrowserTabsState['tabs'][number], activate: boolean): EditorViewDescriptor => ({
+    id: pageViewId(tab.id),
+    label: tab.title,
+    icon: 'globe',
+    element: container,
+    decor: decorOf(tab),
+    // A sleeping page is drawn in italics: opening it loads it again.
+    preview: asleep(tab),
+    activate,
+    persist: { kind: BROWSER_VIEW_KIND, state: () => pageState(tab.id) },
+    onActivate: () => {
+      if (quiet > 0) return
+      if (tabs.activeId !== tab.id && tabs.tabs.some((entry) => entry.id === tab.id)) selectTab(tab.id, { fromEditor: true })
+    },
+    onClose: () => {
+      if (quiet > 0) return
+      if (tabs.tabs.some((entry) => entry.id === tab.id)) closeTabById(tab.id, { fromEditor: true })
+    },
+    onAdd: () => void openNewTab(null, { after: null, activate: true }),
+  })
+
+  /**
+   * Make the editor's page tabs match the pages: open the missing ones (in page
+   * order, appended), relabel the rest, and forget the closed ones. New tabs
+   * are opened before old ones are forgotten, so the shared element is never
+   * left without a tab — it must never leave the document, or its pages die.
+   */
+  const syncEditor = (options: { force: boolean; activate: boolean }): void => {
+    if (!options.force && !inEditor()) return
+    quietly(() => {
+      const live = new Set(tabs.tabs.map((tab) => pageViewId(tab.id)))
+      for (const tab of tabs.tabs) {
+        const id = pageViewId(tab.id)
+        if (!editorApi.hasTab(id)) {
+          editorApi.openView(pageDescriptor(tab, false))
+          shownViews.add(id)
+        } else editorApi.updateView(id, { label: tab.title, decor: decorOf(tab), preview: asleep(tab) })
+      }
+      const active = tabs.tabs.find((tab) => tab.id === tabs.activeId)
+      if (options.activate && active !== undefined) editorApi.openView(pageDescriptor(active, true))
+      for (const id of [...shownViews]) {
+        if (live.has(id)) continue
+        shownViews.delete(id)
+        editorApi.disposeView(id, { keepMounted: true })
+      }
+    })
+  }
+  /** Take every page out of the editor (the last page was closed). */
+  const leaveEditor = (): void => {
+    quietly(() => {
+      for (const id of [...shownViews]) editorApi.disposeView(id, { keepMounted: true })
+    })
+    shownViews.clear()
+  }
+  const renderTabs = (): void => syncEditor({ force: false, activate: false })
 
   /** Put a tab on screen: wake it when it sleeps, load it when it is new. */
-  const selectTab = (id: string): void => {
+  const selectTab = (id: string, options: { fromEditor?: boolean } = {}): void => {
     const tab = tabs.tabs.find((entry) => entry.id === id)
     if (tab === undefined) return
     if (inspectOn) setInspect(false)
@@ -839,7 +929,8 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
       if (asleep !== undefined) destroyPage(asleep)
     }
     tabs = markAsleep(tabs, sleeping)
-    renderTabs()
+    // The editor shows this page's tab — unless it was the editor that asked.
+    syncEditor({ force: false, activate: options.fromEditor !== true })
   }
 
   /** Open a tab at `url` (null: a blank tab), after `after` or at the end. */
@@ -848,7 +939,9 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     tabs = addTab(tabs, {
       id,
       url,
-      after: options.after,
+      // AT THE END, as the editor appends its tabs: page order and tab order
+      // stay the same, which is what a saved set and ⌘1…9 count by.
+      after: null,
       activate: false,
       now: Date.now(),
       ...(options.title === undefined ? {} : { title: options.title }),
@@ -858,8 +951,9 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     return id
   }
 
-  /** Close a tab. The last one closes the browser. */
-  const closeTabById = (id: string): void => {
+  /** Close a tab. The last one closes the browser. `fromEditor`: the editor
+   *  closed its tab and picks what goes on screen. */
+  const closeTabById = (id: string, options: { fromEditor?: boolean } = {}): void => {
     const page = pages.get(id)
     const wasActive = tabs.activeId === id
     tabs = closeTabIn(tabs, id)
@@ -873,11 +967,10 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
       showOnly(cur)
       chrome.setUrl('')
       showOverlay('idle')
-      renderTabs()
-      editorApi.closeFile(BROWSER_TAB_ID)
+      leaveEditor()
       return
     }
-    if (wasActive && tabs.activeId !== null) selectTab(tabs.activeId)
+    if (wasActive && tabs.activeId !== null) selectTab(tabs.activeId, options)
     else renderTabs()
   }
 
@@ -958,18 +1051,26 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
     target: string | null,
     options: { reveal: boolean; restoring: boolean; scope: TabScopeKey | null; saved: unknown },
   ): void => {
-    const adopting = options.restoring || !editorApi.hasTab(BROWSER_TAB_ID)
+    const adopting = options.restoring || !inEditor()
     // Reveal the editor host first — the tab opens into it even when the editor
     // is hidden (⌘⌥D), matching every other view tab.
     if (options.reveal) document.dispatchEvent(new CustomEvent('flow:show-editor'))
-    editorApi.openView({
-      id: BROWSER_TAB_ID,
-      label: 'Browser',
-      icon: 'globe',
-      element: container,
-      // The browser belongs to a conversation's tab set, with its tabs.
-      persist: { kind: BROWSER_VIEW_KIND, state: () => flatTabs(saveTabs(tabs)) },
-    })
+    // MOUNTED BEFORE ANY PAGE LOADS: a <webview> given its first address while
+    // out of the document can come up blank. The current pages' tabs mount the
+    // browser; the sync below brings the tabs in line with what opened.
+    if (!container.isConnected) syncEditor({ force: true, activate: false })
+    try {
+      openPages(target, options, adopting)
+    } finally {
+      // Every page gets its tab; the one on screen is the active tab.
+      syncEditor({ force: true, activate: true })
+    }
+  }
+  const openPages = (
+    target: string | null,
+    options: { reveal: boolean; restoring: boolean; scope: TabScopeKey | null; saved: unknown },
+    adopting: boolean,
+  ): void => {
     const firstOpen = !everOpened
     everOpened = true
     if (adopting && (!sameScope(owner, options.scope) || (options.restoring && untouched()))) {
@@ -1048,8 +1149,14 @@ export function initBrowserTab(editorApi: EditorApi): () => void {
   // the page that conversation was looking at (one browser per window), or
   // blank when it never had one.
   editorApi.registerViewRestorer(BROWSER_VIEW_KIND, (state, scope) => {
+    // A later page's tab: the first page's tab restored every page already.
+    const page = (state as { browserPage?: unknown }).browserPage
+    if (typeof page === 'number') {
+      const tab = tabs.tabs[page]
+      return tab !== undefined && editorApi.hasTab(pageViewId(tab.id)) ? pageViewId(tab.id) : null
+    }
     openAt(null, { reveal: false, restoring: true, scope, saved: state })
-    return BROWSER_TAB_ID
+    return tabs.activeId === null ? null : pageViewId(tabs.activeId)
   })
 
   renderTabs()
@@ -1137,7 +1244,11 @@ function buildOverlay(onNavigate: (url: string) => void, defaultUrl: () => strin
   // Opening the URL that just failed loads it again: that is the reload.
   go.addEventListener('click', open)
 
-  el.append(icon, title, sub, form)
+  // Loading shows Flow's mark in place of the globe and the title.
+  const loading = loadingMark('Loading page', 'large')
+  loading.classList.add('fl-browser-overlay-loading')
+
+  el.append(icon, loading, title, sub, form)
 
   const set = (state: OverlayState, detail: OverlayDetail = {}): void => {
     if (state === 'hidden') {
@@ -1145,8 +1256,11 @@ function buildOverlay(onNavigate: (url: string) => void, defaultUrl: () => strin
       return
     }
     el.hidden = false
-    if (state === 'loading') {
-      title.textContent = 'Loading…'
+    const isLoading = state === 'loading'
+    loading.hidden = !isLoading
+    icon.hidden = isLoading
+    title.hidden = isLoading
+    if (isLoading) {
       sub.textContent = detail.url ?? ''
       form.hidden = true
     } else if (state === 'failed') {
@@ -1200,6 +1314,8 @@ function ensureOverlayStyles(): void {
       font-family: var(--fl-font-ui);
     }
     .fl-browser-overlay[hidden] { display: none; }
+    /* Custom elements set their own display, which beats the hidden attribute. */
+    .fl-browser-overlay > [hidden] { display: none !important; }
     .fl-browser-overlay-icon { color: var(--fl-color-text-secondary); opacity: 0.7; }
     .fl-browser-overlay-title {
       font-size: var(--fl-text-heading-size, 15px);

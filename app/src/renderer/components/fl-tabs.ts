@@ -69,6 +69,17 @@ export interface TabDescriptor {
   /** A caret after the label that opens the owner's menu (emits
    *  fl-tab-caret); the value is its tooltip. Structural. */
   caret?: string
+  /** A width cap in px: a longer label ends in an ellipsis (a browser page,
+   *  whose title can be a whole address). Structural. */
+  maxWidth?: number
+  /** A "+" button drawn right after the LAST tab carrying this; the value is
+   *  its label. Pressing it emits fl-tab-add with that tab's id. Structural. */
+  addAfter?: string
+}
+
+/** The "+" after a tab carrying `addAfter` was pressed. */
+export interface TabAddDetail {
+  id: string
 }
 
 /** The caret of a tab was pressed — the owner opens its menu at `x`/`y` (viewport). */
@@ -216,6 +227,28 @@ export class FlTabs extends HTMLElement {
       }
       .caret:hover { background: var(--fl-color-surface-raised); color: var(--fl-color-text); }
       .tab.pending { font-style: italic; }
+      .tab.capped .label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+      .add {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: none;
+        /* Tabs sit on the strip's bottom edge, 5px shorter than it: centre the
+           "+" on the tabs, not on the strip. */
+        align-self: flex-end;
+        width: 22px;
+        height: 22px;
+        margin: 0 0 calc((var(--fl-tab-height) - 5px - 22px) / 2) 2px;
+        line-height: 0;
+        border: none;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--fl-color-text-secondary);
+        cursor: pointer;
+        padding: 0;
+      }
+      .add fl-icon { display: block; }
+      .add:hover { background: var(--fl-color-surface-raised); color: var(--fl-color-text); }
       .tab.pending .project-dot {
         box-sizing: border-box;
         width: 7px;
@@ -380,16 +413,21 @@ export class FlTabs extends HTMLElement {
     this.#rendered = { tabs: this.#tabs.map((tab) => ({ ...tab })), activeId: this.#activeId }
   }
 
+  /** The tab buttons in order — the strip may also hold a "+" (addAfter). */
+  #tabButtons(): HTMLElement[] {
+    return [...this.#strip.querySelectorAll<HTMLElement>(':scope > .tab')]
+  }
+
   #activeButton(): HTMLElement | null {
     const index = this.#tabs.findIndex((tab) => tab.id === this.#activeId)
-    return index >= 0 ? (this.#strip.children[index] as HTMLElement) : null
+    return index >= 0 ? (this.#tabButtons()[index] ?? null) : null
   }
 
   /** In-place update for label / dirty / active changes — never touches
    *  scrollLeft and never tears down tab DOM (also keeps an open inline
    *  rename editor alive across background label churn). */
   #patch(plan: Extract<StripUpdatePlan, { kind: 'patch' }>): void {
-    const buttons = [...this.#strip.children] as HTMLElement[]
+    const buttons = this.#tabButtons()
     if (buttons.length !== this.#tabs.length) {
       this.#rebuild() // defensive — snapshot drifted from the DOM somehow
       return
@@ -445,6 +483,10 @@ export class FlTabs extends HTMLElement {
         button.title = tab.tooltip
       }
       if (tab.pending) button.classList.add('pending')
+      if (tab.maxWidth !== undefined) {
+        button.classList.add('capped')
+        button.style.maxWidth = `${String(tab.maxWidth)}px`
+      }
 
       // Project accent dot (multi-project threads) — leftmost, so the project
       // marker never collides with the dirty dot on the right.
@@ -579,6 +621,24 @@ export class FlTabs extends HTMLElement {
       })
 
       this.#strip.appendChild(button)
+    }
+    const addOwner = [...this.#tabs].reverse().find((tab) => tab.addAfter !== undefined)
+    if (addOwner !== undefined) {
+      const ownerButton = this.#tabButtons().find((el) => el.dataset['id'] === addOwner.id)
+      const add = document.createElement('button')
+      add.className = 'add'
+      add.setAttribute('aria-label', addOwner.addAfter ?? '')
+      add.title = addOwner.addAfter ?? ''
+      const addIcon = document.createElement('fl-icon')
+      addIcon.setAttribute('name', 'plus')
+      addIcon.setAttribute('size', '12')
+      add.appendChild(addIcon)
+      add.addEventListener('click', () => {
+        this.dispatchEvent(
+          new CustomEvent<TabAddDetail>('fl-tab-add', { detail: { id: addOwner.id }, bubbles: true, composed: true }),
+        )
+      })
+      ownerButton?.after(add)
     }
     this.#strip.scrollLeft = previousScrollLeft
   }

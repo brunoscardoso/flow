@@ -71,6 +71,7 @@ import {
   runtimeRequirements,
   type RuntimeAuthAnswer,
 } from './runtime-ready'
+import { loadingMark } from '../components/fl-loading'
 
 const OPEN_EVENT = 'flow:open-flow-settings'
 const ONBOARDED_KEY = 'flow.onboarded'
@@ -707,7 +708,7 @@ class FlowSettingsView {
     section.appendChild(heading)
     const hint = document.createElement('div')
     hint.className = 'fl-settings-hint'
-    hint.textContent = 'Loading accounts…'
+    hint.replaceChildren(loadingMark('Loading accounts'))
     section.appendChild(hint)
 
     const rootPath = this.#rootPath

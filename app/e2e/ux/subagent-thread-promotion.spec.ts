@@ -237,7 +237,7 @@ test('a RUNNING sub-agent child locks the composer until the origin finishes', a
       hasText: 'Long migration sweep',
     })
     await expect(liveChildRow).toHaveCount(1)
-    await expect(liveChildRow.first().locator('fl-icon[name="spinner"]')).toHaveCount(1)
+    await expect(liveChildRow.first().locator('fl-loading')).toHaveCount(1)
     await expect(liveChildRow.first()).not.toContainText('↳')
     await expect(window.locator('.fl-thread-list fl-list .fl-children-toggle')).toHaveCount(0)
 

@@ -25,6 +25,7 @@ import { redactAndBound } from '../../shared/browser-capture-boundary'
 import { contentTypeOf, formatBody, toCurl, toFetch } from '../../shared/network-detail'
 import {
   NETWORK_TYPE_FILTERS,
+  DEFAULT_NETWORK_TYPE,
   barOf,
   buildRows,
   failureLabel,
@@ -50,6 +51,7 @@ import {
   type NetworkTypeFilter,
 } from '../../shared/network-panel-model'
 import { addCapturesToContext } from './browser-capture-chip'
+import { loadingMark } from '../components/fl-loading'
 import { parseJson, renderJsonTree } from './json-tree'
 
 export type NetworkPanelApi = Pick<FlowBrowserApi, 'bufferSlice' | 'tagEntry' | 'pageTimings' | 'replay'>
@@ -106,10 +108,15 @@ interface Prefs {
   group: boolean
   hideOtherSites: boolean
   preserve: boolean
+  /** The list's share of the width while details are open (0.2–0.8). */
+  listShare: number
 }
 
+const DEFAULT_LIST_SHARE = 0.48
+const clampShare = (share: number): number => Math.min(0.8, Math.max(0.2, share))
+
 function readPrefs(): Prefs {
-  const fallback: Prefs = { group: true, hideOtherSites: false, preserve: false }
+  const fallback: Prefs = { group: true, hideOtherSites: false, preserve: false, listShare: DEFAULT_LIST_SHARE }
   try {
     const raw = window.localStorage.getItem(STORE_KEY)
     if (raw === null) return fallback
@@ -118,6 +125,7 @@ function readPrefs(): Prefs {
       group: typeof parsed.group === 'boolean' ? parsed.group : fallback.group,
       hideOtherSites: typeof parsed.hideOtherSites === 'boolean' ? parsed.hideOtherSites : fallback.hideOtherSites,
       preserve: typeof parsed.preserve === 'boolean' ? parsed.preserve : fallback.preserve,
+      listShare: typeof parsed.listShare === 'number' && Number.isFinite(parsed.listShare) ? clampShare(parsed.listShare) : fallback.listShare,
     }
   } catch {
     return fallback
@@ -147,7 +155,7 @@ export class NetworkPanel {
   #captures: BrowserNetworkCapture[] = []
   #rows: NetworkRow[] = []
   #timings: BrowserPageTimings | null = null
-  #filters: NetworkFilters = { query: '', type: 'all', invert: false, errorsOnly: false, hideOtherSites: false, pageHost: '' }
+  #filters: NetworkFilters = { query: '', type: DEFAULT_NETWORK_TYPE, invert: false, errorsOnly: false, hideOtherSites: false, pageHost: '' }
   #prefs: Prefs
   #sort: { key: NetworkSortKey; direction: 1 | -1 } | null = null
   #selectedId: string | null = null
@@ -168,6 +176,7 @@ export class NetworkPanel {
   #chips: HTMLElement
   #overview: HTMLCanvasElement
   #split: HTMLElement
+  #divider: HTMLElement
   #list: HTMLElement
   #head: HTMLTableRowElement
   #body: HTMLTableSectionElement
@@ -290,7 +299,9 @@ export class NetworkPanel {
     this.#detailTabs.setAttribute('role', 'tablist')
     this.#detailBody = el('div', 'fl-net-detail-body')
     this.#detail.append(this.#detailHead, this.#detailTabs, this.#detailBody, this.#buildDetailFoot())
-    this.#split.append(this.#list, this.#detail)
+    this.#divider = this.#buildDivider()
+    this.#split.append(this.#list, this.#divider, this.#detail)
+    this.#applyShare()
 
     const statusRow = el('div', 'fl-net-status')
     this.#status = el('div', 'fl-net-status-facts')
@@ -564,12 +575,69 @@ export class NetworkPanel {
     this.#status.replaceChildren(...facts)
   }
 
+  // ── The divider between the list and the details ──────────────────────────
+
+  /** A line a person drags to give the list or the details more room. Arrow
+   *  keys move it too; a double click puts it back in the middle. */
+  #buildDivider(): HTMLElement {
+    const divider = el('div', 'fl-net-divider')
+    divider.hidden = true
+    divider.tabIndex = 0
+    divider.setAttribute('role', 'separator')
+    divider.setAttribute('aria-orientation', 'vertical')
+    divider.setAttribute('aria-label', 'Resize the request list and the details')
+    divider.title = 'Drag to resize'
+    divider.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return
+      event.preventDefault()
+      divider.setPointerCapture(event.pointerId)
+      divider.classList.add('is-dragging')
+      const move = (next: PointerEvent): void => {
+        const box = this.#split.getBoundingClientRect()
+        if (box.width > 0) this.#setShare((next.clientX - box.left) / box.width, false)
+      }
+      const end = (): void => {
+        divider.classList.remove('is-dragging')
+        divider.removeEventListener('pointermove', move)
+        divider.removeEventListener('pointerup', end)
+        divider.removeEventListener('pointercancel', end)
+        writePrefs(this.#prefs)
+      }
+      divider.addEventListener('pointermove', move)
+      divider.addEventListener('pointerup', end)
+      divider.addEventListener('pointercancel', end)
+    })
+    divider.addEventListener('dblclick', () => this.#setShare(DEFAULT_LIST_SHARE, true))
+    divider.addEventListener('keydown', (event) => {
+      const step = event.shiftKey ? 0.1 : 0.02
+      if (event.key === 'ArrowLeft') this.#setShare(this.#prefs.listShare - step, true)
+      else if (event.key === 'ArrowRight') this.#setShare(this.#prefs.listShare + step, true)
+      else return
+      event.preventDefault()
+    })
+    return divider
+  }
+
+  #setShare(share: number, save: boolean): void {
+    this.#prefs.listShare = clampShare(share)
+    this.#applyShare()
+    if (save) writePrefs(this.#prefs)
+  }
+
+  #applyShare(): void {
+    const share = this.#prefs.listShare
+    this.#split.style.setProperty('--fl-net-list-share', `${String(share)}fr`)
+    this.#split.style.setProperty('--fl-net-detail-share', `${String(1 - share)}fr`)
+    this.#divider.setAttribute('aria-valuenow', String(Math.round(share * 100)))
+  }
+
   // ── Selection and detail ──────────────────────────────────────────────────
 
   #select(id: string | null): void {
     this.#selectedId = id
     this.#split.classList.toggle('has-detail', id !== null)
     this.#detail.hidden = id === null
+    this.#divider.hidden = id === null
     for (const tr of this.#body.querySelectorAll<HTMLElement>('.fl-net-row')) {
       const row = this.#rows.find((entry) => entry.capture.id === tr.dataset['id'])
       tr.classList.toggle('is-selected', id !== null && row !== undefined && row.ids.includes(id))
@@ -584,7 +652,7 @@ export class NetworkPanel {
 
   async #loadDetail(id: string): Promise<void> {
     const seq = ++this.#detailSeq
-    this.#detailBody.replaceChildren(el('p', 'fl-net-note', 'Loading…'))
+    this.#detailBody.replaceChildren(loadingMark('Loading the response'))
     let capture: BrowserNetworkCapture | null = null
     try {
       const found = await this.#api.bufferSlice({ kind: 'network', selector: { mode: 'single', id } })
@@ -1219,8 +1287,37 @@ function ensureStyles(): void {
       display: grid;
       grid-template-columns: minmax(0, 1fr);
     }
-    .fl-net-split.has-detail { grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); }
-    .fl-net-list { overflow: auto; min-width: 0; outline: none; }
+    .fl-net-split.has-detail {
+      grid-template-columns: minmax(0, var(--fl-net-list-share, 1fr)) 0 minmax(0, var(--fl-net-detail-share, 1.1fr));
+    }
+    .fl-net-list { overflow: auto; min-width: 0; outline: none; container: fl-net-list / inline-size; }
+    /* A zero-width grid track with a wider hit area laid over the line, so the
+       list and the details keep every pixel and the line is easy to grab. */
+    .fl-net-divider {
+      position: relative;
+      z-index: 2;
+      width: 0;
+      cursor: col-resize;
+      outline: none;
+    }
+    .fl-net-divider::before {
+      content: '';
+      position: absolute;
+      inset: 0 -4px;
+    }
+    .fl-net-divider::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: -1px;
+      width: 2px;
+      background: transparent;
+      transition: background-color var(--fl-transition-fast);
+    }
+    .fl-net-divider:hover::after,
+    .fl-net-divider:focus-visible::after,
+    .fl-net-divider.is-dragging::after { background: var(--fl-color-accent); }
     .fl-net-table {
       width: 100%;
       border-collapse: collapse;
@@ -1285,9 +1382,9 @@ function ensureStyles(): void {
     }
     .fl-net-wf-bar.is-failed { background: var(--fl-color-error); }
     .fl-net-wf-bar span { height: 100%; }
-    .fl-net-split.has-detail .is-extra,
-    .fl-net-split.has-detail .is-wide,
-    .fl-net-split.has-detail .fl-net-failure { display: none; }
+    .fl-net-split.has-detail .is-extra { display: none; }
+    /* Size, time and the failure reason come back once the list is dragged wide. */
+    @container fl-net-list (max-width: 620px) { .is-wide, .fl-net-failure { display: none; } }
     @container (max-width: 640px) { .fl-net .is-extra { display: none; } }
     .fl-net-empty { padding: var(--fl-space-md); color: var(--fl-color-text-secondary); text-align: center; }
     .fl-net-detail {

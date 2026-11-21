@@ -9,6 +9,7 @@
  */
 import type {
   FlTabs,
+  TabAddDetail,
   TabCloseDetail,
   TabDescriptor,
   TabRevealDetail,
@@ -19,11 +20,25 @@ import { splitProjectPath } from './tab-reveal'
 import { isUntitledPath } from './untitled'
 import { fileIconBadge, fileIconColor } from './file-icon-color'
 
+/** What a view tab may draw beside its label (a browser page: its site's
+ *  letter, and a dot when it logged errors). */
+export interface TabDecor {
+  mark?: { text: string | null; color: string }
+  dots?: string[]
+  tooltip?: string
+  /** A width cap in px; a longer label ends in an ellipsis. */
+  maxWidth?: number
+  /** A "+" after the last tab carrying this; the value is its label. */
+  addAfter?: string
+}
+
 export interface EditorTabsCallbacks {
   /** User activated a tab (click or programmatic cycle). */
   onSelect: (id: string) => void
   /** User asked to close a tab — the owner decides whether it really closes. */
   onClose: (id: string) => void
+  /** The "+" after a tab (`addAfter`) was pressed. */
+  onAdd?: (id: string) => void
 }
 
 export class EditorTabs {
@@ -37,6 +52,9 @@ export class EditorTabs {
     })
     el.addEventListener('fl-tab-close', (event) => {
       callbacks.onClose((event as CustomEvent<TabCloseDetail>).detail.id)
+    })
+    el.addEventListener('fl-tab-add', (event) => {
+      callbacks.onAdd?.((event as CustomEvent<TabAddDetail>).detail.id)
     })
     // #1063 — reveal the tab's file in the OS file manager. The tab id is an
     // absolute path; map it to the owning project root so the reveal flows
@@ -84,8 +102,13 @@ export class EditorTabs {
   }
 
   /** Add a tab for `id` (no-op if already open). Icon defaults to 'file'. */
-  add(id: string, label: string, icon = 'file'): void {
+  add(id: string, label: string, icon = 'file', decor?: TabDecor): void {
     if (this.#tabs.some((tab) => tab.id === id)) {
+      return
+    }
+    if (decor !== undefined) {
+      this.#tabs.push({ id, label, icon, closable: true, dirty: false, ...cleanDecor(decor) })
+      this.#render()
       return
     }
     // #1442: an unsaved note's id is synthetic — the reveal resolved to
@@ -134,6 +157,27 @@ export class EditorTabs {
       tab.label = label
       this.#render()
     }
+  }
+
+  /** Replace what a view tab draws beside its label. No-op when unchanged. */
+  setDecor(id: string, decor: TabDecor): void {
+    const tab = this.#tabs.find((candidate) => candidate.id === id)
+    if (tab === undefined) return
+    const next = cleanDecor(decor)
+    const same =
+      JSON.stringify(tab.mark ?? null) === JSON.stringify(next.mark ?? null) &&
+      JSON.stringify(tab.dots ?? null) === JSON.stringify(next.dots ?? null) &&
+      (tab.tooltip ?? null) === (next.tooltip ?? null) &&
+      tab.maxWidth === next.maxWidth &&
+      tab.addAfter === next.addAfter
+    if (same) return
+    delete tab.mark
+    delete tab.dots
+    delete tab.tooltip
+    delete tab.maxWidth
+    delete tab.addAfter
+    Object.assign(tab, next)
+    this.#render()
   }
 
   /** Draw a tab's label in italics (a preview tab). No-op when unchanged. */
@@ -198,5 +242,15 @@ export class EditorTabs {
   #render(): void {
     // fl-tabs re-renders on assignment; pass a copy so its state stays ours.
     this.#el.tabs = this.#tabs.map((tab) => ({ ...tab }))
+  }
+}
+
+function cleanDecor(decor: TabDecor): TabDecor {
+  return {
+    ...(decor.mark !== undefined ? { mark: decor.mark } : {}),
+    ...(decor.dots !== undefined && decor.dots.length > 0 ? { dots: decor.dots } : {}),
+    ...(decor.tooltip !== undefined ? { tooltip: decor.tooltip } : {}),
+    ...(decor.maxWidth !== undefined ? { maxWidth: decor.maxWidth } : {}),
+    ...(decor.addAfter !== undefined ? { addAfter: decor.addAfter } : {}),
   }
 }

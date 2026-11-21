@@ -92,13 +92,11 @@ test('browser capture timestamps are epoch ms on the host clock', async ({ windo
   // that would break the feature silently.
   expect(late!.ts).toBeGreaterThan(1_600_000_000_000)
 
-  // ── AND THE GAP WORTH KNOWING ───────────────────────────────────────────
-  // The page's own load-time fetch (to the same host, from the inline script)
-  // is NOT here: capture attaches after the guest's first requests. A debug
-  // session that needs a page load in its window has to cause the load itself,
-  // after starting.
-  expect(
-    seen.network.some((row) => row.what.includes('/clock-probe')),
-    'load-time requests are captured now — the session can stop forcing a reload',
-  ).toBe(false)
+  // ── LOAD-TIME REQUESTS: NOT ASSERTED EITHER WAY ─────────────────────────
+  // Capture now starts when the guest is created (2026-11-20, the Network
+  // panel), so the page's document and, usually, its inline load-time fetch
+  // are captured. Requests the page's process sends before capture listens
+  // there can still be missed — the Network panel counts them and offers a
+  // reload — so a debug session that needs a whole page load in its window
+  // still has to cause the load itself, after starting.
 })
