@@ -56,6 +56,7 @@ RELATED COMMANDS:
 |------|-------------|
 | **Drafts only** | Write only inside `flow/drafts/<canvas>/`. Never touch the project's real code, configuration or the discovery. |
 | **Layout first** | Write `layout.json` before any screen, and write screens in the layout's order, so progress can be counted. |
+| **Fits the window** | No frame wider than 1440. Options side by side wrap into rows; nothing sets `overflow: hidden` on `html` or `body`. |
 | **Self-contained** | No network URLs, no external fonts. Images only as `data:` URIs or inline SVG. |
 | **No emoji decoration** | An emoji appears only where the target app itself shows one. |
 | **No ids by hand** | Never write `data-flow-id`; Flow adds them. |

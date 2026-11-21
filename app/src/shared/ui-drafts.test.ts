@@ -3,6 +3,7 @@
 import {
   decodeDraftRoot,
   draftPageUrl,
+  draftScreenAtPath,
   draftVersionSlug,
   encodeDraftRoot,
   isDraftColour,
@@ -189,5 +190,22 @@ describe('draftVersionSlug', () => {
     expect(draftVersionSlug('First pass — Café')).toBe('first-pass-cafe')
     expect(draftVersionSlug('  !!  ')).toBeNull()
     expect(draftVersionSlug('../etc')).toBe('etc')
+  })
+})
+
+describe('draftScreenAtPath', () => {
+  it('names the screen of a file in a canvas folder', () => {
+    expect(draftScreenAtPath('/p/app/flow/drafts/desks-icons/compare-all.html')).toEqual({
+      root: '/p/app',
+      canvas: 'desks-icons',
+      screen: 'compare-all',
+    })
+  })
+
+  it('is null for the layout, the tokens, a nested file or a file outside the drafts', () => {
+    expect(draftScreenAtPath('/p/flow/drafts/pay/layout.json')).toBeNull()
+    expect(draftScreenAtPath('/p/flow/drafts/pay/tokens.css')).toBeNull()
+    expect(draftScreenAtPath('/p/flow/drafts/pay/old/home.html')).toBeNull()
+    expect(draftScreenAtPath('/p/docs/home.html')).toBeNull()
   })
 })

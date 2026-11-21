@@ -116,6 +116,10 @@ Rules the layout reader enforces:
   (390 by 844, 80 apart). Give frames anyway; use a width near the target
   (390 phone, 1280 desktop) and the height of one screen. Leave 80 canvas
   pixels between frames in a row.
+- **No frame wider than 1440.** A screen is one window of the app, not a
+  poster. Eight options side by side are not one 2,700-pixel screen: split them
+  over several screens (four per screen), or let one screen wrap them into rows
+  (see Step 5).
 - Order the `screens` array in the flow's order. Write the screen files in
   that same order.
 
@@ -126,6 +130,13 @@ colours, type (families and scale), spacing, radii, shadows. Use the project's
 own names where they exist. Add the base rules every screen shares (body
 background and text colour, font family, a reset). Do not use `@import` or
 `url(...)` to a network address.
+
+**Pick, never copy.** Take the values you need; do not paste the project's
+global stylesheet. An app's globals carry its shell rules, and on a draft they
+cut the screen off. `html` and `body` get only background, colour, font and
+`margin: 0` — never `overflow`, `white-space: nowrap`, a fixed `height`, or a
+flex/grid layout. Component rules go under classes, and the whole file stays
+small (a few hundred lines, not tens of kilobytes).
 
 ### Step 5: Write the screens, in layout order
 
@@ -148,6 +159,13 @@ Rules for every screen:
   sample content, not "Lorem ipsum".
 - Each screen stands alone and fits its frame (`w` by `h`); let long content
   scroll inside it.
+- **Nothing wider than the frame.** No fixed column count whose columns add up
+  past the frame (`repeat(8, 300px)` is 2,600 pixels). A screen that compares
+  options lays them out to wrap:
+  `grid-template-columns: repeat(auto-fill, minmax(280px, 1fr))`, or flex with
+  `flex-wrap: wrap`. No `min-width` on the page wider than the frame.
+- Never `overflow: hidden` on `html` or `body`. Scroll inside a pane when the
+  app does, never by cutting the page off.
 - Never edit the project's real code to make a draft work.
 
 ### Step 6: Check
@@ -158,6 +176,10 @@ Run these yourself. Fix a screen and re-run until each holds.
 ls flow/drafts/<canvas>                                                  # layout.json, tokens.css and every screen listed
 grep -nE "(src|href)=\"https?://|url\(['\"]?https?:|@import" flow/drafts/<canvas>/*.html flow/drafts/<canvas>/tokens.css   # must print nothing
 grep -l "data-flow-id" flow/drafts/<canvas>/*.html                       # must print nothing
+grep -nE "repeat\(([5-9]|[1-9][0-9]+), *[0-9]+px" flow/drafts/<canvas>/*.html flow/drafts/<canvas>/tokens.css   # must print nothing: wrap instead
+node -e 'const fs=require("fs");for(const f of process.argv.slice(1)){const t=fs.readFileSync(f,"utf8");for(const m of t.matchAll(/(?:^|[};\s])((?:html|body)(?:\s*,\s*(?:html|body))*)\s*\{([^}]*)\}/g))if(/overflow|nowrap/.test(m[2]))console.log(f+": "+m[1].replace(/\s+/g," "))}' flow/drafts/<canvas>/*.html flow/drafts/<canvas>/tokens.css   # must print nothing
+node -e 'const l=require("./flow/drafts/<canvas>/layout.json");for(const s of l.screens)if((s.frame?.w??390)>1440)console.log(s.id)'   # must print nothing
+wc -c flow/drafts/<canvas>/tokens.css                                    # well under 20000
 ```
 
 Check that the layout is valid JSON and that every screen it names exists.

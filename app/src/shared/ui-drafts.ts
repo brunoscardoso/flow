@@ -186,6 +186,23 @@ export function resolveDraftPath(root: string, canvas: string, file: string): Dr
 }
 
 /** The canvas folder, relative to the root — or null for a name that is not a slug. */
+/**
+ * The draft screen an absolute file path names — `<root>/flow/drafts/<canvas>/<screen>.html`
+ * — or null. Lets a link to a screen file open as the screen Flow serves (which
+ * scrolls and stays sandboxed) rather than as a raw file.
+ */
+export function draftScreenAtPath(absPath: string): { root: string; canvas: string; screen: string } | null {
+  const path = absPath.replace(/\\/g, '/')
+  const marker = `/${DRAFTS_DIR}/`
+  const at = path.lastIndexOf(marker)
+  if (at <= 0) return null
+  const match = /^([^/]+)\/([^/]+)\.html$/.exec(path.slice(at + marker.length))
+  if (match === null) return null
+  const [, canvas, screen] = match
+  if (!isDraftSlug(canvas) || !isDraftSlug(screen)) return null
+  return { root: path.slice(0, at), canvas, screen }
+}
+
 export function draftCanvasDir(canvas: string): string | null {
   return isDraftSlug(canvas) ? `${DRAFTS_DIR}/${canvas}` : null
 }

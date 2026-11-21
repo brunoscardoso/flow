@@ -3,7 +3,7 @@
 
 import { serveWalkthroughPage, WALKTHROUGH_PAGE_CSP } from '../flow/walkthrough-page'
 import { draftPageUrl, encodeDraftRoot } from '../../shared/ui-drafts'
-import { DRAFT_CANVAS_CSP, DRAFT_DATA_CSP, draftScreenCsp, resolveDraftRequest } from './draft-serve'
+import { DRAFT_CANVAS_CSP, DRAFT_DATA_CSP, DRAFT_SCROLL_GUARD, draftScreenCsp, resolveDraftRequest, withScrollGuard } from './draft-serve'
 import { canvasMetaText, canvasPageHtml, screenProblemSentence } from './canvas-page'
 
 const ROOT = '/Users/me/projects/shop'
@@ -62,7 +62,7 @@ describe('serveWalkthroughPage dispatch', () => {
         { isKnownRoot: knownRoot, readFile: fs.readFile },
       )
       expect(response.status).toBe(200)
-      expect(await response.text()).toBe('<h1>Cart</h1>')
+      expect(await response.text()).toBe(`<h1>Cart</h1>${DRAFT_SCROLL_GUARD}`)
       const csp = response.headers.get('content-security-policy') ?? ''
       expect(csp).toBe(draftScreenCsp(ROOT, 'checkout'))
       expect(csp.startsWith('sandbox allow-scripts; ')).toBe(true)
@@ -219,5 +219,12 @@ describe('serveWalkthroughPage dispatch', () => {
       ok: false,
       reason: 'unknown project root',
     })
+  })
+})
+
+describe('the scroll guard', () => {
+  it('goes before </body>, and at the end when there is none', () => {
+    expect(withScrollGuard('<body><h1>x</h1></body></html>')).toBe(`<body><h1>x</h1>${DRAFT_SCROLL_GUARD}</body></html>`)
+    expect(withScrollGuard('<h1>x</h1>')).toBe(`<h1>x</h1>${DRAFT_SCROLL_GUARD}`)
   })
 })

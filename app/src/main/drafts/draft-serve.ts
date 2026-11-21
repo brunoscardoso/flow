@@ -39,6 +39,23 @@ const SCREEN_CSP_BASE =
   "default-src 'none'; script-src 'unsafe-inline'; img-src data:; font-src data:"
 
 /**
+ * A rule appended to every screen Flow serves: the page can always be
+ * scrolled. A screen's stylesheet often carries the target app's shell rules —
+ * `body { overflow: hidden }` for an app whose panes scroll on their own — and a
+ * draft wider or taller than the window was then cut off with no way to see
+ * the rest. A screen that fits is unchanged: nothing overflows, so nothing
+ * scrolls. Last in the document, so it wins over the screen's own rules.
+ */
+export const DRAFT_SCROLL_GUARD =
+  '<style data-flow-scroll-guard>html{overflow:auto!important}body{overflow:visible!important}</style>'
+
+/** `html` with the scroll guard after its last element. */
+export function withScrollGuard(html: string): string {
+  const close = html.toLowerCase().lastIndexOf('</body>')
+  return close === -1 ? `${html}${DRAFT_SCROLL_GUARD}` : `${html.slice(0, close)}${DRAFT_SCROLL_GUARD}${html.slice(close)}`
+}
+
+/**
  * A screen's policy: sandboxed to an opaque origin, inline script and style,
  * and the ONE stylesheet URL of its own canvas.
  */
@@ -118,6 +135,7 @@ export async function serveDraftRequest(url: string, deps: DraftServeDeps): Prom
     // An empty screen is drawn as the sentence, not as a blank white frame — the
     // canvas reloads a changed frame alone, so the frame must say it itself.
     if (body.trim().length === 0) body = unreadableScreenHtml(screenProblemSentence('empty'))
+    else body = withScrollGuard(body)
     return new Response(body, {
       headers: {
         'content-type': 'text/html; charset=utf-8',

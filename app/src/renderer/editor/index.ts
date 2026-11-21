@@ -38,6 +38,7 @@ import { SearchPanel } from '../search/search-panel'
 import { isMarkdownPath, previewToggleLabel } from './markdown-preview'
 import { fileRefNotifyRoot, fileRefRoots } from './file-ref-roots'
 import { fileUrl } from '../threads/file-path'
+import { draftPageUrl, draftScreenAtPath } from '../../shared/ui-drafts'
 import { reconcileOpenTabs, shouldApplyReload } from './tab-reconcile'
 import { UNTITLED_PREFIX, isUntitledPath } from './untitled'
 import { MonacoHost, monacoNamespace } from './monaco-host'
@@ -884,11 +885,14 @@ export function initEditor(surfaces: ShellSurfaces): EditorApi {
           // `docs/x.html` means is a question only this handler can answer
           // (allowed-pattern #14).
           if (detail?.as === 'browser') {
-            document.dispatchEvent(
-              new CustomEvent('flow:open-browser', {
-                detail: { url: fileUrl(rootPath, relPath) },
-              }),
-            )
+            // A screen of a UI drafts canvas opens as the screen Flow serves —
+            // sandboxed, and always scrollable — not as a raw file.
+            const screen = draftScreenAtPath(`${rootPath.replace(/\/+$/, '')}/${relPath}`)
+            const url =
+              screen === null
+                ? fileUrl(rootPath, relPath)
+                : draftPageUrl({ kind: 'screen', root: screen.root, canvas: screen.canvas, screen: screen.screen, mode: 'single' })
+            document.dispatchEvent(new CustomEvent('flow:open-browser', { detail: { url } }))
             return
           }
           // `preview: true` opens markdown straight into the rendered preview
