@@ -36,6 +36,7 @@ import { dirname, join } from 'node:path';
 
 const model = await import('./workspace-model.js');
 const syncModule = await import('./workspace-sync.js');
+const { onlyIgnoresMore } = syncModule;
 const merge = await import('./workspace-merge.js');
 const moveModule = await import('./workspace-move.js');
 const remoteModule = await import('./workspace-remote.js');
@@ -1360,6 +1361,11 @@ describeWithGit('workspace sync against real git, two machines', () => {
       '.gitattributes',
     ],
     ['a nested .gitignore', (dir: string) => write(dir, 'projects/backend/.gitignore', '*.md\n'), 'projects/backend/.gitignore'],
+    [
+      'a root .gitignore line outside the block that un-ignores a file',
+      (dir: string) => writeFileSync(join(dir, '.gitignore'), `${readFileSync(join(dir, '.gitignore'), 'utf-8')}!/projects/*/memory.md\n`),
+      '.gitignore',
+    ],
   ])(
     'refuses an incoming change that carries %s — nothing merged, nothing pushed (review fix 4)',
     (_label, mutate, path) => {
@@ -1371,6 +1377,7 @@ describeWithGit('workspace sync against real git, two machines', () => {
       expect(refusal.payload).toMatchObject({ paths: [expect.objectContaining({ path })], pushed: false });
       expect(git(wsB, 'rev-parse', 'HEAD~1').trim()).toBe(before); // the local commit stays, nothing merged on top
       if (path === '.gitattributes') expect(read(wsB, path)).not.toContain('*.md merge=union');
+      else if (path === '.gitignore') expect(read(wsB, path)).not.toContain('!/projects/*/memory.md');
       else expect(existsSync(join(wsB, path))).toBe(false);
       expect(remoteRefs()).toBe(refsBefore);
       expect(calls.some((args) => args.includes('push'))).toBe(false);
@@ -1395,6 +1402,32 @@ describeWithGit('workspace sync against real git, two machines', () => {
     },
     TEST_TIMEOUT_MS
   );
+
+  it(
+    'lets in a root .gitignore that a member extended outside the block with plain ignore lines (user report 2026-11-24)',
+    () => {
+      rawPush('ignore-more', (dir) => {
+        const text = readFileSync(join(dir, '.gitignore'), 'utf-8');
+        writeFileSync(join(dir, '.gitignore'), `${text}\n# Misfiled deliverables, kept off the team repository.\n/projects/backend/pr-draft.md\n`);
+        write(dir, 'projects/backend/plans/plan_theirs_v1.md', '# theirs\n');
+      });
+      write(wsB, 'projects/backend/plans/plan_mine_v1.md', '# mine\n');
+      expect(sync(flowB)).toMatchObject({ state: 'synced', pulled: 1 });
+      expect(read(wsB, 'projects/backend/plans/plan_theirs_v1.md')).toBe('# theirs\n');
+      expect(read(wsB, '.gitignore')).toContain('/projects/backend/pr-draft.md');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it.each([
+    ['adds comments and plain patterns', '', '# why\n/a.md', true],
+    ['keeps what was there and adds more', '/a.md', '/a.md\n/b.md', true],
+    ['drops only a comment', '# old\n/a.md', '/a.md', true],
+    ['adds a negation', '', '!/projects/*/memory.md', false],
+    ['removes a pattern', '/a.md\n/b.md', '/a.md', false],
+  ])('onlyIgnoresMore: %s', (_label, before, after, safe) => {
+    expect(onlyIgnoresMore(before, after)).toBe(safe);
+  });
 
   it(
     'checks every outgoing commit for personal files, not just the net change (review fix 5)',

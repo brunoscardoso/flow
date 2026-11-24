@@ -28,7 +28,8 @@
  *      anything is checked out, what the remote changed since the common
  *      ancestor is judged: a personal file (any spelling), a symlink, a nested
  *      `.gitattributes`/`.gitignore`, or a root one changed outside Flow's
- *      generated block refuses `incoming-unsafe` (fast-forward included).
+ *      generated block refuses `incoming-unsafe` (fast-forward included) —
+ *      except a root `.gitignore` that only ignores MORE (`onlyIgnoresMore`).
  *      Every git call that writes the tree runs with `core.symlinks=false`.
  *      Then a fast-forward when we are behind it, otherwise `merge --no-ff
  *      --no-commit` and `workspace-merge.ts` sorts what both sides touched.
@@ -936,7 +937,8 @@ const REPO_SETTINGS_FILE = /(?:^|\/)\.git(?:attributes|ignore|modules)$/i;
  * merged on a person's behalf: a personal-class path (any spelling), a
  * symlink, a nested `.gitattributes`/`.gitignore`, or a root one changed
  * outside Flow's generated block (for `.gitattributes`, the block itself too
- * — it decides how THIS merge resolves files). Read-only.
+ * — it decides how THIS merge resolves files; for `.gitignore`, only a change
+ * that un-ignores something). Read-only.
  */
 function unsafeIncoming(git: WorkspaceGit, repo: string, head: string | null, tracking: string): UnsafeIncomingPath[] {
   let from = EMPTY_TREE;
@@ -981,13 +983,41 @@ function unsafeIncoming(git: WorkspaceGit, repo: string, head: string | null, tr
       }
       const before = splitWorkspaceBlock(textAt(from, path));
       const after = splitWorkspaceBlock(removed ? null : textAt(tracking, path));
-      const outsideChanged = before.outside !== after.outside;
+      const isIgnore = /^\.gitignore$/i.test(path);
+      const outsideChanged =
+        before.outside !== after.outside && !(isIgnore && onlyIgnoresMore(before.outside, after.outside));
       const attributesBlockChanged =
         /^\.gitattributes$/i.test(path) && after.block !== before.block && after.block !== workspaceGitattributes();
       if (outsideChanged || attributesBlockChanged) unsafe.push({ path, why: 'repo-settings' });
     }
   }
   return unsafe;
+}
+
+/**
+ * Whether a root `.gitignore`'s lines outside Flow's block changed ONLY by
+ * ignoring more: added comments and plain patterns, removed comments. Ignoring
+ * more can never publish a file from this machine, so a teammate's hand-added
+ * ignore lines merge like any other change (user report 2026-11-24: lines a
+ * member added outside the block on 2026-10-16 refused every sync of a member
+ * whose last common commit was older, for ever). Un-ignoring is still refused:
+ * a negation (`!pattern`) or a removed pattern.
+ */
+export function onlyIgnoresMore(beforeOutside: string, afterOutside: string): boolean {
+  const lines = (text: string): string[] => (text === '' ? [] : text.split('\n'));
+  const before = lines(beforeOutside);
+  const after = lines(afterOutside);
+  const comment = (line: string): boolean => line.trimStart().startsWith('#');
+  const remaining = [...after];
+  for (const line of before) {
+    const at = remaining.indexOf(line);
+    if (at !== -1) {
+      remaining.splice(at, 1);
+      continue;
+    }
+    if (!comment(line)) return false;
+  }
+  return remaining.every((line) => comment(line) || !line.trimStart().startsWith('!'));
 }
 
 function refuseUnsafeIncoming(unsafe: readonly UnsafeIncomingPath[]): never {
