@@ -156,19 +156,19 @@ describe('runsIn', () => {
   const cross: RunSetup = {
     version: 1,
     steps: [
-      { id: 'temporal', name: 'temporal', command: 'temporal server start-dev', start: 'now', runsIn: 'jupiter-core', ready: { kind: 'port', port: 7233 } },
+      { id: 'temporal', name: 'temporal', command: 'temporal server start-dev', start: 'now', runsIn: 'lumen-core', ready: { kind: 'port', port: 7233 } },
       { id: 'app', name: 'app', command: 'npm run dev', start: 'after-previous' },
       { id: 'own', name: 'own', command: 'x', start: 'now', runsIn: 'P' },
     ],
   }
   const places: RunPlace[] = [
     { name: 'p', root: '/p', cwd: '/p-checkout', from: 'scope' },
-    { name: 'jupiter-core', root: '/core', cwd: '/core-checkout', from: 'scope' },
+    { name: 'lumen-core', root: '/core', cwd: '/core-checkout', from: 'scope' },
   ]
 
   it('round-trips through serialize and parse', () => {
     const text = serializeRunSetup(cross)
-    expect(text).toContain('"runsIn": "jupiter-core"')
+    expect(text).toContain('"runsIn": "lumen-core"')
     expect(parseRunSetup(text).setup).toEqual(cross)
   })
 
@@ -183,7 +183,7 @@ describe('runsIn', () => {
 
   it('runs a step in the named project, in its conversation checkout', () => {
     const steps = resolveRunSteps(project({ setup: cross, cwd: '/p-checkout' }), places)
-    expect(steps[0]).toMatchObject({ key: '/p::temporal', projectRoot: '/core', projectName: 'jupiter-core', cwd: '/core-checkout' })
+    expect(steps[0]).toMatchObject({ key: '/p::temporal', projectRoot: '/core', projectName: 'lumen-core', cwd: '/core-checkout' })
     expect(steps[0].unavailable).toBeUndefined()
     expect(steps[1]).toMatchObject({ key: '/p::app', projectRoot: '/p', cwd: '/p-checkout' })
     // A runsIn naming the setup's own project (any case) is the setup's own project.
@@ -191,15 +191,15 @@ describe('runsIn', () => {
   })
 
   it('runs a step in a Workspace sibling on this computer, in its folder', () => {
-    const sibling: RunPlace[] = [{ name: 'jupiter-core', root: '/core', cwd: '/core', from: 'workspace' }]
+    const sibling: RunPlace[] = [{ name: 'lumen-core', root: '/core', cwd: '/core', from: 'workspace' }]
     expect(resolveRunSteps(project({ setup: cross }), sibling)[0]).toMatchObject({ projectRoot: '/core', cwd: '/core' })
   })
 
   it('marks a step whose project is not on this computer, keeping its key and name', () => {
     const step = resolveRunSteps(project({ setup: cross }), [])[0]
-    expect(step).toMatchObject({ key: '/p::temporal', projectName: 'jupiter-core' })
-    expect(step.unavailable).toBe(notHereSentence('jupiter-core'))
-    expect(step.unavailable).toBe("jupiter-core is not on this computer, so this step can't start.")
+    expect(step).toMatchObject({ key: '/p::temporal', projectName: 'lumen-core' })
+    expect(step.unavailable).toBe(notHereSentence('lumen-core'))
+    expect(step.unavailable).toBe("lumen-core is not on this computer, so this step can't start.")
   })
 
   it('placeOfStep ignores a place with no folder here', () => {

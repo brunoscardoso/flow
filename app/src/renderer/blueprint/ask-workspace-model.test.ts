@@ -308,7 +308,7 @@ describe('askScopeLine', () => {
     const one: AskScope = { ...WORKSPACE, projects: [{ slug: 'a', name: 'A' }] }
     expect(askScopeLine(run([{ type: 'open', scope: one }])).items[0].label).toBe('The one project')
     expect(askScopeLine(initialAskState()).items[0].label).toBe('This whole project')
-    expect(askScopeLine(run([{ type: 'open', scope: { kind: 'project', name: 'Jupiter' } }])).items[0].label).toBe('All of Jupiter')
+    expect(askScopeLine(run([{ type: 'open', scope: { kind: 'project', name: 'Lumen' } }])).items[0].label).toBe('All of Lumen')
   })
 })
 

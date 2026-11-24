@@ -27,7 +27,7 @@ describe('declared feature line', () => {
   });
 
   it('wins over the name and the code, and resolves a feature id', () => {
-    const doc = '**Feature**: feature:jupiter-app::chats\n`src/app/api/auth/a.ts` `src/app/api/auth/b.ts`';
+    const doc = '**Feature**: feature:lumen-app::chats\n`src/app/api/auth/a.ts` `src/app/api/auth/b.ts`';
     expect(link('auth_rework', doc)).toEqual({ featureSlug: 'chats', source: 'declared' });
   });
 

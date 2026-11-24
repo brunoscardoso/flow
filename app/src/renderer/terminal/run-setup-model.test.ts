@@ -32,12 +32,12 @@ import {
   type RunSetupDraft,
 } from './run-setup-model'
 
-const ROOT = '/work/jupiter'
+const ROOT = '/work/lumen'
 
 function project(extra: Partial<RunProjectLayers> = {}): RunProjectLayers {
   return {
     root: ROOT,
-    name: 'jupiter',
+    name: 'lumen',
     cwd: ROOT,
     hasSharedSetup: true,
     problems: [],
@@ -114,33 +114,33 @@ describe('editing a draft for Everyone', () => {
       setup: {
         version: 1,
         steps: [
-          { id: '/work/jupiter-core::temporal', name: 'temporal', command: 'temporal server start-dev', start: 'now', runsIn: 'jupiter-core' },
-          { id: `${ROOT}::api`, name: 'api', command: 'uv run api', start: 'after-previous', runsIn: 'jupiter' },
+          { id: '/work/lumen-core::temporal', name: 'temporal', command: 'temporal server start-dev', start: 'now', runsIn: 'lumen-core' },
+          { id: `${ROOT}::api`, name: 'api', command: 'uv run api', start: 'after-previous', runsIn: 'lumen' },
         ],
       },
     })
     const draft = startDraft(combined)
     expect(draft.steps.map((s) => [s.id, s.runsIn])).toEqual([
-      ['/work/jupiter-core::temporal', 'jupiter-core'],
+      ['/work/lumen-core::temporal', 'lumen-core'],
       [`${ROOT}::api`, null],
     ])
-    const change = saveChange(changeStep(draft, `${ROOT}::api`, { runsIn: 'jupiter-core' }))
+    const change = saveChange(changeStep(draft, `${ROOT}::api`, { runsIn: 'lumen-core' }))
     expect(change).toEqual({
       layer: 'shared',
       steps: [
-        { id: '/work/jupiter-core::temporal', name: 'temporal', command: 'temporal server start-dev', start: 'now', runsIn: 'jupiter-core' },
-        { id: `${ROOT}::api`, name: 'api', command: 'uv run api', start: 'after-previous', runsIn: 'jupiter-core' },
+        { id: '/work/lumen-core::temporal', name: 'temporal', command: 'temporal server start-dev', start: 'now', runsIn: 'lumen-core' },
+        { id: `${ROOT}::api`, name: 'api', command: 'uv run api', start: 'after-previous', runsIn: 'lumen-core' },
       ],
     })
   })
 
   it('starts from the suggestions the person ticked, each running in its project', () => {
     const draft = draftFromSuggestions(project({ setup: null, hasSharedSetup: false }), [
-      { projectRoot: '/work/jupiter-app', projectName: 'jupiter-app', name: 'dev', command: 'npm run dev', source: 'package.json' },
-      { projectRoot: ROOT, projectName: 'jupiter', name: 'api', command: 'uv run api', source: 'README' },
+      { projectRoot: '/work/lumen-app', projectName: 'lumen-app', name: 'dev', command: 'npm run dev', source: 'package.json' },
+      { projectRoot: ROOT, projectName: 'lumen', name: 'api', command: 'uv run api', source: 'README' },
     ])
     expect(draft.steps).toHaveLength(2)
-    expect(draft.steps[0]).toMatchObject({ name: 'dev', command: 'npm run dev', runsIn: 'jupiter-app', origin: 'jupiter-app · package.json', isNew: true })
+    expect(draft.steps[0]).toMatchObject({ name: 'dev', command: 'npm run dev', runsIn: 'lumen-app', origin: 'lumen-app · package.json', isNew: true })
     // The setup's own project is not written as a runsIn.
     expect(draft.steps[1]?.runsIn).toBeNull()
   })
@@ -155,38 +155,38 @@ describe('editing a draft for Everyone', () => {
 
 describe('one list across projects', () => {
   const places = [
-    { name: 'jupiter', root: ROOT },
-    { name: 'jupiter-core', root: '/work/jupiter-core' },
-    { name: 'jupiter-app', root: '/work/jupiter-app' },
+    { name: 'lumen', root: ROOT },
+    { name: 'lumen-core', root: '/work/lumen-core' },
+    { name: 'lumen-app', root: '/work/lumen-app' },
   ]
 
   it('orders steps of different projects in one list, and writes runsIn for every project but the main one', () => {
     let draft = startDraft(project({ setup: null }))
-    draft = addStep(draft, { name: 'temporal', command: 'temporal server start-dev', runsIn: 'jupiter-core' })
-    draft = addStep(draft, { name: 'app', command: 'npm run dev', runsIn: 'jupiter-app' })
+    draft = addStep(draft, { name: 'temporal', command: 'temporal server start-dev', runsIn: 'lumen-core' })
+    draft = addStep(draft, { name: 'app', command: 'npm run dev', runsIn: 'lumen-app' })
     draft = changeStep(draft, 'app', { start: 'after-previous' })
-    draft = addStep(draft, { name: 'api', command: 'uv run api', runsIn: 'jupiter' })
+    draft = addStep(draft, { name: 'api', command: 'uv run api', runsIn: 'lumen' })
     draft = moveStep(draft, 'api', 1)
     const change = saveChange(draft)
     expect(change.steps.map((step) => [step.id, step.runsIn])).toEqual([
-      ['temporal', 'jupiter-core'],
+      ['temporal', 'lumen-core'],
       ['api', undefined],
-      ['app', 'jupiter-app'],
+      ['app', 'lumen-app'],
     ])
   })
 
   it('moving a step to another project is a change', () => {
     const cross = project()
     let draft = startDraft(cross)
-    draft = changeStep(draft, 'temporal', { runsIn: 'jupiter-core' })
+    draft = changeStep(draft, 'temporal', { runsIn: 'lumen-core' })
     expect(diffDraft(draft).changed.map((step) => step.id)).toEqual(['temporal'])
-    draft = changeStep(draft, 'temporal', { runsIn: 'JUPITER' })
+    draft = changeStep(draft, 'temporal', { runsIn: 'LUMEN' })
     expect(draft.steps[0]?.runsIn).toBeNull()
   })
 
   it('offers the conversation\'s projects, the main one first, and keeps a project that is not among them', () => {
     const draft = startDraft(project())
-    expect(runsInChoices(draft, places, { runsIn: null }).map((choice) => choice.value)).toEqual(['', 'jupiter-core', 'jupiter-app'])
+    expect(runsInChoices(draft, places, { runsIn: null }).map((choice) => choice.value)).toEqual(['', 'lumen-core', 'lumen-app'])
     const lost = runsInChoices(draft, places, { runsIn: 'billing' })
     expect(lost[lost.length - 1]).toEqual({ value: 'billing', label: 'billing · not in this conversation', missing: true })
   })
@@ -203,8 +203,8 @@ describe('one list across projects', () => {
   })
 
   it('titles the setup with the conversation\'s projects', () => {
-    expect(setupTitle(places)).toBe('Launchpad for jupiter, jupiter-core, jupiter-app')
-    expect(setupTitle([], 'jupiter')).toBe('Launchpad for jupiter')
+    expect(setupTitle(places)).toBe('Launchpad for lumen, lumen-core, lumen-app')
+    expect(setupTitle([], 'lumen')).toBe('Launchpad for lumen')
     expect(setupTitle([])).toBe('Launchpad')
   })
 })
@@ -218,18 +218,18 @@ describe('the Suggested list', () => {
     source,
   })
   const found = [
-    s('jupiter-app', 'npm run storybook', 'you ran it 6 times'),
-    s('jupiter-core', 'docker compose up kafka', 'the agent started it'),
-    s('jupiter-app', 'npm run storybook', 'package.json'),
-    s('jupiter', 'npm run dev'),
-    s('jupiter-core', 'make up'),
-    s('jupiter-app', 'npm run preview'),
-    s('jupiter-core', 'make watch'),
+    s('lumen-app', 'npm run storybook', 'you ran it 6 times'),
+    s('lumen-core', 'docker compose up kafka', 'the agent started it'),
+    s('lumen-app', 'npm run storybook', 'package.json'),
+    s('lumen', 'npm run dev'),
+    s('lumen-core', 'make up'),
+    s('lumen-app', 'npm run preview'),
+    s('lumen-core', 'make watch'),
   ]
 
   it('shows the top four, de-duplicated, leaving out what is already a saved step', () => {
     const offered = offeredSuggestions(startDraft(project()), found)
-    // "npm run dev" in jupiter is the saved step "app".
+    // "npm run dev" in lumen is the saved step "app".
     expect(offered.total).toBe(5)
     expect(offered.top.map((item) => item.suggestion.command)).toEqual([
       'npm run storybook',
@@ -237,15 +237,15 @@ describe('the Suggested list', () => {
       'make up',
       'npm run preview',
     ])
-    expect(offered.top[0]?.meta).toBe('jupiter-app · you ran it 6 times')
+    expect(offered.top[0]?.meta).toBe('lumen-app · you ran it 6 times')
     expect(showAllLabel(offered.total)).toBe('Show all (5)')
   })
 
   it('groups the full list by project', () => {
     const offered = offeredSuggestions(startDraft(project()), found)
     expect(offered.groups.map((group) => [group.projectName, group.items.length])).toEqual([
-      ['jupiter-app', 2],
-      ['jupiter-core', 3],
+      ['lumen-app', 2],
+      ['lumen-core', 3],
     ])
   })
 
@@ -255,12 +255,12 @@ describe('the Suggested list', () => {
     const kafka = offered.top.find((item) => item.suggestion.command === 'docker compose up kafka')
     expect(kafka?.addedAs).toBe(5)
     expect(addedAsLabel(5)).toBe('Added as step 5')
-    expect(draft.steps[4]).toMatchObject({ runsIn: 'jupiter-core', command: 'docker compose up kafka' })
+    expect(draft.steps[4]).toMatchObject({ runsIn: 'lumen-core', command: 'docker compose up kafka' })
   })
 
   it('a suggestion whose name is taken gets its project added', () => {
-    const draft = addSuggestion(startDraft(project()), s('jupiter-core', 'npm run app'))
-    expect(draft.steps[4]?.name).toBe('app (jupiter-core)')
+    const draft = addSuggestion(startDraft(project()), s('lumen-core', 'npm run app'))
+    expect(draft.steps[4]?.name).toBe('app (lumen-core)')
   })
 })
 
@@ -315,7 +315,7 @@ describe('saveSentence', () => {
   it('reads like the mockup when one step is added to a going Run', () => {
     const draft = addSuggestion(startDraft(project()), {
       projectRoot: ROOT,
-      projectName: 'jupiter-app',
+      projectName: 'lumen-app',
       name: 'storybook',
       command: 'npm run storybook',
       source: 'package.json',
@@ -362,7 +362,7 @@ describe('UI text (forbidden-pattern #12)', () => {
       saveSentence(draft, ALL_RUNNING),
       saveSentence(draft, null),
       saveSentence(removeStep(startDraft(project()), 'api'), ALL_RUNNING),
-      setupTitle([{ name: 'jupiter-app' }, { name: 'jupiter-core' }]),
+      setupTitle([{ name: 'lumen-app' }, { name: 'lumen-core' }]),
       ...validateDraft(moveStep(startDraft(project()), 'worker', 0)),
       ...Object.values(SETUP_STRINGS),
       ...startsOptions(draft.steps, 2).map((option) => option.label),
@@ -393,8 +393,8 @@ describe('stepSuggestions — each step offers its own project, five at most', (
     projectRoot: `/${projectName}`, projectName, name, command, source: 'package.json',
   })
   const all = [
-    sug('jupiter', 'npm run dev'), sug('jupiter', 'npm start'), sug('jupiter', 'npm run storybook'),
-    sug('jupiter', 'npm run preview'), sug('jupiter', 'npm run serve'), sug('jupiter', 'npm run watch'),
+    sug('lumen', 'npm run dev'), sug('lumen', 'npm start'), sug('lumen', 'npm run storybook'),
+    sug('lumen', 'npm run preview'), sug('lumen', 'npm run serve'), sug('lumen', 'npm run watch'),
     sug('core', 'uv run python -m core', 'core'), sug('core', 'docker compose up postgres', 'postgres'),
   ]
   const empty = (): RunSetupDraft => addStep(startDraft(project({ setup: { version: 1, steps: [] } })))
@@ -403,7 +403,7 @@ describe('stepSuggestions — each step offers its own project, five at most', (
     const draft = empty()
     const found = stepSuggestions(draft, draft.steps[0]!.id, all)
     expect(found).toHaveLength(5)
-    expect(found.every((s) => s.projectName === 'jupiter')).toBe(true)
+    expect(found.every((s) => s.projectName === 'lumen')).toBe(true)
   })
 
   it('follows the project the step runs in, and what is typed', () => {
@@ -511,7 +511,7 @@ describe('one-time actions in the draft', () => {
   })
 
   it('a step offers only suggestions of its kind and its project, at most five', () => {
-    const s = (command: string, use?: 'once', projectName = 'jupiter'): RunSuggestion => ({
+    const s = (command: string, use?: 'once', projectName = 'lumen'): RunSuggestion => ({
       projectRoot: ROOT, projectName, name: command, command, source: 'package.json', ...(use === undefined ? {} : { use }),
     })
     const suggestions = [
@@ -608,12 +608,12 @@ describe('scripts in one-time actions', () => {
   it('offers no command suggestions to a script', () => {
     const { draft, id } = withAction()
     const scripted = switchBody(draft, id, 'script')
-    const suggestion: RunSuggestion = { projectRoot: ROOT, projectName: 'jupiter', name: 'lint', command: 'npm run lint', source: 'package.json', use: 'once' }
+    const suggestion: RunSuggestion = { projectRoot: ROOT, projectName: 'lumen', name: 'lint', command: 'npm run lint', source: 'package.json', use: 'once' }
     expect(stepSuggestions(draft, id, [suggestion])).toHaveLength(1)
     expect(stepSuggestions(scripted, id, [suggestion])).toEqual([])
   })
 
   it('the hint names the project, not a command line or a path', () => {
-    expect(scriptHint('jupiter-app')).toBe('Runs as one script in jupiter-app. The first line picks the program; without one, bash runs it.')
+    expect(scriptHint('lumen-app')).toBe('Runs as one script in lumen-app. The first line picks the program; without one, bash runs it.')
   })
 })

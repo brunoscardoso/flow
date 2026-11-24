@@ -132,10 +132,10 @@ describe('classifyKnowledgePath', () => {
     expect(classifyKnowledgePath('qa.jsonl', { root: 'workspace' })).toBe('personal');
     expect(classifyKnowledgePathDetailed('qa.jsonl', { root: 'workspace' }).row?.pattern).toBe('/qa.jsonl');
     expect(classifyKnowledgePath('brain/.structure/qa.jsonl')).toBe('personal');
-    expect(classifyKnowledgePath('projects/jupiter-app/brain/.structure/qa.jsonl', { root: 'workspace' })).toBe('personal');
+    expect(classifyKnowledgePath('projects/lumen-app/brain/.structure/qa.jsonl', { root: 'workspace' })).toBe('personal');
     // …and the pre-push guard names one that was staged.
-    expect(findPersonalFiles(['projects/jupiter-app/brain/.structure/qa.jsonl']).map((hit) => hit.path)).toEqual([
-      'projects/jupiter-app/brain/.structure/qa.jsonl',
+    expect(findPersonalFiles(['projects/lumen-app/brain/.structure/qa.jsonl']).map((hit) => hit.path)).toEqual([
+      'projects/lumen-app/brain/.structure/qa.jsonl',
     ]);
   });
 

@@ -29,7 +29,7 @@ const WORKSPACE = {
   projects: [
     project('app', 'orbit-app', APP),
     project('core', 'orbit-core', CORE),
-    project('argo', 'orbit-argo-applications', null),
+    project('keel', 'orbit-keel-applications', null),
     project('mobile', 'storefront-mobile', '/elsewhere/storefront-mobile'),
   ],
 } as unknown as WorkspaceListing
@@ -48,7 +48,7 @@ function projects() {
 describe('task projects picker model', () => {
   it("lists the Workspace's projects in its order, each open one tickable and the others with a reason", () => {
     const list = projects()
-    expect(list.map((p) => p.name)).toEqual(['orbit-app', 'orbit-core', 'orbit-argo-applications', 'storefront-mobile'])
+    expect(list.map((p) => p.name)).toEqual(['orbit-app', 'orbit-core', 'orbit-keel-applications', 'storefront-mobile'])
     expect(list.map((p) => p.unavailableReason)).toEqual([null, null, NOT_ON_THIS_COMPUTER, NOT_OPEN_IN_FLOW])
     expect(list[0]?.root).toBe(APP)
   })
@@ -91,7 +91,7 @@ describe('task projects picker model', () => {
   it('an unavailable project can never be ticked, even when asked', () => {
     expect(pickableOnly(projects(), [APP, '/elsewhere/storefront-mobile', APP])).toEqual([APP])
     const rows = pickerRows(projects(), [])
-    expect(rows.find((row) => row.name === 'orbit-argo-applications')).toMatchObject({ disabled: true, checked: false })
+    expect(rows.find((row) => row.name === 'orbit-keel-applications')).toMatchObject({ disabled: true, checked: false })
   })
 
   it('a card may change projects only while its chat has not started', () => {

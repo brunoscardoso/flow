@@ -188,7 +188,7 @@ export class GuideController {
   }
 
   #openOverview(): void {
-    const overview = new GuideOverview(this.#state?.enabled ?? true, (answer) => {
+    const overview = new GuideOverview((answer) => {
       this.#active = null
       void this.#update({ overviewSeen: true, enabled: answer.tips }).then(() => {
         if (answer.startTour) this.replay('threads')

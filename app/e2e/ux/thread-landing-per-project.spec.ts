@@ -44,7 +44,7 @@ import { basename, join } from 'node:path'
 test.use({ appEnv: AGENT_AUTH_ISOLATED })
 
 /** The real branch name that has broken this panel twice. 53 characters. */
-const LONG_BRANCH = 'ACME-2059-logging-strategy-for-the-argo-applications-x'
+const LONG_BRANCH = 'ACME-2059-logging-strategy-for-the-keel-applications-x'
 
 /** Narrow / the width the panel bugs get reported at / wide. */
 const WIDTHS = [320, 500, 900]
@@ -257,16 +257,16 @@ test.skip('the landing belongs to one project, and every project has a visible e
 
   // ── The user's shape: three repositories, one of them the thread's own ────
   const project = await seedCommittedRepo(window, 'flow-lpp-app-')
-  const argo = await seedCommittedRepo(window, 'flow-lpp-argo-')
+  const keel = await seedCommittedRepo(window, 'flow-lpp-keel-')
   const core = await seedCommittedRepo(window, 'flow-lpp-core-')
 
   // A 53-character branch in one of them, checked out — the width hazard, in a
   // group header, at 320px.
-  git(argo, 'checkout', '-q', '-b', LONG_BRANCH)
+  git(keel, 'checkout', '-q', '-b', LONG_BRANCH)
   // Something changed in every repository, so no group is an empty shell.
   for (const [repo, file] of [
     [project, 'my-own-work.md'],
-    [argo, 'logging.yaml'],
+    [keel, 'logging.yaml'],
     [core, 'core-notes.md'],
   ] as const) {
     writeFileSync(join(repo, file), 'work the user did themselves\n')
@@ -282,7 +282,7 @@ test.skip('the landing belongs to one project, and every project has a visible e
     window,
     project,
     title,
-    [argo, core],
+    [keel, core],
     'thread/chat-migration-to-engine-investigation-2',
   )
   await openThread(window, title)
@@ -318,7 +318,7 @@ test.skip('the landing belongs to one project, and every project has a visible e
   const names = [
     `${basename(project)} (this thread)`,
     basename(project),
-    basename(argo),
+    basename(keel),
     basename(core),
   ]
   await expect(async () => {

@@ -32,7 +32,7 @@ const STRUCTURED = [
   '### How a tenant is created',
   'A provisioning call runs `createTenant.ts`, then syncs products. [3]',
   '',
-  'Not covered: how jupiter-core stores tenants.',
+  'Not covered: how lumen-core stores tenants.',
 ].join('\n')
 
 describe('parseAnswer — the structured grammar', () => {
@@ -51,7 +51,7 @@ describe('parseAnswer — the structured grammar', () => {
     expect(list.kind === 'list' && list.items[0][0]).toEqual({ kind: 'code', text: 'externalTenantId' })
     const para = doc.blocks[3]
     expect(para.kind === 'paragraph' && para.inline).toContainEqual({ kind: 'file', text: 'createTenant.ts', path: 'src/commands/createTenant.ts' })
-    expect(doc.notCovered).toBe('how jupiter-core stores tenants.')
+    expect(doc.notCovered).toBe('how lumen-core stores tenants.')
   })
 
   it('a "### Not covered" section is the callout, not a section; bold labels are read too', () => {

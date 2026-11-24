@@ -262,7 +262,7 @@ describe('every connection, feature to feature (2026-10-06: "connected to where?
   const countries = new Map<string, Rect>([
     ['core', { x: 0, y: 0, w: 400, h: 300 }],
     ['app', { x: 420, y: 0, w: 300, h: 300 }],
-    ['argo', { x: 0, y: 320, w: 400, h: 200 }],
+    ['keel', { x: 0, y: 320, w: 400, h: 200 }],
   ])
   const names: Record<string, string> = { 'feature:app::tenant': 'Tenant', 'feature:core::core': 'Core' }
   const lines = (links: BlueprintWorkspaceLink[]) =>
@@ -280,8 +280,8 @@ describe('every connection, feature to feature (2026-10-06: "connected to where?
   })
 
   it('an end no feature claims lands on its project; one off the sheet draws nothing', () => {
-    const [toProject] = lines([link('relates', ['app', ['feature:app::tenant']], ['argo', [], 'file:apps/x.yaml'])])
-    expect(toProject).toMatchObject({ toCell: null, sentence: 'Tenant in orbit-app relates to apps/x.yaml in orbit-argo' })
+    const [toProject] = lines([link('relates', ['app', ['feature:app::tenant']], ['keel', [], 'file:apps/x.yaml'])])
+    expect(toProject).toMatchObject({ toCell: null, sentence: 'Tenant in orbit-app relates to apps/x.yaml in orbit-keel' })
     expect(lines([link('calls', ['app', ['feature:app::tenant']], ['elsewhere', ['feature:elsewhere::x']])])).toEqual([])
   })
 

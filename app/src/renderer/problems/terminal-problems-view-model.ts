@@ -117,7 +117,7 @@ function seenText(problem: Pick<TerminalProblem, 'count' | 'firstSeen' | 'lastSe
 
 /**
  * What Copy puts on the clipboard:
- *   core-dev (jupiter-core) — seen 14 times, 20:55:14 to 20:56:06
+ *   core-dev (lumen-core) — seen 14 times, 20:55:14 to 20:56:06
  *   ConnectionRefusedError: [Errno 61] Connection refused
  *
  *     File ".../asyncpg/connect_utils.py", line 969, in …

@@ -23,7 +23,7 @@ const ROOT = '/work/core'
 function project(): RunProjectLayers {
   return {
     root: ROOT,
-    name: 'jupiter-core',
+    name: 'lumen-core',
     cwd: ROOT,
     hasSharedSetup: true,
     problems: [],
@@ -82,9 +82,9 @@ describe('the agent button', () => {
 
 describe('the message to the agent', () => {
   it('a fix carries the script today, the tool, and says not to run it', () => {
-    const text = agentScriptPrompt({ action: 'reset-database', project: 'jupiter-core', mode: 'fix', script: 'set -e\nmake reset\n', command: '' })
+    const text = agentScriptPrompt({ action: 'reset-database', project: 'lumen-core', mode: 'fix', script: 'set -e\nmake reset\n', command: '' })
     expect(text).toBe(
-      'Fix the Launchpad action "reset-database" in jupiter-core, using what we discussed in this conversation. Its script today:\n' +
+      'Fix the Launchpad action "reset-database" in lumen-core, using what we discussed in this conversation. Its script today:\n' +
         '```bash\nset -e\nmake reset\n```\n' +
         'Put the new script into the Launchpad with the launchpad_set_script tool, with the action name "reset-database". Do not run it.',
     )

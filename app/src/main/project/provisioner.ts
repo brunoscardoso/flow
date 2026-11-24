@@ -345,7 +345,7 @@ export class Provisioner {
       // A STAMPED root with nothing to refresh (setup failed once, or its
       // .claude/ was removed) can never recover through a refresh — the CLI
       // refuses "no existing plan-flow install" on every open (live:
-      // orbit-argo-applications, 2026-10-06). It gets the full first-time
+      // orbit-keel-applications, 2026-10-06). It gets the full first-time
       // setup instead. Only in that case: a full setup is never run over an
       // existing install, whose rules a refresh must leave alone.
       const effective = action === 'refresh' && !(await this.hasInstall(root.rootPath)) ? 'provision' : action

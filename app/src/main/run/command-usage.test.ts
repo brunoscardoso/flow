@@ -63,7 +63,7 @@ describe('the one-shot filter', () => {
   it('knows the programs and words that do a job and end', () => {
     for (const command of ['cd app', 'ls -la', 'git status', 'cat README.md', 'clear', 'exit', 'npm install', 'npm run build', 'pnpm test', 'cargo build', 'FOO=1 git push'])
       expect(looksOneShotCommand(command)).toBe(true)
-    for (const command of ['npm run dev', 'temporal server start-dev', 'uv run python -m jupiter_core', 'docker compose up kafka'])
+    for (const command of ['npm run dev', 'temporal server start-dev', 'uv run python -m lumen_core', 'docker compose up kafka'])
       expect(looksOneShotCommand(command)).toBe(false)
   })
 
@@ -71,7 +71,7 @@ describe('the one-shot filter', () => {
     expect(looksLongRunningCommand('npm run dev')).toBe(true)
     expect(looksLongRunningCommand('temporal server start-dev')).toBe(true)
     expect(looksLongRunningCommand('docker compose up kafka postgres')).toBe(true)
-    expect(looksLongRunningCommand('uv run python -m jupiter_core')).toBe(false)
+    expect(looksLongRunningCommand('uv run python -m lumen_core')).toBe(false)
     expect(looksLongRunningCommand('npm run build')).toBe(false)
   })
 
@@ -161,22 +161,22 @@ describe('CommandUsageStore — the one writer', () => {
 })
 
 describe('usageSuggestions and the merge', () => {
-  const project = { root: '/app', name: 'jupiter-app' }
+  const project = { root: '/app', name: 'lumen-app' }
 
   it('keeps long-running commands, and anything run 3+ times that is not a one-shot', () => {
     const found = usageSuggestions(
       project,
       [
         { command: 'npm run dev', count: 1, lastUsedAt: iso(NOW) },
-        { command: 'uv run python -m jupiter_core', count: 3, lastUsedAt: iso(NOW) },
+        { command: 'uv run python -m lumen_core', count: 3, lastUsedAt: iso(NOW) },
         { command: 'uv run python -m once', count: 2, lastUsedAt: iso(NOW) },
         { command: 'npm run build', count: 9, lastUsedAt: iso(NOW) },
       ],
       [],
       NOW,
     )
-    expect(found.map((suggestion) => suggestion.command)).toEqual(['uv run python -m jupiter_core', 'npm run dev'])
-    expect(found[0]).toMatchObject({ source: 'you ran it 3 times', kind: 'usage', projectName: 'jupiter-app' })
+    expect(found.map((suggestion) => suggestion.command)).toEqual(['uv run python -m lumen_core', 'npm run dev'])
+    expect(found[0]).toMatchObject({ source: 'you ran it 3 times', kind: 'usage', projectName: 'lumen-app' })
     expect(found[1]?.source).toBe('you ran it once')
   })
 
@@ -239,14 +239,14 @@ describe('rankSuggestions — the way to run each project first', () => {
       s('/app', 'codegen:watch', 'npm run codegen:watch', 'package.json'),
       s('/app', 'dev', 'npm run dev', 'package.json'),
       s('/core', 'postgres', 'docker compose up postgres', 'Docker Compose'),
-      s('/core', 'api', 'uv run python -m jupiter_core', 'README'),
+      s('/core', 'api', 'uv run python -m lumen_core', 'README'),
       s('/desk', 'preview', 'npm run preview', 'package.json'),
       s('/desk', 'dev', 'npm run dev', 'package.json'),
     ]
     const ranked = rankSuggestions(files, [], ['/app', '/core', '/desk'])
     expect(ranked.slice(0, 3).map((x) => `${x.projectRoot} ${x.command}`)).toEqual([
       '/app npm run dev',
-      '/core uv run python -m jupiter_core',
+      '/core uv run python -m lumen_core',
       '/desk npm run dev',
     ])
     expect(ranked[ranked.length - 1]!.name).toMatch(/storybook|preview/)
@@ -294,11 +294,11 @@ describe('one-time actions — the one-shot jobs a person typed', () => {
       { command: 'npm run dev', count: 9, lastUsedAt: at(1) },
       { command: 'npm run build', count: 5, lastUsedAt: at(1) },
     ]
-    const once = onceUsageSuggestions({ root: '/core', name: 'jupiter-core' }, typed, NOW_MS)
+    const once = onceUsageSuggestions({ root: '/core', name: 'lumen-core' }, typed, NOW_MS)
     expect(once.map((x) => x.command)).toEqual(['npm run build', 'uv run alembic upgrade head', 'npm run codegen'])
-    expect(once.every((x) => x.use === 'once' && x.projectName === 'jupiter-core')).toBe(true)
+    expect(once.every((x) => x.use === 'once' && x.projectName === 'lumen-core')).toBe(true)
     expect(once[1]!.source).toBe('you ran it 4 times')
-    const running = usageSuggestions({ root: '/core', name: 'jupiter-core' }, typed, [], NOW_MS)
+    const running = usageSuggestions({ root: '/core', name: 'lumen-core' }, typed, [], NOW_MS)
     expect(running.map((x) => x.command)).toEqual(['npm run dev'])
     expect(running.every((x) => x.use === undefined)).toBe(true)
   })

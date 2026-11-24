@@ -53,7 +53,7 @@ export interface DraftStep {
   skipped: boolean
   /** The NAME of the project it runs in; null = the conversation's main project. */
   runsIn: string | null
-  /** Where a step added from a suggestion came from: "jupiter-app · package.json". */
+  /** Where a step added from a suggestion came from: "lumen-app · package.json". */
   origin: string | null
   /** A running step (starts with Run) or a one-time action (pressed from the menu). */
   kind: 'service' | 'once'
@@ -162,7 +162,7 @@ export function stepText(step: Pick<DraftStep, 'body' | 'command' | 'script'>): 
   return step.body === 'script' ? step.script : step.command
 }
 
-/** The page's title: "Launchpad for jupiter-app, jupiter-core" — the conversation's projects. */
+/** The page's title: "Launchpad for lumen-app, lumen-core" — the conversation's projects. */
 export function setupTitle(places: readonly Pick<RunPlace, 'name'>[], fallback = ''): string {
   const names: string[] = []
   for (const place of places) {
@@ -813,7 +813,7 @@ function matches(draft: RunSetupDraft, step: DraftStep, suggestion: RunSuggestio
 
 export interface OfferedSuggestion {
   suggestion: RunSuggestion
-  /** "jupiter-app · you ran it 6 times" */
+  /** "lumen-app · you ran it 6 times" */
   meta: string
   /** 1-based position of the step it was added as in this draft, or null. */
   addedAs: number | null

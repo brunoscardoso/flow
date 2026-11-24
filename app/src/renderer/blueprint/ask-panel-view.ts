@@ -1080,7 +1080,7 @@ export class AskPanelView {
     return this.#projectLook(slug).name
   }
 
-  /** "jupiter-core ›", in the project's colour — before a feature, part or source. */
+  /** "lumen-core ›", in the project's colour — before a feature, part or source. */
   #projectPrefix(slug: string, withArrow = true): HTMLElement {
     const look = this.#projectLook(slug)
     const prefix = el('span', 'fb-ask-proj', withArrow ? `${look.name} ›` : look.name)
@@ -1612,7 +1612,7 @@ export class AskPanelView {
     return list
   }
 
-  /** One end of a suggested connection: "jupiter-app › Connectors", in its project's colour. */
+  /** One end of a suggested connection: "lumen-app › Connectors", in its project's colour. */
   #connectionEnd(end: AskConnectionEnd): HTMLElement {
     const name = end.featureId === null ? null : this.#host.featureName(end.project, end.featureId)
     const label = name ?? (end.featureId !== null ? labelOfId(end.featureId) : end.ref)

@@ -27,7 +27,7 @@ function manualTimers(): TerminalProblemsTimers & { run(ms: number): void; pendi
 }
 
 function info(terminalId: string, extra: Partial<TerminalInfo> = {}): TerminalInfo {
-  return { terminalId, kind: 'user', title: 'zsh', cwd: '/work/jupiter-core', projectRoot: '/work/jupiter-core', ...extra }
+  return { terminalId, kind: 'user', title: 'zsh', cwd: '/work/lumen-core', projectRoot: '/work/lumen-core', ...extra }
 }
 
 function setup() {
@@ -76,7 +76,7 @@ describe('TerminalProblemsService', () => {
     const { service, timers, advance } = setup()
     service.track(info('plain', { title: 'zsh' }))
     service.track(
-      info('step', { title: 'core-dev', run: { scopeKey: 'k', stepId: 's', projectRoot: '/work/jupiter-core' } }),
+      info('step', { title: 'core-dev', run: { scopeKey: 'k', stepId: 's', projectRoot: '/work/lumen-core' } }),
     )
     service.data('plain', 'Error: older\n')
     timers.run(BATCH_MS)
@@ -87,8 +87,8 @@ describe('TerminalProblemsService', () => {
     expect(snapshot.counts).toEqual({ errors: 2, warnings: 1 })
     expect(snapshot.withheld).toBe(0)
     expect(snapshot.groups.map((group) => [group.terminalId, group.label, group.projectName, group.launchpad])).toEqual([
-      ['step', 'core-dev', 'jupiter-core', true],
-      ['plain', 'zsh', 'jupiter-core', false],
+      ['step', 'core-dev', 'lumen-core', true],
+      ['plain', 'zsh', 'lumen-core', false],
     ])
     expect(snapshot.groups[0]!.problems.map((problem) => problem.message)).toEqual(['Error: newest', 'newer'])
   })

@@ -114,7 +114,7 @@ describe('the panel rendered from that domain', () => {
 // changed on the source control." Nothing had been lost; the only surface that
 // shows changes had stopped listing the tree they were in.
 
-const ARGO = '/repos/argo'
+const KEEL = '/repos/keel'
 
 describe('displacedProjectRoot', () => {
   it('is null for every state that existed before thread worktrees', () => {
@@ -151,10 +151,10 @@ describe('panelVisibleRoots', () => {
     // that panel and rejected it ("lets show just one of each of them"). The
     // cost is stated where the rule lives: while a thread has a checkout, the
     // project tree's own uncommitted work is not on this panel.
-    const scope = [entry(CHECKOUT, { primary: true }), entry(ARGO), entry(OTHER)]
-    expect(panelVisibleRoots(scope, [PROJECT, ARGO, OTHER, CHECKOUT], PROJECT)).toEqual([
+    const scope = [entry(CHECKOUT, { primary: true }), entry(KEEL), entry(OTHER)]
+    expect(panelVisibleRoots(scope, [PROJECT, KEEL, OTHER, CHECKOUT], PROJECT)).toEqual([
       CHECKOUT,
-      ARGO,
+      KEEL,
       OTHER,
     ])
   })

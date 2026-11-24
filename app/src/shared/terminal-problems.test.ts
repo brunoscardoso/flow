@@ -67,12 +67,12 @@ describe('detectProblem — structured log lines', () => {
   test('Python loguru: level, message after the location, module as meta', () => {
     expect(
       judge(
-        '2026-11-18 20:56:06.890 | WARNING  | jupiter_core.harness.runtime.stop_signal:_resubscribe:588 - Stop signal resubscribe failed: Error 61 connecting to localhost:6379. Connection refused.',
+        '2026-11-18 20:56:06.890 | WARNING  | lumen_core.harness.runtime.stop_signal:_resubscribe:588 - Stop signal resubscribe failed: Error 61 connecting to localhost:6379. Connection refused.',
       ),
     ).toEqual({
       severity: 'warning',
       message: 'Stop signal resubscribe failed: Error 61 connecting to localhost:6379. Connection refused.',
-      meta: 'jupiter_core.harness.runtime.stop_signal',
+      meta: 'lumen_core.harness.runtime.stop_signal',
     })
     expect(judge('2026-11-18 20:56:07.001 | ERROR    | app.db:connect:12 - could not connect')).toMatchObject({
       severity: 'error',
@@ -88,8 +88,8 @@ describe('detectProblem — structured log lines', () => {
 
   test('Rust tracing: level after the timestamp, target as meta', () => {
     expect(
-      judge('2026-11-18T23:55:52.313450Z  WARN temporalio_sdk_core::worker: Namespace celeste is not found.'),
-    ).toEqual({ severity: 'warning', message: 'Namespace celeste is not found.', meta: 'temporalio_sdk_core::worker' })
+      judge('2026-11-18T23:55:52.313450Z  WARN temporalio_sdk_core::worker: Namespace quill is not found.'),
+    ).toEqual({ severity: 'warning', message: 'Namespace quill is not found.', meta: 'temporalio_sdk_core::worker' })
     const coloured = `${ESC}[2m2026-11-18T23:55:52.313450Z${ESC}[0m ${ESC}[31mERROR${ESC}[0m ${ESC}[2mtemporalio_sdk_core::worker${ESC}[0m${ESC}[2m:${ESC}[0m Worker failed`
     expect(judge(coloured)).toEqual({ severity: 'error', message: 'Worker failed', meta: 'temporalio_sdk_core::worker' })
   })

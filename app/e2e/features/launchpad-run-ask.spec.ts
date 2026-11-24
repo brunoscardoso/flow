@@ -22,7 +22,7 @@ test('a script that asks first is shown with line numbers and colour', async ({ 
   await window.locator('.fl-run-segment-btn', { hasText: 'Script' }).first().click()
   await window.locator('.fl-run-editor-input').first().fill([
     '#!/usr/bin/env bash', 'set -euo pipefail', '', '# One project name for every checkout and worktree.',
-    'export COMPOSE_PROJECT_NAME="jupiter-core"', '', 'docker compose down -v', 'docker compose up --build -d',
+    'export COMPOSE_PROJECT_NAME="lumen-core"', '', 'docker compose down -v', 'docker compose up --build -d',
     'until docker compose exec -T postgres pg_isready -U $USER; do', '  sleep 1', 'done', 'uv run alembic upgrade head',
   ].join('\n'))
   const box = card.locator('input[type=checkbox]').first()

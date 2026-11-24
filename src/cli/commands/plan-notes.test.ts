@@ -239,7 +239,7 @@ describe('readPlanNotes — notes with a Workspace project prefix', () => {
     for (const dir of extra.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
-  /** Workspace `team`: argo (this repo), web (checked out here), gone (not on this computer). */
+  /** Workspace `team`: keel (this repo), web (checked out here), gone (not on this computer). */
   function seedWorkspace(planText: string): void {
     makeRepo(planText);
     const home = mkdtempSync(join(tmpdir(), 'plan-notes-home-'));
@@ -251,9 +251,9 @@ describe('readPlanNotes — notes with a Workspace project prefix', () => {
     mkdirSync(join(home, 'workspaces', 'team'), { recursive: true });
     writeFileSync(
       join(home, 'workspaces', 'team', 'workspace.json'),
-      JSON.stringify({ name: 'Team', slug: 'team', projects: [project('argo'), project('web'), project('gone')] }),
+      JSON.stringify({ name: 'Team', slug: 'team', projects: [project('keel'), project('web'), project('gone')] }),
     );
-    writeFileSync(join(home, 'projects.local.json'), JSON.stringify({ projects: { 'local:argo': repo, 'local:web': web } }));
+    writeFileSync(join(home, 'projects.local.json'), JSON.stringify({ projects: { 'local:keel': repo, 'local:web': web } }));
     process.env.PLAN_FLOW_HOME = home;
   }
 
@@ -265,7 +265,7 @@ describe('readPlanNotes — notes with a Workspace project prefix', () => {
 
 #### Change notes
 
-- note: 1 · change · argo/file:src/a.ts:run
+- note: 1 · change · keel/file:src/a.ts:run
     where: \`not in run at all\`
     what: x
     why: y

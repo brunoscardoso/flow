@@ -18,7 +18,7 @@ import {
 
 const APP = '/tmp/ws/orbit-app'
 const CORE = '/tmp/ws/orbit-core'
-const ARGO = '/tmp/ws/orbit-argo'
+const KEEL = '/tmp/ws/orbit-keel'
 
 function memoryRecord(): TaskProjectsRecord & { extra: Map<string, string[]>; chosen: Set<string> } {
   const extra = new Map<string, string[]>()
@@ -80,11 +80,11 @@ describe('chosen task projects', () => {
   it('Change with the same first project re-sets only the context projects', () => {
     const { task } = addTicket([CORE])
     const record = memoryRecord()
-    const result = chooseTaskProjects({ taskStore, threadStore, projects: record }, { taskId: task.id, roots: [APP, ARGO] })
+    const result = chooseTaskProjects({ taskStore, threadStore, projects: record }, { taskId: task.id, roots: [APP, KEEL] })
     expect(result.task.projectRoot).toBe(APP)
     expect(result.task.threadId).toBe(task.threadId)
-    expect(threadStore.getThreadRoots(task.threadId!)).toEqual([ARGO])
-    expect(record.extra.get(task.id)).toEqual([ARGO])
+    expect(threadStore.getThreadRoots(task.threadId!)).toEqual([KEEL])
+    expect(record.extra.get(task.id)).toEqual([KEEL])
     expect(record.chosen.has(task.id)).toBe(true)
   })
 

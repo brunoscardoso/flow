@@ -304,7 +304,7 @@ describe('Provisioner.maybeProvision', () => {
     expect(stamps[0]?.version).toBe('1.0.0')
   })
 
-  it('sets up in full a stamped root that has no install to refresh (live: orbit-argo-applications, "Could not update plan-flow")', async () => {
+  it('sets up in full a stamped root that has no install to refresh (live: orbit-keel-applications, "Could not update plan-flow")', async () => {
     const stamps: Array<{ rootId: string; version: string; at: string }> = []
     const notifications: FlowNotification[] = []
     const { spawnFn, calls } = fakeSpawn((_args, child) => setImmediate(() => child.emit('close', 0)))

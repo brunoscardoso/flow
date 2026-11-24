@@ -261,27 +261,27 @@ describe('basic discovery, coordinator + orchestrator wired as in the app', () =
 
   it('(d) LIVE 2026-10-06: a sweep that starts after learning paused itself ends as a failure instead of waiting forever', async () => {
     // core fails every module → three in a row pause the learner → core's
-    // sweep fails → the coordinator starts argo's sweep into a paused queue.
+    // sweep fails → the coordinator starts keel's sweep into a paused queue.
     const rig = makeRig({
-      projects: { core: ['c1', 'c2', 'c3', 'c4'], argo: ['g1', 'g2'] },
+      projects: { core: ['c1', 'c2', 'c3', 'c4'], keel: ['g1', 'g2'] },
       pass: (project) => (project === 'core' ? 'fail' : 'ok'),
     })
     const core = rig.roots.core as string
-    const argo = rig.roots.argo as string
-    await rig.discovery.reconcile([core, argo])
+    const keel = rig.roots.keel as string
+    await rig.discovery.reconcile([core, keel])
     await expect(settledWithin(rig.discovery.whenSettled(core))).resolves.toMatchObject({ ok: false })
     expect(rig.orchestrator.isPaused()).toBe(true)
-    // The bug: argo's sweep waited on a drain nobody would restart, "Learning…" for good.
-    const argoAnswer = await settledWithin(rig.discovery.whenSettled(argo))
+    // The bug: keel's sweep waited on a drain nobody would restart, "Learning…" for good.
+    const argoAnswer = await settledWithin(rig.discovery.whenSettled(keel))
     expect(argoAnswer).toMatchObject({ ok: false })
-    expect(rig.discovery.status(argo)).toBe('failed')
+    expect(rig.discovery.status(keel)).toBe('failed')
     // A plain sentence, no path or setting.
-    expect(rig.discovery.failure(argo)).toMatch(/paused/i)
-    expect(rig.discovery.failure(argo)).not.toMatch(/\//)
-    // Try again (a person) lifts the pause and argo is learned.
-    await rig.discovery.require([argo], { priority: true, retry: true })
-    await expect(settledWithin(rig.discovery.whenSettled(argo))).resolves.toEqual({ ok: true })
-    expect(hasRecordFile(argo)).toBe(true)
+    expect(rig.discovery.failure(keel)).toMatch(/paused/i)
+    expect(rig.discovery.failure(keel)).not.toMatch(/\//)
+    // Try again (a person) lifts the pause and keel is learned.
+    await rig.discovery.require([keel], { priority: true, retry: true })
+    await expect(settledWithin(rig.discovery.whenSettled(keel))).resolves.toEqual({ ok: true })
+    expect(hasRecordFile(keel)).toBe(true)
     rig.dispose()
   })
 
@@ -319,8 +319,8 @@ describe('basic discovery, coordinator + orchestrator wired as in the app', () =
 
   it('(f) self-heal: a project that already has learned modules counts as discovered and gets its record lazily', async () => {
     const learned = (module: string): BlueprintLearningEntry => ({ module, status: 'learned', notedAt: '2026-10-06T14:00:00.000Z' })
-    const rig = makeRig({ projects: { argo: ['g1', 'g2'] }, learning: { argo: [learned('g1'), learned('g2')] } })
-    const root = rig.roots.argo as string
+    const rig = makeRig({ projects: { keel: ['g1', 'g2'] }, learning: { keel: [learned('g1'), learned('g2')] } })
+    const root = rig.roots.keel as string
     await rig.discovery.reconcile([root])
     expect(rig.discovery.status(root)).toBe('done')
     expect(rig.passes).toEqual([])
@@ -335,8 +335,8 @@ describe('basic discovery, coordinator + orchestrator wired as in the app', () =
   })
 
   it('(f2) a sweep whose remaining modules are all learned settles at once', async () => {
-    const rig = makeRig({ projects: { argo: ['g1', 'g2'] } })
-    const root = rig.roots.argo as string
+    const rig = makeRig({ projects: { keel: ['g1', 'g2'] } })
+    const root = rig.roots.keel as string
     // Learned between the coordinator's check and the run (e.g. by a resumed queue).
     writeFileSync(
       join(structureOf(root), LEARNING_STATE_FILE),

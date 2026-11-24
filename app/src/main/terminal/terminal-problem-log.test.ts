@@ -8,7 +8,7 @@ function clock(start = 1_000): { now: () => number; tick: (ms: number) => void }
 }
 
 const warning = (second: number): string =>
-  `2026-11-18 20:56:0${second}.890 | WARNING  | jupiter_core.harness.runtime.stop_signal:_resubscribe:588 - Stop signal resubscribe failed: Error 61 connecting to localhost:6379. Connection refused.\r\n`
+  `2026-11-18 20:56:0${second}.890 | WARNING  | lumen_core.harness.runtime.stop_signal:_resubscribe:588 - Stop signal resubscribe failed: Error 61 connecting to localhost:6379. Connection refused.\r\n`
 
 const TRACEBACK = [
   'Traceback (most recent call last):',
@@ -37,7 +37,7 @@ describe('TerminalProblemLog', () => {
       count: 5,
       firstSeen: 1_000,
       lastSeen: 5_000,
-      meta: 'jupiter_core.harness.runtime.stop_signal',
+      meta: 'lumen_core.harness.runtime.stop_signal',
       message: 'Stop signal resubscribe failed: Error 61 connecting to localhost:6379. Connection refused.',
     })
     expect(log.counts()).toEqual({ errors: 0, warnings: 1 })
