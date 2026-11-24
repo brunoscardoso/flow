@@ -59,7 +59,7 @@ describe('the row', () => {
   })
 
   test('the group heading names the project and says Launchpad for a step', () => {
-    expect(groupHeading(group())).toEqual({ label: 'core-dev', detail: 'lumen-core · Launchpad' })
+    expect(groupHeading(group())).toEqual({ label: 'core-dev', detail: 'lumen-core · run step' })
     expect(groupHeading(group({ label: 'zsh', launchpad: false }))).toEqual({ label: 'zsh', detail: 'lumen-core' })
   })
 
@@ -145,7 +145,7 @@ describe('the counters', () => {
 describe('Fix with agent', () => {
   test('names the terminal, the message and the context, ending with the problem line', () => {
     const text = terminalFixMessage(group(), problem({ meta: 'lumen_core.db' }))
-    expect(text).toContain('Fix this error. It was printed by the Launchpad step "core-dev" in lumen-core, seen 14 times, 20:55:14 to 20:56:06.')
+    expect(text).toContain('Fix this error. It was printed by the run step "core-dev" in lumen-core, seen 14 times, 20:55:14 to 20:56:06.')
     expect(text).toContain('Error: ConnectionRefusedError: [Errno 61] Connection refused')
     expect(text).toContain('From: lumen_core.db')
     expect(text).toContain('        await waiter\n    ConnectionRefusedError: [Errno 61] Connection refused')

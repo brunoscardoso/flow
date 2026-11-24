@@ -107,7 +107,7 @@ describe('the group tab’s face', () => {
     expect(face.label).toBe('3 of 4 running')
     expect(face).not.toHaveProperty('count')
     expect(face.tones).toEqual(['ok', 'ok', 'ok', 'bad'])
-    expect(face.tooltip).toBe('Launchpad: 3 running, 1 not running as expected')
+    expect(face.tooltip).toBe('Run steps: 3 running, 1 not running as expected')
   })
 
   it('labels: all running, some running, starting, stopped', () => {
@@ -216,7 +216,7 @@ describe('the caret menus', () => {
   })
 
   it('a step tab in separate mode offers the way back', () => {
-    expect(separateStepMenu()).toEqual([{ kind: 'group', label: 'Group Launchpad tabs' }])
+    expect(separateStepMenu()).toEqual([{ kind: 'group', label: 'Group run step tabs' }])
   })
 })
 

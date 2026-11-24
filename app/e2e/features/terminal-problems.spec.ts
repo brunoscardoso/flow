@@ -83,7 +83,7 @@ test('terminal errors and warnings: counters, rows with counts, context, Copy an
   const group = window.locator('.fl-problems-tgroup')
   await expect(group).toHaveCount(1)
   await expect(group.locator('.fl-problems-thead b')).toHaveText('core-dev')
-  await expect(group.locator('.fl-problems-thead span')).toHaveText(/ · Launchpad$/)
+  await expect(group.locator('.fl-problems-thead span')).toHaveText(/ · run step$/)
   const warningRow = group.locator('.fl-problems-trow[data-severity="warning"]')
   const errorRow = group.locator('.fl-problems-trow[data-severity="error"]')
   await expect(warningRow).toHaveCount(1)

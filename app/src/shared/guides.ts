@@ -342,8 +342,8 @@ export const GUIDE_TOURS: readonly GuideTour[] = [
   },
   {
     id: 'launchpad-menu',
-    name: 'The Launchpad menu',
-    summary: 'One-time actions, running everything, and changing the setup',
+    name: 'The Run menu',
+    summary: 'New terminals, one-time actions, running everything, and changing the setup',
     trigger: ['.fl-run-menu'],
     keepFocus: true,
     avoid: '.fl-run-menu',
@@ -372,20 +372,20 @@ export const GUIDE_TOURS: readonly GuideTour[] = [
   },
   {
     id: 'launchpad',
-    name: 'Launchpad',
-    summary: 'Start your dev servers and scripts together',
-    trigger: ['.fl-run-pill', '.fl-run-setup-entry'],
+    name: 'Run',
+    summary: 'Open terminals, and start your dev servers and scripts together',
+    trigger: ['.fl-run-pill'],
     steps: [
       {
-        anchor: ['.fl-run-pill', '.fl-run-setup-entry'],
-        title: 'Launchpad',
-        body: 'Launchpad starts your dev servers and scripts together, each in its own terminal tab. Set it up once, then start everything in one click. Press it to open the menu: run an action, stop everything, or change the setup. The (i) in the menu explains each part.',
+        anchor: ['.fl-run-pill'],
+        title: 'Run',
+        body: 'Run opens new terminals and starts your dev servers and scripts together, each in its own terminal tab. Set the steps up once, then start everything in one click. Press it to open the menu: open a terminal, run an action, stop everything, or change the setup. With several projects, the menu lists the three you use most; More projects shows them all. The (i) in the menu explains each part.',
       },
     ],
   },
   {
     id: 'launchpad-setup',
-    name: 'Setting up Launchpad',
+    name: 'Setting up run steps',
     summary: 'Running steps, one-time actions, and safe practice steps',
     trigger: ['.fl-run-setup'],
     steps: [
@@ -402,7 +402,7 @@ export const GUIDE_TOURS: readonly GuideTour[] = [
       {
         anchor: ['.fl-run-setup .fl-run-section + .fl-run-section'],
         title: 'Runs once',
-        body: 'Actions you run by hand, such as a database migration. They never start with Run: press them from the Launchpad menu. Tick "Ask before running" for anything that changes data.',
+        body: 'Actions you run by hand, such as a database migration. They never start with Run: press them from the Run menu. Tick "Ask before running" for anything that changes data.',
       },
       {
         anchor: ['.fl-run-setup .fl-run-practice'],

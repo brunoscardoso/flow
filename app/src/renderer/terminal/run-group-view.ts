@@ -1,13 +1,16 @@
 /**
- * THE LAUNCHPAD — the pill at the start of the terminal tab bar ("Launchpad ▾",
- * with Reload all and Stop all beside it once running steps have started), or
- * a dashed "Set up Launchpad" before a setup exists, which opens the setup
- * page straight away with one empty step (the page carries the suggestions
- * and "Ask the agent to set it up").
+ * THE RUN MENU — "Run ▾" at the right of the terminal header (it was the
+ * Launchpad, and the header's + sat beside it; user decision 2026-11-24 folded
+ * the + in and dropped the name). It is always there, because it is the
+ * header's only way to open a terminal.
  *
- * "Launchpad ▾" opens a menu: the conversation's one-time actions grouped by
- * project (each runs once, in its own tab — after an ask when it asks first),
- * then "Run all running steps" and "Edit Launchpad".
+ * The menu, top to bottom: New terminal (one row per project, at most three,
+ * then "More projects", which swaps the menu for every project with a filter
+ * box; with one project just "New terminal"), "Split beside <project>", then
+ * the conversation's one-time actions grouped by project (each runs once, in
+ * its own tab — after an ask when it asks first), Run all, Reload all, Stop
+ * all and "Edit run steps". Before any step exists, "Set up run steps" stands
+ * where the one-time actions go and opens the setup page with one empty step.
  *
  * The scope is the conversation on screen (the terminal panel's owner scope):
  * its project and its thread. Main owns every Run (allowed-pattern #14) — this
@@ -30,11 +33,11 @@ import {
   type RunView,
 } from '../../shared/run-setup'
 import { markModalOverlay } from '../modal-overlay'
+import { ensureAccentProperty } from '../project-accent'
 import { baseName } from '../project-label'
 import {
   askAgentPrompt,
   launchpadMenu,
-  launchpadMenuEntries,
   moveMenuFocus,
   onceAsk,
   pendingTabAction,
@@ -44,6 +47,13 @@ import {
   type RunDotTone,
 } from './run-group-model'
 import { scriptProposals } from './script-proposals'
+import {
+  filterRunMenuProjects,
+  RUN_MENU_TERMINAL_STRINGS,
+  type RunMenuProject,
+  type RunMenuSplit,
+  type RunMenuTerminals,
+} from './run-menu-terminals'
 import { RunSetupPanel } from './run-setup-panel'
 
 export interface RunGroupDeps {
@@ -56,7 +66,16 @@ export interface RunGroupDeps {
   onChange(): void
   /** Show a terminal's tab (now, or as soon as it arrives). */
   focusTerminal(terminalId: string): void
+  /** The menu's New terminal section, as the terminal panel sees it now. */
+  terminals(): RunMenuTerminals
+  /** Open a terminal: in this project, or (null) wherever a new one goes — asking when it must. */
+  openTerminal(rootPath: string | null): void
+  /** Split the focused terminal, in its own project. */
+  splitTerminal(): void
 }
+
+/** The keys that open a new terminal straight away, shown beside the section's heading. */
+const NEW_TERMINAL_SHORTCUT = '⌘⇧`'
 
 /** The colour token for each dot tone — Flow's existing status colours. */
 export const RUN_TONE_COLOR: Record<RunDotTone, string> = {
@@ -94,7 +113,6 @@ export class RunGroupView {
     this.#deps = deps
     this.element = document.createElement('div')
     this.element.className = 'fl-run-group'
-    this.element.hidden = true
     this.#panel = new RunSetupPanel({
       host: deps.dock,
       save: (change) => {
@@ -117,6 +135,8 @@ export class RunGroupView {
     deps.api.run?.onScriptProposal?.((proposal) => {
       if (!this.#panel.receiveProposal(proposal)) scriptProposals.keep(proposal)
     })
+    // Drawn at once: it is how a terminal opens, before any run steps are read.
+    this.#renderPill()
   }
 
   /** The group's state, for the tab strip; null when there is no Run here. */
@@ -401,121 +421,279 @@ export class RunGroupView {
       this.#closeMenu()
       return
     }
-    const menu = launchpadMenu(this.#view)
-    const entries = launchpadMenuEntries(menu)
     const element = document.createElement('div')
     element.className = 'fl-run-menu'
     element.setAttribute('role', 'menu')
     element.setAttribute('aria-label', RUN_STRINGS.launchpad)
-    const buttons: HTMLButtonElement[] = []
-    const activate = (entry: LaunchpadMenuEntry): void => {
-      close()
-      if (entry.kind === 'once') this.#pressOnce(entry.key)
-      else if (entry.kind === 'run-all') this.#act((api, scope) => api.start({ scope }))
-      else if (entry.kind === 'reload-all') this.#act((api, scope) => api.reload({ scope }))
-      else if (entry.kind === 'stop-all') this.#act((api, scope) => api.stop({ scope }))
-      else this.#openSetup({ addOnce: entry.kind === 'add' })
-    }
-    const row = (entry: LaunchpadMenuEntry, className: string, disabled = false): HTMLButtonElement => {
+    // The focusable rows of whichever face is drawn — rebuilt with it.
+    let buttons: HTMLElement[] = []
+    let focus = -1
+    let filter: HTMLInputElement | null = null
+
+    const row = (kind: string, className: string, onPick: (() => void) | null, disabled = false): HTMLButtonElement => {
       const node = document.createElement('button')
       node.type = 'button'
       node.className = className
       node.setAttribute('role', 'menuitem')
       node.tabIndex = -1
-      node.disabled = disabled
       // What the row does, for anything that has to find it (the feature guide).
-      node.dataset['menuEntry'] = entry.kind
-      if (!disabled) {
+      node.dataset['menuEntry'] = kind
+      if (disabled || onPick === null) {
+        // aria-disabled, not disabled: a disabled button shows no tooltip, and
+        // the reason is the point of keeping the row.
+        node.setAttribute('aria-disabled', 'true')
+        node.classList.add('disabled')
+      } else {
         node.addEventListener('click', (event) => {
           event.stopPropagation()
-          activate(entry)
+          onPick()
         })
         buttons.push(node)
       }
       return node
     }
-
-    const header = document.createElement('div')
-    header.className = 'fl-run-menu-head'
-    header.append(document.createTextNode(RUN_STRINGS.menuOnce), guideInfoButton('launchpad-menu', 'the Launchpad menu'))
-    element.appendChild(header)
-    if (menu.empty) {
-      const none = document.createElement('div')
-      none.className = 'fl-run-menu-empty'
-      none.textContent = RUN_STRINGS.noOnce
-      element.appendChild(none)
-      const add = row({ kind: 'add' }, 'fl-run-menu-item small')
-      add.append(icon('plus', '12'), document.createTextNode(RUN_STRINGS.addOnce))
-      element.appendChild(add)
+    const heading = (text: string, extra?: HTMLElement): HTMLElement => {
+      const head = document.createElement('div')
+      head.className = 'fl-run-menu-head'
+      head.append(document.createTextNode(text))
+      if (extra !== undefined) head.append(extra)
+      return head
     }
-    for (const group of menu.groups) {
-      const label = document.createElement('div')
-      label.className = 'fl-run-menu-group'
-      label.textContent = group.projectName
-      element.appendChild(label)
-      for (const item of group.items) {
-        const node = row({ kind: 'once', key: item.key }, 'fl-run-menu-item once', item.disabled)
-        node.title = item.title
-        node.classList.toggle('running', item.running)
-        const lead = icon(item.running ? 'spinner' : 'play', '12')
-        if (item.running) lead.setAttribute('spin', '')
-        const text = document.createElement('span')
-        text.className = 'fl-run-menu-text'
-        const nameLine = document.createElement('span')
-        nameLine.className = 'fl-run-menu-name'
-        nameLine.textContent = item.name
-        if (item.asksFirst) {
-          const tag = document.createElement('span')
-          tag.className = 'fl-run-menu-tag'
-          tag.textContent = RUN_STRINGS.asksFirst
-          nameLine.appendChild(tag)
-        }
-        // The small text under its name: "command", or "script · 12 lines".
-        const command = document.createElement('span')
-        command.className = 'fl-run-menu-detail'
-        command.textContent = item.detail
-        text.append(nameLine, command)
-        node.append(lead, text)
-        element.appendChild(node)
+    const projectRow = (project: RunMenuProject, conversationRoot: string | null): HTMLButtonElement => {
+      const node = row('terminal', 'fl-run-menu-item small project', () => {
+        close()
+        this.#deps.openTerminal(project.rootPath)
+      })
+      node.title = project.rootPath
+      const dot = document.createElement('span')
+      dot.className = 'fl-run-menu-dot'
+      dot.style.background = ensureAccentProperty(project.rootPath)
+      const name = document.createElement('span')
+      name.className = 'fl-run-menu-grow'
+      name.textContent = project.name
+      node.append(dot, name)
+      if (project.rootPath === conversationRoot) {
+        const note = document.createElement('span')
+        note.className = 'fl-run-menu-note'
+        note.textContent = RUN_MENU_TERMINAL_STRINGS.thisConversation
+        node.append(note)
       }
+      return node
     }
-    const divider = document.createElement('div')
-    divider.className = 'fl-run-menu-divider'
-    element.appendChild(divider)
-    if (menu.runAll.shown) {
-      const runAll = row({ kind: 'run-all' }, 'fl-run-menu-item small', menu.runAll.disabled)
-      runAll.title = menu.runAll.title
-      runAll.append(icon('play', '12'), document.createTextNode(RUN_STRINGS.runAll))
-      element.appendChild(runAll)
-    }
-    if (menu.reloadAll) {
-      const reload = row({ kind: 'reload-all' }, 'fl-run-menu-item small')
-      reload.title = RUN_STRINGS.reloadAllTitle
-      reload.append(icon('refresh', '12'), document.createTextNode(RUN_STRINGS.reloadAll))
-      element.appendChild(reload)
-    }
-    if (menu.stopAll) {
-      const stop = row({ kind: 'stop-all' }, 'fl-run-menu-item small')
-      stop.title = RUN_STRINGS.stopAllTitle
-      stop.append(icon('square', '12'), document.createTextNode(RUN_STRINGS.stopAll))
-      element.appendChild(stop)
-    }
-    const edit = row({ kind: 'edit' }, 'fl-run-menu-item small')
-    edit.append(icon('settings', '12'), document.createTextNode(RUN_STRINGS.editLaunchpad))
-    element.appendChild(edit)
-
-    // Fixed under the pill (above it when there is no room below), so a short
-    // terminal panel never clips it.
-    const anchorBox = anchor.getBoundingClientRect()
-    element.style.left = `${Math.max(4, Math.min(anchorBox.left, window.innerWidth - 284))}px`
-    element.style.top = `${anchorBox.bottom + 4}px`
-    document.body.appendChild(element)
-    const menuBox = element.getBoundingClientRect()
-    if (menuBox.bottom > window.innerHeight - 4 && anchorBox.top - menuBox.height - 4 >= 4) {
-      element.style.top = `${anchorBox.top - menuBox.height - 4}px`
+    const splitRowNode = (split: RunMenuSplit): HTMLButtonElement => {
+      const node = row(
+        'split-terminal',
+        'fl-run-menu-item small',
+        () => {
+          close()
+          this.#deps.splitTerminal()
+        },
+        split.disabledReason !== null,
+      )
+      if (split.disabledReason !== null) node.title = split.disabledReason
+      node.append(icon('split-horizontal', '12'), document.createTextNode(split.label))
+      return node
     }
 
-    let focus = -1
+    const drawMain = (): void => {
+      element.textContent = ''
+      buttons = []
+      filter = null
+      const terminals = this.#deps.terminals()
+      const shortcut = document.createElement('span')
+      shortcut.className = 'fl-run-menu-shortcut'
+      shortcut.textContent = NEW_TERMINAL_SHORTCUT
+      element.appendChild(heading(RUN_MENU_TERMINAL_STRINGS.heading, shortcut))
+      if (terminals.mode === 'single') {
+        const add = row('new-terminal', 'fl-run-menu-item small', () => {
+          close()
+          this.#deps.openTerminal(null)
+        })
+        add.append(icon('plus', '12'), document.createTextNode(RUN_MENU_TERMINAL_STRINGS.newTerminal))
+        element.appendChild(add)
+      } else {
+        for (const project of terminals.shown) element.appendChild(projectRow(project, terminals.conversationRoot))
+        if (terminals.more > 0) {
+          const more = row('more-projects', 'fl-run-menu-item small more', () => drawAll(''))
+          more.setAttribute('aria-haspopup', 'menu')
+          const label = document.createElement('span')
+          label.className = 'fl-run-menu-grow'
+          label.textContent = RUN_MENU_TERMINAL_STRINGS.more
+          const count = document.createElement('span')
+          count.className = 'fl-run-menu-note'
+          count.textContent = `${terminals.more} more`
+          more.append(label, count, icon('chevron-right', '10'))
+          element.appendChild(more)
+        }
+      }
+      if (terminals.split !== null) element.appendChild(splitRowNode(terminals.split))
+      element.appendChild(divider())
+      drawRunSteps()
+    }
+
+    const divider = (): HTMLElement => {
+      const node = document.createElement('div')
+      node.className = 'fl-run-menu-divider'
+      return node
+    }
+
+    const drawRunSteps = (): void => {
+      // No Run for this panel (no project, or not read yet): terminals only.
+      if (this.#deps.api.run === undefined || this.#view === null) return
+      const face = pillFace(this.#view)
+      if (face.mode === 'set-up') {
+        const setUp = row('set-up', 'fl-run-menu-item small', () => {
+          close()
+          this.#toggleSetup()
+        })
+        setUp.title = RUN_STRINGS.setUpTitle
+        setUp.append(icon('settings', '12'), document.createTextNode(RUN_STRINGS.setUp))
+        element.appendChild(setUp)
+        return
+      }
+      const menu = launchpadMenu(this.#view)
+      const act = (entry: LaunchpadMenuEntry) => (): void => {
+        close()
+        if (entry.kind === 'once') this.#pressOnce(entry.key)
+        else if (entry.kind === 'run-all') this.#act((api, scope) => api.start({ scope }))
+        else if (entry.kind === 'reload-all') this.#act((api, scope) => api.reload({ scope }))
+        else if (entry.kind === 'stop-all') this.#act((api, scope) => api.stop({ scope }))
+        else this.#openSetup({ addOnce: entry.kind === 'add' })
+      }
+      element.appendChild(heading(RUN_STRINGS.menuOnce, guideInfoButton('launchpad-menu', 'the Run menu')))
+      if (menu.empty) {
+        const none = document.createElement('div')
+        none.className = 'fl-run-menu-empty'
+        none.textContent = RUN_STRINGS.noOnce
+        element.appendChild(none)
+        const add = row('add', 'fl-run-menu-item small', act({ kind: 'add' }))
+        add.append(icon('plus', '12'), document.createTextNode(RUN_STRINGS.addOnce))
+        element.appendChild(add)
+      }
+      for (const group of menu.groups) {
+        const label = document.createElement('div')
+        label.className = 'fl-run-menu-group'
+        label.textContent = group.projectName
+        element.appendChild(label)
+        for (const item of group.items) {
+          const node = row('once', 'fl-run-menu-item once', act({ kind: 'once', key: item.key }), item.disabled)
+          node.title = item.title
+          node.classList.toggle('running', item.running)
+          const lead = icon(item.running ? 'spinner' : 'play', '12')
+          if (item.running) lead.setAttribute('spin', '')
+          const text = document.createElement('span')
+          text.className = 'fl-run-menu-text'
+          const nameLine = document.createElement('span')
+          nameLine.className = 'fl-run-menu-name'
+          nameLine.textContent = item.name
+          if (item.asksFirst) {
+            const tag = document.createElement('span')
+            tag.className = 'fl-run-menu-tag'
+            tag.textContent = RUN_STRINGS.asksFirst
+            nameLine.appendChild(tag)
+          }
+          // The small text under its name: "command", or "script · 12 lines".
+          const command = document.createElement('span')
+          command.className = 'fl-run-menu-detail'
+          command.textContent = item.detail
+          text.append(nameLine, command)
+          node.append(lead, text)
+          element.appendChild(node)
+        }
+      }
+      element.appendChild(divider())
+      if (menu.runAll.shown) {
+        const runAll = row('run-all', 'fl-run-menu-item small', act({ kind: 'run-all' }), menu.runAll.disabled)
+        runAll.title = menu.runAll.title
+        runAll.append(icon('play', '12'), document.createTextNode(RUN_STRINGS.runAll))
+        element.appendChild(runAll)
+      }
+      if (menu.reloadAll) {
+        const reload = row('reload-all', 'fl-run-menu-item small', act({ kind: 'reload-all' }))
+        reload.title = RUN_STRINGS.reloadAllTitle
+        reload.append(icon('refresh', '12'), document.createTextNode(RUN_STRINGS.reloadAll))
+        element.appendChild(reload)
+      }
+      if (menu.stopAll) {
+        const stop = row('stop-all', 'fl-run-menu-item small', act({ kind: 'stop-all' }))
+        stop.title = RUN_STRINGS.stopAllTitle
+        stop.append(icon('square', '12'), document.createTextNode(RUN_STRINGS.stopAll))
+        element.appendChild(stop)
+      }
+      const edit = row('edit', 'fl-run-menu-item small', act({ kind: 'edit' }))
+      edit.append(icon('settings', '12'), document.createTextNode(RUN_STRINGS.editLaunchpad))
+      element.appendChild(edit)
+    }
+
+    // "More projects": the menu swaps to every project, with a filter box that
+    // already has the keyboard. The three from the short list stay on top.
+    const drawAll = (query: string): void => {
+      const terminals = this.#deps.terminals()
+      if (terminals.mode !== 'projects') {
+        drawMain()
+        return
+      }
+      element.textContent = ''
+      buttons = []
+      const head = document.createElement('div')
+      head.className = 'fl-run-menu-head fl-run-menu-back-head'
+      const back = document.createElement('button')
+      back.type = 'button'
+      back.className = 'fl-run-menu-back'
+      back.title = RUN_MENU_TERMINAL_STRINGS.back
+      back.setAttribute('aria-label', RUN_MENU_TERMINAL_STRINGS.back)
+      back.append(icon('chevron-left', '12'))
+      back.addEventListener('click', (event) => {
+        event.stopPropagation()
+        drawMain()
+        focusAt(0)
+      })
+      head.append(back, document.createTextNode(RUN_MENU_TERMINAL_STRINGS.allHeading))
+      element.appendChild(head)
+      const input = document.createElement('input')
+      input.type = 'text'
+      input.className = 'fl-run-menu-filter'
+      input.placeholder = RUN_MENU_TERMINAL_STRINGS.filter
+      input.setAttribute('aria-label', RUN_MENU_TERMINAL_STRINGS.filter)
+      input.value = query
+      element.appendChild(input)
+      filter = input
+      const list = document.createElement('div')
+      list.className = 'fl-run-menu-list'
+      element.appendChild(list)
+      const fill = (): void => {
+        list.textContent = ''
+        buttons = []
+        const found = filterRunMenuProjects(terminals.all, input.value)
+        let ruled = false
+        for (const project of found) {
+          // A rule between the short list and the rest, when both are there.
+          if (!ruled && !terminals.shown.includes(project) && list.childElementCount > 0) {
+            list.appendChild(divider())
+            ruled = true
+          }
+          list.appendChild(projectRow(project, terminals.conversationRoot))
+        }
+        if (found.length === 0) {
+          const none = document.createElement('div')
+          none.className = 'fl-run-menu-empty'
+          none.textContent = RUN_MENU_TERMINAL_STRINGS.noMatch
+          list.appendChild(none)
+        }
+        focus = -1
+      }
+      input.addEventListener('input', fill)
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault()
+          event.stopPropagation()
+          buttons[0]?.click()
+        }
+      })
+      fill()
+      input.focus()
+    }
+
     const focusAt = (index: number): void => {
       focus = index
       buttons[index]?.focus()
@@ -526,17 +704,32 @@ export class RunGroupView {
       if (event.key === 'Escape') {
         event.preventDefault()
         event.stopPropagation()
+        // From the full list, Escape goes back to the menu; from the menu, it closes.
+        if (filter !== null) {
+          drawMain()
+          focusAt(0)
+          return
+        }
         close()
         liveAnchor()?.focus()
         return
       }
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
+        // Home/End belong to the filter box while it has the keyboard.
+        if (document.activeElement === filter && (event.key === 'Home' || event.key === 'End')) return
         event.preventDefault()
-        focusAt(moveMenuFocus(focus, buttons.length, event.key))
+        const at = buttons.indexOf(document.activeElement as HTMLElement)
+        if (filter !== null && event.key === 'ArrowUp' && at === 0) {
+          filter.focus()
+          focus = -1
+          return
+        }
+        focusAt(moveMenuFocus(at >= 0 ? at : focus, buttons.length, event.key))
         return
       }
       if (event.key === 'Enter' || event.key === ' ') {
-        const at = buttons.indexOf(document.activeElement as HTMLButtonElement)
+        if (document.activeElement === filter) return
+        const at = buttons.indexOf(document.activeElement as HTMLElement)
         if (at >= 0) {
           event.preventDefault()
           buttons[at]!.click()
@@ -559,13 +752,27 @@ export class RunGroupView {
       if (this.#menu?.element === element) this.#menu = null
       liveAnchor()?.closest('.fl-run-pill')?.classList.toggle('open', this.#panel.isOpen)
     }
+
+    drawMain()
+    // Fixed under the pill (above it when there is no room below), so a short
+    // terminal panel never clips it. The pill sits at the header's right end,
+    // so the menu's right edge lines up with the pill's.
+    const anchorBox = anchor.getBoundingClientRect()
+    document.body.appendChild(element)
+    const width = element.getBoundingClientRect().width
+    element.style.left = `${Math.max(4, Math.min(anchorBox.right - width, window.innerWidth - width - 4))}px`
+    element.style.top = `${anchorBox.bottom + 4}px`
+    const menuBox = element.getBoundingClientRect()
+    if (menuBox.bottom > window.innerHeight - 4 && anchorBox.top - menuBox.height - 4 >= 4) {
+      element.style.top = `${anchorBox.top - menuBox.height - 4}px`
+    }
     document.addEventListener('keydown', onKey, true)
     document.addEventListener('mousedown', onOutside, true)
     anchor.setAttribute('aria-expanded', 'true')
     this.#menu = { element, close }
     anchor.closest('.fl-run-pill')?.classList.add('open')
-    // The first one-time action (else the first item) takes the keyboard.
-    if (entries.length > 0) focusAt(0)
+    // The first row (a new terminal) takes the keyboard.
+    if (buttons.length > 0) focusAt(0)
   }
 
   async #loadSuggestions(): Promise<RunSuggestion[]> {
@@ -641,22 +848,12 @@ export class RunGroupView {
 
   #renderPill(): void {
     const root = this.element
-    const face = pillFace(this.#deps.api.run === undefined ? null : this.#view)
+    // ALWAYS SHOWN (user decision 2026-11-24): the pill is the terminal header's
+    // only way to open a terminal, so it stands even before a project has run
+    // steps, or before they are read. What is missing shows up inside the menu.
     root.textContent = ''
-    root.hidden = face.mode === 'hidden'
-    root.classList.toggle('set-up', face.mode === 'set-up')
-    if (face.mode === 'hidden') return
-
-    if (face.mode === 'set-up') {
-      const start = document.createElement('button')
-      start.type = 'button'
-      start.className = 'fl-run-setup-entry'
-      start.title = RUN_STRINGS.setUpTitle
-      start.append(document.createTextNode(RUN_STRINGS.setUp))
-      start.addEventListener('click', () => this.#toggleSetup())
-      root.append(start)
-      return
-    }
+    root.hidden = false
+    root.classList.remove('set-up')
 
     const pill = document.createElement('div')
     pill.className = 'fl-run-pill'
@@ -664,7 +861,7 @@ export class RunGroupView {
     pill.setAttribute('aria-label', RUN_STRINGS.launchpad)
     // Accent only while its menu or its setup is open (user decision 2026-11-15).
     pill.classList.toggle('open', this.#menu !== null || this.#panel.isOpen)
-    // "Launchpad ▾": the menu of one-time actions, Run all and Edit.
+    // "Run ▾": new terminals, the one-time actions, Run all and Edit.
     const open = document.createElement('button')
     open.type = 'button'
     open.className = 'fl-run-pill-run'
@@ -685,7 +882,7 @@ export class RunGroupView {
     })
     pill.appendChild(open)
     // Reload all and Stop all live in the menu (user decision 2026-11-15): the
-    // pill is only the Launchpad name and its chevron.
+    // pill is only its name and its chevron.
     root.append(pill)
   }
 }
@@ -702,17 +899,6 @@ function injectRunStyles(): void {
   style.textContent = `
     .fl-run-group { display: inline-flex; align-items: center; flex: none; gap: var(--fl-space-xs); padding-right: var(--fl-space-xs); }
     .fl-run-group[hidden] { display: none; }
-    .fl-run-setup-entry {
-      display: inline-flex; align-items: center; gap: var(--fl-space-xs);
-      height: 26px; padding: 0 8px;
-      border: none;
-      border-radius: var(--fl-radius-row);
-      background: transparent; color: var(--fl-color-text-secondary);
-      font-family: var(--fl-font-ui); font-size: 12px;
-      cursor: pointer; white-space: nowrap;
-    }
-    /* Borderless like its neighbours (polish, 2026-11-17): a soft fill on hover. */
-    .fl-run-setup-entry:hover { color: var(--fl-color-text); background: var(--fl-color-surface-raised); }
     .fl-run-pill {
       display: inline-flex; align-items: center; gap: var(--fl-space-xs);
       height: 26px; padding: 0 8px;
@@ -758,8 +944,28 @@ function injectRunStyles(): void {
       font: inherit;
     }
     .fl-run-menu-item.small { min-height: 32px; }
-    .fl-run-menu-item:hover:not(:disabled), .fl-run-menu-item:focus-visible { background: var(--fl-color-accent-muted); outline: none; }
-    .fl-run-menu-item:disabled { opacity: 0.5; cursor: default; }
+    .fl-run-menu-item:hover:not(.disabled), .fl-run-menu-item:focus-visible { background: var(--fl-color-accent-muted); outline: none; }
+    .fl-run-menu-item.disabled { opacity: 0.5; cursor: default; }
+    .fl-run-menu-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+    .fl-run-menu-grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .fl-run-menu-note { flex: none; color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); }
+    .fl-run-menu-item.more { color: var(--fl-color-accent); }
+    .fl-run-menu-item.more > fl-icon { color: var(--fl-color-text-secondary); }
+    .fl-run-menu-shortcut { color: var(--fl-color-text-secondary); font-weight: normal; letter-spacing: 0; text-transform: none; }
+    .fl-run-menu-back-head { justify-content: flex-start; gap: var(--fl-space-xs); }
+    .fl-run-menu-back {
+      display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0;
+      border: none; border-radius: var(--fl-radius-sm); background: transparent; color: var(--fl-color-text-secondary); cursor: pointer;
+    }
+    .fl-run-menu-back:hover, .fl-run-menu-back:focus-visible { background: var(--fl-color-accent-muted); color: var(--fl-color-text); outline: none; }
+    .fl-run-menu-filter {
+      margin: 0 var(--fl-space-xs) var(--fl-space-xs); padding: 5px var(--fl-space-sm); box-sizing: border-box;
+      border: var(--fl-border-width) solid var(--fl-color-border); border-radius: var(--fl-radius-sm);
+      background: var(--fl-color-bg); color: var(--fl-color-text); font: inherit;
+    }
+    .fl-run-menu-filter:focus { outline: none; border-color: var(--fl-color-accent); }
+    /* Ten rows, then it scrolls. */
+    .fl-run-menu-list { display: flex; flex-direction: column; gap: 1px; max-height: 330px; overflow-y: auto; }
     .fl-run-menu-item.once > fl-icon { color: var(--fl-color-accent); }
     .fl-run-menu-item.running > fl-icon { color: var(--fl-color-warning); }
     .fl-run-menu-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }

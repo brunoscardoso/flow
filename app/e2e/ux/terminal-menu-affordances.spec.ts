@@ -1,5 +1,4 @@
 import { test, expect } from '../fixtures/electron'
-import { clickNewTerminal } from '../terminal-actions'
 import { sel } from '../selectors'
 import { seedProject, activateProject, cleanupSeeds, openThreadByTitle } from './fixtures/seed'
 import type { Page } from '@playwright/test'
@@ -160,8 +159,8 @@ test.describe('terminal popup affordances', () => {
     await waitPrompt(win)
 
     // The palette's "New terminal" (flow:show-terminal on an already-visible
-    // panel → flow:terminal-new) is the KEYBOARD route into this popup; the +
-    // button is the mouse one. Both land in the same picker.
+    // panel → flow:terminal-new) is the KEYBOARD route into this popup; the
+    // mouse route is the Run menu's project rows.
     await win.evaluate(() => document.dispatchEvent(new CustomEvent('flow:show-terminal')))
     await expect(rootMenu(win)).toBeVisible({ timeout: 5000 })
     await expect(rootMenu(win).locator('.fl-term-root-menu-label')).toHaveText('New terminal in:')
@@ -217,18 +216,21 @@ test.describe('terminal popup affordances', () => {
     await revealTerminal(win)
     await waitPrompt(win)
 
-    await clickNewTerminal(win)
+    // The keyboard route in: the palette's "New terminal".
+    const openPicker = () => win.evaluate(() => document.dispatchEvent(new CustomEvent('flow:show-terminal')))
+    await openPicker()
     await expect(rootMenu(win)).toBeVisible({ timeout: 5000 })
 
-    // Escape closes it — the dead key this issue was filed for.
+    // Escape closes it — the dead key this issue was filed for — and hands the
+    // keyboard back to the Run button the header opens terminals from.
     await win.keyboard.press('Escape')
     await expect(rootMenu(win)).toHaveCount(0)
+    expect(await win.evaluate(() => document.activeElement?.classList.contains('fl-run-pill-run'))).toBe(true)
 
-    // …and Enter does not stack a SECOND picker on the first: with focus back
-    // on +, re-opening replaces rather than accumulates.
-    await win.keyboard.press('Enter')
+    // …and asking again does not stack a SECOND picker on the first.
+    await openPicker()
     await expect(rootMenu(win)).toHaveCount(1)
-    await win.keyboard.press('Enter')
+    await openPicker()
     await expect(rootMenu(win)).toHaveCount(1)
 
     // Arrows move between roots without a click.

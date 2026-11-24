@@ -22,10 +22,10 @@ import {
 
 /** Every fixed sentence the Launchpad shows — scanned by the test for #12. */
 export const RUN_STRINGS = {
-  setUp: 'Set up Launchpad',
+  setUp: 'Set up run steps',
   setUpTitle: 'Choose the commands that start this project, and the ones you run now and then',
-  launchpad: 'Launchpad',
-  launchpadTitle: 'Run a one-time action, or start every running step',
+  launchpad: 'Run',
+  launchpadTitle: 'Open a terminal, run a one-time action, or start every running step',
   run: 'Run',
   runTitle: 'Start every step, in order',
   runAll: 'Run all running steps',
@@ -34,7 +34,7 @@ export const RUN_STRINGS = {
   menuOnce: 'Run once',
   noOnce: 'No one-time actions yet',
   addOnce: 'Add one',
-  editLaunchpad: 'Edit Launchpad',
+  editLaunchpad: 'Edit run steps',
   asksFirst: 'asks first',
   onceRunningTitle: 'Running now. Press to show it.',
   onceRunTitle: 'Run this once, in its own tab',
@@ -47,15 +47,15 @@ export const RUN_STRINGS = {
   stopAll: 'Stop all',
   stopAllTitle: 'End every step and free its ports',
   setup: 'Setup',
-  setupTitle: 'Edit the Launchpad',
+  setupTitle: 'Edit the run steps',
   reloadStep: 'Reload step',
   reloadStepTitle: 'Restart only this step',
   startStepTitle: 'Not started. Click to start this step.',
   startRunTitle: 'Not started. Click to start every running step.',
   stopped: 'Stopped',
-  loading: 'Reading the Launchpad…',
-  failedToRead: 'The Launchpad could not be read.',
-  failedToAct: 'Flow could not reach the Launchpad. Nothing was changed.',
+  loading: 'Reading the run steps…',
+  failedToRead: 'The run steps could not be read.',
+  failedToAct: 'Flow could not reach the run steps. Nothing was changed.',
   failedToRunOnce: 'Flow could not run this action. Nothing was started.',
 } as const
 

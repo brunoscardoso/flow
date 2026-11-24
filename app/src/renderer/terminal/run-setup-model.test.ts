@@ -203,9 +203,9 @@ describe('one list across projects', () => {
   })
 
   it('titles the setup with the conversation\'s projects', () => {
-    expect(setupTitle(places)).toBe('Launchpad for lumen, lumen-core, lumen-app')
-    expect(setupTitle([], 'lumen')).toBe('Launchpad for lumen')
-    expect(setupTitle([])).toBe('Launchpad')
+    expect(setupTitle(places)).toBe('Run steps for lumen, lumen-core, lumen-app')
+    expect(setupTitle([], 'lumen')).toBe('Run steps for lumen')
+    expect(setupTitle([])).toBe('Run steps')
   })
 })
 

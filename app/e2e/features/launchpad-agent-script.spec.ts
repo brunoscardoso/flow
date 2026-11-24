@@ -56,7 +56,8 @@ async function prompts(window: Page): Promise<Array<{ threadId: string; text: st
 }
 
 async function openSetup(window: Page): Promise<void> {
-  const entry = window.locator('.fl-run-setup-entry')
+  await window.locator('.fl-run-pill-run').click({ timeout: 30_000 })
+  const entry = window.locator('.fl-run-menu [data-menu-entry="set-up"]')
   await expect(entry).toBeVisible({ timeout: 30_000 })
   await entry.click()
   await expect(window.locator('.fl-run-setup')).toBeVisible({ timeout: 10_000 })

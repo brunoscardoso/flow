@@ -135,7 +135,7 @@ test('the Launchpad steps share one tab: Side by side, One log and one step alon
   await expect(groupTab).toHaveCount(0)
   // …and back.
   await window.locator('.fl-term-tabs .tab', { hasText: 'alpha' }).locator('.caret').click()
-  await menu.locator('.fl-term-root-item', { hasText: 'Group Launchpad tabs' }).click()
+  await menu.locator('.fl-term-root-item', { hasText: 'Group run step tabs' }).click()
   await expect(groupTab).toBeVisible()
 
   await window.evaluate(async (rootPath) => {

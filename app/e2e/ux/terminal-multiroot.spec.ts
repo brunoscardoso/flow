@@ -3,13 +3,13 @@
  *
  * 36 committed terminal specs drive ONE project root. A multi-project thread
  * puts two repos in one window, and the panel grows a whole extra layer for it
- * (terminal-scope.ts): the + button opens a "New terminal in:" root picker,
+ * (terminal-scope.ts): the Run menu lists each project as a New terminal row,
  * each tab carries its project's accent dot + tooltip, and visibility is
  * scope-driven (a tab is shown only while its root is in the active thread's
  * scope). None of that has any e2e coverage.
  *
  * What a user expects, and what this drives:
- *  1. + under a 2-root thread offers a root picker, and picking a root spawns a
+ *  1. Run under a 2-root thread lists both roots, and picking a root spawns a
  *     shell whose cwd IS that root (pwd is the only honest observable).
  *  2. The two shells stay tellable apart in the strip (label / tooltip / dot).
  *  3. Switching to a single-root thread and back does not lose a running shell.
@@ -23,12 +23,19 @@
 import { test, expect } from '../fixtures/electron'
 import { seedProject, activateProject, cleanupSeeds } from './fixtures/seed'
 import type { Page } from '@playwright/test'
-import { clickNewTerminal, clickSplitTerminal } from '../terminal-actions'
+import {
+  clickNewTerminal,
+  newTerminalIn,
+  openRunMenu,
+  projectRowName,
+  projectRows,
+  runMenu,
+  splitChoice,
+} from '../terminal-actions'
 
 const SCREENS = 'e2e/ux/__screens'
 
 const termTabs = (win: Page) => win.locator('.fl-term-tabs .tab')
-const rootMenu = (win: Page) => win.locator('.fl-term-root-menu')
 const activeRows = (win: Page) => win.locator('.fl-term-host:not([hidden]) .xterm-rows')
 
 /** UNCAUGHT exceptions only. `console.error` is deliberately NOT collected
@@ -131,7 +138,7 @@ async function tabReport(
 
 test.afterAll(() => cleanupSeeds())
 
-test('multi-root thread: + offers a root picker and each pick spawns a shell IN that root', async ({
+test('multi-root thread: Run lists both roots and each pick spawns a shell IN that root', async ({
   window,
 }) => {
   test.setTimeout(300_000)
@@ -148,22 +155,20 @@ test('multi-root thread: + offers a root picker and each pick spawns a shell IN 
   console.log('BETA:', beta)
   console.log('TABS(initial):', JSON.stringify(await tabReport(window)))
 
-  // + is a user gesture under a 2-root scope → the "New terminal in:" picker.
+  // Under a 2-root scope the Run menu lists both projects, one click each.
   await clickNewTerminal(window)
-  await expect(rootMenu(window)).toBeVisible({ timeout: 8000 })
-  const rows = rootMenu(window).locator('.fl-term-root-item')
+  await expect(runMenu(window)).toBeVisible({ timeout: 8000 })
+  const rows = projectRows(window)
   console.log('MENU ROWS:', JSON.stringify(await rows.allInnerTexts()))
-  console.log(
-    'MENU TITLES:',
-    JSON.stringify(await rows.evaluateAll((n) => n.map((e) => e.getAttribute('title')))),
-  )
   await window.screenshot({ path: `${SCREENS}/terminal-multiroot-menu.png` })
 
-  // GUARD — the picker names both attached roots, primary first, with the full
-  // path as the tooltip (the only thing that tells two same-named repos apart).
+  // GUARD — the menu names both attached roots, primary first (marked as the
+  // conversation's own), with the full path as the tooltip (the only thing
+  // that tells two same-named repos apart).
   await expect(rows).toHaveCount(2)
-  await expect(rows.nth(0)).toHaveText(alpha.split('/').pop() ?? '')
-  await expect(rows.nth(1)).toHaveText(beta.split('/').pop() ?? '')
+  await expect(projectRowName(window, 0)).toHaveText(alpha.split('/').pop() ?? '')
+  await expect(projectRowName(window, 1)).toHaveText(beta.split('/').pop() ?? '')
+  await expect(rows.nth(0)).toContainText('this conversation')
   expect(
     await rows.evaluateAll((nodes) => nodes.map((node) => node.getAttribute('title'))),
   ).toEqual([alpha, beta])
@@ -174,14 +179,14 @@ test('multi-root thread: + offers a root picker and each pick spawns a shell IN 
   // `pwd` is the only honest observable: the label follows OSC 7, so a shell in
   // the wrong repo would still be labelled with whatever folder it landed in.
   await rows.nth(1).click()
-  await expect(rootMenu(window)).toHaveCount(0)
+  await expect(runMenu(window)).toHaveCount(0)
   await expect(termTabs(window)).toHaveCount(before + 1, { timeout: 20_000 })
   expect(await shellCwd(window)).toBe(beta)
 
   // GUARD — and the PRIMARY root, from the same menu, lands in alpha.
   await clickNewTerminal(window)
-  await expect(rootMenu(window)).toBeVisible({ timeout: 8000 })
-  await rootMenu(window).locator('.fl-term-root-item').nth(0).click()
+  await expect(runMenu(window)).toBeVisible({ timeout: 8000 })
+  await projectRows(window).nth(0).click()
   await expect(termTabs(window)).toHaveCount(before + 2, { timeout: 20_000 })
   expect(await shellCwd(window)).toBe(alpha)
 
@@ -242,18 +247,17 @@ async function focusedCwd(win: Page): Promise<string> {
 }
 
 /**
- * SPLITTING INTO A DIFFERENT PROJECT.
+ * SPLITTING FROM THE RUN MENU.
  *
- * The split button took the anchor's project with no say in it, so a person
- * splitting to watch a backend beside a frontend got the same project twice and
- * had to move the tab afterwards (user, 2026-09-18: "probably they want to run,
- * for example, the backend on one side and the frontend on another").
+ * The Run menu's split row names its project — the focused terminal's (user
+ * decision 2026-11-24) — so it splits without asking. Splitting into a
+ * DIFFERENT project (user, 2026-09-18: "the backend on one side and the
+ * frontend on another") is still the palette's Split terminal, which asks.
  *
- * It asks wherever the + asks, and `pwd` is the only honest observable — a tab
- * label is a name somebody chose, while the shell's own directory is where the
- * command would actually run.
+ * `pwd` is the only honest observable — a tab label is a name somebody chose,
+ * while the shell's own directory is where the command would actually run.
  */
-test('multi-root thread: split offers the same picker, and the pane lands in the picked root', async ({
+test('multi-root thread: split names the focused terminal\'s project, and the pane lands there', async ({
   window,
 }) => {
   test.setTimeout(300_000)
@@ -265,23 +269,17 @@ test('multi-root thread: split offers the same picker, and the pane lands in the
   await createThread(window, alpha, 'Split across projects', [beta])
   await openThread(window, 'Split across projects')
 
-  // One terminal to split FROM, in alpha.
-  await clickNewTerminal(window)
-  await expect(rootMenu(window)).toBeVisible({ timeout: 20_000 })
-  await rootMenu(window).locator('.fl-term-root-item', { hasText: 'flow-tsplit-alpha' }).first().click()
+  // One terminal to split FROM, in beta.
+  await newTerminalIn(window, 'flow-tsplit-beta')
   await waitForPrompt(window)
-  expect(await shellCwd(window)).toContain('flow-tsplit-alpha')
+  expect(await shellCwd(window)).toContain('flow-tsplit-beta')
 
-  // THE SPLIT ASKS. This is the whole change: it used to spawn immediately,
-  // in the anchor's project.
-  await clickSplitTerminal(window)
-  await expect(rootMenu(window)).toBeVisible({ timeout: 20_000 })
-  await expect(rootMenu(window)).toContainText('Split with:')
-  // Both projects are offered — the anchor's included, because splitting into
-  // the same project is still the common case.
-  await expect(rootMenu(window).locator('.fl-term-root-item')).toHaveCount(2)
-
-  await rootMenu(window).locator('.fl-term-root-item', { hasText: 'flow-tsplit-beta' }).first().click()
+  // THE SPLIT NAMES ITS PROJECT: the focused terminal's (user decision
+  // 2026-11-24). Beta is not the conversation's own project, so a pane that
+  // fell back to the primary root would land in alpha.
+  await openRunMenu(window)
+  await expect(splitChoice(window)).toHaveText(/Split beside flow-tsplit-beta/)
+  await splitChoice(window).click()
 
   // TWO PANES, and the new one is where it was asked to be. `pwd` in the
   // focused pane is the answer; the label is not.

@@ -15,7 +15,7 @@
  *  - Source Control: one group per repo (branch in the header); staging and
  *    committing inside beta's group commits BETA's repo only (asserted on the
  *    real repos with git, not on panel text).
- *  - Terminal: + offers "New terminal in:" both roots; a shell spawned in
+ *  - Terminal: Run offers both roots as New terminal rows; a shell spawned in
  *    beta carries beta's accent dot.
  *
  * The control thread (single root) is the NFR1 guard: NO scope chrome anywhere
@@ -29,7 +29,7 @@ import { basename, join } from 'node:path'
 import type { Page } from '@playwright/test'
 import { test, expect } from './fixtures/electron'
 import { sel } from './selectors'
-import { clickNewTerminal } from './terminal-actions'
+import { clickNewTerminal, projectRows, runMenu } from './terminal-actions'
 import { seedProject, activateProject, cleanupSeeds, gitRetry, pickFilesProject } from './ux/fixtures/seed'
 
 /** Accent chrome (tree header borders, terminal dots) is inline-styled
@@ -335,15 +335,14 @@ test('multi-root thread: sectioned tree, per-repo git groups + independent commi
   expect(gitRetry(alpha, 'log', '--format=%s').trim()).toBe('alpha initial')
   expect(gitRetry(alpha, 'status', '--porcelain')).toContain('?? alpha-dirty.txt')
 
-  // ── Terminal: + offers both roots; a beta shell carries beta's accent ────
+  // ── Terminal: Run offers both roots; a beta shell carries beta's accent ──
   await expect(window.locator(sel.terminalRoot)).toBeVisible()
   const tabsBefore = await termTabs(window).count()
   await clickNewTerminal(window)
-  const rootMenu = window.locator('.fl-term-root-menu')
-  await expect(rootMenu).toBeVisible()
-  await expect(rootMenu.locator('.fl-term-root-item')).toHaveCount(2)
-  await expect(rootMenu.locator('.fl-term-root-item', { hasText: alphaName })).toBeVisible()
-  const betaItem = rootMenu.locator('.fl-term-root-item', { hasText: betaName })
+  await expect(runMenu(window)).toBeVisible()
+  await expect(projectRows(window)).toHaveCount(2)
+  await expect(projectRows(window).filter({ hasText: alphaName })).toBeVisible()
+  const betaItem = projectRows(window).filter({ hasText: betaName })
   await expect(betaItem).toBeVisible()
   await betaItem.click()
   await expect(termTabs(window)).toHaveCount(tabsBefore + 1, { timeout: 15_000 })
@@ -387,11 +386,13 @@ test('single-root control shows NO scope chrome (NFR1); live attach flips all su
   }).toPass({ timeout: 15_000 })
   await expect(window.locator('.gp-group-head')).toHaveCount(0)
 
-  // Terminal: + spawns directly — no root menu, and no accent dots on tabs.
+  // Terminal: one project — "New terminal" spawns directly, no project rows,
+  // no root menu, and no accent dots on tabs.
   await expect(window.locator(sel.terminalRoot)).toBeVisible()
   const tabsBefore = await termTabs(window).count()
   await clickNewTerminal(window)
   await expect(window.locator('.fl-term-root-menu')).toHaveCount(0)
+  await expect(projectRows(window)).toHaveCount(0)
   await expect(termTabs(window)).toHaveCount(tabsBefore + 1, { timeout: 15_000 })
   await expect(window.locator('.fl-term-tabs .tab .project-dot')).toHaveCount(0)
 
@@ -421,14 +422,13 @@ test('single-root control shows NO scope chrome (NFR1); live attach flips all su
   await expect(primaryHeader(window)).toHaveCount(1)
 
   // The terminal strip re-rendered scoped: the existing alpha tab gained its
-  // accent dot, and + now offers both roots.
+  // accent dot, and Run now offers both roots.
   await expect(
     window.locator('.fl-term-tabs .tab .project-dot').first(),
   ).toBeVisible({ timeout: 15_000 })
   await clickNewTerminal(window)
-  const rootMenu = window.locator('.fl-term-root-menu')
-  await expect(rootMenu).toBeVisible()
-  await expect(rootMenu.locator('.fl-term-root-item')).toHaveCount(2)
+  await expect(runMenu(window)).toBeVisible()
+  await expect(projectRows(window)).toHaveCount(2)
   await window.keyboard.press('Escape')
 
   expect(errors, `renderer errors:\n${errors.join('\n')}`).toEqual([])

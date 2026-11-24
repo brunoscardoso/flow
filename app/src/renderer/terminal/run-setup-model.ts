@@ -88,12 +88,12 @@ export interface RunSetupDraft {
 
 /** Every fixed sentence the page shows — scanned by the test for #12. */
 export const SETUP_STRINGS = {
-  title: 'Launchpad',
-  close: 'Close the Launchpad',
+  title: 'Run steps',
+  close: 'Close the run steps',
   keepsRunning: 'Keeps running',
   keepsRunningNote: 'Starts with Run, in this order. Each gets its own tab.',
   runsOnce: 'Runs once',
-  runsOnceNote: 'Never starts with Run. Press it from the Launchpad menu when you need it.',
+  runsOnceNote: 'Never starts with Run. Press it from the Run menu when you need it.',
   suggested: 'Suggested',
   add: 'Add',
   addStep: '+ Add a running step',

@@ -24,7 +24,7 @@ const CARDS: Array<{ icon: string; title: string; body: string }> = [
   { icon: 'checklist', title: 'Tasks and Loops', body: 'A board of work. Press play and the agent works the cards on its own.' },
   { icon: 'map', title: 'Blueprint and Brain', body: 'A map of what your code does. Ask it questions and get answers with sources.' },
   { icon: 'git-branch', title: 'Changes and plan review', body: 'Review a plan before it runs, then see every change it made.' },
-  { icon: 'rocket', title: 'Launchpad', body: 'Start your dev servers and scripts together, in one click.' },
+  { icon: 'rocket', title: 'Run', body: 'Open terminals, and start your dev servers and scripts together, in one click.' },
   { icon: 'globe', title: 'Browser and UI drafts', body: 'Open your app beside the code, inspect it, and see drafts of new screens.' },
 ]
 
