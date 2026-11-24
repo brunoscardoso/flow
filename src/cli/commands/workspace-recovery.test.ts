@@ -146,13 +146,6 @@ describeWithGit('workspace recovery — real CLI, real git, two machines', () =>
       write(mine, 'projects/app/discovery/discovery_mine_v1.md', '# Only mine\n');
       // … and was connected to the team's repository by hand.
       expect(workspace(machineB, 'set-remote', '--workspace', 'my-mac', '--remote', WORKSPACE_REMOTE, '--json').status).toBe(0);
-      expect(workspace(machineB, 'sync', '--workspace', 'my-mac', '--json').combined).toContain('unrelated-history');
-      // Again, with the team's branch already fetched (the teammate's real
-      // case): still the plain answer, never git's "no merge base".
-      write(mine, 'projects/app/brain/decisions/later.md', '# Later\n');
-      const again = workspace(machineB, 'sync', '--workspace', 'my-mac', '--json');
-      expect(again.combined).not.toContain('no merge base');
-      expect(again.json).toMatchObject({ refused: 'unrelated-history', pushed: false });
 
       // ── Joining is no longer refused "already has that Workspace" ─────────
       const joined = workspace(machineB, 'join', '--remote', WORKSPACE_REMOTE, '--json');
@@ -278,6 +271,92 @@ describeWithGit('workspace recovery — real CLI, real git, two machines', () =>
       // Naming it the shared name again forgets the local one.
       expect(workspace(machineA, 'rename', '--workspace', 'team', '--name', 'Team', '--json').json).toMatchObject({ workspace: { name: 'Team' } });
       expect(readFileSync(join(machineA, 'settings', 'workspaces.local.json'), 'utf-8')).not.toContain('"A"');
+    },
+    SUITE_TIMEOUT_MS
+  );
+
+  it(
+    'combines two Workspaces set up on their own for the same projects, instead of refusing',
+    () => {
+      expect(workspace(machineA, 'create', '--name', 'Team', '--remote', WORKSPACE_REMOTE, '--json').status).toBe(0);
+      const appA = makeRepo(join(sandbox, 'machine-a', 'code', 'app'), 'https://git.example.test/team/app.git');
+      expect(workspace(machineA, 'link', '--target', appA, '--workspace', 'team', '--json').status).toBe(0);
+      const team = join(machineA, 'workspaces', 'team');
+      write(team, 'projects/app/brain/decisions/queue.md', '# Queue\n\nThe team says SQS.\n');
+      write(team, 'projects/app/discovery/discovery_theirs_v1.md', '# Theirs\n');
+      write(team, 'projects/app/brain/features/queue.md', '---\nname: Queue\nkind: core\n---\n\n# Queue\n\n- Messages go through SQS\n');
+      write(team, 'projects/app/brain/.structure/basic-discovery.jsonl', '{"completedAt":"2026-11-20T10:00:00Z","learned":3,"failed":0}\n');
+      expect(workspace(machineA, 'sync', '--workspace', 'team', '--json').json).toMatchObject({ state: 'synced', pushed: true });
+
+      expect(workspace(machineB, 'create', '--name', 'My Mac', '--json').status).toBe(0);
+      const appB = makeRepo(join(sandbox, 'machine-b', 'code', 'app'), 'https://git.example.test/team/app.git');
+      expect(workspace(machineB, 'link', '--target', appB, '--workspace', 'my-mac', '--json').status).toBe(0);
+      const mine = join(machineB, 'workspaces', 'my-mac');
+      write(mine, 'projects/app/brain/decisions/queue.md', '# Queue\n\nI learned we use SQS with a DLQ.\n');
+      write(mine, 'projects/app/discovery/discovery_mine_v1.md', '# Mine\n');
+      write(mine, 'projects/app/brain/features/queue.md', '---\nname: Queue\nkind: core\n---\n\n# Queue\n\n- Failed messages go to a DLQ\n');
+      write(mine, 'projects/app/brain/.structure/basic-discovery.jsonl', '{"completedAt":"2026-11-21T10:00:00Z","learned":2,"failed":0}\n');
+      expect(workspace(machineB, 'set-remote', '--workspace', 'my-mac', '--remote', WORKSPACE_REMOTE, '--json').status).toBe(0);
+
+      const first = workspace(machineB, 'sync', '--workspace', 'my-mac', '--json');
+      expect(first.combined).not.toContain('unrelated-history');
+      expect(first.combined).not.toContain('no merge base');
+      // The one note both wrote, differently, is the agent's to combine.
+      expect(first.json).toMatchObject({ state: 'ask' });
+      const asks = (first.json as { asks: { id: string; path: string; agentMergeable?: boolean }[] }).asks;
+      expect(asks.map((ask) => ask.path).sort()).toEqual(['projects/app/brain/decisions/queue.md', 'projects/app/brain/features/queue.md']);
+      expect(asks.every((ask) => ask.agentMergeable === true)).toBe(true);
+      // Nothing else needs anyone: no review waiting (the generated README is the team's).
+      expect((first.json as { reviews: unknown[] }).reviews).toEqual([]);
+
+      // What the agent wrote is taken, and the combined Workspace is published.
+      const combined = '# Queue\n\nThe team says SQS, with a DLQ for failures.\n';
+      const agentText = join(sandbox, 'agent-merge.md');
+      writeFileSync(agentText, combined);
+      // The app answers every agent-mergeable item, one resolve each (intent-merge.ts).
+      const feature = asks.find((ask) => ask.path.includes('/features/')) as { id: string; path: string };
+      const decision = asks.find((ask) => ask.path.includes('/decisions/')) as { id: string; path: string };
+      const featureText = join(sandbox, 'agent-feature.md');
+      writeFileSync(featureText, '---\nname: Queue\nkind: core\n---\n\n# Queue\n\n- Messages go through SQS\n- Failed messages go to a DLQ\n');
+      expect(
+        workspace(machineB, 'sync', '--workspace', 'my-mac', `--resolve=${feature.path}`, `--id=${feature.id}`, `--take=file:${featureText}`, '--json').json,
+      ).toMatchObject({ state: 'ask' });
+      const settled = workspace(
+        machineB, 'sync', '--workspace', 'my-mac', `--resolve=${decision.path}`, `--id=${decision.id}`, `--take=file:${agentText}`, '--json',
+      );
+      expect(settled.json).toMatchObject({ state: 'synced', pushed: true });
+      expect(readFileSync(join(mine, 'projects/app/brain/decisions/queue.md'), 'utf-8')).toBe(combined);
+      expect(readFileSync(join(mine, 'projects/app/discovery/discovery_theirs_v1.md'), 'utf-8')).toBe('# Theirs\n');
+      expect(projectsOf(machineB, 'my-mac')).toEqual(['app']);
+      // This machine still calls it My Mac; the team's file kept its name.
+      expect((workspace(machineB, 'status', '--json').json as { workspaces: { slug: string; name: string }[] }).workspaces.find((w) => w.slug === 'my-mac')?.name).toBe('My Mac');
+
+      // And machine A receives B's work on its next sync.
+      expect(workspace(machineA, 'sync', '--workspace', 'team', '--json').json).toMatchObject({ state: 'synced' });
+      expect(readFileSync(join(team, 'projects/app/discovery/discovery_mine_v1.md'), 'utf-8')).toBe('# Mine\n');
+      expect(readFileSync(join(team, 'projects/app/brain/decisions/queue.md'), 'utf-8')).toBe(combined);
+    },
+    SUITE_TIMEOUT_MS
+  );
+
+  it(
+    'still refuses a repository whose Workspace has no project in common',
+    () => {
+      expect(workspace(machineA, 'create', '--name', 'Team', '--remote', WORKSPACE_REMOTE, '--json').status).toBe(0);
+      const appA = makeRepo(join(sandbox, 'machine-a', 'code', 'app'), 'https://git.example.test/team/app.git');
+      expect(workspace(machineA, 'link', '--target', appA, '--workspace', 'team', '--json').status).toBe(0);
+      expect(workspace(machineA, 'sync', '--workspace', 'team', '--json').json).toMatchObject({ state: 'synced' });
+
+      expect(workspace(machineB, 'create', '--name', 'Other', '--json').status).toBe(0);
+      const other = makeRepo(join(sandbox, 'machine-b', 'code', 'other'), 'https://git.example.test/someone/other.git');
+      expect(workspace(machineB, 'link', '--target', other, '--workspace', 'other', '--json').status).toBe(0);
+      expect(workspace(machineB, 'set-remote', '--workspace', 'other', '--remote', WORKSPACE_REMOTE, '--json').status).toBe(0);
+      expect(workspace(machineB, 'sync', '--workspace', 'other', '--json').json).toMatchObject({ refused: 'unrelated-history', pushed: false });
+      // Again, with the team's branch already fetched: the same plain answer, never git's.
+      write(join(machineB, 'workspaces', 'other'), 'projects/other/brain/decisions/later.md', '# Later\n');
+      const again = workspace(machineB, 'sync', '--workspace', 'other', '--json');
+      expect(again.combined).not.toContain('no merge base');
+      expect(again.json).toMatchObject({ refused: 'unrelated-history', pushed: false });
     },
     SUITE_TIMEOUT_MS
   );

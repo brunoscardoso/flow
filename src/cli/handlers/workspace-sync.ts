@@ -134,6 +134,7 @@ import {
   MAX_DECISION_CONTENT,
   readDecisions,
   readMergeFacts,
+  textAt,
   writeDecisions,
   writeMergeLog,
   type MergeResolution,
@@ -149,6 +150,7 @@ import {
   projectFolder,
   recordBranchMove,
   readLocalProjects,
+  readLocalWorkspaceNames,
   readWorkspace,
   realOrResolved,
   scanWorkspaces,
@@ -157,6 +159,7 @@ import {
   WorkspaceRefusal,
   workspaceDir,
   writeWorkspaceRepoFiles,
+  writeLocalWorkspaceName,
   type LoadedWorkspace,
   type WorkspaceDeps,
   type WorkspaceGit,
@@ -1011,7 +1014,16 @@ function mergeIncoming(context: MergeContext, tracking: string | null): MergeSte
   // Workspace's — another Workspace, a repository someone started by hand —
   // is never mixed in: git would refuse the merge anyway, and the person
   // needs to hear WHY in words, not as a failed merge.
-  if (head !== null && !attempt(git, ['merge-base', head, tracking], repo).ok) {
+  // …UNLESS it is the same work: when both list at least one project in
+  // common, two people set up "the same" Workspace on their own (user,
+  // 2026-11-24 — "the agent should automatically combine and sync it"). Then
+  // the histories are merged in place, every file both wrote goes through the
+  // same merge as any sync (the agent combines notes written two ways), and
+  // nothing stops for a person unless that merge asks. With no project in
+  // common it may be anyone's Workspace — a mistyped address must never send
+  // this one's knowledge there — so that still refuses.
+  const unrelated = head !== null && !attempt(git, ['merge-base', head, tracking], repo).ok;
+  if (unrelated && !sharesAProject(git, repo, head as string, tracking)) {
     if (context.resolve !== undefined) {
       throw new WorkspaceRefusal('nothing-to-resolve', 'there is no merge waiting for a decision in this Workspace', { path: resolveSubject(context.resolve) });
     }
@@ -1047,7 +1059,19 @@ function mergeIncoming(context: MergeContext, tracking: string | null): MergeSte
   writeMarker(git, repo, { pid: process.pid, head, incoming, startedAt: context.now.toISOString() });
   const merge = attempt(
     git,
-    [...NO_SYMLINKS, '-c', 'rerere.enabled=false', '-c', 'merge.conflictStyle=merge', 'merge', '--no-ff', '--no-commit', '-q', tracking],
+    [
+      ...NO_SYMLINKS,
+      '-c',
+      'rerere.enabled=false',
+      '-c',
+      'merge.conflictStyle=merge',
+      'merge',
+      '--no-ff',
+      '--no-commit',
+      '-q',
+      ...(unrelated ? ['--allow-unrelated-histories'] : []),
+      tracking,
+    ],
     repo
   );
   if (revParse(git, repo, 'MERGE_HEAD') === null) {
@@ -1501,6 +1525,10 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
   }
 
   const lock = acquireLock(git, repo, now());
+  // A sync never changes what THIS machine calls the Workspace: when the
+  // merged file brings another shared name (two Workspaces combined, an older
+  // client's rename), the name this machine showed is kept as its own.
+  const nameBefore = workspace.name;
   try {
     const recoveredMerge = recoverLeftoverMerge(git, repo, workspace.slug);
     const branchOut = attempt(git, ['symbolic-ref', '--short', '-q', 'HEAD'], repo);
@@ -1750,7 +1778,41 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     return result;
   } finally {
     lock.release();
+    keepLocalName(flowFolder, workspace.slug, nameBefore);
   }
+}
+
+function keepLocalName(flowFolder: string, slug: string, nameBefore: string): void {
+  try {
+    if (readLocalWorkspaceNames(flowFolder)[slug] !== undefined) return;
+    if (readWorkspace(flowFolder, slug).file.name !== nameBefore) writeLocalWorkspaceName(flowFolder, slug, nameBefore);
+  } catch {
+    // A name is never a reason for a sync to fail.
+  }
+}
+
+/** Project ids a commit's workspace.json lists. */
+function projectIdsAt(git: WorkspaceGit, repo: string, rev: string): Set<string> {
+  const text = textAt(git, repo, rev, 'workspace.json');
+  if (text === null) return new Set();
+  try {
+    const parsed = JSON.parse(text) as { projects?: unknown };
+    if (!Array.isArray(parsed.projects)) return new Set();
+    return new Set(
+      parsed.projects
+        .map((entry) => (typeof entry === 'object' && entry !== null ? (entry as { id?: unknown }).id : undefined))
+        .filter((id): id is string => typeof id === 'string' && id !== '')
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+/** Whether two histories' Workspaces list at least one project in common — "the same work". */
+function sharesAProject(git: WorkspaceGit, repo: string, ours: string, theirs: string): boolean {
+  const mine = projectIdsAt(git, repo, ours);
+  for (const id of projectIdsAt(git, repo, theirs)) if (mine.has(id)) return true;
+  return false;
 }
 
 /** Sync every Workspace on this machine, one after another. One refusal never stops the others. */

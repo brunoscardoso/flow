@@ -323,8 +323,14 @@ export function unmergedPaths(git: WorkspaceGit, repo: string): Set<string> {
 }
 
 /** Read the facts of the merge in progress in `repo` (MERGE_HEAD must exist). */
+/** git's empty tree: the "common ancestor" of two histories that have none. */
+export const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
 export function readMergeFacts(git: WorkspaceGit, repo: string, ours: string, theirs: string): MergeFacts {
-  const base = git(['merge-base', ours, theirs], repo).trim();
+  // Two Workspaces combined (unrelated histories): nothing is common, so every
+  // file each side holds counts as added by that side.
+  const found = attempt(git, ['merge-base', ours, theirs], repo);
+  const base = found !== null && found.trim() !== '' ? found.trim() : EMPTY_TREE;
   return {
     repo,
     git,
@@ -482,7 +488,8 @@ function pick3(base: unknown, ours: unknown, theirs: unknown): { value: unknown 
  * then a person reviews it.
  */
 export function mergeWorkspaceFile(baseText: string | null, oursText: string | null, theirsText: string | null): string | null {
-  const base = parseJsonObject(baseText);
+  // Added on both sides (two Workspaces combined): nothing was common.
+  const base = parseJsonObject(baseText ?? (oursText !== null && theirsText !== null ? '{}' : null));
   const ours = parseJsonObject(oursText);
   const theirs = parseJsonObject(theirsText);
   if (base === null || ours === null || theirs === null) return null;
@@ -498,7 +505,10 @@ export function mergeWorkspaceFile(baseText: string | null, oursText: string | n
     // The shared name is only what someone who never renamed it sees; each
     // machine keeps its own (settings/workspaces.local.json). Two different
     // renames are not a reason to stop a sync: the team's version stands.
-    const picked = pick3(base[key], ours[key], theirs[key]) ?? (key === 'name' ? { value: theirs[key] ?? ours[key] } : undefined);
+    // The file's slug is informational (each machine's handle is its folder),
+    // so it follows the team's the same way.
+    const picked =
+      pick3(base[key], ours[key], theirs[key]) ?? (key === 'name' || key === 'slug' ? { value: theirs[key] ?? ours[key] } : undefined);
     if (picked === undefined) return null;
     if (picked.value !== undefined) out[key] = picked.value;
   }
@@ -524,11 +534,26 @@ function mergeProjects(base: unknown, ours: unknown, theirs: unknown): unknown[]
   const ids = [...new Set([...t.keys(), ...o.keys(), ...b.keys()])];
   const out: unknown[] = [];
   for (const id of ids) {
-    const picked = pick3(b.get(id), o.get(id), t.get(id));
+    const picked = pick3(b.get(id), o.get(id), t.get(id)) ?? addedOnBoth(b.get(id), o.get(id), t.get(id));
     if (picked === undefined) return null;
     if (picked.value !== undefined) out.push(picked.value);
   }
   return out;
+}
+
+/**
+ * One project both sides listed on their own (two Workspaces combined): the
+ * team's entry, with every remote either side knew. Only when it lives in the
+ * same folder on both — two folders for one project would split its knowledge,
+ * so that one is for a person.
+ */
+function addedOnBoth(base: unknown, ours: unknown, theirs: unknown): { value: unknown } | undefined {
+  if (base !== undefined || typeof ours !== 'object' || ours === null || typeof theirs !== 'object' || theirs === null) return undefined;
+  const o = ours as { slug?: unknown; remotes?: unknown };
+  const t = theirs as { slug?: unknown; remotes?: unknown };
+  if (typeof t.slug !== 'string' || t.slug !== o.slug) return undefined;
+  const remotes = [...new Set([...(Array.isArray(t.remotes) ? t.remotes : []), ...(Array.isArray(o.remotes) ? o.remotes : [])])];
+  return { value: { ...o, ...t, ...(remotes.length > 0 ? { remotes } : {}) } };
 }
 
 // ─── Feature notes: the draft/solid rules (FR-11) ──────────────────────────
@@ -949,6 +974,9 @@ function anchorsAdded(text: string | null, baseText: string | null, path: string
  * index is changed — so a merge that turns out to need a person can be
  * aborted onto exactly the commit it started from.
  */
+/** Files Flow generates at the Workspace repository's root (see `writeWorkspaceRepoFiles`). */
+const GENERATED_REPO_FILES = new Set(['README.md', '.gitignore', '.gitattributes']);
+
 export function inspectMerge(facts: MergeFacts): MergeInspection {
   const { git, repo, oursChanged, theirsChanged, conflicted } = facts;
   const inspection: MergeInspection = { resolutions: [], asks: [], reviews: [] };
@@ -1004,6 +1032,13 @@ export function inspectMerge(facts: MergeFacts): MergeInspection {
       const content = complete ? null : expected;
       const lines = contentLines(complete ? current : content).length;
       inspection.resolutions.push({ kind: 'union', path, attribute: attribute && complete, content, lines });
+      continue;
+    }
+    // The repository's own scaffolding — written by Flow from the Workspace's
+    // name and the sync classes, rewritten on the next write anyway. Two
+    // Workspaces combined disagree on its title only: the team's copy stands.
+    if (GENERATED_REPO_FILES.has(path) && sides.theirs !== null && sides.ours !== null) {
+      inspection.resolutions.push({ kind: 'workspace-file', path, content: sides.theirs });
       continue;
     }
     if (path === 'workspace.json') {
