@@ -263,6 +263,8 @@ export class WorkspaceRefusal extends Error {
 export interface WorkspaceGitOptions {
   /** Talks to a remote (clone). */
   network?: boolean;
+  /** How long this one call may take; default by kind (local or network). */
+  timeoutMs?: number;
 }
 
 /** Run git, return stdout, throw on a non-zero exit. */
@@ -329,7 +331,7 @@ export const defaultWorkspaceGit: WorkspaceGit = (args, cwd, options = {}) => {
     encoding: 'utf-8',
     cwd,
     env: workspaceGitEnv(process.env, cwd, network),
-    timeout: network ? NETWORK_GIT_TIMEOUT_MS : LOCAL_GIT_TIMEOUT_MS,
+    timeout: options.timeoutMs ?? (network ? NETWORK_GIT_TIMEOUT_MS : LOCAL_GIT_TIMEOUT_MS),
     maxBuffer: 16 * 1024 * 1024,
     stdio: [...QUIET_CHILD_STDIO],
   });

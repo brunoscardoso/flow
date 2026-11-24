@@ -36,7 +36,7 @@ import { dirname, join } from 'node:path';
 
 const model = await import('./workspace-model.js');
 const syncModule = await import('./workspace-sync.js');
-const { onlyIgnoresMore } = syncModule;
+const { onlyIgnoresMore, syncNetworkTimeout } = syncModule;
 const merge = await import('./workspace-merge.js');
 const moveModule = await import('./workspace-move.js');
 const remoteModule = await import('./workspace-remote.js');
@@ -1208,6 +1208,39 @@ describeWithGit('workspace sync against real git, two machines', () => {
   );
 
   it(
+    "undoes a half-done merge that broke the Workspace's own workspace.json, instead of refusing to read it for ever (user report 2026-11-24)",
+    () => {
+      const rename = (dir: string, name: string): void => {
+        const text = readFileSync(join(dir, 'workspace.json'), 'utf-8');
+        writeFileSync(join(dir, 'workspace.json'), text.replace(/"name": "[^"]*"/, `"name": "${name}"`));
+      };
+      rawPush('rename', (dir) => rename(dir, 'Theirs'));
+      rename(wsB, 'Mine');
+      crashMidMerge();
+      // The dead run left git's conflict markers in workspace.json: no longer JSON.
+      expect(read(wsB, 'workspace.json')).toContain('<<<<<<<');
+      expect(() => model.readWorkspace(flowB, 'team')).toThrow(/not valid JSON/);
+
+      const recovered = sync(flowB);
+      expect(recovered.recovered).toEqual({ lock: 'owner-gone', merge: true });
+      expect(() => JSON.parse(read(wsB, 'workspace.json'))).not.toThrow();
+      expect(existsSync(join(wsB, '.git', 'plan-flow-sync-merge.json'))).toBe(false);
+      expect(calls.some((args) => args.includes('--hard'))).toBe(false);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'still refuses a workspace.json broken by hand, with no merge of Flow\'s to undo',
+    () => {
+      writeFileSync(join(wsB, 'workspace.json'), '{ not json');
+      refusalOf(() => sync(flowB), 'malformed-workspace');
+      expect(read(wsB, 'workspace.json')).toBe('{ not json');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
     'undoes a clean merge left half-done and finishes the sync — merged and published',
     () => {
       write(wsA, 'projects/backend/plans/plan_a_v1.md', '# A\n');
@@ -1418,6 +1451,31 @@ describeWithGit('workspace sync against real git, two machines', () => {
     },
     TEST_TIMEOUT_MS
   );
+
+  it(
+    'gives every fetch and push of a run a capped timeout, so a hung one answers before the app gives up on the run (user report 2026-11-24)',
+    () => {
+      const seen: { verb: string; timeoutMs: number | undefined }[] = [];
+      const watching: Git = (args, cwd, options) => {
+        if (options?.network === true) seen.push({ verb: args.includes('push') ? 'push' : 'fetch', timeoutMs: options.timeoutMs });
+        return recordingGit(args, cwd, options);
+      };
+      write(wsB, 'projects/backend/plans/plan_timed_v1.md', '# timed\n');
+      expect(syncWorkspace({ flowFolder: flowB, push: true, workspace: 'team', deps: { git: watching, now: () => NOW } })).toMatchObject({ pushed: true });
+      expect(seen.map((entry) => entry.verb)).toEqual(expect.arrayContaining(['fetch', 'push']));
+      for (const entry of seen) {
+        expect(entry.timeoutMs).toBeGreaterThanOrEqual(5_000);
+        expect(entry.timeoutMs).toBeLessThanOrEqual(120_000);
+      }
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it('syncNetworkTimeout: capped per call, shrinking with the run budget, never below a floor', () => {
+    expect(syncNetworkTimeout(1_000_000, 0)).toBe(120_000);
+    expect(syncNetworkTimeout(30_000, 0)).toBe(30_000);
+    expect(syncNetworkTimeout(0, 10_000)).toBe(5_000);
+  });
 
   it.each([
     ['adds comments and plain patterns', '', '# why\n/a.md', true],

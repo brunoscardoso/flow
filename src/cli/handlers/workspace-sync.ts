@@ -363,9 +363,27 @@ export interface SyncOptions {
 
 // ─── Small helpers ──────────────────────────────────────────────────────────
 
-function attempt(git: WorkspaceGit, args: string[], cwd: string, network = false): { ok: true; out: string } | { ok: false; detail: string } {
+/**
+ * THE NETWORK BUDGET of one sync run. The app gives a whole sync five minutes
+ * (`WORKSPACE_SYNC_TIMEOUT_MS`), and one network git call used to be allowed
+ * the same five minutes — so a fetch that hung (a sign-in window nobody saw, a
+ * stalled connection) let the app kill the run with no answer at all, possibly
+ * mid-merge (user report 2026-11-24). Every fetch and push of a run now shares
+ * this budget, each call capped, so the run always answers first.
+ */
+const SYNC_NETWORK_BUDGET_MS = 4 * 60_000;
+const SYNC_NETWORK_CALL_MAX_MS = 2 * 60_000;
+const SYNC_NETWORK_CALL_MIN_MS = 5_000;
+
+/** The timeout of a run's next network call, from the run's deadline (wall clock). */
+export function syncNetworkTimeout(deadline: number, clock: number = Date.now()): number {
+  return Math.max(SYNC_NETWORK_CALL_MIN_MS, Math.min(SYNC_NETWORK_CALL_MAX_MS, deadline - clock));
+}
+
+/** `network`: false for a local call, or the timeout of a network one. */
+function attempt(git: WorkspaceGit, args: string[], cwd: string, network: false | number = false): { ok: true; out: string } | { ok: false; detail: string } {
   try {
-    return { ok: true, out: git(args, cwd, network ? { network: true } : {}) };
+    return { ok: true, out: git(args, cwd, network === false ? {} : { network: true, timeoutMs: network }) };
   } catch (error) {
     return { ok: false, detail: errorText(error) };
   }
@@ -465,6 +483,40 @@ function findWorkspace(flowFolder: string, wanted: string | undefined): LoadedWo
     throw new WorkspaceRefusal('unknown-workspace', `there is no Workspace called ${wanted} on this machine`, { workspaces: choices });
   }
   return found;
+}
+
+/**
+ * `findWorkspace`, except when the Workspace's own `workspace.json` is
+ * unreadable BECAUSE a sync of Flow's died mid-merge and left conflict markers
+ * in it: that merge is undone first (`recoverLeftoverMerge`, under the lock),
+ * then the Workspace is read again. Without this, the refusal came before the
+ * recovery that would have fixed it, so the Workspace could never sync again
+ * (user report 2026-11-24: a sync killed by the app's timeout mid-merge). Any
+ * other unreadable file, or a merge Flow did not start, is refused as before.
+ */
+function findWorkspaceRecovering(
+  flowFolder: string,
+  wanted: string | undefined,
+  git: WorkspaceGit,
+  now: () => Date
+): { workspace: LoadedWorkspace; early: { lock: LockRecovery | null; merge: boolean } } {
+  try {
+    return { workspace: findWorkspace(flowFolder, wanted), early: { lock: null, merge: false } };
+  } catch (error) {
+    if (!(error instanceof WorkspaceRefusal) || error.reason !== 'malformed-workspace' || wanted === undefined) throw error;
+    const repo = workspaceDir(flowFolder, wanted);
+    const top = attempt(git, ['rev-parse', '--show-toplevel'], repo);
+    if (!top.ok || realOrResolved(top.out.trim()) !== realOrResolved(repo)) throw error;
+    if (revParse(git, repo, 'MERGE_HEAD') === null) throw error;
+    const lock = acquireLock(git, repo, now());
+    let merge: boolean;
+    try {
+      merge = recoverLeftoverMerge(git, repo, wanted);
+    } finally {
+      lock.release();
+    }
+    return { workspace: findWorkspace(flowFolder, wanted), early: { lock: lock.recovered, merge } };
+  }
 }
 
 // ─── The lock ───────────────────────────────────────────────────────────────
@@ -1532,7 +1584,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
   const flowFolder = resolve(options.flowFolder);
   const git = options.deps?.git ?? defaultWorkspaceGit;
   const now = options.deps?.now ?? (() => new Date());
-  const workspace = findWorkspace(flowFolder, options.workspace);
+  const { workspace, early } = findWorkspaceRecovering(flowFolder, options.workspace, git, now);
   const repo = workspaceDir(flowFolder, workspace.slug);
 
   const top = attempt(git, ['rev-parse', '--show-toplevel'], repo);
@@ -1554,6 +1606,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     });
   }
 
+  const networkDeadline = Date.now() + SYNC_NETWORK_BUDGET_MS;
   const lock = acquireLock(git, repo, now());
   // A sync never changes what THIS machine calls the Workspace: when the
   // merged file brings another shared name (two Workspaces combined, an older
@@ -1595,7 +1648,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
       indexes: { rebuilt: [], failed: [] },
       rules: { copied: [], skipped: [], failed: [] },
       mode: options.commitOnly === true ? 'commit-only' : 'full',
-      recovered: { lock: lock.recovered, merge: recoveredMerge },
+      recovered: { lock: lock.recovered ?? early.lock, merge: recoveredMerge || early.merge },
       untracked: [],
     };
 
@@ -1643,7 +1696,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
       if (branch !== WORKSPACE_FALLBACK_BRANCH) {
         refspecs.push(`+refs/heads/${WORKSPACE_FALLBACK_BRANCH}*:refs/remotes/${REMOTE_NAME}/${WORKSPACE_FALLBACK_BRANCH}*`);
       }
-      const fetched = attempt(git, [...NO_SYMLINKS, 'fetch', '-q', '--no-tags', '--', REMOTE_NAME, ...refspecs], repo, true);
+      const fetched = attempt(git, [...NO_SYMLINKS, 'fetch', '-q', '--no-tags', '--', REMOTE_NAME, ...refspecs], repo, syncNetworkTimeout(networkDeadline));
       if (!fetched.ok) {
         // A remote that does not have this branch yet is not an error: the first push creates it.
         if (/couldn't find remote ref/i.test(fetched.detail)) return { ok: true };
@@ -1764,7 +1817,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
       const ahead = countRange(git, repo, tracking === null ? 'HEAD' : `${trackingRef}..HEAD`);
       if (ahead === 0) return finish();
       guardPersonal(outgoingPaths(git, repo, tracking), { committed: result.committed !== null, merged: result.merge !== null });
-      const pushed = attempt(git, ['push', '-q', '--', REMOTE_NAME, `HEAD:refs/heads/${branch}`], repo, true);
+      const pushed = attempt(git, ['push', '-q', '--', REMOTE_NAME, `HEAD:refs/heads/${branch}`], repo, syncNetworkTimeout(networkDeadline));
       if (pushed.ok) {
         result.pushed = true;
         // Record what the remote now holds, so `ahead` reads true without a fetch.
