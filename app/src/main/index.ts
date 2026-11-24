@@ -942,6 +942,33 @@ function bootstrapMainProcess(): void {
    * Fire-and-forget; the coordinator reads asynchronously and runs one sweep
    * at a time (allowed-pattern #19).
    */
+  /**
+   * For a minute after a Workspace change, every 5 s: each Flow process's
+   * memory and CPU. Diagnostic only — one sampler at a time, nothing decided
+   * from it (user report 2026-11-24: a join froze a teammate's Mac).
+   */
+  let processSampler: ReturnType<typeof setInterval> | null = null
+  const watchProcessesAfter = (cause: string): void => {
+    if (processSampler !== null) clearInterval(processSampler)
+    let ticks = 0
+    const sample = (): void => {
+      const processes = app.getAppMetrics().map((metric) => ({
+        type: metric.type,
+        pid: metric.pid,
+        cpu: Math.round(metric.cpu.percentCPUUsage),
+        mb: Math.round(metric.memory.workingSetSize / 1024),
+      }))
+      const totalMb = processes.reduce((sum, entry) => sum + entry.mb, 0)
+      console.log('[Workspaces] processes after a change', { cause, second: ticks * 5, totalMb, processes })
+      ticks += 1
+      if (ticks > 12 && processSampler !== null) {
+        clearInterval(processSampler)
+        processSampler = null
+      }
+    }
+    sample()
+    processSampler = setInterval(sample, 5000)
+  }
   const reconcileBasicDiscovery = (): void => {
     const roots = (projectRegistry?.getRoots() ?? []).filter((root) => root.available !== false).map((root) => root.rootPath)
     void basicDiscovery?.reconcile(roots).catch((error: unknown) => {
@@ -956,10 +983,15 @@ function bootstrapMainProcess(): void {
       broadcast('workspaces:changed', event)
       // These rewrite projects' `flow` links: the watchers follow the new targets.
       if (['linked', 'joined', 'migrated', 'moved', 'deleted'].includes(event.cause)) {
+        // TIMED (user report 2026-11-24: a join froze a teammate's Mac and the
+        // log said nothing about what ran after it).
+        const relinkStarted = Date.now()
         announceFlowLinksChanged()
+        console.log('[Workspaces] watchers re-followed the flow links', { cause: event.cause, ms: Date.now() - relinkStarted })
         // A project joined (or moved between) Workspaces: one without its
         // basic discovery gets it now, without being asked.
         reconcileBasicDiscovery()
+        watchProcessesAfter(event.cause)
       }
     },
   })

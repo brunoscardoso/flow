@@ -230,13 +230,29 @@ export function registerWorkspaceChannels(deps: WorkspaceChannelDependencies): (
     })
   })
 
-  handle('workspaces:join', (request) => {
+  handle('workspaces:join', async (request) => {
     const channel = 'workspaces:join'
     const body = record(request, channel)
     const remote = requiredString(body['remote'], channel, 'remote')
     const name = optionalString(body['name'], channel, 'name')
     const branch = optionalString(body['branch'], channel, 'branch')
-    return registry.join(remote, name, { openRoots: deps.openRoots(), ...(branch === undefined ? {} : { branch }) })
+    const started = Date.now()
+    console.log('[Workspaces] join started')
+    const answer = await registry.join(remote, name, { openRoots: deps.openRoots(), ...(branch === undefined ? {} : { branch }) })
+    console.log('[Workspaces] join finished', {
+      ms: Date.now() - started,
+      ok: answer.ok,
+      ...(answer.ok
+        ? { slug: answer.workspace.slug, disconnected: (answer.disconnected ?? []).map((entry) => entry.slug) }
+        : { reason: answer.reason }),
+    })
+    // A Workspace the join disconnected still shows its last sync — an
+    // "unrelated history" error that is no longer true. One sync, the same
+    // as a hand disconnect runs, turns it into "kept on this computer".
+    if (answer.ok) {
+      for (const entry of answer.disconnected ?? []) void deps.sync.syncNow(entry.slug).catch(() => undefined)
+    }
+    return answer
   })
 
   handle('workspaces:current', () => registry.current())
