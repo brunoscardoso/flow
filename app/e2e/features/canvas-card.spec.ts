@@ -99,6 +99,8 @@ test('a canvas the agent wrote gets a card, opens by itself when its turn ends, 
   await expect(card.locator('.fl-canvas-card-detail')).toHaveText('Canvas · 2 screens')
   // Under the work row, inside the request.
   await expect(window.locator('.fl-conv-entry-request .fl-canvas-card')).toHaveCount(1)
+  // The card stands for its files: none of them is listed again.
+  await expect(window.locator('.fl-conv-entry-request .fl-file-change-list')).toHaveCount(0)
 
   // ── An old request does not open anything by itself ──────────────────────
   // (the positive first: the card IS drawn, so no page is evidence)
@@ -123,4 +125,70 @@ test('a canvas the agent wrote gets a card, opens by itself when its turn ends, 
   await expect(pageTabs(window)).toHaveCount(1, { timeout: 20_000 })
   await expect(address(window)).toHaveValue(new RegExp(`${CANVAS}`), { timeout: 15_000 })
   if (process.env['FLOW_E2E_SHOTS']) await card.screenshot({ path: `${process.env['FLOW_E2E_SHOTS']}/canvas-card.png` })
+})
+
+/**
+ * While a request runs, its work row is the "still working" signal, so it sits
+ * under the canvas and the files written so far (user, 2026-11-24: "the loading
+ * status should be always the last message"). When the turn rests, the row
+ * moves back above them: "Worked …" heads what the request produced.
+ */
+test('the live work row stays under the canvas and files, and returns on top when the turn rests', async ({
+  app,
+  window,
+}) => {
+  test.setTimeout(120_000)
+  const root = await seedProject(window, 'flow-e2e-canvas-live-', seedCanvas)
+  await activateProject(window, root)
+  const threadId: string = await window.evaluate(async (r) => {
+    const t = await (window as unknown as { flow: { threads: { create: (o: unknown) => Promise<{ id: string }> } } }).flow.threads.create({
+      projectRoot: r,
+      title: 'Canvas live',
+    })
+    return t.id
+  }, root)
+  const thread = window.getByText('Canvas live', { exact: true }).first()
+  await thread.waitFor({ timeout: 20_000 })
+  await thread.click()
+  await window.waitForTimeout(1500)
+
+  // Two canvas files and one ordinary source file: only the last is listed.
+  const files = [...['layout.json', 'a.html'].map((name) => join(root, 'flow', 'drafts', CANVAS, name)), join(root, 'src', 'index.ts')]
+  await toRenderer(app, 'threads:stream', { kind: 'status', threadId, status: 'working' })
+  await toRenderer(app, 'threads:stream', { kind: 'message-start', threadId, messageId: 'm1' })
+  for (const [i, path] of files.entries()) {
+    const toolCall = {
+      id: `w${String(i)}`,
+      threadId,
+      messageId: 'm1',
+      toolName: 'Write',
+      inputJson: JSON.stringify({ file_path: path, content: '{}' }),
+      outputJson: null,
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+    }
+    await toRenderer(app, 'threads:stream', { kind: 'tool-start', threadId, toolCall })
+    await toRenderer(app, 'threads:stream', {
+      kind: 'tool-end',
+      threadId,
+      toolCall: { ...toolCall, status: 'success', outputJson: JSON.stringify('ok'), completedAt: new Date().toISOString() },
+    })
+  }
+
+  const request = window.locator('.fl-conv-entry-request').last()
+  // The positive first: the canvas card and the live row are both drawn.
+  await expect(request.locator('.fl-canvas-card')).toHaveCount(1, { timeout: 15_000 })
+  const order = (): Promise<string[]> =>
+    request.evaluate((el) => [...el.children].map((child) => (child.classList.contains('fl-canvas-card') ? 'canvas' : child.classList.contains('fl-request-row') ? 'row' : 'other')))
+  await expect.poll(async () => (await order()).at(-1), { timeout: 10_000 }).toBe('row')
+  const live = await order()
+  expect(live.indexOf('canvas')).toBeLessThan(live.length - 1)
+  // The canvas card stands for its files: only the source file gets a card.
+  const liveCards = request.locator('.fl-file-change-live > .fl-file-change-card')
+  await expect(liveCards).toHaveCount(1)
+  await expect(liveCards.first()).toContainText('index.ts')
+
+  await toRenderer(app, 'threads:stream', { kind: 'done', threadId, messageId: 'm1' })
+  await expect.poll(async () => (await order())[0], { timeout: 10_000 }).toBe('row')
 })

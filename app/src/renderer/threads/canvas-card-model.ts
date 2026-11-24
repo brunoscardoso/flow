@@ -112,3 +112,34 @@ export class CanvasOpenLedger {
     return true
   }
 }
+
+/** The part of a request's file changes a canvas card does not already show. */
+interface FileChangesLike<F extends { path: string; added: number; removed: number; counted: boolean }> {
+  files: F[]
+  steps: F[][]
+  added: number
+  removed: number
+}
+
+/**
+ * A request's changed files without the ones inside a UI drafts canvas (user,
+ * 2026-11-24: "lets show only the canva component"). The canvas card stands
+ * for its files: layout, tokens and screens are how the canvas is built, not
+ * changes a person reviews one by one. Totals are summed again over what is
+ * left, so "N files changed" never counts a file it does not list.
+ */
+export function withoutCanvasFiles<F extends { path: string; added: number; removed: number; counted: boolean }>(
+  changes: FileChangesLike<F>,
+): FileChangesLike<F> {
+  const keep = (file: F): boolean => canvasesInPaths([file.path]).length === 0
+  const files = changes.files.filter(keep)
+  if (files.length === changes.files.length) return changes
+  let added = 0
+  let removed = 0
+  for (const file of files) {
+    if (!file.counted) continue
+    added += file.added
+    removed += file.removed
+  }
+  return { files, steps: changes.steps.map((step) => step.filter(keep)), added, removed }
+}

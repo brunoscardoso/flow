@@ -1,4 +1,4 @@
-import { CanvasOpenLedger, canvasCardView, canvasesInPaths } from './canvas-card-model'
+import { CanvasOpenLedger, canvasCardView, canvasesInPaths, withoutCanvasFiles } from './canvas-card-model'
 
 describe('canvasesInPaths', () => {
   it('finds each canvas once, with the project it lives in', () => {
@@ -73,5 +73,23 @@ describe('CanvasOpenLedger', () => {
     expect(ledger.take('t1', ['m1', 'm2'], written)).toBe(false)
     // Another conversation is not this one.
     expect(ledger.take('t2', ['m2'], written)).toBe(false)
+  })
+})
+
+describe('withoutCanvasFiles', () => {
+  const file = (path: string, added: number) => ({ path, added, removed: 0, counted: true })
+
+  it('drops the files inside a canvas and sums the rest again', () => {
+    const code = file('/p/app/src/index.ts', 5)
+    const layout = file('/p/app/flow/drafts/desks-naming/layout.json', 37)
+    const screen = file('/p/app/flow/drafts/desks-naming/a.html', 100)
+    const out = withoutCanvasFiles({ files: [code, layout, screen], steps: [[code, layout], [screen]], added: 142, removed: 0 })
+    expect(out).toEqual({ files: [code], steps: [[code], []], added: 5, removed: 0 })
+  })
+
+  it('keeps a file directly in the drafts folder, and returns the input untouched when nothing is a canvas', () => {
+    const loose = file('/p/app/flow/drafts/notes.md', 3)
+    const input = { files: [loose], steps: [[loose]], added: 3, removed: 0 }
+    expect(withoutCanvasFiles(input)).toBe(input)
   })
 })

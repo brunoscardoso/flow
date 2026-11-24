@@ -116,7 +116,7 @@ import { planRequests, requestSummary, type Request, type RequestRole } from './
 import { RequestRow, sentWhileWorkingNote } from './request-row'
 import { workingMark } from '../components/fl-loading'
 import { CanvasCard } from './canvas-card'
-import { CanvasOpenLedger, canvasesInPaths, type WrittenCanvas } from './canvas-card-model'
+import { CanvasOpenLedger, canvasesInPaths, withoutCanvasFiles, type WrittenCanvas } from './canvas-card-model'
 import { liveRequestSummary, type RequestRowStepInput } from './request-row-model'
 import { fileDisplay, requestFileChanges } from './request-file-changes'
 import { fileChangeChips, fileChangeList, LiveFileCards, type FileChangeActions } from './request-file-changes-view'
@@ -2264,7 +2264,7 @@ export class ConversationPane {
       if (!unit.request || (unit.live && liveTail)) continue
       const records = unit.entries.flatMap((entry) => (entry.kind === 'tool' ? [entry.toolCall] : []))
       if (records.length === 0) continue
-      const list = fileChangeList(requestFileChanges([records]), this.#fileActions)
+      const list = fileChangeList(withoutCanvasFiles(requestFileChanges([records])), this.#fileActions)
       if (list === null) continue
       const wrapper = entryWrapper('file-changes', list)
       if (unit.answer !== null) {
@@ -2426,9 +2426,13 @@ export class ConversationPane {
       records: recordsOf(step.tools),
     }))
     const summary = requestSummary(request, { classify: requestRoleFor })
-    const files = requestFileChanges(
-      inputs.map((input) => input.records),
-      { live },
+    // A canvas card stands for the files inside its canvas, so they are not
+    // listed again (the cards themselves read the request's own records).
+    const files = withoutCanvasFiles(
+      requestFileChanges(
+        inputs.map((input) => input.records),
+        { live },
+      ),
     )
     const row = new RequestRow(summary, inputs, live, {
       fileActions: this.#fileActions,
@@ -2496,6 +2500,7 @@ export class ConversationPane {
         files: liveFiles,
         canvases: liveCanvases,
       }
+      placeLiveRow(row.element, true)
       this.#startLiveRequestTimer()
     }
     return wrapper
@@ -2631,7 +2636,7 @@ export class ConversationPane {
     // hang under it as chips, as they do under a step of the opened work row.
     // Not while the turn runs — its tools are still landing.
     if (!live) {
-      const chips = fileChangeChips(requestFileChanges([records]).files, this.#fileActions)
+      const chips = fileChangeChips(withoutCanvasFiles(requestFileChanges([records])).files, this.#fileActions)
       if (chips !== null) wrapper.appendChild(chips)
     }
     // Stamped like a group's slot so the story card's timestamp-ordered
@@ -2895,14 +2900,16 @@ export class ConversationPane {
     })
     // Records are memoized by identity inside the fold, so a text batch or a
     // tick that changed no tool re-counts nothing; the cards diff what they draw.
-    const files = requestFileChanges(
+    const all = requestFileChanges(
       steps.map((step) => step.records),
       { live: live.active },
     )
+    // The canvas card stands for its files: they are not listed again.
+    const files = withoutCanvasFiles(all)
     live.row.update(summary, steps, live.active, files)
     live.files.update(files.files)
     // A canvas appears under the row the moment the request writes its first file.
-    for (const written of canvasesInPaths(files.files.map((file) => file.path))) {
+    for (const written of canvasesInPaths(all.files.map((file) => file.path))) {
       const key = canvasKey(written)
       const known = live.canvases.get(key)
       if (known !== undefined) {
@@ -2913,6 +2920,7 @@ export class ConversationPane {
       live.files.element.before(card.element)
       live.canvases.set(key, card)
     }
+    placeLiveRow(live.row.element, live.active)
   }
 
   #startLiveRequestTimer(): void {
@@ -5176,6 +5184,23 @@ function thoughtLabel(ms: number): string | null {
   const minutes = Math.floor(seconds / 60)
   const rest = seconds % 60
   return rest === 0 ? `Thought ${minutes}m` : `Thought ${minutes}m ${rest}s`
+}
+
+/**
+ * Where a request's work row sits among its own cards (user, 2026-11-24: "the
+ * loading status should be always the last message"). While the request
+ * runs, the row is the "still working" signal, so it goes under the canvases
+ * and files it has written so far. Once it rests, it moves back to the top:
+ * "Worked 6 min" heads the files it produced, as in the finished layout.
+ */
+function placeLiveRow(row: HTMLElement, active: boolean): void {
+  const wrapper = row.parentElement
+  if (wrapper === null) return
+  if (active) {
+    if (wrapper.lastElementChild !== row) wrapper.appendChild(row)
+  } else if (wrapper.firstElementChild !== row) {
+    wrapper.prepend(row)
+  }
 }
 
 function entryWrapper(kind: string, content: HTMLElement): HTMLElement {
