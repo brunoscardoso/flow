@@ -37,6 +37,7 @@ import { initIntegrationsSettings } from './settings/integrations-settings-view'
 import { initFlowUi } from './flow'
 import { initProjectContext } from './project-context'
 import { maybeStartOnboarding } from './onboarding'
+import { startGuides } from './guides/guide-controller'
 import { maybeAskAboutTelemetry } from './onboarding/consent-prompt'
 import { installOverlayFocusTrap } from './settings/overlay-focus-trap'
 import { initUpdateBanner } from './update/update-banner'
@@ -259,6 +260,10 @@ if (appRoot) {
   // is offered so a first-run user never meets both at once — on day three the
   // wizard is long gone anyway.
   void maybeAskAboutTelemetry()
+  // The feature guide: the overview once after setup, then a short tour the
+  // first time each part of Flow is on screen. It waits for any dialog,
+  // the setup wizard included, to close before it shows anything.
+  startGuides()
   // Auto-update banner (#auto-update) — driven by the main process's status push.
   initUpdateBanner()
   // A reset ran at this launch: say what it deleted, once.

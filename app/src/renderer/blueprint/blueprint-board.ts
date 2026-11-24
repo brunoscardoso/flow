@@ -30,6 +30,7 @@
  * flow-model's buildDisplayResolver, so decoration lights the same card the
  * rollup drew. Motion is CSS, gated by prefers-reduced-motion.
  */
+import { guideInfoButton } from '../guides/guide-info'
 import { featureSlugOfRef } from './feature-ref'
 import '../components'
 import type {
@@ -5211,14 +5212,16 @@ export class BlueprintBoard {
       const storyRef = this.#briefFeatureRef
       if (storyRef !== null) {
         const storyName = this.#featureNameFor(storyRef, this.#brief?.delta.identity?.name) ?? storyRef
-        actions.appendChild(
-          this.#headerButton({
-            icon: 'file',
-            label: 'Follow the code',
-            title: `Follow ${storyName}'s code from where it starts`,
-            press: () => this.openStorylineForPart(storyRef, storyName),
-          }),
-        )
+        const story = this.#headerButton({
+          icon: 'file',
+          label: 'Follow the code',
+          title: `Follow ${storyName}'s code from where it starts`,
+          press: () => this.openStorylineForPart(storyRef, storyName),
+        })
+        // The same mark the trail's own button carries, so the feature guide
+        // (and anything else) finds "Follow the code" wherever it is drawn.
+        story.dataset['featureStory'] = storyRef
+        actions.appendChild(story)
       }
 
       // ASK ABOUT THIS — the Ask panel with this feature tagged. On a deep
@@ -13727,6 +13730,9 @@ export class BlueprintBoard {
       trail.append(lead, sep)
     }
     trail.appendChild(input.crumbs)
+    // One (i) for the whole board: it explains whatever is in front of the
+    // person — an open block, a feature's diagram, or the map.
+    trail.appendChild(guideInfoButton(['block', 'diagram', 'blueprint'], 'the Blueprint'))
     let switchHost: HTMLElement | null = null
     if (input.actions.length > 0) {
       const actions = document.createElement('span')

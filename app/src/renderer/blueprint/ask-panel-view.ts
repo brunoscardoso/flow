@@ -31,6 +31,7 @@
 // shows a repo path the answer itself named, and every error is main's plain
 // sentence.
 
+import { guideInfoButton } from '../guides/guide-info'
 import type { AskSavedThread, AskSource, AskSuggestedConnection } from '../../shared/ask-contract'
 import { markModalOverlay } from '../modal-overlay'
 import {
@@ -338,7 +339,7 @@ export class AskPanelView {
       event.preventDefault()
       this.#closeFromKeyboard()
     })
-    this.#big.append(this.#textarea, esc)
+    this.#big.append(this.#textarea, guideInfoButton('ask', 'asking'), esc)
     this.#big.addEventListener('mousedown', (event) => {
       if (event.target === this.#textarea || (event.target as Element).closest('kbd') !== null) return
       event.preventDefault()

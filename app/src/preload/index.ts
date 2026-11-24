@@ -411,6 +411,8 @@ const flowApi: FlowApi = {
   settings: {
     getOnboarding: () => invoke('settings:getOnboarding', {}),
     setOnboarding: (request) => invoke('settings:setOnboarding', request),
+    getGuides: () => invoke('settings:getGuides', {}),
+    setGuides: (request) => invoke('settings:setGuides', request),
     getTelemetryConsent: () => invoke('settings:getTelemetryConsent', {}),
     whoAmI: () => invoke('auth:whoAmI', {}),
     authAvailable: () => invoke('auth:available', {}),

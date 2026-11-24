@@ -18,6 +18,7 @@
  *     and, on send, folds them into the message CONTENT via serializeChips
  *     (renderer-only — the sendMessage IPC shape is untouched)
  */
+import { guideInfoButton } from '../guides/guide-info'
 import { publishCommandNames } from './command-names'
 import { ComposerHighlight } from './composer-highlight'
 import { renderHighlightedText } from './message-token-view'
@@ -702,6 +703,7 @@ export class Composer {
     // beyond the composer where they were invisible and unclickable.
     const actions = document.createElement('span')
     actions.className = 'fl-composer-actions'
+    actions.appendChild(guideInfoButton('threads', 'the composer'))
 
     this.#interruptButton = document.createElement('fl-button')
     this.#interruptButton.setAttribute('small', '')

@@ -109,6 +109,7 @@ import { isThemeMode } from '../theme/theme-model'
 import { WorkspaceSettingsSection } from './workspace-settings-section'
 import { ConnectorsSettingsSection } from './connectors-settings-section'
 import { ResetSettingsSection } from './reset-section'
+import { GuidesSettingsSection } from './guides-settings-section'
 import { WORKSPACES_GROUP_LABEL } from './workspace-settings-model'
 
 const OPEN_EVENT = 'flow:open-settings'
@@ -186,6 +187,8 @@ export const SETTINGS_GROUPS = [
   // Grouping projects into Workspaces — the on/off switch and each Workspace's
   // projects, sync and shared repository (workspaces-knowledge-hub Phase 10).
   { key: 'workspaces', label: WORKSPACES_GROUP_LABEL },
+  // The feature guide: first-open tours on or off, and every tour to replay.
+  { key: 'guides', label: 'Guides' },
   { key: 'app', label: 'App' },
 ] as const
 
@@ -238,6 +241,7 @@ class SettingsView {
   #workspaces: WorkspaceSettingsSection | null = null
   /** The Connectors section — one instance for the page's life, like #workspaces. */
   #connectors: ConnectorsSettingsSection | null = null
+  #guides: GuidesSettingsSection | null = null
   #reset: ResetSettingsSection | null = null
   #tabButtons = new Map<SettingsGroup, HTMLButtonElement>()
   /** Retires the integrations renderer mounted by the last render, if any. */
@@ -375,6 +379,7 @@ class SettingsView {
     if (group === 'workspaces') this.#workspaces?.shown()
     // Connectors read their status only while on screen (allowed-pattern #17).
     if (group === 'connectors') this.#connectors?.shown()
+    if (group === 'guides') void this.#guides?.shown()
   }
 
   async open(group?: SettingsGroup): Promise<void> {
@@ -574,6 +579,14 @@ class SettingsView {
       into('workspaces', this.#workspaces.element)
       // Read when SHOWN (#showGroup below), not on every page render — an
       // account change re-renders the page and must not spawn the CLI.
+    }
+
+    // GUIDES, KEPT ALIVE ACROSS RENDERS; it reads its state when shown. An
+    // older preload without the guide channels has no tab.
+    if (typeof api.settings.getGuides === 'function') {
+      this.#guides ??= new GuidesSettingsSection(() => this.close())
+      into('guides', this.#guides.element)
+      if (this.#group === 'guides') void this.#guides.shown()
     }
 
     into('app', this.#renderAppearanceSection())

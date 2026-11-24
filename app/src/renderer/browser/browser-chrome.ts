@@ -12,6 +12,7 @@
  * navigation logic — it reports intent through callbacks and reflects state
  * through its setters, exactly like the editor tab strip.
  */
+import { guideInfoButton } from '../guides/guide-info'
 import '../components'
 import type { FlButton } from '../components'
 
@@ -143,6 +144,7 @@ export class BrowserChrome {
       this.#urlInput,
       this.#debugBtn,
       this.#inspectBtn,
+      guideInfoButton('browser', 'the browser'),
     )
     this.element = bar
 

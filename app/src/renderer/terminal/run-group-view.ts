@@ -19,6 +19,7 @@
  * (one `run:get`) only when the panel is on screen — an off-screen panel marks
  * itself stale and re-reads on the way back in.
  */
+import { guideInfoButton } from '../guides/guide-info'
 import type { FlowApi } from '../../shared/ipc-contract'
 import { createScriptView } from './script-editor'
 import {
@@ -422,6 +423,8 @@ export class RunGroupView {
       node.setAttribute('role', 'menuitem')
       node.tabIndex = -1
       node.disabled = disabled
+      // What the row does, for anything that has to find it (the feature guide).
+      node.dataset['menuEntry'] = entry.kind
       if (!disabled) {
         node.addEventListener('click', (event) => {
           event.stopPropagation()
@@ -434,7 +437,7 @@ export class RunGroupView {
 
     const header = document.createElement('div')
     header.className = 'fl-run-menu-head'
-    header.textContent = RUN_STRINGS.menuOnce
+    header.append(document.createTextNode(RUN_STRINGS.menuOnce), guideInfoButton('launchpad-menu', 'the Launchpad menu'))
     element.appendChild(header)
     if (menu.empty) {
       const none = document.createElement('div')
@@ -741,6 +744,7 @@ function injectRunStyles(): void {
       font-family: var(--fl-font-ui); font-size: var(--fl-text-ui-size);
     }
     .fl-run-menu-head {
+      display: flex; align-items: center; justify-content: space-between;
       padding: var(--fl-space-xs) var(--fl-space-sm); color: var(--fl-color-text-secondary);
       font-size: var(--fl-text-caption-size); font-weight: var(--fl-text-ui-weight-medium);
       text-transform: uppercase; letter-spacing: 0.06em;
@@ -843,6 +847,12 @@ function injectRunStyles(): void {
       display: flex; flex-direction: column; gap: var(--fl-space-md); padding-top: var(--fl-space-lg);
     }
     .fl-run-setup-head { display: flex; align-items: flex-start; gap: var(--fl-space-sm); }
+    .fl-run-practice {
+      display: flex; align-items: center; flex-wrap: wrap; gap: var(--fl-space-sm);
+      padding: var(--fl-space-sm) var(--fl-space-md); border-radius: var(--fl-radius-md);
+      border: var(--fl-border-width) dashed var(--fl-color-border); background: var(--fl-color-accent-soft);
+    }
+    .fl-run-practice-text { flex: 1; min-width: 220px; font-size: var(--fl-text-caption-size); color: var(--fl-color-text-secondary); }
     .fl-run-setup-titles { display: flex; flex-direction: column; gap: 2px; }
     .fl-run-setup-title { font-weight: var(--fl-text-ui-weight-medium); font-size: var(--fl-text-ui-size); }
     .fl-run-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--fl-space-lg); align-items: start; }

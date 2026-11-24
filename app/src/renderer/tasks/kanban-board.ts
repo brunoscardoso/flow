@@ -19,6 +19,7 @@
 // three DOM-free and therefore the only testable part of the board. If you find
 // yourself writing an `if` about a card's state here, it belongs in one of them.
 
+import { guideInfoButton } from '../guides/guide-info'
 import { dismissOnEscape } from './modal-escape'
 import '../components'
 import { OverlayFocusReturn } from '../settings/overlay-focus-return'
@@ -582,6 +583,7 @@ export class KanbanBoard {
       const count = document.createElement('span')
       count.className = 'fl-board-count'
       naming.append(label, count)
+      if (lane.key === 'todo') naming.appendChild(guideInfoButton('tasks', 'the task board'))
       colHead.append(naming)
       /**
        * TODO CARRIES THE BOARD'S TWO VERBS, because they are both about Todo.

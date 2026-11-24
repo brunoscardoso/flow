@@ -6,6 +6,7 @@
 //     ("Autonomous mode"), overridable per-thread.
 
 import { countUseDay } from '../../shared/consent-prompt'
+import { applyGuidesUpdate, parseGuidesState, type GuidesState, type GuidesUpdate } from '../../shared/guides'
 import { randomBytes } from 'node:crypto'
 
 import type { FlowDatabase } from './db'
@@ -26,6 +27,8 @@ import type {
 } from '../../shared/ipc-contract'
 
 const ONBOARDING_COMPLETED_KEY = 'onboarding_completed'
+/** The feature guide: tips on/off, the overview, and which tours have run. */
+const GUIDES_KEY = 'guides_state'
 const AUTONOMY_BYPASS_DEFAULT_KEY = 'autonomy_bypass_default'
 const CLOSE_REMOTE_ON_DONE_KEY = 'close_remote_on_done'
 const MODEL_ROUTING_KEY = 'model_routing_auto'
@@ -231,6 +234,22 @@ export class AppSettingsStore {
 
   setOnboardingCompleted(value: boolean): void {
     this.#setBool(ONBOARDING_COMPLETED_KEY, value)
+  }
+
+  /**
+   * The feature guide's state. `defaultEnabled` answers for a person nobody has
+   * asked yet: tips are on in the app and off in a hidden end-to-end run, where
+   * a tour over every spec's screen would hide what each spec is checking. A
+   * stored answer always wins.
+   */
+  getGuides(defaultEnabled: boolean): GuidesState {
+    return parseGuidesState(this.#getString(GUIDES_KEY), defaultEnabled)
+  }
+
+  updateGuides(update: GuidesUpdate, defaultEnabled: boolean): GuidesState {
+    const next = applyGuidesUpdate(this.getGuides(defaultEnabled), update)
+    this.#setString(GUIDES_KEY, JSON.stringify(next))
+    return next
   }
 
   /** Whether new threads default to bypassPermissions ("Autonomous mode"). */

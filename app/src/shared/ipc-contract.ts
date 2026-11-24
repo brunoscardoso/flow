@@ -17,6 +17,7 @@
  * a credential value, and none should carry one either.
  */
 
+import type { GuidesState, GuidesUpdate } from './guides'
 import type { BasicDiscoveryStatus, LearningFirstState } from './basic-discovery'
 import type { ReviewListResult } from './review-types'
 import type { DebugSessionSummary, DebugStopResult } from './debug-session-ipc'
@@ -6929,6 +6930,10 @@ export interface IpcInvokeMap {
     request: { completed?: boolean; autonomyBypassDefault?: boolean }
     response: void
   }
+  /** The feature guide: tips on/off, the overview, and which tours have run. */
+  'settings:getGuides': { request: Record<string, never>; response: GuidesState }
+  /** A partial update; returns the state after it. */
+  'settings:setGuides': { request: GuidesUpdate; response: GuidesState }
   // Auto-mode effort→model routing (#129) — the full, validated map.
   /**
    * Has this person agreed to share usage data?
@@ -8186,6 +8191,8 @@ export const IPC_INVOKE_CHANNELS = [
   'flow:chain',
   'settings:getOnboarding',
   'settings:setOnboarding',
+  'settings:getGuides',
+  'settings:setGuides',
   'settings:getTelemetryConsent',
   'auth:whoAmI',
   'auth:available',
@@ -8775,6 +8782,10 @@ export interface FlowSettingsApi {
   getOnboarding(): Promise<IpcResponse<'settings:getOnboarding'>>
   /** Partial update of app-wide settings (onboarding completion / autonomy default). */
   setOnboarding(request: IpcRequest<'settings:setOnboarding'>): Promise<void>
+  /** The feature guide's state. */
+  getGuides(): Promise<IpcResponse<'settings:getGuides'>>
+  /** Change the feature guide's state; returns it after the change. */
+  setGuides(request: IpcRequest<'settings:setGuides'>): Promise<IpcResponse<'settings:setGuides'>>
   /** Has this person agreed to share usage data? `null` = never asked. */
   getTelemetryConsent(): Promise<IpcResponse<'settings:getTelemetryConsent'>>
   whoAmI(): Promise<IpcResponse<'auth:whoAmI'>>

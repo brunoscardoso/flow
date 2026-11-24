@@ -27,9 +27,12 @@
  * command: Save sends one request and main decides what starts, restarts or
  * stops (allowed-pattern #14).
  */
+import { guideInfoButton } from '../guides/guide-info'
 import { scriptLineCount, type RunScriptProposal, type RunGroupState, type RunSaveAnswer, type RunSaveChange, type RunSuggestion, type RunView } from '../../shared/run-setup'
 import { linesLabel, RUN_STRINGS } from './run-group-model'
 import { createScriptEditor } from './script-editor'
+import { addPracticeSteps, hasPracticeSteps, PRACTICE_STRINGS, removePracticeSteps } from './launchpad-practice'
+import { currentPlatform } from '../platform-affordances'
 import { proposalOutcome, scriptProposals } from './script-proposals'
 import {
   addOnceAction,
@@ -427,7 +430,7 @@ export class RunSetupPanel {
     const head = el('div', 'fl-run-setup-head')
     const titles = el('div', 'fl-run-setup-titles')
     titles.appendChild(el('span', 'fl-run-setup-title', setupTitle(this.#view?.resolution.places ?? [], draft?.projectName ?? '')))
-    head.appendChild(titles)
+    head.append(titles, guideInfoButton('launchpad-setup', 'Launchpad setup'))
     page.appendChild(head)
 
     if (draft === null) {
@@ -440,6 +443,21 @@ export class RunSetupPanel {
     body.append(main)
     page.appendChild(body)
     for (const problem of this.#view?.resolution.project.problems ?? []) main.appendChild(el('p', 'fl-run-note', problem))
+
+    // PRACTICE STEPS: a safe way to watch Launchpad work, added to the draft
+    // only (nothing is kept before Save) and taken out again in one click.
+    const practicing = hasPracticeSteps(draft)
+    const practice = el('div', 'fl-run-practice')
+    practice.appendChild(el('span', 'fl-run-practice-text', practicing ? PRACTICE_STRINGS.added : PRACTICE_STRINGS.offer))
+    practice.appendChild(
+      button('fl-run-chip', practicing ? PRACTICE_STRINGS.remove : PRACTICE_STRINGS.add, () => {
+        const currentDraft = this.#draft ?? draft
+        this.#update(
+          hasPracticeSteps(currentDraft) ? removePracticeSteps(currentDraft) : addPracticeSteps(currentDraft, currentPlatform()),
+        )
+      }),
+    )
+    main.appendChild(practice)
 
     // Keeps running: the steps Run starts, in order.
     const services = stepsOfKind(draft, 'service')

@@ -73,6 +73,11 @@ export function registerSettingsChannels(deps: SettingsChannelDependencies): () 
     }
   })
 
+  // The feature guide. Tips default to off only in a hidden end-to-end run.
+  const guidesDefault = process.env['FLOW_E2E'] !== '1'
+  handle('settings:getGuides', () => appSettings.getGuides(guidesDefault))
+  handle('settings:setGuides', (update) => appSettings.updateGuides(update, guidesDefault))
+
   // Consent. `null` until somebody is asked — see the contract for why that is
   // a third state and not a no.
   handle('settings:getTelemetryConsent', () => appSettings.getTelemetryConsent())

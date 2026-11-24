@@ -183,6 +183,8 @@ const INVOKE_MAP_KEYS: Record<IpcInvokeChannel, true> = {
   'blueprint:driftReset': true,
   'settings:getOnboarding': true,
   'settings:setOnboarding': true,
+  'settings:getGuides': true,
+  'settings:setGuides': true,
   'settings:checkRuntimeAuth': true,
   'settings:installRuntime': true,
   'settings:startRuntimeLogin': true,
