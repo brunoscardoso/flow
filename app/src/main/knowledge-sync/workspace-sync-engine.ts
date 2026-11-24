@@ -661,9 +661,27 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
       args.push(`--put-back=${options.putBack.path}`, `--expect=${options.putBack.expect}`, `--take=${options.putBack.take}`)
     }
     args.push('--json')
+    // EVERY RUN IS LOGGED (user, 2026-11-24 — a teammate's sync kept failing
+    // with nothing to go on): what was asked, how long it took, what came back.
+    // The commit message is left out; it can carry a person's words.
+    const asked = args.filter((arg) => !arg.startsWith('--message='))
+    const started = Date.now()
+    deps.log('workspace sync started', { slug: rec.slug, args: asked })
     const run = await deps.runCli(deps.cwd, args, { timeoutMs: options.timeoutMs })
+    const ms = Date.now() - started
     const payload = lastJsonLine(run.stdout)
     if (run.ok && payload !== null && payload['action'] === 'sync' && typeof payload['refused'] !== 'string') {
+      deps.log('workspace sync finished', {
+        slug: rec.slug,
+        ms,
+        state: payload['state'],
+        branch: payload['branch'],
+        pushed: payload['pushed'],
+        pulled: payload['pulled'],
+        committed: payload['committed'] === null || payload['committed'] === undefined ? null : 'yes',
+        asks: Array.isArray(payload['asks']) ? payload['asks'].length : 0,
+        reviews: Array.isArray(payload['reviews']) ? payload['reviews'].length : 0,
+      })
       try {
         return { kind: 'result', result: readResult(payload) }
       } catch (error) {
@@ -673,10 +691,18 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
     }
     if (!run.ok && payload !== null && typeof payload['refused'] === 'string') {
       // The CLI's sentence is for terminal users: it stays in the log.
-      deps.log('workspace sync refused', { slug: rec.slug, reason: payload['refused'], detail: payload['detail'] })
+      const { action: _action, refused: _refused, detail: _detail, ...extra } = payload
+      deps.log('workspace sync refused', { slug: rec.slug, ms, reason: payload['refused'], detail: payload['detail'], extra, stderr: tail(run.stderr) })
       return { kind: 'refused', reason: payload['refused'] }
     }
-    deps.log('workspace sync gave no usable answer', { slug: rec.slug, error: run.error, stderr: run.stderr })
+    deps.log('workspace sync gave no usable answer', {
+      slug: rec.slug,
+      ms,
+      ok: run.ok,
+      error: run.error,
+      stderr: tail(run.stderr),
+      stdout: tail(run.stdout),
+    })
     return { kind: 'unavailable' }
   }
 
@@ -1180,4 +1206,10 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
   }
 
   return { open, commitAfterTurn, syncNow, resolve, intentMerges, keepIntent, status, forget, quit }
+}
+
+/** The last part of a CLI stream, for a log line — never the whole thing. */
+function tail(text: string | undefined, max = 2000): string {
+  if (text === undefined || text === '') return ''
+  return text.length <= max ? text : `…${text.slice(-max)}`
 }

@@ -696,6 +696,12 @@ function recoverLeftoverMerge(git: WorkspaceGit, repo: string, workspace: string
 function outgoingPaths(git: WorkspaceGit, repo: string, tracking: string | null): string[] {
   const head = revParse(git, repo, 'HEAD');
   if (head === null) return [];
+  // A shared repository with NO history in common with this one (a Workspace
+  // connected by hand to a repository that holds another Workspace): nothing
+  // can be pushed — the merge step refuses `unrelated-history` and says what
+  // to do. Asking git for a three-dot diff here would fail with "no merge
+  // base" and bury that answer under a raw git error (user report 2026-11-24).
+  if (tracking !== null && !attempt(git, ['merge-base', head, tracking], repo).ok) return [];
   const range = tracking === null ? [head, '--not', '--remotes'] : [`${tracking}..${head}`];
   const log = git(['log', '--name-only', '--no-renames', '--diff-filter=AMTC', '--format=', '-z', ...range], repo);
   const paths = log

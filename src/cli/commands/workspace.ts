@@ -641,6 +641,10 @@ export function runWorkspace(action: string, options: WorkspaceCommandOptions, r
       logError(`${WORKSPACE_REFUSED_PREFIX} ${oneLine(`${error.reason} — ${error.sentence}`)}`);
     } else {
       const message = error instanceof Error ? error.message : String(error);
+      // A caller reading --json still gets one line it can parse (the app's
+      // sync engine logs the detail and shows "couldn't sync"), instead of
+      // only a prose line on the side.
+      if (options.json === true) process.stdout.write(`${JSON.stringify({ action, refused: 'failed', detail: oneLine(message) })}\n`);
       logError(`${WORKSPACE_REFUSED_PREFIX} ${oneLine(message)}`);
     }
     process.exitCode = 1;

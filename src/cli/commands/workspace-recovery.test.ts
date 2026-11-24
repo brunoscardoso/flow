@@ -147,6 +147,12 @@ describeWithGit('workspace recovery — real CLI, real git, two machines', () =>
       // … and was connected to the team's repository by hand.
       expect(workspace(machineB, 'set-remote', '--workspace', 'my-mac', '--remote', WORKSPACE_REMOTE, '--json').status).toBe(0);
       expect(workspace(machineB, 'sync', '--workspace', 'my-mac', '--json').combined).toContain('unrelated-history');
+      // Again, with the team's branch already fetched (the teammate's real
+      // case): still the plain answer, never git's "no merge base".
+      write(mine, 'projects/app/brain/decisions/later.md', '# Later\n');
+      const again = workspace(machineB, 'sync', '--workspace', 'my-mac', '--json');
+      expect(again.combined).not.toContain('no merge base');
+      expect(again.json).toMatchObject({ refused: 'unrelated-history', pushed: false });
 
       // ── Joining is no longer refused "already has that Workspace" ─────────
       const joined = workspace(machineB, 'join', '--remote', WORKSPACE_REMOTE, '--json');
