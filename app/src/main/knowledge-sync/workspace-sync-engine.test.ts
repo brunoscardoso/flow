@@ -835,14 +835,21 @@ describe('workspace sync engine — intent merges', () => {
     expect(h.merges).toEqual([])
   })
 
-  it('a pause with anything that is not intent never reaches the agent', async () => {
+  it('a pause with an item the agent cannot take settles the rest, and only that one is left for a person', async () => {
     const h = harness({ mergeIntent: async () => MERGED_TEXT })
-    h.answer(SYNC_ARGV, result('ask', { asks: [MERGEABLE, { ...ASK, id: 'ask-2', kind: 'same-feature', path: 'projects/api/brain/features/q.md', existingPath: 'projects/api/brain/features/q.md' }] }))
+    const feature = { ...ASK, id: 'ask-2', kind: 'same-feature' as const, path: 'projects/api/brain/features/q.md', existingPath: 'projects/api/brain/features/q.md' }
+    h.answer(SYNC_ARGV, result('ask', { asks: [MERGEABLE, feature] }))
+    h.answer(
+      `workspace sync --workspace ${SLUG} --resolve=${DECISION} --id=ask-1 --take=file:/tmp/decision-0.md --json`,
+      result('ask', { asks: [feature], decided: ['ask-1'] }),
+    )
     await h.engine.open(SLUG)
-    // Positive first: the pause is shown.
+    // Positive first: the agent merged the one it could take…
+    expect(h.agentCalls).toHaveLength(1)
+    expect(h.temps).toEqual([MERGED_TEXT])
+    // …and the pause that is left holds only the other one.
     expect(h.last()).toMatchObject({ state: 'paused' })
-    expect(h.agentCalls).toEqual([])
-    expect(h.temps).toEqual([])
+    expect(h.last().asks.map((ask: { id: string }) => ask.id)).toEqual(['ask-2'])
   })
 
   it('Undo puts back this computer\'s version: a put-back over exactly the merged text, then the set says so', async () => {

@@ -91,7 +91,7 @@ Skills report `Workspace links: N recorded` (zero with its reason). The per-skil
 
 | File | Owner |
 |------|-------|
-| `workspace.json` | `workspace create | link | join | describe | rename | move-project | migrate | set-remote | unset-remote` |
+| `workspace.json` | `workspace create | link | join | describe | rename | move-project | remove-project | migrate | set-remote | unset-remote` |
 | `settings/workspaces.local.json` | `workspace migrate | set-default` |
 | `links.jsonl` | `workspace link-knowledge` |
 | `merges/`, the Workspace `.gitignore` / `.gitattributes` | `workspace sync` |
@@ -122,6 +122,7 @@ Never run `git` inside a Workspace repo to commit, merge or push its knowledge �
 | `set-remote --workspace <w> --remote <url> [--replace]` | connect a Workspace to a shared repository after it was created: sets the Workspace repo's `origin` and `remote` in `workspace.json`; contacts nothing — the next `sync` publishes. A different remote already set is refused `remote-exists` (payload `current`, `wanted`, `needs: 'replace'`) unless `--replace`, which drops the old remote's tracking refs and leaves that repository untouched; `sync-busy` / `merge-in-progress` refuse before anything is written |
 | `unset-remote --workspace <w>` | disconnect: removes `origin` and `remote`; the Workspace, its history and the shared repository are untouched (`remoteUntouched: true`); `sync` is `local-only` again |
 | `move-project --project <p> --to <w> [--from <w>]` | move a project's knowledge folder, both `workspace.json` files and every checkout's `flow` link |
+| `remove-project --workspace <w> --project <p> --confirm` | take a project out of one Workspace; its folder is kept under `workspaces/.removed-…`. When another Workspace here also has it, that copy stays, gains the files only the removed copy had (never overwriting) and the checkout's `flow` is pointed at it. Refuses `sole-copy` for the only copy a checkout uses (move it instead). In a shared Workspace the removal syncs to everyone |
 | `delete --workspace <w> --confirm` | move its projects into the Default and keep the folder as `workspaces/.deleted-<slug>-<date>/`; the remote is untouched; never the Default |
 
 All take `--json`. A refusal prints a JSON payload line on stdout, then `workspace refused: <reason> — <sentence>`, exit 1; callers read the last parseable JSON line. Remotes are `https://`, `ssh://` or scp-style, never with credentials.
@@ -173,7 +174,7 @@ sub-agent for it — the single largest section in it — and pointed here anywa
 
 **On disk.** `<Flow folder>/workspaces/<w>/` is the repository: `workspace.json` (`name`, `slug`, `remote?`, `projects: [{ id, name, slug, remotes[], description? }]`), `projects/<p>/` (what `<repo>/flow` links to), `links.jsonl` and `merges/`. Beside it, `projects.local.json` maps project id → this machine's checkout and is personal (never synced). The **Flow folder** resolves `PLAN_FLOW_HOME` → the parent of `PLAN_FLOW_VAULT_DIR` (when that names a `brain` folder) → `~/plan-flow` (`resolveFlowFolder`, `src/cli/utils/files.ts`). A project's id is its git remote identity (`host/owner/repo`), never its folder name; a repo with no remote joins as `local:<slug>`. Old knowledge is never moved or deleted — with `--import` it is copied in first, and the original stays as the backup: linking replaces a vault link (the vault copy stays), renames an untracked `flow/` — or one that is its own knowledge repo — to `flow.pre-workspace-<date>/`, and renames a committed `flow/` to `flow.pre-workspace/` in one code-repo commit that is refused until a person has seen it. Provisioning links a repo that is a project of exactly one Workspace there (only on this machine's own `projects.local.json` record — a remote match is a suggestion), importing what `flow/` held, never into the vault, and never moves an existing Workspace link. `init --workspace-managed` (what the app passes) leaves a `flow/` that is not a Workspace link exactly as it is — no vault link, no vault registration, nothing seeded — because the app runs `workspace migrate` for every project right after; a terminal `init` without the flag behaves as before. The old `PLANFLOW_WORKSPACES` environment switch is ignored.
 
-**Not supported yet**: taking a project out of every Workspace (a project always belongs to one — `move-project` moves it between them), and moving the Flow folder from the app (the CLI's `move-flow-folder` exists; the app shows the folder read-only and says so).
+**Not supported yet**: taking a project out of every Workspace while its checkout uses that copy (a project always belongs to one — `move-project` moves it between them; `remove-project` clears a duplicate or a project with no checkout here), and moving the Flow folder from the app (the CLI's `move-flow-folder` exists; the app shows the folder read-only and says so).
 
 
 ---

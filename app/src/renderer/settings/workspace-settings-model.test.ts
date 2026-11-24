@@ -22,6 +22,10 @@ import {
   commitConfirmText,
   commitFilesOf,
   deleteConfirmView,
+  removeProjectView,
+  removedProjectLine,
+  alsoInTag,
+  ONLY_COPY_LINE,
   deletedLine,
   joinOutcome,
   mapCandidates,
@@ -276,6 +280,29 @@ describe('creating and joining', () => {
   })
 })
 
+describe('a repository that holds another Workspace', () => {
+  it('the sync line offers to join it instead', () => {
+    const status = { state: 'error' as const, cause: 'unrelated-history' as const, lastSyncedAt: null, detail: 'holds a different history', asks: [], reviews: [] }
+    expect(syncLine(status, 0).joinInstead).toBe(true)
+    expect(syncLine({ ...status, cause: 'access' as const }, 0).joinInstead).toBeUndefined()
+    expect(syncLine(status, 0, true).joinInstead).toBeUndefined()
+  })
+  it('a join names the Workspaces that let go of the same repository', () => {
+    const { projects: _p, ...summary } = ACME
+    const { projects: _d, ...mine } = { ...DEFAULT, name: 'My Mac' }
+    const view = joinOutcome({
+      workspace: summary,
+      linked: [],
+      noLocalCheckout: [],
+      needsReview: [],
+      candidates: [],
+      openCandidates: [],
+      disconnected: [mine],
+    })
+    expect(view.lines[0]).toBe('My Mac pointed at the same repository, so it let go of it. Its knowledge stays on this computer.')
+  })
+})
+
 describe('a join\'s open-project candidates', () => {
   it('are proposed, never linked: listed unticked, with the press that adds them', () => {
     const { projects: _p, ...summary } = ACME
@@ -304,6 +331,34 @@ describe('rename, delete, move', () => {
     expect(validateRename('  ', 'Acme')).toEqual({ ok: false, message: 'Give the Workspace a name.' })
     expect(validateRename('Acme', 'Acme')).toMatchObject({ ok: false })
     expect(validateRename(' Acme Corp ', 'Acme')).toEqual({ ok: true, name: 'Acme Corp' })
+  })
+  it('a project another Workspace also holds is tagged and removable; the only copy in use is not', () => {
+    const shared = { ...ACME, projects: [project('backend', '/code/backend'), project('mobile', null)] }
+    const mine = { ...DEFAULT, projects: [project('backend', '/code/backend')] }
+    const rows = projectRows(shared, OPEN, true, [shared, mine])
+    expect(rows.map((row) => [row.name, row.alsoIn, row.canRemove, row.removeBlocked])).toEqual([
+      ['backend', ['Default'], true, null],
+      ['mobile', [], true, null],
+    ])
+    const alone = projectRows(mine, OPEN, true, [mine])
+    expect(alone[0]).toMatchObject({ canRemove: false, removeBlocked: ONLY_COPY_LINE })
+    expect(alsoInTag(['My Mac'])).toBe('Also in My Mac')
+    expect(alsoInTag([])).toBeNull()
+  })
+  it('the remove confirm says where the project stays, keeps a backup, and warns for a shared Workspace', () => {
+    const view = removeProjectView({ projectName: 'backend', workspaceName: 'Shared', keptIn: 'My Mac', shared: true })
+    expect(view.title).toBe('Remove backend from Shared?')
+    expect(view.lines.map((line) => line.warn)).toEqual([false, false, true])
+    expect(view.lines[0]?.text).toMatch(/My Mac also has backend, so it stays there/)
+    expect(view.lines[2]?.text).toMatch(/removes it for everyone who syncs Shared/)
+    const local = removeProjectView({ projectName: 'backend', workspaceName: 'Acme', keptIn: null, shared: false })
+    expect(local.lines.map((line) => line.text)).toEqual(['No other Workspace here has backend.', 'This copy is kept on this computer as a backup.'])
+    expect(removedProjectLine('backend', 'Shared', 'My Mac')).toBe('backend was removed from Shared. It is in My Mac.')
+  })
+  it('a delete merges the projects Default already has instead of moving them', () => {
+    const lines = deleteConfirmView(ACME, 'Default', ['example.com/team/backend']).lines
+    expect(lines[0]).toBe('Its 2 projects move to Default: frontend, mobile.')
+    expect(lines[1]).toMatch(/^Default already has backend\. Anything only this Workspace's copy has goes into Default's copy/)
   })
   it('a delete lists the projects that move to Default, and says the shared copy online stays', () => {
     expect(deleteConfirmView(ACME, 'Default')).toEqual({

@@ -84,6 +84,9 @@ import {
   createdLine,
   deleteConfirmView,
   deletedLine,
+  removeProjectView,
+  JOIN_INSTEAD_LABEL,
+  removedProjectLine,
   moveHereCandidates,
   movedLine,
   moveTitle,
@@ -527,8 +530,9 @@ export function openDeleteDialog(slug: string): Promise<boolean> {
         resolve(false)
         return
       }
-      const fallback = workspaces.find((candidate) => candidate.isDefault)?.name ?? 'Default'
-      const view = deleteConfirmView(workspace, fallback)
+      const defaultWorkspace = workspaces.find((candidate) => candidate.isDefault)
+      const fallback = defaultWorkspace?.name ?? 'Default'
+      const view = deleteConfirmView(workspace, fallback, defaultWorkspace?.projects.map((project) => project.id) ?? [])
       const dialog = shell(view.title, null, 'delete')
       let deleted = false
       dialog.onClose(() => {
@@ -883,6 +887,17 @@ export function openConnectRemoteDialog(input: { slug: string; name: string; rep
       dialog.message.textContent = text
     }
 
+    // The branch holds another Workspace: the person may have meant to join it.
+    const offerJoinInstead = (remote: string, joinBranch: string | null): void => {
+      if (remote === '' || dialog.actions.querySelector('[data-action="join-instead"]') !== null) return
+      const join = actionButton(JOIN_INSTEAD_LABEL, false, () => {
+        dialog.close()
+        void openJoinDialog({ remote, branch: joinBranch })
+      })
+      join.dataset['action'] = 'join-instead'
+      dialog.actions.prepend(join)
+    }
+
     const submit = async (): Promise<void> => {
       if (api === undefined) {
         fail(CONNECT_FAILED_LINE)
@@ -953,6 +968,7 @@ export function openConnectRemoteDialog(input: { slug: string; name: string; rep
           changed = true
           if (result.cause !== undefined && picked.branch !== undefined) branch.markUnusable(picked.branch, result.cause)
           branch.focus()
+          if (result.cause === 'unrelated-history') offerJoinInstead(address.input.value.trim(), picked.branch ?? null)
         }
         if (outcome.suggestion !== undefined) repoName.input.value = outcome.suggestion
         if (outcome.created !== undefined) {
@@ -1067,6 +1083,62 @@ export function openMoveProjectDialog(input: { from: string; projectId: string; 
   })
 }
 
+// ── Remove a project from a Workspace ──────────────────────────────────────
+
+/**
+ * Remove a project from one Workspace after the person has read where it
+ * stays, that this copy is kept as a backup, and — for a shared Workspace —
+ * that teammates lose it too.
+ */
+export function openRemoveProjectDialog(input: { slug: string; projectId: string; projectName: string }): Promise<boolean> {
+  return new Promise((resolve) => {
+    void readWorkspaces().then((workspaces) => {
+      const workspace = workspaces.find((candidate) => candidate.slug === input.slug)
+      if (workspace === undefined) {
+        resolve(false)
+        return
+      }
+      const holders = workspaces.filter(
+        (candidate) => candidate.slug !== input.slug && candidate.projects.some((project) => project.id === input.projectId),
+      )
+      const keeper = holders.find((candidate) => candidate.isDefault) ?? holders[0] ?? null
+      const view = removeProjectView({
+        projectName: input.projectName,
+        workspaceName: workspace.name,
+        keptIn: keeper?.name ?? null,
+        shared: workspace.remote !== null,
+      })
+      const dialog = shell(view.title, null, 'remove-project')
+      let removed = false
+      dialog.onClose(() => resolve(removed))
+      for (const line of view.lines) {
+        dialog.content.appendChild(paragraph(line.text, line.warn ? 'fl-ws-dialog-help fl-ws-dialog-warn' : 'fl-ws-dialog-help'))
+      }
+      const confirm = actionButton(view.confirm, true, () => {
+        void (async () => {
+          confirm.disabled = true
+          confirm.textContent = WORKING_LABEL
+          const answer = await window.flow.workspaces
+            ?.removeProject({ slug: input.slug, project: input.projectId })
+            .catch(() => null)
+          if (answer === null || answer === undefined || !answer.ok) {
+            confirm.disabled = false
+            confirm.textContent = view.confirm
+            dialog.message.textContent = answer?.ok === false ? answer.detail : ACTION_FAILED_LINE
+            return
+          }
+          removed = true
+          const keptIn = workspaces.find((candidate) => candidate.slug === answer.keptIn)?.name ?? null
+          dialog.content.replaceChildren(paragraph(removedProjectLine(input.projectName, workspace.name, keptIn), 'fl-ws-dialog-done'))
+          dialog.actions.replaceChildren(actionButton(DONE_LABEL, true, () => dialog.close()))
+        })()
+      })
+      confirm.dataset['action'] = 'confirm-remove-project'
+      dialog.actions.append(actionButton(CANCEL_LABEL, false, () => dialog.close()), confirm)
+    })
+  })
+}
+
 // ── Move it in (a committed knowledge folder) ───────────────────────────────
 
 /**
@@ -1174,7 +1246,7 @@ function chooseWorkspace(workspaces: readonly WorkspaceListing[], current: strin
 
 // ── Join a Workspace ────────────────────────────────────────────────────────
 
-export function openJoinDialog(): Promise<WorkspaceSummary | null> {
+export function openJoinDialog(prefill?: { remote: string; branch?: string | null }): Promise<WorkspaceSummary | null> {
   return new Promise((resolve) => {
     const dialog = shell(JOIN_TITLE, JOIN_BODY, 'join')
     let joined: WorkspaceSummary | null = null
@@ -1186,6 +1258,10 @@ export function openJoinDialog(): Promise<WorkspaceSummary | null> {
     // Optional: empty follows the branch the team already syncs on.
     const joinBranch = field('fl-ws-join-branch', JOIN_BRANCH_LABEL, NEW_BRANCH_PLACEHOLDER, JOIN_BRANCH_HELP)
     dialog.content.append(address.row, joinBranch.row, paragraph(FRESH_NOTE, 'fl-ws-dialog-note'))
+    if (prefill !== undefined) {
+      address.input.value = prefill.remote
+      if (prefill.branch !== undefined && prefill.branch !== null) joinBranch.input.value = prefill.branch
+    }
     const confirm = actionButton(JOIN_CONFIRM, true, () => void submit())
     dialog.actions.append(actionButton(CANCEL_LABEL, false, () => dialog.close()), confirm)
 
@@ -1495,6 +1571,7 @@ function injectStyles(): void {
     }
     .fl-ws-dialog-input:focus-visible { outline: 2px solid var(--fl-color-focus-ring); outline-offset: 1px; }
     .fl-ws-dialog-help { font-size: var(--fl-text-caption-size); }
+    .fl-ws-dialog-warn { color: var(--fl-color-warning); }
     .fl-ws-dialog-note {
       margin: 0; font-size: var(--fl-text-caption-size); line-height: var(--fl-line-height-dense);
       color: var(--fl-color-text-secondary);

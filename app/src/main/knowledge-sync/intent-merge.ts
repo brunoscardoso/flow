@@ -65,7 +65,8 @@ export interface IntentMergeDeps {
 }
 
 export type IntentMergeOutcome =
-  | { kind: 'settled'; documents: WorkspaceIntentMergeDocument[] }
+  /** `left`: how many items still wait for a person (the agent settled the rest). */
+  | { kind: 'settled'; documents: WorkspaceIntentMergeDocument[]; left: number }
   /** The pause stays for the collision card. `resolve-failed` may leave earlier decisions recorded in the CLI's store. */
   | { kind: 'left'; reason: 'not-mergeable' | 'agent-failed' | 'resolve-failed' }
 
@@ -76,6 +77,7 @@ export function intentKindOf(path: string): IntentDocumentKind | null {
   if (/^projects\/[^/]+\/brain\/decisions\//.test(path)) return 'decision'
   if (/^projects\/[^/]+\/plans\/[^/]+\.md$/.test(path)) return 'plan'
   if (/^projects\/[^/]+\/discovery\/[^/]+\.md$/.test(path)) return 'discovery'
+  if (/^projects\/[^/]+\/.+\.md$/.test(path)) return 'note'
   return null
 }
 
@@ -172,28 +174,33 @@ async function askOnce(input: Omit<IntentMergeInput, 'signal'>, deps: IntentMerg
 // ── The one entry point ─────────────────────────────────────────────────────
 
 /**
- * For a pause made ONLY of agent-mergeable items: one merged text per item
- * from the agent, then each resolved through the CLI. Returns what an Undo
- * and "See both" need; anything the agent cannot merge leaves the pause.
+ * One merged text per item the agent can merge, then each resolved through
+ * the CLI. Returns what an Undo and "See both" need. Items it cannot merge —
+ * two files, a deletion, a contradiction — stay for a person, and only those:
+ * a pause is no longer all-or-nothing (user, 2026-11-24: "we are having
+ * conflicts that agent should fix").
  */
 export async function settleIntentAsks(
   slug: string,
   asks: readonly IntentItem[],
   deps: IntentMergeDeps,
 ): Promise<IntentMergeOutcome> {
-  if (!allAgentMergeable(asks)) return { kind: 'left', reason: 'not-mergeable' }
+  const candidates = asks.filter((item) => sidesOf(item) !== null)
+  if (candidates.length === 0) return { kind: 'left', reason: 'not-mergeable' }
 
   // 1. Every text first. Sequential: one model call at a time, never a burst.
   const documents: WorkspaceIntentMergeDocument[] = []
-  for (const item of asks) {
+  const settled: IntentItem[] = []
+  for (const item of candidates) {
     const sides = sidesOf(item)
-    if (sides === null) return { kind: 'left', reason: 'not-mergeable' }
+    if (sides === null) continue
     const title = documentTitle(item.path, sides.ours, sides.theirs)
     const merged = await askOnce({ slug, kind: sides.kind, title, base: sides.base, ours: sides.ours, theirs: sides.theirs }, deps)
     if (merged === null) {
-      deps.log('an intent document was left for a person: the agent gave no usable merge', { slug, id: item.id })
-      return { kind: 'left', reason: 'agent-failed' }
+      deps.log('a document was left for a person: the agent gave no usable merge', { slug, id: item.id })
+      continue
     }
+    settled.push(item)
     documents.push({
       id: item.id,
       path: item.path,
@@ -208,13 +215,15 @@ export async function settleIntentAsks(
     })
   }
 
-  // 2. Then every resolve, in order: the last one completes the merge.
-  for (const [index, item] of asks.entries()) {
+  if (settled.length === 0) return { kind: 'left', reason: 'agent-failed' }
+
+  // 2. Then every resolve, in order: when nothing else waits, the last one completes the merge.
+  for (const [index, item] of settled.entries()) {
     const taken = await deps.resolve(item, documents[index].merged).catch((error: unknown) => {
       deps.log('resolving an agent merge failed', { slug, id: item.id, error: String(error) })
       return false
     })
     if (!taken) return { kind: 'left', reason: 'resolve-failed' }
   }
-  return { kind: 'settled', documents }
+  return { kind: 'settled', documents, left: asks.length - settled.length }
 }

@@ -35,6 +35,7 @@ import {
   openChangeBranchDialog,
   openDisconnectRemoteDialog,
   openMoveProjectDialog,
+  openRemoveProjectDialog,
   openProjectIntoWorkspace,
   openRenameDialog,
   readOpenProjects,
@@ -50,6 +51,9 @@ import {
   MOVE_HERE_CONFIRM,
   MOVE_HERE_LABEL,
   MOVE_TO_LABEL,
+  JOIN_INSTEAD_LABEL,
+  REMOVE_PROJECT_LABEL,
+  alsoInTag,
   NEW_WORKSPACE_LABEL,
   NO_MAP_CANDIDATES,
   NO_MOVE_HERE_CANDIDATES,
@@ -301,6 +305,13 @@ export class WorkspaceSettingsSection {
         }),
       )
     }
+    if (view.hasRemote && view.sync.joinInstead === true) {
+      const remote = view.remoteText
+      const branch = view.branchText === NO_BRANCH_YET ? null : view.branchText
+      syncActions.appendChild(
+        this.#button(JOIN_INSTEAD_LABEL, () => void openJoinDialog({ remote, branch }).then(() => this.refresh()), 'join-instead'),
+      )
+    }
     if (view.hasRemote) {
       const syncNow = this.#button(SYNC_NOW_LABEL, () => void this.#syncNow(view.slug), 'sync-now')
       syncNow.disabled = !view.sync.canSyncNow
@@ -330,6 +341,12 @@ export class WorkspaceSettingsSection {
       const name = document.createElement('div')
       name.className = 'fl-wss-project-name'
       name.appendChild(this.#line(project.name, 'fl-wss-value'))
+      const also = alsoInTag(project.alsoIn)
+      if (also !== null) {
+        const tag = this.#line(also, 'fl-wss-also')
+        tag.dataset['part'] = 'also-in'
+        name.appendChild(tag)
+      }
       if (project.note !== null) name.appendChild(this.#line(project.note, 'fl-wss-muted'))
       row.appendChild(name)
       const root = project.root
@@ -351,6 +368,16 @@ export class WorkspaceSettingsSection {
             void openMoveProjectDialog({ from: view.slug, projectId, projectName }).then((done) => { if (done) void this.refresh() })
           }, 'move-project'),
         )
+      }
+      {
+        const projectId = project.id
+        const projectName = project.name
+        const remove = this.#button(REMOVE_PROJECT_LABEL, () => {
+          void openRemoveProjectDialog({ slug: view.slug, projectId, projectName }).then((done) => { if (done) void this.refresh() })
+        }, 'remove-project')
+        remove.disabled = !project.canRemove
+        if (project.removeBlocked !== null) remove.title = project.removeBlocked
+        row.appendChild(remove)
       }
       block.appendChild(row)
     }
@@ -510,6 +537,7 @@ function injectStyles(): void {
     .fl-wss-status { font-size: var(--fl-text-ui-size); color: var(--fl-color-text-secondary); }
     .fl-wss-status.ok { color: var(--fl-color-success); }
     .fl-wss-status.warning { color: var(--fl-color-warning); }
+    .fl-wss-also { font-size: var(--fl-text-caption-size); color: var(--fl-color-warning); }
     .fl-wss-status.error { color: var(--fl-color-error); }
     .fl-wss-projects { display: flex; flex-direction: column; gap: var(--fl-space-xs); align-items: flex-start; }
     .fl-wss-project {

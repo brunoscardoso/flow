@@ -522,6 +522,7 @@ const flowApi: FlowApi = {
     rename: (request) => invoke('workspaces:rename', request),
     moveProject: (request) => invoke('workspaces:moveProject', request),
     delete: (request) => invoke('workspaces:delete', request),
+    removeProject: (request) => invoke('workspaces:removeProject', request),
     placement: () => invoke('workspaces:placement', {}),
     moveIn: (request) => invoke('workspaces:moveIn', request),
     retryPlacement: (request) => invoke('workspaces:retryPlacement', request),

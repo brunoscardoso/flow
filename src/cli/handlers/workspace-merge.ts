@@ -371,6 +371,16 @@ export function isIntentPath(path: string): boolean {
   return DECISION_PATH.test(path) || DISCOVERY_PATH.test(path) || PLAN_PATH.test(path);
 }
 
+/**
+ * Any markdown note of a project — intent, a feature, an error, a learned
+ * note — which an agent may merge (user, 2026-11-24: "we are having
+ * conflicts that agent should fix"). Only the base text is extra; the app
+ * still decides, item by item, whether its answer is usable.
+ */
+export function isAgentMergeablePath(path: string): boolean {
+  return isIntentPath(path) || /^projects\/[^/]+\/.+\.md$/.test(path);
+}
+
 function versionedName(path: string): VersionedName | null {
   const match = VERSIONED_PATH.exec(path);
   if (match === null) return null;
@@ -914,7 +924,7 @@ function reviewOf(facts: MergeFacts, path: string, sides: Sides): SyncReview {
     existing: existing.text,
     incoming: incoming.text,
     conflicted: conflicted.text,
-    ...(isIntentPath(path) ? { agentMergeable: true as const, theirAuthor: authorAt(facts.git, facts.repo, facts.theirs, path) } : {}),
+    ...(isAgentMergeablePath(path) ? { agentMergeable: true as const, theirAuthor: authorAt(facts.git, facts.repo, facts.theirs, path) } : {}),
     truncated: base.truncated || existing.truncated || incoming.truncated || conflicted.truncated,
     options: ['ours', 'theirs', 'file'],
   };
@@ -978,7 +988,7 @@ export function inspectMerge(facts: MergeFacts): MergeInspection {
       }
       const feature = featureOf(path, sides.ours) ?? featureOf(path, sides.theirs) ?? featureOf(path, sides.base);
       const topic = feature === null ? path : featureAddress(feature.id);
-      inspection.asks.push(askOf(facts, 'same-feature', topic, path, path));
+      inspection.asks.push(askOf(facts, 'same-feature', topic, path, path, { agentMergeable: true }));
       continue;
     }
     const knowledgeClass = classifyKnowledgePath(path, { root: 'workspace' });

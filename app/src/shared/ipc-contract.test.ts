@@ -218,6 +218,7 @@ const INVOKE_MAP_KEYS: Record<IpcInvokeChannel, true> = {
   'workspaces:rename': true,
   'workspaces:moveProject': true,
   'workspaces:delete': true,
+  'workspaces:removeProject': true,
   'workspaces:placement': true,
   'workspaces:moveIn': true,
   'workspaces:retryPlacement': true,

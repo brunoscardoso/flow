@@ -1,0 +1,238 @@
+/**
+ * Getting a person OUT of a tangled Workspace setup (user report 2026-11-24),
+ * through the REAL CLI. The teammate's own Default had been connected to the
+ * team's repository by hand, so it could never sync ("a different history"),
+ * joining refused ("this computer already has that Workspace"), the same
+ * projects sat in two Workspaces, and deleting one refused ("already has this
+ * project"). Each step below is one of those dead ends, now with a way out.
+ *
+ * `planflow-ai workspace sync` — the REAL CLI (from source, through tsx), a
+ * REAL git, two "machines" in one throwaway sandbox. The layer the app's sync
+ * engine and the heartbeat daemon reach: they spawn the verb and read the LAST
+ * parseable JSON line on stdout.
+ *
+ * Isolation as in workspace.test.ts: each machine is its own Flow folder
+ * (PLAN_FLOW_HOME), git reads a private config whose `insteadOf` maps
+ * https://git.example.test/ onto a local bare repo, and only the `file`
+ * transport is allowed (FLOW_E2E=1 + FLOW_E2E_KNOWLEDGE_GIT_PROTOCOLS=file).
+ */
+
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+
+const { getPackageRoot } = await import('../utils/files.js');
+const { tsxRunnerPath } = await import('../utils/node-runner.js');
+
+const PACKAGE_ROOT = getPackageRoot();
+const TSX_BIN = tsxRunnerPath(PACKAGE_ROOT);
+const CLI_ENTRY = join(PACKAGE_ROOT, 'src', 'cli', 'index.ts');
+const CLI_TIMEOUT_MS = 120_000;
+const SUITE_TIMEOUT_MS = 240_000;
+const WORKSPACE_REMOTE = 'https://git.example.test/team/ws.git';
+
+const GIT_AVAILABLE = spawnSync('git', ['--version'], { encoding: 'utf-8' }).status === 0;
+const describeWithGit = GIT_AVAILABLE ? describe : describe.skip;
+
+interface CliRun {
+  combined: string;
+  status: number | null;
+  json: Record<string, unknown> | null;
+}
+
+function lastJson(stdout: string): Record<string, unknown> | null {
+  for (const line of stdout.split('\n').reverse()) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    try {
+      return JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      // not JSON — keep scanning upwards
+    }
+  }
+  return null;
+}
+
+describeWithGit('workspace recovery — real CLI, real git, two machines', () => {
+  let sandbox: string;
+  let env: NodeJS.ProcessEnv;
+  let machineA: string;
+  let machineB: string;
+
+  function git(cwd: string, ...args: string[]): string {
+    const result = spawnSync('git', args, { cwd, encoding: 'utf-8', env });
+    if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${result.stderr}`);
+    return result.stdout;
+  }
+
+  function workspace(flowFolder: string, ...args: string[]): CliRun {
+    const result = spawnSync(process.execPath, [TSX_BIN, CLI_ENTRY, 'workspace', ...args], {
+      encoding: 'utf-8',
+      timeout: CLI_TIMEOUT_MS,
+      cwd: sandbox,
+      env: { ...env, PLAN_FLOW_HOME: flowFolder, PLAN_FLOW_VAULT_DIR: join(flowFolder, 'brain') },
+    });
+    if (result.error) throw result.error;
+    const stdout = result.stdout ?? '';
+    return { combined: `${stdout}\n${result.stderr ?? ''}`, status: result.status, json: lastJson(stdout) };
+  }
+
+  function write(root: string, path: string, text: string): void {
+    const full = join(root, path);
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, text);
+  }
+
+  beforeEach(() => {
+    sandbox = realpathSync(mkdtempSync(join(tmpdir(), 'pf-workspace-recovery-')));
+    machineA = join(sandbox, 'machine-a', 'plan-flow');
+    machineB = join(sandbox, 'machine-b', 'plan-flow');
+    mkdirSync(join(sandbox, 'home'), { recursive: true });
+    mkdirSync(join(sandbox, 'remotes', 'team'), { recursive: true });
+    writeFileSync(
+      join(sandbox, 'gitconfig'),
+      `[user]\n\tname = Test Person\n\temail = test@example.com\n[init]\n\tdefaultBranch = main\n[url "file://${sandbox}/remotes/"]\n\tinsteadOf = https://git.example.test/\n`
+    );
+    env = {
+      PATH: process.env.PATH ?? '/usr/bin:/bin',
+      HOME: join(sandbox, 'home'),
+      TMPDIR: process.env.TMPDIR ?? tmpdir(),
+      GIT_CONFIG_GLOBAL: join(sandbox, 'gitconfig'),
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_TERMINAL_PROMPT: '0',
+      FLOW_E2E: '1',
+      FLOW_E2E_KNOWLEDGE_GIT_PROTOCOLS: 'file',
+      COPILOT_HOME: join(sandbox, 'copilot'),
+      PLANFLOW_NO_BACKGROUND_WORK: '1',
+    };
+    git(join(sandbox, 'remotes', 'team'), 'init', '-q', '--bare', 'ws.git');
+  });
+
+  afterEach(() => {
+    rmSync(sandbox, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  });
+
+
+  function makeRepo(path: string, origin: string): string {
+    mkdirSync(path, { recursive: true });
+    git(path, 'init', '-q', '-b', 'main');
+    writeFileSync(join(path, 'app.ts'), 'export {}\n');
+    git(path, 'add', '-A');
+    git(path, 'commit', '-q', '-m', 'init');
+    git(path, 'remote', 'add', 'origin', origin);
+    return path;
+  }
+
+  const projectsOf = (flowFolder: string, slug: string): string[] =>
+    (JSON.parse(readFileSync(join(flowFolder, 'workspaces', slug, 'workspace.json'), 'utf-8')) as { projects: { slug: string }[] }).projects.map((p) => p.slug);
+
+  it(
+    'joins over a Workspace that only pointed at the team repository, and hands its projects to the team copy',
+    () => {
+      // ── The team: machine A shares a Workspace with one project in it ──────
+      expect(workspace(machineA, 'create', '--name', 'Team', '--remote', WORKSPACE_REMOTE, '--json').status).toBe(0);
+      const appA = makeRepo(join(sandbox, 'machine-a', 'code', 'app'), 'https://git.example.test/team/app.git');
+      expect(workspace(machineA, 'link', '--target', appA, '--workspace', 'team', '--json').status).toBe(0);
+      write(join(machineA, 'workspaces', 'team'), 'projects/app/brain/decisions/queue.md', '# Queue\n\nThe team says SQS.\n');
+      expect(workspace(machineA, 'sync', '--workspace', 'team', '--json').json).toMatchObject({ state: 'synced', pushed: true });
+
+      // ── The teammate: their own Workspace has the same project … ──────────
+      expect(workspace(machineB, 'create', '--name', 'My Mac', '--json').status).toBe(0);
+      const appB = makeRepo(join(sandbox, 'machine-b', 'code', 'app'), 'https://git.example.test/team/app.git');
+      expect(workspace(machineB, 'link', '--target', appB, '--workspace', 'my-mac', '--json').status).toBe(0);
+      const mine = join(machineB, 'workspaces', 'my-mac');
+      write(mine, 'projects/app/brain/decisions/queue.md', '# Queue\n\nMy older note.\n');
+      write(mine, 'projects/app/discovery/discovery_mine_v1.md', '# Only mine\n');
+      // … and was connected to the team's repository by hand.
+      expect(workspace(machineB, 'set-remote', '--workspace', 'my-mac', '--remote', WORKSPACE_REMOTE, '--json').status).toBe(0);
+      expect(workspace(machineB, 'sync', '--workspace', 'my-mac', '--json').combined).toContain('unrelated-history');
+
+      // ── Joining is no longer refused "already has that Workspace" ─────────
+      const joined = workspace(machineB, 'join', '--remote', WORKSPACE_REMOTE, '--json');
+      expect(joined.combined).not.toContain('already-joined');
+      expect(joined.status).toBe(0);
+      expect(joined.json).toMatchObject({ action: 'join', workspace: { slug: 'team' }, disconnected: [{ slug: 'my-mac', remote: null }] });
+      expect(git(mine, 'remote').trim()).toBe('');
+
+      // The project moved over to the team's copy: one listing, the checkout
+      // points there, the team's version won, and the teammate's own extra
+      // discovery came along. Their copy is kept as a backup.
+      expect(projectsOf(machineB, 'my-mac')).toEqual([]);
+      expect(projectsOf(machineB, 'team')).toEqual(['app']);
+      const teamApp = join(machineB, 'workspaces', 'team', 'projects', 'app');
+      expect(realpathSync(join(appB, 'flow'))).toBe(realpathSync(teamApp));
+      expect(readFileSync(join(teamApp, 'brain/decisions/queue.md'), 'utf-8')).toBe('# Queue\n\nThe team says SQS.\n');
+      expect(readFileSync(join(teamApp, 'discovery/discovery_mine_v1.md'), 'utf-8')).toBe('# Only mine\n');
+      const backups = readdirSync(join(machineB, 'workspaces')).filter((name) => name.startsWith('.removed-my-mac-app-'));
+      expect(backups).toHaveLength(1);
+      expect(readFileSync(join(machineB, 'workspaces', backups[0], 'brain/decisions/queue.md'), 'utf-8')).toBe('# Queue\n\nMy older note.\n');
+
+      // And both Workspaces sync again.
+      expect(workspace(machineB, 'sync', '--workspace', 'my-mac', '--json').json).toMatchObject({ state: 'local-only' });
+      expect(workspace(machineB, 'sync', '--workspace', 'team', '--json').json).toMatchObject({ state: 'synced' });
+
+      // A real second join is still refused: that one truly is the same Workspace.
+      expect(workspace(machineB, 'join', '--remote', WORKSPACE_REMOTE, '--json').combined).toContain('already-joined');
+    },
+    SUITE_TIMEOUT_MS
+  );
+
+  it(
+    'removes a project from a Workspace, refuses the only copy a checkout uses, and deletes over a duplicate',
+    () => {
+      expect(workspace(machineA, 'create', '--name', 'Home', '--json').status).toBe(0);
+      expect(workspace(machineA, 'set-default', '--workspace', 'home', '--json').status).toBe(0);
+      expect(workspace(machineA, 'create', '--name', 'Side', '--json').status).toBe(0);
+      const app = makeRepo(join(sandbox, 'machine-a', 'code', 'app'), 'https://git.example.test/team/app.git');
+      expect(workspace(machineA, 'link', '--target', app, '--workspace', 'side', '--json').status).toBe(0);
+      const side = join(machineA, 'workspaces', 'side');
+      const home = join(machineA, 'workspaces', 'home');
+
+      // The only copy, and the checkout uses it: refused, nothing changed.
+      const sole = workspace(machineA, 'remove-project', '--workspace', 'side', '--project', 'app', '--confirm', '--json');
+      expect(sole.status).toBe(1);
+      expect(sole.json).toMatchObject({ refused: 'sole-copy' });
+      expect(projectsOf(machineA, 'side')).toEqual(['app']);
+
+      // The same project listed in Home too (as a join or an old move left it).
+      const homeFile = join(home, 'workspace.json');
+      const homeJson = JSON.parse(readFileSync(homeFile, 'utf-8')) as { projects: unknown[] };
+      const sideJson = JSON.parse(readFileSync(join(side, 'workspace.json'), 'utf-8')) as { projects: unknown[] };
+      homeJson.projects = sideJson.projects;
+      writeFileSync(homeFile, JSON.stringify(homeJson, null, 2));
+      write(home, 'projects/app/brain/decisions/a.md', '# Home keeps this\n');
+      write(side, 'projects/app/brain/decisions/a.md', '# Side differs\n');
+      write(side, 'projects/app/plans/plan_side_v1.md', '# Only in Side\n');
+
+      // Deleting Side no longer refuses: Home's copy stays and gains what only Side had.
+      const asked = workspace(machineA, 'delete', '--workspace', 'side', '--json');
+      expect(asked.json).toMatchObject({ refused: 'unconfirmed' });
+      const deleted = workspace(machineA, 'delete', '--workspace', 'side', '--confirm', '--json');
+      expect(deleted.combined).not.toContain('project-exists');
+      expect(deleted.status).toBe(0);
+      expect(deleted.json).toMatchObject({ action: 'delete', merged: [{ name: 'app' }] });
+      expect(projectsOf(machineA, 'home')).toEqual(['app']);
+      expect(readFileSync(join(home, 'projects/app/brain/decisions/a.md'), 'utf-8')).toBe('# Home keeps this\n');
+      expect(readFileSync(join(home, 'projects/app/plans/plan_side_v1.md'), 'utf-8')).toBe('# Only in Side\n');
+      expect(realpathSync(join(app, 'flow'))).toBe(realpathSync(join(home, 'projects', 'app')));
+      expect(existsSync(side)).toBe(false);
+
+      // A project with no checkout here can be removed; it asks first.
+      expect(workspace(machineA, 'create', '--name', 'Extra', '--json').status).toBe(0);
+      const extraFile = join(machineA, 'workspaces', 'extra', 'workspace.json');
+      const extraJson = JSON.parse(readFileSync(extraFile, 'utf-8')) as { projects: unknown[] };
+      extraJson.projects = [{ id: 'git.example.test/team/gone', name: 'gone', slug: 'gone', remotes: [] }];
+      writeFileSync(extraFile, JSON.stringify(extraJson, null, 2));
+      write(join(machineA, 'workspaces', 'extra'), 'projects/gone/brain/index.md', '# gone\n');
+      const ask = workspace(machineA, 'remove-project', '--workspace', 'extra', '--project', 'gone', '--json');
+      expect(ask.json).toMatchObject({ refused: 'unconfirmed', needs: 'confirm', keptIn: null, shared: false });
+      const removed = workspace(machineA, 'remove-project', '--workspace', 'extra', '--project', 'gone', '--confirm', '--json');
+      expect(removed.status).toBe(0);
+      expect(projectsOf(machineA, 'extra')).toEqual([]);
+      expect(existsSync(join(machineA, 'workspaces', 'extra', 'projects', 'gone'))).toBe(false);
+      expect(readdirSync(join(machineA, 'workspaces')).some((name) => name.startsWith('.removed-extra-gone-'))).toBe(true);
+    },
+    SUITE_TIMEOUT_MS
+  );
+});

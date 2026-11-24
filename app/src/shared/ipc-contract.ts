@@ -127,6 +127,8 @@ import type {
   ThreadContextOfferEvent,
   WorkspacesChangedEvent,
   WorkspaceDeleteResult,
+  WorkspaceRemoveProjectRequest,
+  WorkspaceRemoveProjectResult,
   WorkspacePlacementState,
   WorkspacesList,
   WorkspaceSuggestion,
@@ -7018,6 +7020,8 @@ export interface IpcInvokeMap {
    * is not touched. Default refuses.
    */
   'workspaces:delete': { request: { slug: string }; response: WorkspaceAnswer<WorkspaceDeleteResult> }
+  /** Take one project out of one Workspace; its folder is kept as a backup. */
+  'workspaces:removeProject': { request: WorkspaceRemoveProjectRequest; response: WorkspaceAnswer<WorkspaceRemoveProjectResult> }
   /** The projects outside every Workspace (waiting on a person, or failed), and whether the launch migration still runs. */
   'workspaces:placement': { request: Record<string, never>; response: WorkspacePlacementState }
   /** "Move it in": the one confirmed commit a committed knowledge folder takes. A person's press only. */
@@ -8213,6 +8217,7 @@ export const IPC_INVOKE_CHANNELS = [
   'workspaces:rename',
   'workspaces:moveProject',
   'workspaces:delete',
+  'workspaces:removeProject',
   'workspaces:placement',
   'workspaces:moveIn',
   'workspaces:retryPlacement',
@@ -9441,6 +9446,7 @@ export interface FlowWorkspacesApi {
   rename(request: IpcRequest<'workspaces:rename'>): Promise<IpcResponse<'workspaces:rename'>>
   moveProject(request: IpcRequest<'workspaces:moveProject'>): Promise<IpcResponse<'workspaces:moveProject'>>
   delete(request: IpcRequest<'workspaces:delete'>): Promise<IpcResponse<'workspaces:delete'>>
+  removeProject(request: IpcRequest<'workspaces:removeProject'>): Promise<IpcResponse<'workspaces:removeProject'>>
   placement(): Promise<IpcResponse<'workspaces:placement'>>
   moveIn(request: IpcRequest<'workspaces:moveIn'>): Promise<IpcResponse<'workspaces:moveIn'>>
   retryPlacement(request: IpcRequest<'workspaces:retryPlacement'>): Promise<IpcResponse<'workspaces:retryPlacement'>>

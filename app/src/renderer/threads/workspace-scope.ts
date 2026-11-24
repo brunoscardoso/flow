@@ -23,6 +23,11 @@ import type { WorkspaceListing, WorkspacePlacementState, WorkspacesChangedEvent 
 import { isRootAvailable } from '../../shared/root-selection'
 import {
   LAST_PROJECT_STORAGE_KEY,
+  LAST_THREAD_STORAGE_KEY,
+  parseLastThreads,
+  rememberLastThread,
+  workspaceLanding,
+  type LastThread,
   choiceForRoot,
   defaultNewThreadProject,
   deriveScope,
@@ -71,6 +76,25 @@ function writeLastProjects(map: Record<string, string>): void {
     console.warn('flow: could not remember the last project of a Workspace', error)
   }
 }
+
+function readLastThreads(): Record<string, LastThread> {
+  try {
+    return parseLastThreads(window.localStorage.getItem(LAST_THREAD_STORAGE_KEY))
+  } catch {
+    return {}
+  }
+}
+
+function writeLastThreads(map: Record<string, LastThread>): void {
+  try {
+    window.localStorage.setItem(LAST_THREAD_STORAGE_KEY, JSON.stringify(map))
+  } catch (error) {
+    console.warn('flow: could not remember the last conversation of a Workspace', error)
+  }
+}
+
+/** Sent when a Workspace with no project to open becomes the one looked at: the old conversation must not stay on screen. */
+export const WORKSPACE_EMPTY_EVENT = 'flow:workspace-empty'
 
 class WorkspaceScopeStore {
   #started = false
@@ -320,6 +344,17 @@ class WorkspaceScopeStore {
     writeLastProjects(rememberLastProject(readLastProjects(), slug, root))
   }
 
+  /**
+   * A conversation was opened: remember it — and its project — as where its
+   * Workspace was left, so switching back returns to it.
+   */
+  rememberThread(root: string, threadId: string): void {
+    const slug = this.#state.membership.get(root)
+    if (typeof slug !== 'string') return
+    writeLastProjects(rememberLastProject(readLastProjects(), slug, root))
+    writeLastThreads(rememberLastThread(readLastThreads(), slug, { root, threadId }))
+  }
+
   // ── What the switcher does ────────────────────────────────────────────────
 
   /** Look at a Workspace: remember it in main, and open one of its projects. */
@@ -328,13 +363,26 @@ class WorkspaceScopeStore {
     this.#emit()
     const answer = await this.#ws().setCurrent({ slug }).catch(() => null)
     if (answer !== null && !answer.ok) console.warn('flow: could not make the Workspace current', answer.detail)
-    const target = this.newThreadProject()
     const activeSlug = this.#activeRoot === null ? undefined : this.#membership.get(this.#activeRoot)
-    if (target !== null && activeSlug !== slug) {
-      await window.flow.project
-        .setActive({ rootPath: target })
-        .catch((error: unknown) => console.error('flow: failed to switch project', error))
+    if (activeSlug === slug) return
+    // EACH WORKSPACE KEEPS ITS OWN PLACE (user, 2026-11-24): the conversation
+    // last open there comes back, and the editor tabs, terminals, Launchpad and
+    // browser pages follow it, because they are all kept per conversation.
+    const landing = workspaceLanding({ target: this.newThreadProject(), remembered: readLastThreads()[slug] ?? null })
+    if (landing === null) {
+      document.dispatchEvent(new CustomEvent(WORKSPACE_EMPTY_EVENT))
+      return
     }
+    // Recorded BEFORE the switch, so the project change carries this thread
+    // (the same order selecting a thread uses).
+    if (landing.threadId !== null) {
+      await window.flow.project
+        .setActiveThread({ rootPath: landing.root, threadId: landing.threadId })
+        .catch((error: unknown) => console.warn('flow: failed to restore the conversation', error))
+    }
+    await window.flow.project
+      .setActive({ rootPath: landing.root })
+      .catch((error: unknown) => console.error('flow: failed to switch project', error))
   }
 
   /**

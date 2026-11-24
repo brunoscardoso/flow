@@ -110,7 +110,7 @@ test('create a Workspace from the switcher, add projects, manage it in Settings,
   const card = section.locator('.fl-wss-card[data-workspace="acme"]')
   const defaultCard = section.locator('.fl-wss-card[data-workspace="default"]')
   await expect(card.locator('.fl-wss-name')).toHaveText('Acme')
-  await expect(card.locator('.fl-wss-remote')).toHaveText(sandbox.remoteUrl)
+  await expect(card.locator('[data-part="shared-repository"] .fl-wss-remote')).toHaveText(sandbox.remoteUrl)
   // The Workspace cards say where things live; the Flow folder block is gone
   // (the cards above are the positive — the section did render).
   await expect(section.locator('[data-part="flow-folder"]')).toHaveCount(0)
@@ -130,6 +130,12 @@ test('create a Workspace from the switcher, add projects, manage it in Settings,
   await expect(card.locator('.fl-wss-project-name .fl-wss-value')).toHaveText(['backend', 'frontend'])
   expect(lstatSync(join(frontend, 'flow')).isSymbolicLink()).toBe(true)
   await expect(card.locator('.fl-wss-project button', { hasText: 'Project settings' })).toHaveCount(2)
+  // Each row offers Remove…; a project's only copy, which its checkout uses,
+  // can't be removed — only moved — and the button says why.
+  const remove = card.locator('[data-part="remove-project"]')
+  await expect(remove).toHaveCount(2)
+  await expect(remove.first()).toBeDisabled()
+  await expect(remove.first()).toHaveAttribute('title', 'This is the only copy here, and the project uses it. Move it instead.')
   await window.screenshot({ path: join(SCREENS, 'workspaces-settings-section.png') })
 
   // ── Sync now really syncs — to the local bare repository, never the network ──

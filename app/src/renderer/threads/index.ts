@@ -26,6 +26,7 @@ import { askCarryInline } from './carry-menu-view'
 import { prepareThreadWorktree } from './prepare-worktree-flow'
 import { hasAvailableRoot } from './root-availability-select'
 import { ThreadSidebar } from './thread-sidebar'
+import { WORKSPACE_EMPTY_EVENT, workspaceScope } from './workspace-scope'
 import { createChainChip } from './chain-chip-view'
 import { CLOSE_SUBAGENT_VIEWS_EVENT } from './subagent-open'
 import { createThreadProjectChips } from './thread-project-chips'
@@ -682,6 +683,7 @@ export function initThreads(surfaces: ShellSurfaces): void {
     void api.project
       .setActiveThread({ rootPath: thread.projectRoot, threadId: thread.id })
       .catch((error: unknown) => console.warn('flow: failed to persist active thread', error))
+    workspaceScope.rememberThread(thread.projectRoot, thread.id)
     if (thread.projectRoot !== activeProjectRoot) {
       activeProjectRoot = thread.projectRoot
       void api.project
@@ -853,6 +855,10 @@ export function initThreads(surfaces: ShellSurfaces): void {
   // the old project can't drive a reject against the new one (#405). A
   // same-project switch (already selected) is a no-op, so no loop with the
   // setActiveProject call above.
+  // A Workspace with nothing to open: its list is empty, so the old
+  // Workspace's conversation must not stay on screen beside it.
+  document.addEventListener(WORKSPACE_EMPTY_EVENT, () => clearSelectedThread())
+
   api.project.onActiveChanged((context) => {
     activeProjectRoot = context?.rootPath ?? null
     // THE CACHED BRANCH IS ONLY GOOD FOR A VISIT. A project's own branch can

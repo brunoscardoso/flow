@@ -61,11 +61,14 @@ import { moveFlowFolder, type MoveFlowFolderResult } from '../handlers/workspace
 import { migrateWorkspaces, type MigrateResult } from '../handlers/workspace-migrate.js';
 import {
   deleteWorkspace,
+  joinAndSettle,
   moveProject,
+  removeProject,
   renameWorkspace,
   setDefaultWorkspace,
   type DeleteResult,
   type MoveProjectResult,
+  type RemoveProjectResult,
   type RenameResult,
   type SetDefaultResult,
 } from '../handlers/workspace-admin.js';
@@ -131,6 +134,7 @@ export const WORKSPACE_ACTIONS = [
   'migrate',
   'rename',
   'move-project',
+  'remove-project',
   'delete',
   'set-default',
   'set-remote',
@@ -235,6 +239,7 @@ type WorkspaceResult =
   | MigrateResult
   | RenameResult
   | MoveProjectResult
+  | RemoveProjectResult
   | DeleteResult
   | SetDefaultResult
   | SetRemoteResult
@@ -281,7 +286,7 @@ function dispatch(action: WorkspaceAction, options: WorkspaceCommandOptions, run
         import: options.import === true,
       });
     case 'join':
-      return joinWorkspace({
+      return joinAndSettle({
         ...context,
         remote: required(options.remote, 'remote', action),
         ...(options.name === undefined ? {} : { name: options.name }),
@@ -357,6 +362,14 @@ function dispatch(action: WorkspaceAction, options: WorkspaceCommandOptions, run
         project: required(options.project, 'project', action),
         to: required(options.to, 'to', action),
         ...(options.from === undefined ? {} : { from: options.from }),
+      });
+    case 'remove-project':
+      return removeProject({
+        ...context,
+        workspace: required(options.workspace, 'workspace', action),
+        project: required(options.project, 'project', action),
+        // THE TYPED FLAG IS THE CONFIRMATION (forbidden-pattern #15).
+        confirm: options.confirm === true,
       });
     case 'delete':
       return deleteWorkspace({
@@ -553,6 +566,10 @@ function renderHuman(result: WorkspaceResult): string {
     case 'move-project': {
       const moved = result as MoveProjectResult;
       return `workspace: ${moved.project.name} moved from ${moved.from.name} to ${moved.to.name} — ${moved.relinked.length} flow link(s) re-pointed`;
+    }
+    case 'remove-project': {
+      const removed = result as RemoveProjectResult;
+      return `workspace: removed ${removed.project.name} from ${removed.workspace.name}; kept at ${removed.keptAt}. ${removed.detail}`;
     }
     case 'delete': {
       const deleted = result as DeleteResult;

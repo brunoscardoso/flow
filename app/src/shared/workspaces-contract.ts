@@ -43,6 +43,7 @@ export const WORKSPACE_CLI_REFUSALS = [
   'project-exists',
   'default-workspace',
   'unconfirmed',
+  'sole-copy',
   'remote-exists',
   'merge-in-progress',
   'invalid-branch',
@@ -167,6 +168,11 @@ export interface WorkspaceLinkResult {
 
 export interface WorkspaceJoinResult {
   workspace: WorkspaceSummary
+  /**
+   * Workspaces here that only pointed at the joined repository: they let go
+   * of it and keep their own knowledge on this computer.
+   */
+  disconnected?: WorkspaceSummary[]
   linked: WorkspaceProject[]
   noLocalCheckout: WorkspaceProject[]
   /** Projects whose checkout needs a person first; `refusal` is the CLI's payload for it. */
@@ -264,6 +270,21 @@ export interface WorkspacePlacementState {
 }
 
 /** The answer to a delete asked without confirmation: what would move to Default. */
+/** Take one project out of one Workspace (`workspace remove-project`). */
+export interface WorkspaceRemoveProjectRequest {
+  /** The Workspace it leaves. */
+  slug: string
+  /** The project, by id. */
+  project: string
+}
+
+export interface WorkspaceRemoveProjectResult {
+  workspace: string
+  project: string
+  /** The Workspace on this computer that still has the project, or null. */
+  keptIn: string | null
+}
+
 export interface WorkspaceDeleteResult {
   workspace: string
   /** The projects that moved into Default. */
@@ -434,7 +455,8 @@ export type WorkspaceResolveResult =
 // ── Intent merges — Flow merged two edits to a decision, plan or discovery ──
 
 /** What kind of intent document Flow merged — the word a sentence uses. */
-export type IntentDocumentKind = 'decision' | 'plan' | 'discovery'
+/** `note`: any other markdown note of a project (a feature, an error, a learned note). */
+export type IntentDocumentKind = 'decision' | 'plan' | 'discovery' | 'note'
 
 /** Which text an intent document holds: Flow's merge, or one of the two originals. */
 export type IntentMergeKeep = 'ours' | 'theirs' | 'merged'

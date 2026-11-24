@@ -80,6 +80,10 @@ function harness(options: { trusted?: boolean } = {}) {
       received.push({ moveProject: request })
       return { ok: true, to: request.to }
     },
+    removeProject: async (request) => {
+      received.push({ removeProject: request })
+      return { ok: true, workspace: request.slug, project: request.project, keptIn: null }
+    },
     deleteWorkspace: async (slug) => {
       received.push({ delete: slug })
       return { ok: true, workspace: slug, moved: [] }

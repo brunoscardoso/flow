@@ -610,7 +610,8 @@ describeWithGit('workspace sync against real git, two machines', () => {
       const asked = sync(flowB);
       expect(asked.state).toBe('ask');
       expect(asked.asks).toEqual([expect.objectContaining({ kind: 'same-feature', topic: 'backend/auth', path: feature })]);
-      expect(asked.asks[0].agentMergeable).toBeUndefined();
+      // The agent may draft this one now; a person still sees it if the agent can't.
+      expect(asked.asks[0].agentMergeable).toBe(true);
       expect(remoteRefs()).toBe(refsBefore);
     },
     TEST_TIMEOUT_MS
@@ -703,26 +704,33 @@ describeWithGit('workspace sync against real git, two machines', () => {
   );
 
   it(
-    'refuses a personal file — staged by force or committed by hand — and commits and pushes nothing',
+    'lets go of a personal file — staged by force or committed by hand — and never sends it (user, 2026-11-24)',
     () => {
-      const refsBefore = remoteRefs();
-      const before = head(wsA);
+      const sentPaths = (): string => git(bare, 'log', '--all', '--name-only', '--format=');
       write(wsA, 'projects/backend/tasklist.md', '- [ ] my own todo\n');
       write(wsA, 'projects/backend/plans/plan_ok_v1.md', '# fine\n');
       git(wsA, 'add', '-f', '--', 'projects/backend/tasklist.md');
 
-      const refusal = refusalOf(() => sync(flowA), 'personal-files');
-      expect(refusal.payload).toMatchObject({ paths: ['projects/backend/tasklist.md'], committed: false, pushed: false });
-      expect(head(wsA)).toBe(before);
-      expect(git(wsA, 'diff', '--cached', '--name-only').trim()).toBe('');
-      expect(remoteRefs()).toBe(refsBefore);
+      // Staged by force: it is unstaged (kept on disk) and the rest syncs.
+      const first = sync(flowA);
+      expect(first.state).toBe('synced');
+      expect(first.pushed).toBe(true);
+      expect(first.untracked).toContain('projects/backend/tasklist.md');
+      expect(sentPaths()).toContain('projects/backend/plans/plan_ok_v1.md');
+      expect(sentPaths()).not.toContain('tasklist.md');
+      expect(existsSync(join(wsA, 'projects/backend/tasklist.md'))).toBe(true);
 
-      // Committed by hand behind Flow's back: the outgoing check still refuses before anything is pushed.
-      git(wsA, 'add', '-f', '--', 'projects/backend/tasklist.md');
+      // Committed by hand behind Flow's back: the unsent commits are rebuilt
+      // without it before anything is pushed, and the other change still goes.
+      write(wsA, 'projects/backend/plans/plan_two_v1.md', '# two\n');
+      git(wsA, 'add', '-f', '--', 'projects/backend/tasklist.md', 'projects/backend/plans/plan_two_v1.md');
       git(wsA, 'commit', '-q', '-m', 'oops');
-      refusalOf(() => sync(flowA), 'personal-files');
-      expect(remoteRefs()).toBe(refsBefore);
-      expect(calls.some((args) => args.includes('push'))).toBe(false);
+      const second = sync(flowA);
+      expect(second.pushed).toBe(true);
+      expect(sentPaths()).toContain('projects/backend/plans/plan_two_v1.md');
+      expect(sentPaths()).not.toContain('tasklist.md');
+      expect(git(wsA, 'log', '--name-only', '--format=', 'HEAD')).not.toContain('tasklist.md');
+      expect(readFileSync(join(wsA, 'projects/backend/tasklist.md'), 'utf-8')).toBe('- [ ] my own todo\n');
     },
     TEST_TIMEOUT_MS
   );
@@ -1111,10 +1119,11 @@ describeWithGit('workspace sync against real git, two machines', () => {
       expect(sync(flowA, { commitOnly: true })).toMatchObject({ state: 'nothing-to-do', committed: null });
       // A decision needs the merge it answers.
       refusalOf(() => sync(flowA, { commitOnly: true, resolve: { path: 'projects/backend/plans/plan_quit_v1.md', take: 'ours' } }), 'invalid-resolution');
-      // The guard still runs: a personal file refuses a commit-only run too.
+      // The guard still runs: a personal file staged by force is let go of in a commit-only run too.
       write(wsA, 'projects/backend/tasklist.md', 'mine\n');
       git(wsA, 'add', '-f', '--', 'projects/backend/tasklist.md');
-      refusalOf(() => sync(flowA, { commitOnly: true }), 'personal-files');
+      expect(sync(flowA, { commitOnly: true }).untracked).toContain('projects/backend/tasklist.md');
+      expect(git(wsA, 'ls-tree', '-r', '--name-only', 'HEAD')).not.toContain('tasklist.md');
       git(wsA, 'reset', '-q');
 
       const full = sync(flowA);
@@ -1387,9 +1396,16 @@ describeWithGit('workspace sync against real git, two machines', () => {
       git(wsA, 'commit', '-q', '-m', 'oops');
       git(wsA, 'rm', '-q', '--cached', '--', 'projects/backend/memory.md');
       git(wsA, 'commit', '-q', '-m', 'undo oops');
-      const refusal = refusalOf(() => sync(flowA), 'personal-files');
-      expect(refusal.payload).toMatchObject({ paths: ['projects/backend/memory.md'] });
+      // Added then removed: the net change is empty, but the history a push
+      // sends still holds it. The unsent commits are rebuilt without it.
+      const result = sync(flowA);
+      expect(result.untracked).toContain('projects/backend/memory.md');
+      // Nothing is left to send once it is gone, so nothing is pushed — and the
+      // unsent history no longer holds it either.
       expect(remoteRefs()).toBe(refsBefore);
+      expect(git(wsA, 'log', '--name-only', '--format=', 'HEAD')).not.toContain('memory.md');
+      expect(git(bare, 'log', '--all', '--name-only', '--format=')).not.toContain('memory.md');
+      expect(readFileSync(join(wsA, 'projects/backend/memory.md'), 'utf-8')).toBe('my memory\n');
     },
     TEST_TIMEOUT_MS
   );

@@ -47,6 +47,8 @@ export const WORKSPACE_REFUSAL_SENTENCES: Record<WorkspaceRefusalReason, string>
   'project-exists': 'That Workspace already has this project. Move or remove it there first.',
   'default-workspace': 'The Default Workspace stays — every project without another Workspace lives there.',
   unconfirmed: 'This needs your go-ahead first.',
+  'sole-copy':
+    "This is the only copy of the project's knowledge on this computer, and the project uses it. Move it to another Workspace instead.",
   'remote-exists': 'This Workspace already shares through another repository. Choose Change to replace it.',
   'merge-in-progress': 'A sync of this Workspace was left half-done. Sync it first, then try again.',
   'invalid-branch': "That isn't a name a branch can have. Choose another.",

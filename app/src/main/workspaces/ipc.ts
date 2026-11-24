@@ -282,6 +282,14 @@ export function registerWorkspaceChannels(deps: WorkspaceChannelDependencies): (
     return answer
   })
 
+  handle('workspaces:removeProject', (request) => {
+    const channel = 'workspaces:removeProject'
+    const body = record(request, channel)
+    const slug = requiredString(body['slug'], channel, 'slug')
+    const project = requiredString(body['project'], channel, 'project')
+    return registry.removeProject({ slug, project })
+  })
+
   handle('workspaces:placement', () => deps.placement.state())
 
   handle('workspaces:moveIn', (request) => {

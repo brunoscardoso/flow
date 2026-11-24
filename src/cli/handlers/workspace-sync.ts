@@ -776,11 +776,39 @@ function defaultMessage(workspace: LoadedWorkspace): string {
   return `${DEFAULT_MESSAGE_PREFIX} ${workspace.file.name}`;
 }
 
+/**
+ * Rebuild the commits this machine has not sent yet without the personal
+ * files in them (user, 2026-11-24: sync stuck on "personal files … nothing was
+ * sent" for ever). The index already holds what should be shared — personal
+ * files are untracked by now and stay on disk — so the unsent commits are
+ * folded into one from where this machine and the remote last agreed. Nothing
+ * is lost: every file is still in the tree or on disk, and nothing the remote
+ * has is rewritten. Returns false when it cannot tell where they agreed (no
+ * tracking ref, and part of this history is on some other remote ref).
+ */
+function dropPersonalHistory(git: WorkspaceGit, repo: string, tracking: string | null, message: string): boolean {
+  if (tracking !== null) {
+    const base = attempt(git, ['merge-base', 'HEAD', tracking], repo);
+    if (!base.ok || base.out.trim() === '') return false;
+    git(['reset', '-q', '--soft', base.out.trim()], repo);
+    return true;
+  }
+  const all = countRange(git, repo, 'HEAD');
+  const unsent = Number(git(['rev-list', '--count', 'HEAD', '--not', '--remotes'], repo).trim());
+  if (all !== unsent) return false;
+  const tree = git(['write-tree'], repo).trim();
+  const made = attempt(git, ['-c', 'user.useConfigOnly=true', 'commit-tree', tree, '-m', message], repo);
+  if (!made.ok) return false;
+  git(['reset', '-q', '--soft', made.out.trim()], repo);
+  return true;
+}
+
 function commitLocal(
   git: WorkspaceGit,
   repo: string,
   message: string,
   tracking: string | null,
+  hasRemote: boolean,
   untracked: string[] = []
 ): SyncCommit | null {
   summarizeRoundsRecords(repo);
@@ -788,6 +816,22 @@ function commitLocal(
   let staged: string[];
   try {
     untracked.push(...untrackLocalOnly(git, repo));
+    // A personal file staged by hand (forced past the ignore file) is let go
+    // of the same way: it stays on disk, it is just not shared.
+    const stagedPersonal = findPersonalFiles(
+      splitZ(git(['diff', '--cached', '--name-only', '--no-renames', '--diff-filter=AMTC', '-z'], repo))
+    ).map((hit) => hit.path);
+    if (stagedPersonal.length > 0) {
+      git(['rm', '-q', '--cached', '--ignore-unmatch', '--', ...stagedPersonal], repo);
+      untracked.push(...stagedPersonal);
+    }
+    // History only matters once there is somewhere to send it: a Workspace
+    // with no shared repository sends nothing, so an old commit that once held
+    // a personal file must not block it for ever.
+    if (hasRemote) {
+      const inHistory = findPersonalFiles(outgoingPaths(git, repo, tracking)).map((hit) => hit.path);
+      if (inHistory.length > 0 && dropPersonalHistory(git, repo, tracking, message)) untracked.push(...inHistory);
+    }
     // Drafts are committed like any knowledge (discovery
     // `workspace_knowledge_draft_solid`, FR-3): the team sees work in progress,
     // tagged with its branch by its provenance, and promotion — not this
@@ -795,7 +839,7 @@ function commitLocal(
     staged = splitZ(git(['diff', '--cached', '--name-only', '--no-renames', '-z'], repo));
     // A removal publishes nothing of the file; everything else is judged.
     const published = splitZ(git(['diff', '--cached', '--name-only', '--no-renames', '--diff-filter=AMTC', '-z'], repo));
-    guardPersonal([...published, ...outgoingPaths(git, repo, tracking)], {});
+    guardPersonal([...published, ...(hasRemote ? outgoingPaths(git, repo, tracking) : [])], {});
   } catch (error) {
     unstageAll(git, repo);
     throw error;
@@ -1505,6 +1549,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
       repo,
       message,
       remote === null ? null : revParse(git, repo, trackingRef),
+      remote !== null,
       result.untracked
     );
 

@@ -230,10 +230,25 @@ test('a Workspace is one switcher entry, one thread list and chips on a thread',
   await expect(chips.locator('.fl-project-chip-add')).toBeVisible()
   await window.screenshot({ path: join(SCREENS, 'workspaces-thread-chips.png') })
 
+  // The conversation left open in Acme: the frontend one (not Acme's first project).
+  if (!/\bactive\b/.test((await threadsRail.getAttribute('class')) ?? '')) await threadsRail.click()
+  await sidebar.getByText('Orders screen layout', { exact: true }).click()
+  await expect(chips.locator('.fl-project-chip.primary')).toHaveText('frontend', { timeout: 15_000 })
+
   // ── The other Workspace: its own one list ───────────────────────────────
   await switcher.locator('.fl-project-current').click()
   await menu.locator('.fl-ws-item', { hasText: 'Side' }).click()
   await expect(switcher.locator('.fl-project-name')).toHaveText('Side')
+  // Acme's conversation does not stay on screen in Side.
+  await expect
+    .poll(async () =>
+      window.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the preload bridge, untyped in the spec
+        const active = await (window as unknown as { flow: any }).flow.project.active()
+        return (active?.rootPath ?? '') as string
+      }),
+    )
+    .toMatch(/\/loose$/)
   await closeProjectOnboarding(window, 3_000)
   if (!/\bactive\b/.test((await threadsRail.getAttribute('class')) ?? '')) await threadsRail.click()
   await expect(sidebar.getByText('Loose experiment', { exact: true })).toBeVisible()
@@ -245,6 +260,18 @@ test('a Workspace is one switcher entry, one thread list and chips on a thread',
   await switcher.locator('.fl-project-current').click()
   await menu.locator('.fl-ws-item', { hasText: 'Acme' }).click()
   await expect(switcher.locator('.fl-project-name')).toHaveText('Acme')
+  // EACH WORKSPACE KEEPS ITS OWN PLACE: the conversation left open in Acme
+  // comes back — its project and its thread — not just one of Acme's projects.
+  await expect
+    .poll(async () =>
+      window.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the preload bridge, untyped in the spec
+        const active = await (window as unknown as { flow: any }).flow.project.active()
+        return `${(active?.rootPath ?? '').split('/').pop()}:${active?.activeThreadId ?? ''}`
+      }),
+    { timeout: 15_000 })
+    .toBe(`frontend:${ids.screen}`)
+  await expect(chips.locator('.fl-project-chip.primary')).toHaveText('frontend', { timeout: 15_000 })
   // The rail can follow the project switch to Files; the list is on the threads rail.
   if (!/\bactive\b/.test((await threadsRail.getAttribute('class')) ?? '')) await threadsRail.click()
   await expect(sidebar.getByText('Orders screen layout', { exact: true })).toBeVisible()

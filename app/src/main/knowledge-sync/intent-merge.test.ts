@@ -113,6 +113,7 @@ describe('settleIntentAsks', () => {
         { id: 'ask-1', path: DECISION, kind: 'decision', title: 'Queue', theirName: 'Bea', ours: ASK.incoming, theirs: ASK.existing, base: ASK.base, merged: '# Queue\n\nSQS and Kafka.\n', current: 'merged' },
         { id: 'review-1', path: PLAN, kind: 'plan', title: 'Plan', theirName: null, ours: REVIEW.incoming, theirs: REVIEW.existing, base: REVIEW.base, merged: '# Plan\n\nPhase A, then B.\n', current: 'merged' },
       ],
+      left: 0,
     })
     expect(h.timers.armed.size).toBe(0)
   })
@@ -122,14 +123,21 @@ describe('settleIntentAsks', () => {
     ['the agent cannot merge', [CANNOT_MERGE]],
     ['the agent says nothing', [null]],
     ['the agent answers conflict lines', ['<<<<<<< mine\na\n=======\nb\n>>>>>>> theirs']],
-  ])('one item where %s → NOTHING is resolved, not even the items already merged', async (_label, second) => {
+  ])('one item where %s → the others are still settled, and only that one waits for a person', async (_label, second) => {
     const h = harness(['# Queue\n\nmerged\n', ...second])
     const outcome = await settleIntentAsks('acme', [ASK, REVIEW], h.deps)
-    // Positive first: the first item WAS merged by the agent…
+    // Positive first: the agent was asked about both…
     expect(h.asked).toHaveLength(2)
-    // …and still nothing was resolved.
+    // …the one it merged is resolved, the other is left.
+    expect(h.resolved).toEqual([{ id: 'ask-1', text: '# Queue\n\nmerged\n' }])
+    expect(outcome).toMatchObject({ kind: 'settled', left: 1, documents: [{ id: 'ask-1' }] })
+  })
+
+  it('every item failing leaves the pause for a person, and nothing is resolved', async () => {
+    const h = harness([CANNOT_MERGE, null])
+    expect(await settleIntentAsks('acme', [ASK, REVIEW], h.deps)).toEqual({ kind: 'left', reason: 'agent-failed' })
+    expect(h.asked).toHaveLength(2)
     expect(h.resolved).toEqual([])
-    expect(outcome).toEqual({ kind: 'left', reason: 'agent-failed' })
   })
 
   it('an agent that never answers is cut off by the timeout, and nothing is resolved', async () => {
@@ -144,10 +152,18 @@ describe('settleIntentAsks', () => {
     expect(h.resolved).toEqual([])
   })
 
-  it('a non-mergeable item present → the agent is never called', async () => {
+  it('a non-mergeable item is left alone while the mergeable ones beside it are settled', async () => {
+    const feature: WorkspaceSyncAsk = { ...ASK, id: 'ask-2', kind: 'same-feature', path: 'projects/api/brain/features/q.md', existingPath: 'projects/api/brain/features/q.md', agentMergeable: undefined }
+    const mixed = harness(['# Queue\n\nmerged\n'])
+    expect(await settleIntentAsks('acme', [ASK, feature], mixed.deps)).toMatchObject({ kind: 'settled', left: 1 })
+    expect(mixed.asked).toHaveLength(1)
+    expect(mixed.resolved.map((entry) => entry.id)).toEqual(['ask-1'])
+  })
+
+  it('nothing mergeable at all → the agent is never called', async () => {
     const feature: WorkspaceSyncAsk = { ...ASK, id: 'ask-2', kind: 'same-feature', path: 'projects/api/brain/features/q.md', existingPath: 'projects/api/brain/features/q.md', agentMergeable: undefined }
     for (const items of [
-      [ASK, feature],
+      [feature],
       [{ ...ASK, truncated: true }],
       [{ ...ASK, existingPath: 'projects/api/discovery/discovery_q_v2.md' }],
       [{ ...REVIEW, kind: 'modify-delete' as const, existing: null }],
@@ -170,11 +186,14 @@ describe('settleIntentAsks', () => {
 })
 
 describe('intent-merge helpers', () => {
-  it('reads the kind from the Workspace path, and nothing else is intent', () => {
+  it('reads the kind from the Workspace path: intent, any other project note, and nothing else', () => {
     expect(intentKindOf(DECISION)).toBe('decision')
     expect(intentKindOf(PLAN)).toBe('plan')
     expect(intentKindOf('projects/api/discovery/discovery_q_v1.md')).toBe('discovery')
-    expect(intentKindOf('projects/api/brain/features/q.md')).toBeNull()
+    // Any other note of a project is a note the agent may merge; anything else is not.
+    expect(intentKindOf('projects/api/brain/features/q.md')).toBe('note')
+    expect(intentKindOf('projects/api/brain/.structure/graph.json')).toBeNull()
+    expect(intentKindOf('workspace.json')).toBeNull()
   })
 
   it('titles a document by its heading, else its file name in words', () => {

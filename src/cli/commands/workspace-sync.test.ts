@@ -107,7 +107,7 @@ describeWithGit('workspace sync CLI — real CLI, real git, two machines', () =>
   });
 
   it(
-    'syncs through the verb, asks on a decision collision, applies a --resolve, and refuses a personal file',
+    'syncs through the verb, asks on a decision collision, applies a --resolve, and lets go of a personal file',
     () => {
       const bare = join(sandbox, 'remotes', 'team', 'ws.git');
       const refs = (): string => git(bare, 'for-each-ref', '--format=%(refname) %(objectname)');
@@ -158,26 +158,40 @@ describeWithGit('workspace sync CLI — real CLI, real git, two machines', () =>
       expect(resolved.json).toMatchObject({ state: 'synced', pushed: true });
       expect(readFileSync(join(wsB, decision), 'utf-8')).toBe('# Queue\n\nSQS, FIFO.\n');
 
-      // A personal file forced into the index: refused, payload first, nothing committed or pushed.
+      // A personal file forced into the index: let go of (kept on disk), never sent (user, 2026-11-24).
       write(wsB, 'projects/backend/memory.md', 'mine\n');
       git(wsB, 'add', '-f', '--', 'projects/backend/memory.md');
-      const headBefore = git(wsB, 'rev-parse', 'HEAD');
-      const pushedBefore = refs();
-      const refused = workspace(machineB, 'sync', '--workspace', 'team', '--json');
-      expect(refused.status).toBe(1);
-      expect(refused.combined).toContain('workspace refused: personal-files');
-      expect(refused.json).toMatchObject({ action: 'sync', refused: 'personal-files', paths: ['projects/backend/memory.md'] });
-      expect(git(wsB, 'rev-parse', 'HEAD')).toBe(headBefore);
-      expect(refs()).toBe(pushedBefore);
+      const synced = workspace(machineB, 'sync', '--workspace', 'team', '--json');
+      expect(synced.status).toBe(0);
+      expect(synced.combined).not.toContain('personal-files');
+      expect(synced.json).toMatchObject({ action: 'sync', untracked: ['projects/backend/memory.md'] });
+      expect(git(wsB, 'ls-tree', '-r', '--name-only', 'HEAD')).not.toContain('memory.md');
+      expect(readFileSync(join(wsB, 'projects/backend/memory.md'), 'utf-8')).toBe('mine\n');
 
-      // The refusal unstaged it again (the ignore file keeps it out of `add -A`).
-      expect(git(wsB, 'diff', '--cached', '--name-only').trim()).toBe('');
-
-      // --all reports each Workspace; the refusal is carried, not fatal.
+      // --all reports each Workspace the same way.
       git(wsB, 'add', '-f', '--', 'projects/backend/memory.md');
       const all = workspace(machineB, 'sync', '--all', '--json');
       expect(all.status).toBe(0);
-      expect(all.json).toMatchObject({ action: 'sync', all: true, results: [{ workspace: { slug: 'team' }, refused: 'personal-files' }] });
+      expect(JSON.stringify(all.json)).not.toContain('personal-files');
+    },
+    SUITE_TIMEOUT_MS
+  );
+  it(
+    'a Workspace with no shared repository syncs over an old commit that held a personal file (user report 2026-11-24)',
+    () => {
+      expect(workspace(machineA, 'create', '--name', 'Solo', '--json').status).toBe(0);
+      const ws = join(machineA, 'workspaces', 'solo');
+      // Committed long ago, before the file was classified personal.
+      write(ws, 'projects/backend/brain/.structure/qa.jsonl', '{"q":"old"}\n');
+      git(ws, 'add', '-f', '--', 'projects/backend/brain/.structure/qa.jsonl');
+      git(ws, 'commit', '-q', '-m', 'old');
+      write(ws, 'projects/backend/plans/plan_new_v1.md', '# new\n');
+
+      const synced = workspace(machineA, 'sync', '--workspace', 'solo', '--json');
+      expect(synced.combined).not.toContain('personal-files');
+      expect(synced.status).toBe(0);
+      expect(synced.json).toMatchObject({ action: 'sync', state: 'local-only' });
+      expect(git(ws, 'ls-tree', '-r', '--name-only', 'HEAD')).toContain('projects/backend/plans/plan_new_v1.md');
     },
     SUITE_TIMEOUT_MS
   );

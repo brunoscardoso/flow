@@ -78,6 +78,8 @@ export const MOVE_HERE_CHOOSE = 'Choose a project from another Workspace'
 export const NO_MOVE_HERE_CANDIDATES = 'Every project is already in this Workspace.'
 export const OPEN_PROJECT_HERE_LABEL = 'Open a project here…'
 export const MOVE_TO_LABEL = 'Move to…'
+export const REMOVE_PROJECT_LABEL = 'Remove…'
+export const ONLY_COPY_LINE = 'This is the only copy here, and the project uses it. Move it instead.'
 export const RENAME_LABEL = 'Rename…'
 export const DELETE_LABEL = 'Delete…'
 export const DEFAULT_LINE = 'Default — every project without another Workspace lives here. It can’t be deleted.'
@@ -114,6 +116,8 @@ export interface SyncLineView {
   canSyncNow: boolean
   /** A person must choose before sync runs again. */
   paused: boolean
+  /** The repository holds another Workspace: offer to join it instead. */
+  joinInstead?: boolean
 }
 
 function waitingCount(status: WorkspaceSyncStatus): number {
@@ -127,6 +131,11 @@ function needsYou(count: number): string {
 
 /** One Workspace's sync, in words; `null` while it has not been read. */
 export function syncLine(status: WorkspaceSyncStatus | null, now: number, syncing = false): SyncLineView {
+  const line = syncLineOf(status, now, syncing)
+  return status?.cause === 'unrelated-history' && status.state !== 'syncing' && !syncing ? { ...line, joinInstead: true } : line
+}
+
+function syncLineOf(status: WorkspaceSyncStatus | null, now: number, syncing: boolean): SyncLineView {
   if (syncing || status?.state === 'syncing') {
     return { text: SYNCING_LABEL, tone: 'muted', canSyncNow: false, paused: false }
   }
@@ -194,6 +203,12 @@ export interface WorkspaceProjectRow {
   canMapSameProject: boolean
   /** It can move to another Workspace (there is another one). */
   canMove: boolean
+  /** The other Workspaces here that also hold this project, by name. */
+  alsoIn: string[]
+  /** Remove… is offered and pressable. */
+  canRemove: boolean
+  /** Why Remove… can't be pressed, or null. */
+  removeBlocked: string | null
 }
 
 export interface WorkspaceCardView {
@@ -227,8 +242,14 @@ export function projectRows(
   workspace: WorkspaceListing,
   open: readonly OpenProject[],
   canMove = false,
+  all: readonly WorkspaceListing[] = [workspace],
 ): WorkspaceProjectRow[] {
   return workspace.projects.map((project) => {
+    const alsoIn = all
+      .filter((other) => other.slug !== workspace.slug && other.projects.some((candidate) => candidate.id === project.id))
+      .map((other) => other.name)
+    // The one copy of a project this computer works in can't be removed — only moved.
+    const removeBlocked = alsoIn.length === 0 && project.localPath !== null ? ONLY_COPY_LINE : null
     const localPath = project.localPath
     const match =
       localPath === null ? undefined : open.find((candidate) => samePath(candidate.rootPath, localPath))
@@ -243,6 +264,9 @@ export function projectRows(
       canOpenSettings: match !== undefined,
       canMapSameProject: localPath === null,
       canMove,
+      alsoIn,
+      canRemove: removeBlocked === null,
+      removeBlocked,
     }
   })
 }
@@ -294,7 +318,7 @@ export function workspaceCard(input: {
     branchText: workspace.branch ?? NO_BRANCH_YET,
     branchMoveText: branchMoveLine(workspace.branchMove ?? null),
     sync: syncLine(input.sync, input.now, input.syncing === true),
-    projects: projectRows(workspace, input.open, all.length > 1),
+    projects: projectRows(workspace, input.open, all.length > 1, all),
     moveHereCandidates: moveHereCandidates(all, workspace.slug),
   }
 }
@@ -324,13 +348,26 @@ export interface DeleteConfirmView {
 }
 
 /** What the person reads before a Workspace is deleted: which projects move to Default, and what is kept. */
-export function deleteConfirmView(workspace: WorkspaceListing, defaultName: string): DeleteConfirmView {
-  const names = workspace.projects.map((project) => project.name)
-  const moving =
-    names.length === 0
-      ? 'It has no projects.'
-      : `${names.length === 1 ? 'Its project moves' : `Its ${names.length} projects move`} to ${defaultName}: ${names.join(', ')}.`
-  return { title: `Delete ${workspace.name}?`, lines: [moving, DELETE_KEEPS], confirm: DELETE_CONFIRM }
+export function deleteConfirmView(
+  workspace: WorkspaceListing,
+  defaultName: string,
+  /** The ids of the projects Default already has — those merge instead of moving. */
+  defaultHas: readonly string[] = [],
+): DeleteConfirmView {
+  const merging = workspace.projects.filter((project) => defaultHas.includes(project.id)).map((project) => project.name)
+  const moving = workspace.projects.filter((project) => !defaultHas.includes(project.id)).map((project) => project.name)
+  const lines: string[] = []
+  if (moving.length === 0 && merging.length === 0) lines.push('It has no projects.')
+  if (moving.length > 0) {
+    lines.push(`${moving.length === 1 ? 'Its project moves' : `Its ${moving.length} projects move`} to ${defaultName}: ${moving.join(', ')}.`)
+  }
+  if (merging.length > 0) {
+    lines.push(
+      `${defaultName} already has ${merging.join(', ')}. Anything only this Workspace's copy has goes into ${defaultName}'s copy, and nothing there is replaced.`,
+    )
+  }
+  lines.push(DELETE_KEEPS)
+  return { title: `Delete ${workspace.name}?`, lines, confirm: DELETE_CONFIRM }
 }
 
 export function deletedLine(name: string, defaultName: string): string {
@@ -542,6 +579,9 @@ export function joinOutcome(result: WorkspaceJoinResult): JoinOutcomeView {
     checked: false as const,
   }))
   const proposed = new Set(candidates.map((candidate) => candidate.projectId))
+  for (const workspace of result.disconnected ?? []) {
+    lines.push(`${workspace.name} pointed at the same repository, so it let go of it. Its knowledge stays on this computer.`)
+  }
   if (result.linked.length > 0) lines.push(`Linked on this computer: ${names(result.linked)}.`)
   else if (candidates.length === 0) lines.push('No project was added yet — none of its projects are open in Flow on this computer.')
   if (candidates.length > 0) lines.push(JOIN_CANDIDATES_LINE)
@@ -724,3 +764,54 @@ export const FIXED_STRINGS: readonly string[] = [
   ONBOARDING_UNAVAILABLE,
   ONBOARDING_LATER,
 ]
+
+// ── Remove a project from a Workspace ───────────────────────────────────────
+
+export const REMOVE_PROJECT_CONFIRM = 'Remove project'
+
+/** "Also in My Mac" — the tag beside a project that more than one Workspace holds. */
+export function alsoInTag(names: readonly string[]): string | null {
+  return names.length === 0 ? null : `Also in ${names.join(', ')}`
+}
+
+export interface RemoveProjectView {
+  title: string
+  lines: Array<{ text: string; warn: boolean }>
+  confirm: string
+}
+
+export function removeProjectView(input: {
+  projectName: string
+  workspaceName: string
+  /** Where the project stays, or null (no other Workspace holds it). */
+  keptIn: string | null
+  shared: boolean
+}): RemoveProjectView {
+  const { projectName, workspaceName, keptIn } = input
+  const lines: RemoveProjectView['lines'] = []
+  if (keptIn !== null) {
+    lines.push({
+      text: `${keptIn} also has ${projectName}, so it stays there. Anything only this copy has, like a discovery or a plan, goes into ${keptIn}'s copy. Nothing in ${keptIn}'s copy is replaced.`,
+      warn: false,
+    })
+  } else {
+    lines.push({ text: `No other Workspace here has ${projectName}.`, warn: false })
+  }
+  lines.push({ text: 'This copy is kept on this computer as a backup.', warn: false })
+  if (input.shared) {
+    lines.push({
+      text: `${workspaceName} is shared with your team. Removing the project removes it for everyone who syncs ${workspaceName}.`,
+      warn: true,
+    })
+  }
+  return { title: `Remove ${projectName} from ${workspaceName}?`, lines, confirm: REMOVE_PROJECT_CONFIRM }
+}
+
+export function removedProjectLine(projectName: string, workspaceName: string, keptIn: string | null): string {
+  return keptIn === null
+    ? `${projectName} was removed from ${workspaceName}.`
+    : `${projectName} was removed from ${workspaceName}. It is in ${keptIn}.`
+}
+
+/** The button that turns "this repository holds another Workspace" into joining it. */
+export const JOIN_INSTEAD_LABEL = 'Join it instead'

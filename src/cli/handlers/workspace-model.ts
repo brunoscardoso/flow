@@ -218,6 +218,8 @@ export type WorkspaceRefusalReason =
   | 'default-workspace'
   /** delete: needs `--confirm`; the payload lists what would move. */
   | 'unconfirmed'
+  /** remove-project: the only copy of a project's knowledge here, and its checkout uses it — move it instead. */
+  | 'sole-copy'
   // connecting a Workspace to a shared repository (workspace-remote.ts / workspace-sync.ts)
   /** set-remote: the Workspace already has a different shared repository — needs `--replace`. */
   | 'remote-exists'
@@ -1474,6 +1476,19 @@ export interface JoinResult {
    * `localPath` is the matching checkout.
    */
   candidates: ProjectView[];
+  /**
+   * Workspaces on this machine that pointed at this repository without sharing
+   * its history — connected to it by hand, never synced with it. Their
+   * connection is let go of (their knowledge and history stay as they are),
+   * because that repository holds THIS Workspace, not theirs.
+   */
+  disconnected: WorkspaceSummary[];
+}
+
+/** The first commits of a repository's history — two histories are one when they share any. */
+function rootCommits(repo: string, git: WorkspaceGit): Set<string> {
+  const out = tryGit(git, ['rev-list', '--max-parents=0', 'HEAD'], repo);
+  return new Set((out ?? '').split('\n').map((line) => line.trim()).filter((line) => line.length > 0));
 }
 
 /** Clone a Workspace and link every project whose checkout this machine knows. */
@@ -1487,15 +1502,31 @@ export function joinWorkspace(options: JoinOptions): JoinResult {
     throw new WorkspaceRefusal('invalid-branch', `'${options.branch}' isn't a name a branch can have`, { branch: options.branch });
   }
 
+  // Workspaces here that point at the same repository. Pointing is not
+  // having: one connected to it by hand (user report 2026-11-24 — the Default
+  // connected to the team's repository) shares none of its history, and
+  // refusing "already joined" on its say-so left the person no way in. Which
+  // one truly holds it is decided once the clone can be compared below.
   const scan = scanWorkspaces(flowFolder);
-  const already = scan.workspaces.find((workspace) => {
+  const claimants = scan.workspaces.filter((workspace) => {
     const known = workspace.file.remote ?? originOf(workspace.path, deps.git);
     return known !== null && known !== undefined && remoteIdentity(known) === identity;
   });
-  if (already !== undefined) {
-    throw new WorkspaceRefusal('already-joined', `this machine already has that Workspace, as ${already.file.name}`, {
-      workspace: summaryOf(already, deps.git),
-    });
+  // The plain case first, with no network: a Workspace that has already
+  // fetched from that repository and shares its history IS that Workspace.
+  for (const claimant of claimants) {
+    const fetched = tryGit(deps.git, ['for-each-ref', '--format=%(objectname)', 'refs/remotes/origin/'], claimant.path);
+    const tips = (fetched ?? '').split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+    if (tips.length === 0) continue;
+    const mine = rootCommits(claimant.path, deps.git);
+    const theirs = new Set(
+      tips.flatMap((tip) => (tryGit(deps.git, ['rev-list', '--max-parents=0', tip], claimant.path) ?? '').split('\n').map((line) => line.trim()))
+    );
+    if ([...mine].some((sha) => theirs.has(sha))) {
+      throw new WorkspaceRefusal('already-joined', `this machine already has that Workspace, as ${claimant.file.name}`, {
+        workspace: summaryOf(claimant, deps.git),
+      });
+    }
   }
 
   const local = readLocalProjects(flowFolder);
@@ -1543,6 +1574,26 @@ export function joinWorkspace(options: JoinOptions): JoinResult {
     rmSync(staging, { recursive: true, force: true });
     throw new WorkspaceRefusal('not-a-workspace-repo', `that repository is not a Flow Workspace Flow can read: ${problem}`, { remote });
   }
+  const joinedRoots = rootCommits(staging, deps.git);
+  const holder = claimants.find((workspace) => [...rootCommits(workspace.path, deps.git)].some((sha) => joinedRoots.has(sha)));
+  if (holder !== undefined) {
+    rmSync(staging, { recursive: true, force: true });
+    throw new WorkspaceRefusal('already-joined', `this machine already has that Workspace, as ${holder.file.name}`, {
+      workspace: summaryOf(holder, deps.git),
+    });
+  }
+  // The others only pointed at it: let go of that connection, keep the rest.
+  const disconnected: WorkspaceSummary[] = [];
+  for (const claimant of claimants) {
+    tryGit(deps.git, ['remote', 'remove', 'origin'], claimant.path);
+    if (claimant.file.remote !== undefined) {
+      const file = { ...claimant.file };
+      delete file.remote;
+      writeWorkspace({ ...claimant, file });
+    }
+    disconnected.push(summaryOf(readWorkspace(flowFolder, claimant.slug), deps.git));
+  }
+
   const own = (parsed as WorkspaceFile).slug;
   const base = slugify(options.name ?? '') || own;
   const slug = uniqueSlug(base, new Set(readdirSync(root)));
@@ -1570,6 +1621,7 @@ export function joinWorkspace(options: JoinOptions): JoinResult {
     noLocalCheckout: [],
     needsReview: [],
     candidates: [],
+    disconnected,
   };
   // The checkouts this machine knows, by remote identity — candidates only.
   const knownCheckouts: { path: string; identity: string }[] = [];
