@@ -443,7 +443,7 @@ export function classifyRejection(detail: string): SyncRejection {
 
 function findWorkspace(flowFolder: string, wanted: string | undefined): LoadedWorkspace {
   const scan = scanWorkspaces(flowFolder);
-  const choices = scan.workspaces.map((workspace) => ({ slug: workspace.slug, name: workspace.file.name }));
+  const choices = scan.workspaces.map((workspace) => ({ slug: workspace.slug, name: workspace.name }));
   if (wanted === undefined) {
     if (scan.workspaces.length === 1) return scan.workspaces[0];
     if (scan.workspaces.length === 0) {
@@ -455,7 +455,7 @@ function findWorkspace(flowFolder: string, wanted: string | undefined): LoadedWo
   if (broken !== undefined) throw new WorkspaceRefusal('malformed-workspace', broken.detail, { workspace: wanted });
   const found =
     scan.workspaces.find((workspace) => workspace.slug === wanted) ??
-    scan.workspaces.find((workspace) => workspace.file.name === wanted) ??
+    scan.workspaces.find((workspace) => workspace.name === wanted) ??
     scan.workspaces.find((workspace) => workspace.slug === slugify(wanted));
   if (found === undefined) {
     throw new WorkspaceRefusal('unknown-workspace', `there is no Workspace called ${wanted} on this machine`, { workspaces: choices });
@@ -773,7 +773,7 @@ function guardPersonal(paths: readonly string[], extra: Record<string, unknown>)
 }
 
 function defaultMessage(workspace: LoadedWorkspace): string {
-  return `${DEFAULT_MESSAGE_PREFIX} ${workspace.file.name}`;
+  return `${DEFAULT_MESSAGE_PREFIX} ${workspace.name}`;
 }
 
 /**
@@ -1477,7 +1477,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
 
   const top = attempt(git, ['rev-parse', '--show-toplevel'], repo);
   if (!top.ok || realOrResolved(top.out.trim()) !== realOrResolved(repo)) {
-    throw new WorkspaceRefusal('not-a-git-repo', `the ${workspace.file.name} Workspace folder is not a git repository`, { workspace: workspace.slug });
+    throw new WorkspaceRefusal('not-a-git-repo', `the ${workspace.name} Workspace folder is not a git repository`, { workspace: workspace.slug });
   }
   const resolveRequest = options.resolve === undefined ? undefined : parseResolve(options.resolve, repo, options.cwd ?? process.cwd());
 
@@ -1512,7 +1512,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
 
     const result: SyncResult = {
       action: 'sync',
-      workspace: { name: workspace.file.name, slug: workspace.slug, path: repo },
+      workspace: { name: workspace.name, slug: workspace.slug, path: repo },
       branch,
       remote: remote === null ? null : redactRemote(remote),
       state: 'nothing-to-do',
@@ -1627,7 +1627,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
       const existing = revParse(git, repo, `refs/heads/${target}`);
       if (existing !== null && !isAncestor(git, repo, existing, 'HEAD')) return false;
       try {
-        switchWorkspaceBranch(git, repo, target, workspace.file.name);
+        switchWorkspaceBranch(git, repo, target, workspace.name);
       } catch {
         return false;
       }

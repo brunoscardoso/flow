@@ -116,7 +116,7 @@ function attempt(git: WorkspaceGit, args: string[], cwd: string): boolean {
 /** The Workspace folder must be the top of its own repository — never one around it. */
 function requireRepository(workspace: LoadedWorkspace, git: WorkspaceGit): void {
   if (!isRepoRoot(workspace.path, git)) {
-    throw new WorkspaceRefusal('not-a-git-repo', `the ${workspace.file.name} Workspace folder is not a git repository`, { workspace: workspace.slug });
+    throw new WorkspaceRefusal('not-a-git-repo', `the ${workspace.name} Workspace folder is not a git repository`, { workspace: workspace.slug });
   }
 }
 
@@ -126,7 +126,7 @@ function refuseIfUnsettled(workspace: LoadedWorkspace, git: WorkspaceGit): void 
   if (attempt(git, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], workspace.path)) {
     throw new WorkspaceRefusal(
       'merge-in-progress',
-      `a merge was left half-done in the ${workspace.file.name} Workspace, so its shared repository can't change until a sync settles it`,
+      `a merge was left half-done in the ${workspace.name} Workspace, so its shared repository can't change until a sync settles it`,
       { workspace: workspace.slug }
     );
   }
@@ -205,7 +205,7 @@ export function setWorkspaceRemote(options: SetRemoteOptions): SetRemoteResult {
   if (other !== undefined && options.replace !== true) {
     throw new WorkspaceRefusal(
       'remote-exists',
-      `the ${workspace.file.name} Workspace already shares through another repository — say so to replace it`,
+      `the ${workspace.name} Workspace already shares through another repository — say so to replace it`,
       { workspace: workspace.slug, current: redactRemote(other), wanted: remote, needs: 'replace' }
     );
   }

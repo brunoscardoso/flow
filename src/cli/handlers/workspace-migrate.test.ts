@@ -426,12 +426,20 @@ describeWithGit('the Workspaces hard migration', () => {
   // ─── admin verbs ──────────────────────────────────────────────────────────
 
   describe('rename, set-default, move-project, delete', () => {
-    it('renames the display name only — the folder stays — and refuses an empty or taken name', () => {
+    it('renames what THIS machine calls it — the folder and the shared name stay — and refuses an empty or taken name', () => {
       createWorkspace({ flowFolder: flowA, name: 'Team' });
       createWorkspace({ flowFolder: flowA, name: 'Personal' });
       const renamed = renameWorkspace({ flowFolder: flowA, workspace: 'team', name: 'Acme Team' });
-      expect(renamed).toMatchObject({ action: 'rename', previousName: 'Team', changed: true, workspace: { name: 'Acme Team', slug: 'team' } });
-      expect(readWorkspace(flowA, 'team').file).toMatchObject({ name: 'Acme Team', slug: 'team' });
+      expect(renamed).toMatchObject({
+        action: 'rename',
+        previousName: 'Team',
+        changed: true,
+        workspace: { name: 'Acme Team', sharedName: 'Team', slug: 'team' },
+      });
+      // The synced file keeps the shared name; the local settings hold this machine's.
+      expect(readWorkspace(flowA, 'team').file).toMatchObject({ name: 'Team', slug: 'team' });
+      expect(readWorkspace(flowA, 'team').name).toBe('Acme Team');
+      expect(JSON.parse(readFileSync(join(flowA, 'settings', 'workspaces.local.json'), 'utf-8'))).toEqual({ names: { team: 'Acme Team' } });
       expect(existsSync(join(flowA, 'workspaces', 'team'))).toBe(true);
       refusalOf(() => renameWorkspace({ flowFolder: flowA, workspace: 'team', name: '  ' }), 'invalid-name');
       refusalOf(() => renameWorkspace({ flowFolder: flowA, workspace: 'team', name: 'personal' }), 'duplicate-name');

@@ -224,6 +224,8 @@ export interface WorkspaceCardView {
   /** Why Flow moved it to that branch by itself, or null. */
   branchMoveText: string | null
   sync: SyncLineView
+  /** "Your team calls it Team" — only when this computer named it differently, and it is shared. */
+  teamNameText: string | null
   projects: WorkspaceProjectRow[]
   /** Projects of the other Workspaces that may move here. */
   moveHereCandidates: MoveCandidate[]
@@ -318,6 +320,10 @@ export function workspaceCard(input: {
     branchText: workspace.branch ?? NO_BRANCH_YET,
     branchMoveText: branchMoveLine(workspace.branchMove ?? null),
     sync: syncLine(input.sync, input.now, input.syncing === true),
+    teamNameText:
+      workspace.remote !== null && workspace.sharedName !== undefined && workspace.sharedName !== workspace.name
+        ? teamNameLine(workspace.sharedName)
+        : null,
     projects: projectRows(workspace, input.open, all.length > 1, all),
     moveHereCandidates: moveHereCandidates(all, workspace.slug),
   }
@@ -326,7 +332,8 @@ export function workspaceCard(input: {
 // ── Rename, delete, move ────────────────────────────────────────────────────
 
 export const RENAME_TITLE = 'Rename the Workspace'
-export const RENAME_BODY = 'Only its name changes. Its projects, knowledge and shared repository stay as they are.'
+export const RENAME_BODY =
+  'Only what this computer calls it changes. Teammates keep their own name for it, and its projects, knowledge and shared repository stay as they are.'
 export const RENAME_CONFIRM = 'Rename'
 
 /** Trimmed input, or the sentence that keeps the dialog open. */
@@ -815,3 +822,40 @@ export function removedProjectLine(projectName: string, workspaceName: string, k
 
 /** The button that turns "this repository holds another Workspace" into joining it. */
 export const JOIN_INSTEAD_LABEL = 'Join it instead'
+
+// ── The card's layout (user, 2026-11-24: "Workspaces settings, redesigned") ──
+
+export const DEFAULT_BADGE = 'Default'
+/** Under a Default card's name — the badge already says "Default". */
+export const DEFAULT_CARD_LINE = 'Every project without another Workspace lives here. It can’t be deleted.'
+export const SHOW_WORKSPACE_LABEL = 'Show'
+export const HIDE_WORKSPACE_LABEL = 'Hide'
+export const ON_THIS_COMPUTER = 'On this computer'
+/** The row's gear button; its accessible name says which project. */
+export const SETTINGS_SHORT_LABEL = 'Settings'
+export const MOVE_TO_WORKSPACE_LABEL = 'Move to another Workspace…'
+
+export function removeFromLabel(workspaceName: string): string {
+  return `Remove from ${workspaceName}…`
+}
+
+/** A folded card's one line: "Shared with your team · 3 projects". */
+export function foldedSummary(shared: boolean, projects: number): string {
+  const where = shared ? 'Shared with your team' : 'Kept on this computer'
+  return `${where} · ${projects === 1 ? '1 project' : `${projects} projects`}`
+}
+
+/** Beside a shared Workspace this computer renamed: what everyone else sees by default. */
+export function teamNameLine(sharedName: string): string {
+  return `Your team calls it ${sharedName}`
+}
+
+/** The gear's accessible name: which project's settings it opens. */
+export function projectSettingsFor(projectName: string): string {
+  return `${PROJECT_SETTINGS_LABEL} for ${projectName}`
+}
+
+/** The ⋯ button's accessible name. */
+export function moreFor(projectName: string): string {
+  return `More for ${projectName}`
+}

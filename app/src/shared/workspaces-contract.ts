@@ -72,7 +72,10 @@ export interface WorkspaceRefusal {
 export type WorkspaceAnswer<T> = ({ ok: true } & T) | WorkspaceRefusal
 
 export interface WorkspaceSummary {
+  /** What THIS computer calls it — a rename is local; teammates keep their own names. */
   name: string
+  /** The name in the shared repository, what a teammate who never renamed it sees; absent from an older CLI. */
+  sharedName?: string
   /** The Workspace's folder name on this machine — its handle everywhere in the app. */
   slug: string
   path: string

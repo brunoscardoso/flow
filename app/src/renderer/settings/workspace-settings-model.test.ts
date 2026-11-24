@@ -280,6 +280,16 @@ describe('creating and joining', () => {
   })
 })
 
+describe('a Workspace this computer renamed', () => {
+  it('says what the team calls it, only when it is shared and the names differ', () => {
+    const shared = { ...ACME, remote: 'https://git.example.test/team/ws.git', name: 'Mine', sharedName: 'Acme' }
+    expect(workspaceCard({ workspace: shared, open: [], sync: null, now: 0 }).teamNameText).toBe('Your team calls it Acme')
+    expect(workspaceCard({ workspace: { ...shared, name: 'Acme' }, open: [], sync: null, now: 0 }).teamNameText).toBeNull()
+    expect(workspaceCard({ workspace: { ...shared, remote: null }, open: [], sync: null, now: 0 }).teamNameText).toBeNull()
+    expect(workspaceCard({ workspace: { ...ACME, remote: 'x' }, open: [], sync: null, now: 0 }).teamNameText).toBeNull()
+  })
+})
+
 describe('a repository that holds another Workspace', () => {
   it('the sync line offers to join it instead', () => {
     const status = { state: 'error' as const, cause: 'unrelated-history' as const, lastSyncedAt: null, detail: 'holds a different history', asks: [], reviews: [] }

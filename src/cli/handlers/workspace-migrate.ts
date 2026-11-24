@@ -153,7 +153,7 @@ function chooseWorkspace(
   const plan = planDefaultWorkspace(flowFolder, name);
   if (plan.kind !== 'create') return { workspace: plan.workspace, created: false, exists: true };
   return {
-    workspace: { slug: plan.slug, path: plan.path, raw: {}, file: { name: plan.name, slug: plan.slug, projects: [] } },
+    workspace: { slug: plan.slug, path: plan.path, raw: {}, name: plan.name, file: { name: plan.name, slug: plan.slug, projects: [] } },
     created: false,
     exists: false,
   };
@@ -168,7 +168,7 @@ export function migrateWorkspaces(options: MigrateOptions): MigrateResult {
     action: 'migrate',
     dryRun,
     ...(dryRun ? { would: chosen.exists ? ('use-workspace' as const) : ('create-workspace' as const) } : {}),
-    workspace: { name: chosen.workspace.file.name, slug: chosen.workspace.slug, path: chosen.workspace.path, created: chosen.created },
+    workspace: { name: chosen.workspace.name, slug: chosen.workspace.slug, path: chosen.workspace.path, created: chosen.created },
     migrated: [],
     unchanged: [],
     pending: [],
@@ -246,7 +246,7 @@ export function migrateWorkspaces(options: MigrateOptions): MigrateResult {
 
   if (!dryRun) {
     const updated = readWorkspace(flowFolder, chosen.workspace.slug);
-    result.workspace.name = updated.file.name;
+    result.workspace.name = updated.name;
   }
   return result;
 }

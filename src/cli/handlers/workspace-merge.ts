@@ -495,7 +495,10 @@ export function mergeWorkspaceFile(baseText: string | null, oursText: string | n
       out.projects = projects;
       continue;
     }
-    const picked = pick3(base[key], ours[key], theirs[key]);
+    // The shared name is only what someone who never renamed it sees; each
+    // machine keeps its own (settings/workspaces.local.json). Two different
+    // renames are not a reason to stop a sync: the team's version stands.
+    const picked = pick3(base[key], ours[key], theirs[key]) ?? (key === 'name' ? { value: theirs[key] ?? ours[key] } : undefined);
     if (picked === undefined) return null;
     if (picked.value !== undefined) out[key] = picked.value;
   }

@@ -147,6 +147,12 @@ export interface WorkspaceFile {
 export interface LoadedWorkspace {
   slug: string;
   path: string;
+  /**
+   * What THIS machine calls it: its own name from `settings/workspaces.local.json`,
+   * else the shared name in `workspace.json`. Two teammates syncing one
+   * Workspace may call it differently; only `file.name` is shared.
+   */
+  name: string;
   file: WorkspaceFile;
   /** The parsed JSON as read — unknown keys are written back untouched. */
   raw: Record<string, unknown>;
@@ -495,7 +501,8 @@ export function readWorkspace(flowFolder: string, slug: string): LoadedWorkspace
     throw new WorkspaceRefusal('malformed-workspace', `the Workspace ${slug} can't be read: ${problem}`, { workspace: slug, path });
   }
   const raw = parsed as Record<string, unknown>;
-  return { slug, path, raw, file: raw as unknown as WorkspaceFile };
+  const file = raw as unknown as WorkspaceFile;
+  return { slug, path, raw, file, name: readLocalWorkspaceNames(flowFolder)[slug] ?? file.name };
 }
 
 /** Write a Workspace's file — unknown keys it was read with are kept. */
@@ -597,20 +604,53 @@ export function workspaceDefaultsPath(flowFolder: string): string {
  * unreadable, or the Workspace it names is gone. A preference, so never a
  * refusal: an unreadable record is the same as no record.
  */
-export function readDefaultWorkspace(flowFolder: string): string | null {
-  let parsed: unknown;
+function readWorkspaceDefaults(flowFolder: string): Record<string, unknown> {
   try {
-    parsed = JSON.parse(readFileSync(workspaceDefaultsPath(flowFolder), 'utf-8'));
+    const parsed: unknown = JSON.parse(readFileSync(workspaceDefaultsPath(flowFolder), 'utf-8'));
+    return isRecord(parsed) ? parsed : {};
   } catch {
-    return null;
+    return {};
   }
-  if (!isRecord(parsed) || !isSlug(parsed.default)) return null;
+}
+
+/** Keys this file does not know are written back untouched. */
+function writeWorkspaceDefaults(flowFolder: string, record: Record<string, unknown>): void {
+  mkdirSync(join(flowFolder, SETTINGS_DIRNAME), { recursive: true });
+  atomicWriteFile(workspaceDefaultsPath(flowFolder), `${JSON.stringify(record, null, 2)}\n`);
+}
+
+export function readDefaultWorkspace(flowFolder: string): string | null {
+  const parsed = readWorkspaceDefaults(flowFolder);
+  if (!isSlug(parsed.default)) return null;
   return existsSync(join(workspaceDir(flowFolder, parsed.default), WORKSPACE_FILENAME)) ? parsed.default : null;
 }
 
 export function writeDefaultWorkspace(flowFolder: string, slug: string): void {
-  mkdirSync(join(flowFolder, SETTINGS_DIRNAME), { recursive: true });
-  atomicWriteFile(workspaceDefaultsPath(flowFolder), `${JSON.stringify({ default: slug }, null, 2)}\n`);
+  writeWorkspaceDefaults(flowFolder, { ...readWorkspaceDefaults(flowFolder), default: slug });
+}
+
+/**
+ * What this machine calls each Workspace, by slug — LOCAL, like the Default.
+ * A rename writes here, never into the synced `workspace.json`, so each
+ * teammate keeps their own name for the same shared Workspace.
+ */
+export function readLocalWorkspaceNames(flowFolder: string): Record<string, string> {
+  const names = readWorkspaceDefaults(flowFolder).names;
+  if (!isRecord(names)) return {};
+  const out: Record<string, string> = {};
+  for (const [slug, name] of Object.entries(names)) if (typeof name === 'string' && name.trim() !== '') out[slug] = name;
+  return out;
+}
+
+/** Record this machine's name for a Workspace; null forgets it (the shared name shows again). */
+export function writeLocalWorkspaceName(flowFolder: string, slug: string, name: string | null): void {
+  const record = readWorkspaceDefaults(flowFolder);
+  const names = { ...readLocalWorkspaceNames(flowFolder) };
+  if (name === null) delete names[slug];
+  else names[slug] = name;
+  if (Object.keys(names).length === 0) delete record.names;
+  else record.names = names;
+  writeWorkspaceDefaults(flowFolder, record);
 }
 
 // ─── Repos and identity ─────────────────────────────────────────────────────
@@ -645,7 +685,10 @@ function projectNameFor(repo: string, origin: string | null): string {
 // ─── Public shapes ──────────────────────────────────────────────────────────
 
 export interface WorkspaceSummary {
+  /** What this machine calls it. */
   name: string;
+  /** The name in the shared `workspace.json` — what a teammate who never renamed it sees. */
+  sharedName: string;
   slug: string;
   path: string;
   remote: string | null;
@@ -759,7 +802,8 @@ export interface ProjectView {
 
 export function summaryOf(workspace: LoadedWorkspace, git: WorkspaceGit): WorkspaceSummary {
   return {
-    name: workspace.file.name,
+    name: workspace.name,
+    sharedName: workspace.file.name,
     slug: workspace.slug,
     path: workspace.path,
     remote: workspace.file.remote ?? originOf(workspace.path, git),
@@ -872,6 +916,7 @@ export function createWorkspace(options: CreateOptions): CreateResult {
       slug,
       path,
       raw: {},
+      name,
       file: { name, slug, ...(options.remote === undefined ? {} : { remote: options.remote }), projects: [] },
     };
     writeWorkspace(workspace);
@@ -950,10 +995,11 @@ export interface RepoHints {
 }
 
 export function pickWorkspace(scan: WorkspaceScan, wanted: string | undefined, hints: RepoHints): LoadedWorkspace {
-  const choices = scan.workspaces.map((workspace) => ({ slug: workspace.slug, name: workspace.file.name }));
+  const choices = scan.workspaces.map((workspace) => ({ slug: workspace.slug, name: workspace.name }));
   if (wanted !== undefined) {
     const found =
       scan.workspaces.find((workspace) => workspace.slug === wanted) ??
+      scan.workspaces.find((workspace) => workspace.name === wanted) ??
       scan.workspaces.find((workspace) => workspace.file.name === wanted) ??
       scan.workspaces.find((workspace) => workspace.slug === slugify(wanted));
     if (found === undefined) {
@@ -1222,7 +1268,7 @@ function resolveProject(
   if (wanted !== undefined) {
     const found = projects.find((project) => project.id === wanted) ?? projects.find((project) => project.slug === wanted);
     if (found === undefined) {
-      throw new WorkspaceRefusal('unknown-project', `the ${workspace.file.name} Workspace has no project ${wanted}`, {
+      throw new WorkspaceRefusal('unknown-project', `the ${workspace.name} Workspace has no project ${wanted}`, {
         workspace: workspace.slug,
         projects: projects.map((project) => ({ id: project.id, name: project.name, slug: project.slug })),
       });
@@ -1523,7 +1569,7 @@ export function joinWorkspace(options: JoinOptions): JoinResult {
       tips.flatMap((tip) => (tryGit(deps.git, ['rev-list', '--max-parents=0', tip], claimant.path) ?? '').split('\n').map((line) => line.trim()))
     );
     if ([...mine].some((sha) => theirs.has(sha))) {
-      throw new WorkspaceRefusal('already-joined', `this machine already has that Workspace, as ${claimant.file.name}`, {
+      throw new WorkspaceRefusal('already-joined', `this machine already has that Workspace, as ${claimant.name}`, {
         workspace: summaryOf(claimant, deps.git),
       });
     }
@@ -1578,7 +1624,7 @@ export function joinWorkspace(options: JoinOptions): JoinResult {
   const holder = claimants.find((workspace) => [...rootCommits(workspace.path, deps.git)].some((sha) => joinedRoots.has(sha)));
   if (holder !== undefined) {
     rmSync(staging, { recursive: true, force: true });
-    throw new WorkspaceRefusal('already-joined', `this machine already has that Workspace, as ${holder.file.name}`, {
+    throw new WorkspaceRefusal('already-joined', `this machine already has that Workspace, as ${holder.name}`, {
       workspace: summaryOf(holder, deps.git),
     });
   }
@@ -1830,7 +1876,7 @@ export function describeProject(options: DescribeOptions): DescribeResult {
   const workspace = pickWorkspace(scan, options.workspace, { ...NO_HINTS, project: options.project });
   const project = workspace.file.projects.find((entry) => entry.slug === options.project || entry.id === options.project);
   if (project === undefined) {
-    throw new WorkspaceRefusal('unknown-project', `the Workspace ${workspace.file.name} has no project ${options.project}`, {
+    throw new WorkspaceRefusal('unknown-project', `the Workspace ${workspace.name} has no project ${options.project}`, {
       workspace: workspace.slug,
       projects: workspace.file.projects.map((entry) => ({ id: entry.id, slug: entry.slug, name: entry.name })),
     });
@@ -1910,10 +1956,10 @@ export function provisionWorkspaceLink(target: string, context: WorkspaceContext
       return {
         kind: 'suggestion',
         workspace: workspace.slug,
-        workspaceName: workspace.file.name,
+        workspaceName: workspace.name,
         project: project.id,
         projectSlug: project.slug,
-        sentence: `this checkout looks like ${project.name} of the ${workspace.file.name} Workspace — link it from the Workspace to keep its knowledge there`,
+        sentence: `this checkout looks like ${project.name} of the ${workspace.name} Workspace — link it from the Workspace to keep its knowledge there`,
       };
     }
     return { kind: 'not-in-workspace' };

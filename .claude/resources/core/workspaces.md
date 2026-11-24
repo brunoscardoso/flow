@@ -18,7 +18,7 @@ A **Workspace** groups projects (a backend, the frontend that calls it, a shared
 <Flow folder>/
 ├── projects.local.json          project id → this machine's checkout (personal, never synced)
 ├── settings/
-│   └── workspaces.local.json    { "default": "<slug>" } — this machine's Default Workspace (personal)
+│   └── workspaces.local.json    { "default": "<slug>", "names": { "<slug>": "<name>" } } — this machine's Default and its own names (personal)
 └── workspaces/<w>/              ONE git repository per Workspace
     ├── workspace.json           { name, slug, remote?, projects: [{ id, name, slug, remotes[], description? }] }
     ├── links.jsonl              cross-project links (append-only; written only by `workspace link-knowledge`)
@@ -91,8 +91,8 @@ Skills report `Workspace links: N recorded` (zero with its reason). The per-skil
 
 | File | Owner |
 |------|-------|
-| `workspace.json` | `workspace create | link | join | describe | rename | move-project | remove-project | migrate | set-remote | unset-remote` |
-| `settings/workspaces.local.json` | `workspace migrate | set-default` |
+| `workspace.json` | `workspace create | link | join | describe | move-project | remove-project | migrate | set-remote | unset-remote` |
+| `settings/workspaces.local.json` | `workspace migrate | set-default | rename | delete` |
 | `links.jsonl` | `workspace link-knowledge` |
 | `merges/`, the Workspace `.gitignore` / `.gitattributes` | `workspace sync` |
 | `projects.local.json` | `workspace link | join | migrate | move-flow-folder` |
@@ -117,7 +117,7 @@ Never run `git` inside a Workspace repo to commit, merge or push its knowledge �
 | `sync [--workspace <w> \| --all] [--message <m>] [--no-push] [--commit-only] [--resolve <path> --take ours\|theirs\|merged\|file:<path>]` | commit, fetch, merge, push |
 | `move-flow-folder --to <dir>` | move `workspaces/`, `settings/`, `projects.local.json`; re-point every `flow` link; later runs need `PLAN_FLOW_HOME=<dir>` |
 | `migrate --roots <json> [--name <n>] [--workspace <w>] [--dry-run]` | link every root with `--import` into the Default (created and recorded when missing) or `--workspace`; per root `migrated` / `unchanged` / `pending` (a committed `flow/` waits for `link --confirm-commit --import`) / `failed`; exit 0; `--dry-run` writes nothing and adds `would` + `plan` |
-| `rename --workspace <w> --name <n>` | the display name only — the folder never changes |
+| `rename --workspace <w> --name <n>` | what THIS machine calls it — written to `settings/workspaces.local.json`, never to the synced `workspace.json`, so teammates syncing the same Workspace keep their own names; the folder never changes, and naming it the shared name again forgets the local one. Summaries carry `name` (this machine's) and `sharedName` (the one in `workspace.json`); two different shared names never pause a sync — the team's stands |
 | `set-default --workspace <w>` | this machine's Default |
 | `set-remote --workspace <w> --remote <url> [--replace]` | connect a Workspace to a shared repository after it was created: sets the Workspace repo's `origin` and `remote` in `workspace.json`; contacts nothing — the next `sync` publishes. A different remote already set is refused `remote-exists` (payload `current`, `wanted`, `needs: 'replace'`) unless `--replace`, which drops the old remote's tracking refs and leaves that repository untouched; `sync-busy` / `merge-in-progress` refuse before anything is written |
 | `unset-remote --workspace <w>` | disconnect: removes `origin` and `remote`; the Workspace, its history and the shared repository are untouched (`remoteUntouched: true`); `sync` is `local-only` again |

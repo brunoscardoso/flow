@@ -70,6 +70,7 @@ import {
   type WorkspaceSummary,
   type JoinOptions,
   type JoinResult,
+  writeLocalWorkspaceName,
 } from './workspace-model.js';
 
 export { readDefaultWorkspace } from './workspace-model.js';
@@ -169,16 +170,20 @@ export function renameWorkspace(options: RenameOptions): RenameResult {
   const scan = scanWorkspaces(flowFolder);
   const workspace = pickWorkspace(scan, options.workspace, NO_HINTS);
   const clash = scan.workspaces.find(
-    (other) => other.slug !== workspace.slug && other.file.name.trim().toLowerCase() === name.toLowerCase()
+    (other) => other.slug !== workspace.slug && other.name.trim().toLowerCase() === name.toLowerCase()
   );
   if (clash !== undefined) {
-    throw new WorkspaceRefusal('duplicate-name', `there is already a Workspace called ${clash.file.name} on this machine`, {
-      workspaces: scan.workspaces.map((entry) => ({ slug: entry.slug, name: entry.file.name })),
+    throw new WorkspaceRefusal('duplicate-name', `there is already a Workspace called ${clash.name} on this machine`, {
+      workspaces: scan.workspaces.map((entry) => ({ slug: entry.slug, name: entry.name })),
     });
   }
-  const previousName = workspace.file.name;
+  const previousName = workspace.name;
   const changed = previousName !== name;
-  if (changed) writeWorkspace({ ...workspace, file: { ...workspace.file, name } });
+  // THIS MACHINE'S NAME ONLY (user, 2026-11-24): a teammate syncing the same
+  // Workspace keeps whatever they call it. The shared name in workspace.json is
+  // what someone who never renamed it sees; naming it that again forgets the
+  // local name.
+  if (changed) writeLocalWorkspaceName(flowFolder, workspace.slug, name === workspace.file.name ? null : name);
   return { action: 'rename', workspace: summaryOf(readWorkspace(flowFolder, workspace.slug), deps.git), previousName, changed };
 }
 
@@ -229,7 +234,7 @@ function sourceOf(
     const workspace = pickWorkspace(scan, from, NO_HINTS);
     const found = findProject(workspace, project);
     if (found === undefined) {
-      throw new WorkspaceRefusal('unknown-project', `the ${workspace.file.name} Workspace has no project ${project}`, {
+      throw new WorkspaceRefusal('unknown-project', `the ${workspace.name} Workspace has no project ${project}`, {
         workspace: workspace.slug,
         projects: workspace.file.projects.map((entry) => ({ id: entry.id, name: entry.name, slug: entry.slug })),
       });
@@ -242,7 +247,7 @@ function sourceOf(
     .filter((entry): entry is { workspace: LoadedWorkspace; project: WorkspaceProject } => entry.project !== undefined);
   const holders = all.filter((entry) => entry.workspace.slug !== target.slug);
   if (holders.length === 0 && all.length > 0) {
-    throw new WorkspaceRefusal('same-workspace', `${all[0].project.name} is already in the ${target.file.name} Workspace`, {
+    throw new WorkspaceRefusal('same-workspace', `${all[0].project.name} is already in the ${target.name} Workspace`, {
       workspace: target.slug,
       project: all[0].project.slug,
     });
@@ -256,7 +261,7 @@ function sourceOf(
   }
   if (holders.length > 1) {
     throw new WorkspaceRefusal('which-workspace', `more than one Workspace has a project ${project} — say which one it moves from`, {
-      workspaces: holders.map((entry) => ({ slug: entry.workspace.slug, name: entry.workspace.file.name })),
+      workspaces: holders.map((entry) => ({ slug: entry.workspace.slug, name: entry.workspace.name })),
     });
   }
   return holders[0];
@@ -297,13 +302,13 @@ export function moveProject(options: MoveProjectOptions): MoveProjectResult {
   const target = pickWorkspace(scan, options.to, NO_HINTS);
   const source = sourceOf(scan, options.project, options.from, target);
   if (target.slug === source.workspace.slug) {
-    throw new WorkspaceRefusal('same-workspace', `${source.project.name} is already in the ${target.file.name} Workspace`, {
+    throw new WorkspaceRefusal('same-workspace', `${source.project.name} is already in the ${target.name} Workspace`, {
       workspace: target.slug,
       project: source.project.slug,
     });
   }
   if (target.file.projects.some((entry) => entry.id === source.project.id)) {
-    throw new WorkspaceRefusal('project-exists', `the ${target.file.name} Workspace already has ${source.project.name}`, {
+    throw new WorkspaceRefusal('project-exists', `the ${target.name} Workspace already has ${source.project.name}`, {
       workspace: target.slug,
       project: source.project.id,
     });
@@ -426,20 +431,20 @@ export function deleteWorkspace(options: DeleteOptions): DeleteResult {
   const defaultPlan = planDefaultWorkspace(flowFolder);
   const intoSlug = defaultPlan.kind === 'create' ? null : defaultPlan.workspace.slug;
   if (intoSlug === workspace.slug) {
-    throw new WorkspaceRefusal('default-workspace', `${workspace.file.name} is the Default Workspace — make another Workspace the Default first`, {
+    throw new WorkspaceRefusal('default-workspace', `${workspace.name} is the Default Workspace — make another Workspace the Default first`, {
       workspace: workspace.slug,
     });
   }
   const into =
     defaultPlan.kind === 'create'
       ? { name: defaultPlan.name, slug: defaultPlan.slug, create: true }
-      : { name: defaultPlan.workspace.file.name, slug: defaultPlan.workspace.slug, create: false };
+      : { name: defaultPlan.workspace.name, slug: defaultPlan.workspace.slug, create: false };
   const projects = workspace.file.projects.map((project) => ({ id: project.id, name: project.name, slug: project.slug }));
   if (options.confirm !== true) {
     throw new WorkspaceRefusal(
       'unconfirmed',
-      `deleting ${workspace.file.name} moves its ${projects.length} project${projects.length === 1 ? '' : 's'} into ${into.name} and keeps its folder as a backup — that needs your go-ahead`,
-      { workspace: { name: workspace.file.name, slug: workspace.slug, remote: workspace.file.remote ?? null }, projects, into, remoteUntouched: true, needs: 'confirm' }
+      `deleting ${workspace.name} moves its ${projects.length} project${projects.length === 1 ? '' : 's'} into ${into.name} and keeps its folder as a backup — that needs your go-ahead`,
+      { workspace: { name: workspace.name, slug: workspace.slug, remote: workspace.file.remote ?? null }, projects, into, remoteUntouched: true, needs: 'confirm' }
     );
   }
   // A project the Default already lists is not refused any more (user report
@@ -494,6 +499,8 @@ export function deleteWorkspace(options: DeleteOptions): DeleteResult {
   for (let n = 2; taken.has(name); n += 1) name = `${base}-${n}`;
   const keptAt = join(root, name);
   renameSync(workspace.path, keptAt);
+  // Its local name goes with it: a later Workspace in the same folder starts from its own.
+  writeLocalWorkspaceName(flowFolder, workspace.slug, null);
 
   return {
     action: 'delete',
@@ -609,7 +616,7 @@ export function removeProject(options: RemoveProjectOptions): RemoveProjectResul
   const workspace = pickWorkspace(scan, options.workspace, NO_HINTS);
   const project = findProject(workspace, options.project);
   if (project === undefined) {
-    throw new WorkspaceRefusal('unknown-project', `the ${workspace.file.name} Workspace has no project ${options.project}`, {
+    throw new WorkspaceRefusal('unknown-project', `the ${workspace.name} Workspace has no project ${options.project}`, {
       workspace: workspace.slug,
       projects: workspace.file.projects.map((entry) => ({ id: entry.id, name: entry.name, slug: entry.slug })),
     });
@@ -626,18 +633,18 @@ export function removeProject(options: RemoveProjectOptions): RemoveProjectResul
   if (keeper === null && usesThis) {
     throw new WorkspaceRefusal(
       'sole-copy',
-      `${project.name}'s knowledge lives only in ${workspace.file.name} on this machine, and its checkout uses it — move it to another Workspace instead`,
+      `${project.name}'s knowledge lives only in ${workspace.name} on this machine, and its checkout uses it — move it to another Workspace instead`,
       { workspace: summary, project: named }
     );
   }
   if (options.confirm !== true) {
     throw new WorkspaceRefusal(
       'unconfirmed',
-      `removing ${project.name} from ${workspace.file.name} keeps its folder as a backup — that needs your go-ahead`,
+      `removing ${project.name} from ${workspace.name} keeps its folder as a backup — that needs your go-ahead`,
       {
         workspace: summary,
         project: named,
-        keptIn: keeper === null ? null : { name: keeper.file.name, slug: keeper.slug },
+        keptIn: keeper === null ? null : { name: keeper.name, slug: keeper.slug },
         shared: summary.remote !== null,
         needs: 'confirm',
       }

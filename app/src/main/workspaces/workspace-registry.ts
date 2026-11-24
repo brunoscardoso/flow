@@ -326,6 +326,8 @@ export function readSummary(value: unknown): WorkspaceSummary {
   if (remote === undefined) throw new MalformedAnswer('workspace.remote')
   return {
     name: need(str(value['name']), 'workspace.name'),
+    // An older CLI has no per-machine names: the name IS the shared one.
+    ...(typeof value['sharedName'] === 'string' && value['sharedName'] !== '' ? { sharedName: value['sharedName'] } : {}),
     slug: need(str(value['slug']), 'workspace.slug'),
     path: need(str(value['path']), 'workspace.path'),
     remote,

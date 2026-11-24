@@ -106,6 +106,15 @@ describe('workspace-merge pure parts', () => {
     const slugClash = { ...base, projects: [project('local:a', 'a'), project('local:z', 'c')] };
     expect(mergeWorkspaceFile(JSON.stringify(base), JSON.stringify(slugClash), JSON.stringify(theirs))).toBeNull();
   });
+  it('two different shared names never stop a sync: the team\'s stands (each machine keeps its own name locally)', () => {
+    const base = { name: 'Team', slug: 'team', projects: [] }
+    const merged = JSON.parse(
+      mergeWorkspaceFile(JSON.stringify(base), JSON.stringify({ ...base, name: 'A' }), JSON.stringify({ ...base, name: 'B' })) as string,
+    )
+    expect(merged.name).toBe('B')
+    // Anything else changed differently on both sides still asks a person.
+    expect(mergeWorkspaceFile(JSON.stringify(base), JSON.stringify({ ...base, slug: 'x' }), JSON.stringify({ ...base, slug: 'y' }))).toBeNull()
+  });
 });
 
 describe('classifyRejection', () => {

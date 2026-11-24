@@ -235,4 +235,44 @@ describeWithGit('workspace recovery — real CLI, real git, two machines', () =>
     },
     SUITE_TIMEOUT_MS
   );
+
+  it(
+    'each machine calls the shared Workspace by its own name, and both keep syncing',
+    () => {
+      expect(workspace(machineA, 'create', '--name', 'Team', '--remote', WORKSPACE_REMOTE, '--json').status).toBe(0);
+      const appA = makeRepo(join(sandbox, 'machine-a', 'code', 'app'), 'https://git.example.test/team/app.git');
+      expect(workspace(machineA, 'link', '--target', appA, '--workspace', 'team', '--json').status).toBe(0);
+      expect(workspace(machineA, 'sync', '--workspace', 'team', '--json').json).toMatchObject({ state: 'synced', pushed: true });
+      expect(workspace(machineB, 'join', '--remote', WORKSPACE_REMOTE, '--json').status).toBe(0);
+
+      // A calls it A, B calls it B.
+      expect(workspace(machineA, 'rename', '--workspace', 'team', '--name', 'A', '--json').json).toMatchObject({
+        changed: true,
+        workspace: { name: 'A', sharedName: 'Team' },
+      });
+      expect(workspace(machineB, 'rename', '--workspace', 'team', '--name', 'B', '--json').json).toMatchObject({
+        workspace: { name: 'B', sharedName: 'Team' },
+      });
+
+      // Knowledge still flows both ways, and nothing stops for a person.
+      write(join(machineA, 'workspaces', 'team'), 'projects/app/brain/decisions/queue.md', '# Queue\n\nSQS.\n');
+      expect(workspace(machineA, 'sync', '--workspace', 'team', '--json').json).toMatchObject({ state: 'synced' });
+      expect(workspace(machineB, 'sync', '--workspace', 'team', '--json').json).toMatchObject({ state: 'synced' });
+      expect(readFileSync(join(machineB, 'workspaces', 'team', 'projects/app/brain/decisions/queue.md'), 'utf-8')).toBe('# Queue\n\nSQS.\n');
+      expect(String(workspace(machineA, 'sync', '--workspace', 'team', '--json').json?.['state'])).toMatch(/^(synced|nothing-to-do)$/);
+
+      // Each still sees its own name; the shared file never changed.
+      const nameOn = (flowFolder: string): unknown =>
+        (workspace(flowFolder, 'status', '--json').json as { workspaces: { slug: string; name: string }[] }).workspaces.find((w) => w.slug === 'team')?.name;
+      expect(nameOn(machineA)).toBe('A');
+      expect(nameOn(machineB)).toBe('B');
+      for (const machine of [machineA, machineB]) {
+        expect((JSON.parse(readFileSync(join(machine, 'workspaces', 'team', 'workspace.json'), 'utf-8')) as { name: string }).name).toBe('Team');
+      }
+      // Naming it the shared name again forgets the local one.
+      expect(workspace(machineA, 'rename', '--workspace', 'team', '--name', 'Team', '--json').json).toMatchObject({ workspace: { name: 'Team' } });
+      expect(readFileSync(join(machineA, 'settings', 'workspaces.local.json'), 'utf-8')).not.toContain('"A"');
+    },
+    SUITE_TIMEOUT_MS
+  );
 });
