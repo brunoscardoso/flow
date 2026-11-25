@@ -101,7 +101,7 @@ import {
 } from '../state/knowledge-status-log.js';
 import { parseProvenanceRecords } from '../state/knowledge-status-fold.js';
 import { atomicWriteFile } from '../utils/atomic-write.js';
-import { classifyKnowledgePath } from './knowledge-classes.js';
+import { classifyKnowledgePath, isMachineFile } from './knowledge-classes.js';
 import { projectCheckout } from './knowledge-landing.js';
 import { readLocalProjects, workspaceFileProblem, type WorkspaceGit } from './workspace-model.js';
 
@@ -194,6 +194,7 @@ export type MergeResolution =
       referencesNotUpdated: string[];
     }
   | { kind: 'workspace-file'; path: string }
+  | { kind: 'machine-file'; path: string }
   | { kind: 'line-merge'; path: string }
   | {
       kind: 'feature-rules';
@@ -237,6 +238,7 @@ export type PlannedResolution =
   | { kind: 'union'; path: string; attribute: boolean; content: string | null; lines: number }
   | { kind: 'renumber'; path: string; ours: string; theirs: string; family: VersionedName; walkthrough: string | null }
   | { kind: 'workspace-file'; path: string; content: string }
+  | { kind: 'machine-file'; path: string }
   | { kind: 'line-merge'; path: string }
   | {
       kind: 'feature-rules';
@@ -1135,6 +1137,12 @@ export function inspectMerge(facts: MergeFacts): MergeInspection {
     if (sides.oursBlob === sides.theirsBlob && !conflicted.has(path)) continue; // the same change on both sides
     const isConflict = conflicted.has(path);
 
+    // A file the operating system writes (Finder's .DS_Store): never knowledge,
+    // never a question. It leaves the Workspace; the OS rebuilds it on each machine.
+    if (isMachineFile(path)) {
+      inspection.resolutions.push({ kind: 'machine-file', path });
+      continue;
+    }
     if (isDecisionPath(path)) {
       inspection.asks.push(askOf(facts, 'decision', decisionTopic(path), path, path, { agentMergeable: true }));
       continue;
@@ -1418,6 +1426,11 @@ export function applyResolutions(facts: MergeFacts, planned: readonly PlannedRes
         stage(git, repo, [resolution.path]);
         done.push({ kind: 'workspace-file', path: resolution.path });
         break;
+      case 'machine-file':
+        writeOrRemove(repo, resolution.path, null);
+        stage(git, repo, [resolution.path]);
+        done.push({ kind: 'machine-file', path: resolution.path });
+        break;
       case 'line-merge':
         done.push({ kind: 'line-merge', path: resolution.path });
         break;
@@ -1540,6 +1553,8 @@ function describeResolution(resolution: MergeResolution): string {
     }
     case 'workspace-file':
       return 'The Workspace description changed on both sides in different fields or projects — both changes kept.';
+    case 'machine-file':
+      return 'A file the operating system writes on each machine (not knowledge) — removed from the Workspace and ignored from now on.';
     case 'line-merge':
       return 'Edited on both sides in different places — git merged the two without a conflict.';
     case 'feature-rules':

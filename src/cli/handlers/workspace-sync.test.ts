@@ -1693,6 +1693,34 @@ describeWithGit('workspace sync against real git, two machines', () => {
   const mergeCalls = (): number => calls.filter((args) => args.includes('merge') && args.includes('--no-commit')).length;
 
   it(
+    "never asks about an operating-system file: two machines' .DS_Store leave the Workspace without a question",
+    () => {
+      const path = 'projects/backend/plans/.DS_Store';
+      // The Workspace already holds one (pushed before Flow ignored them), and this machine committed its own.
+      write(wsA, path, 'finder view of A');
+      git(wsA, 'add', '-f', '--', path);
+      git(wsA, 'commit', '-q', '-m', 'old machine file');
+      git(wsA, 'push', '-q', 'origin', 'HEAD:refs/heads/main');
+      expect(onRemote(path)).toBe('finder view of A');
+      write(wsB, path, 'finder view of B');
+      git(wsB, 'add', '-f', '--', path);
+      git(wsB, 'commit', '-q', '-m', 'old machine file');
+
+      const first = sync(flowB);
+      // The sync went through (the positive)…
+      expect(first).toMatchObject({ state: 'synced', pushed: true });
+      // …and asked nothing about it (the absence).
+      expect(first.asks).toEqual([]);
+      expect(first.reviews).toEqual([]);
+      sync(flowB);
+      const tracked = git(bare, 'ls-tree', '-r', '--name-only', 'refs/heads/main');
+      expect(tracked).toContain('projects/backend');
+      expect(tracked).not.toContain('.DS_Store');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
     'applies a whole batch of decisions in ONE merge, and the merge commit names each one and who agreed',
     () => {
       const [ours, theirs, written] = conflictingPlans(['bat_one', 'bat_two', 'bat_three']);
