@@ -855,6 +855,27 @@ describe('workspace sync engine — the agent decides a pause', () => {
     expect(h.last()).toMatchObject({ state: 'review' })
   })
 
+  it('a combine of two Workspaces arrives as its own group, first, waiting for review — and is never recorded as a file decision', async () => {
+    const h = harness({ nameOf: async () => 'Acme' })
+    h.answer(
+      SYNC_ARGV,
+      result('merged-local', {
+        awaitingReview: true,
+        mergedItems: [
+          { id: 'review-1', path: REVIEW.path, kind: 'conflict', take: 'theirs' },
+          { id: 'combine:abc', path: '', kind: 'combine', take: 'theirs' },
+        ],
+        heldAside: [],
+      }),
+    )
+    await h.engine.open(SLUG)
+    const shown = h.last()
+    expect(shown).toMatchObject({ state: 'review' })
+    expect(shown.review?.groups.map((group) => group.key)).toEqual(['combined', 'took-theirs'])
+    expect(shown.review?.groups[0]?.items.map((item) => [item.id, item.kind])).toEqual([['combine:abc', 'combine']])
+    expect(h.timers.syncTimers()).toBe(0)
+  })
+
   it('a merged text goes in the batch as content', async () => {
     const plan = { ...NOTE_REVIEW, id: 'review-plan', path: 'projects/api/plans/plan_q_v1.md' }
     const h = harness({

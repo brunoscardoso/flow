@@ -109,6 +109,20 @@ describe('the merge review card', () => {
     expect(agreed?.canAgree).toBe(false)
   })
 
+  it('a combine of two Workspaces is its own group, agreed as a whole and never disagreed', () => {
+    const combine = item('combine:abc', 'pending', { path: '', kind: 'combine', reason: '' })
+    const r = review({ groups: [{ key: 'combined', count: 1, items: [combine] }, ...review().groups] })
+    const view = mergeReviewView(status(r), ui({ open: new Set(['combined']) }), NOW)
+    const group = view?.groups[0]
+    // The positive: the plain groups still offer Disagree…
+    expect(view?.groups[1]?.canDisagree).toBe(true)
+    expect(group).toMatchObject({ key: 'combined', label: 'Combined with another Workspace', canAgree: true, canDisagree: false })
+    expect(group?.agreeableIds).toEqual(['combine:abc'])
+    expect(group?.disagreeableIds).toEqual([])
+    expect(group?.rows[0]?.label).toBe('Everything the other Workspace holds')
+    expect(group?.blurb).not.toMatch(/[/`]|planflow|--/)
+  })
+
   it('a count opens to a sample, then "Show all"', () => {
     const closed = mergeReviewView(status(review()), ui(), NOW)?.groups[0]
     expect(closed?.rows).toEqual([])

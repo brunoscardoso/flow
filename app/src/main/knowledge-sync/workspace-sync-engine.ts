@@ -364,7 +364,7 @@ interface CliResult {
   heldAside: WorkspaceMergeReviewHeld[]
 }
 
-const ITEM_KINDS: readonly WorkspaceMergeItemKind[] = [...ASK_KINDS, ...REVIEW_KINDS]
+const ITEM_KINDS: readonly WorkspaceMergeItemKind[] = [...ASK_KINDS, ...REVIEW_KINDS, 'combine']
 
 /** Lenient: an entry that cannot be read is left out, never fatal (these only feed the review). */
 function readMergedItems(value: unknown): CliMergedItem[] {
@@ -405,7 +405,17 @@ interface RecordedReason {
   ts: string
 }
 
-const GROUP_ORDER: readonly WorkspaceMergeReviewGroup['key'][] = ['merged', 'took-theirs', 'kept-mine', 'kept-both', 'identical']
+const GROUP_ORDER: readonly WorkspaceMergeReviewGroup['key'][] = ['combined', 'merged', 'took-theirs', 'kept-mine', 'kept-both', 'identical']
+
+/**
+ * A merge that COMBINED two Workspaces set up separately is one item of its
+ * own, first in the review: the CLI shares it only once a person agrees.
+ */
+function combineEntries(result: Pick<CliResult, 'mergedItems'>): ReviewEntry[] {
+  return result.mergedItems
+    .filter((item) => item.kind === 'combine' && !item.held)
+    .map((item) => ({ ...entryBase(item.id, '', 'combine'), group: 'combined' as const, take: 'theirs' as const }))
+}
 
 /**
  * One item of the open review as the engine keeps it. `heldHere`: this
@@ -487,7 +497,7 @@ function openReviewOf(
   const byId = new Map(items.map((item) => [item.id, item]))
   const applied = new Set(result.mergedItems.filter((item) => !item.held).map((item) => item.id))
   const heldIds = new Set(result.heldAside.map((held) => held.id))
-  const entries: ReviewEntry[] = []
+  const entries: ReviewEntry[] = [...combineEntries(result)]
   for (const key of GROUP_ORDER) {
     for (const decision of decided.decisions) {
       const item = byId.get(decision.id)
@@ -525,11 +535,12 @@ function openReviewOf(
  */
 function reviewFromCli(at: number, result: Pick<CliResult, 'mergedItems' | 'heldAside'>): OpenReview {
   const entries = result.mergedItems.flatMap((item): ReviewEntry[] => {
-    if (item.held) return []
+    if (item.held || item.kind === 'combine') return []
     const take: WorkspaceAgentTake = item.take === 'ours' ? 'ours' : item.take === 'theirs' ? 'theirs' : 'file'
     const group: WorkspaceMergeGroupKey = take === 'ours' ? 'kept-mine' : take === 'theirs' ? 'took-theirs' : 'merged'
     return [{ ...entryBase(item.id, item.path, item.kind ?? 'conflict'), group, take }]
   })
+  entries.unshift(...combineEntries(result))
   const review: OpenReview = { mergedAt: new Date(at).toISOString(), entries, held: [], items: new Map() }
   withHeld(review, result.heldAside)
   return review
@@ -658,6 +669,7 @@ function recordTake(entry: ReviewEntry): string {
 }
 
 const GROUP_SUMMARY: Record<WorkspaceMergeGroupKey, string> = {
+  combined: 'combined two Workspaces set up separately',
   'kept-both': 'kept both notes',
   'took-theirs': "took the Workspace's version",
   'kept-mine': "kept this computer's version",
@@ -1618,6 +1630,8 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
    * writer). A line that cannot be written is logged; it never stops a review.
    */
   async function recordDecision(rec: WorkspaceRecord, entry: ReviewEntry, outcome: 'agreed' | 'disagreed', reason: string): Promise<boolean> {
+    // A combine is not a decision about one file: the record holds file decisions only.
+    if (entry.kind === 'combine') return false
     const project = projectOf(entry.path)
     if (project === null) {
       deps.log('a review decision names no project; not recorded', { slug: rec.slug })

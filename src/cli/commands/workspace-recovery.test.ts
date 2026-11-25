@@ -287,6 +287,15 @@ describeWithGit('workspace recovery — real CLI, real git, two machines', () =>
       write(team, 'projects/app/brain/features/queue.md', '---\nname: Queue\nkind: core\n---\n\n# Queue\n\n- Messages go through SQS\n');
       write(team, 'projects/app/brain/.structure/basic-discovery.jsonl', '{"completedAt":"2026-11-20T10:00:00Z","learned":3,"failed":0}\n');
       expect(workspace(machineA, 'sync', '--workspace', 'team', '--json').json).toMatchObject({ state: 'synced', pushed: true });
+      // A chat working set the team's repository already holds (shared by an older Flow).
+      const teamWorkingSet = 'projects/app/brain/features/aai-9-old-thread.md';
+      write(team, teamWorkingSet, '---\nfeature: aai-9-old-thread\nthread_id: 0f0e\n---\n\n# AAI-9\n\nWorking set for "AAI-9" — 1 file(s): 1 edited, 0 read.\n');
+      spawnSync('git', ['-C', team, 'add', '-f', '--', teamWorkingSet], { env });
+      spawnSync('git', ['-C', team, '-c', 'user.email=a@example.test', '-c', 'user.name=A', 'commit', '-q', '-m', 'old working set'], { env });
+      const teamBranch = spawnSync('git', ['-C', team, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8', env }).stdout.trim();
+      const pushedSet = spawnSync('git', ['-C', team, 'push', '-q', 'origin', `HEAD:refs/heads/${teamBranch}`], { encoding: 'utf8', env });
+      expect(pushedSet.status).toBe(0);
+      expect(spawnSync('git', ['-C', team, 'ls-tree', '--name-only', `origin/${teamBranch}`, '--', teamWorkingSet], { encoding: 'utf8', env }).stdout.trim()).toBe(teamWorkingSet);
 
       expect(workspace(machineB, 'create', '--name', 'My Mac', '--json').status).toBe(0);
       const appB = makeRepo(join(sandbox, 'machine-b', 'code', 'app'), 'https://git.example.test/team/app.git');
@@ -324,7 +333,19 @@ describeWithGit('workspace recovery — real CLI, real git, two machines', () =>
       const settled = workspace(
         machineB, 'sync', '--workspace', 'my-mac', `--resolve=${decision.path}`, `--id=${decision.id}`, `--take=file:${agentText}`, '--json',
       );
-      expect(settled.json).toMatchObject({ state: 'synced', pushed: true });
+      // Combining two Workspaces waits for a person (the positive: it IS merged here)…
+      expect(settled.json).toMatchObject({ state: 'merged-local', awaitingReview: true, pushed: false });
+      expect((settled.json as { mergedItems: { kind: string }[] }).mergedItems.map((item) => item.kind)).toContain('combine');
+      expect(readFileSync(join(mine, 'projects/app/brain/decisions/queue.md'), 'utf-8')).toBe(combined);
+      // …a later run does not share it on its own…
+      expect(workspace(machineB, 'sync', '--workspace', 'my-mac', '--json').json).toMatchObject({ pushed: false });
+      // …and the other computer's working set is not in the combined commit (kept on disk here, not tracked).
+      const mergeSha = (settled.json as { merge: { sha: string } }).merge.sha;
+      const inMerge = (path: string): string => spawnSync('git', ['-C', mine, 'ls-tree', '--name-only', mergeSha, '--', path], { encoding: 'utf8', env }).stdout.trim();
+      expect(inMerge('projects/app/discovery/discovery_theirs_v1.md')).not.toBe('');
+      expect(inMerge(teamWorkingSet)).toBe('');
+      // A person agrees: now it is shared.
+      expect(workspace(machineB, 'sync', '--workspace', 'my-mac', '--agreed', '--json').json).toMatchObject({ state: 'synced', pushed: true });
       expect(readFileSync(join(mine, 'projects/app/brain/decisions/queue.md'), 'utf-8')).toBe(combined);
       expect(readFileSync(join(mine, 'projects/app/discovery/discovery_theirs_v1.md'), 'utf-8')).toBe('# Theirs\n');
       expect(projectsOf(machineB, 'my-mac')).toEqual(['app']);

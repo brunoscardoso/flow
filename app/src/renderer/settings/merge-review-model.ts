@@ -148,6 +148,10 @@ export function isDisagreeable(state: WorkspaceMergeItemState): boolean {
 // ── Groups ──────────────────────────────────────────────────────────────────
 
 const GROUP_COPY: Record<WorkspaceMergeGroupKey, { label: string; blurb: string }> = {
+  combined: {
+    label: 'Combined with another Workspace',
+    blurb: 'The shared Workspace was set up separately for the same projects. Everything it holds was merged on this computer. Nothing is shared until you agree.',
+  },
   'kept-both': { label: 'Kept both notes', blurb: 'Two different notes describe the same code. Both stay as they are.' },
   'took-theirs': { label: 'Took the Workspace’s version', blurb: 'Flow kept the team’s version of these notes.' },
   merged: { label: 'Merged both versions', blurb: 'Flow wrote one note from your text and the team’s.' },
@@ -217,7 +221,7 @@ function itemRow(item: WorkspaceMergeReviewItem): ItemRowView {
   const why = item.state === 'redone' && item.redo !== undefined ? item.redo.reason : item.reason
   return {
     id: item.id,
-    label: itemLabel(item.path),
+    label: item.kind === 'combine' ? 'Everything the other Workspace holds' : itemLabel(item.path),
     pill: statePill(item.state),
     why,
     yourReason: item.disagreedReason === undefined || item.disagreedReason === '' ? null : `Your reason: “${item.disagreedReason}”`,
@@ -438,7 +442,8 @@ function groupView(
   ui: MergeReviewUiState,
 ): GroupView {
   const agreeableIds = items.filter((item) => isAgreeable(item.state)).map((item) => item.id)
-  const disagreeableIds = items.filter((item) => isDisagreeable(item.state)).map((item) => item.id)
+  // A combine is agreed or left as a whole — there is nothing for the agent to redo.
+  const disagreeableIds = key === 'combined' ? [] : items.filter((item) => isDisagreeable(item.state)).map((item) => item.id)
   const open = ui.open.has(key)
   const all = ui.showAll.has(key)
   const limit = all ? MAX_SHOWN : SAMPLE_SIZE
@@ -495,6 +500,7 @@ const KIND_LABELS: Record<WorkspaceMergeItemKind, string> = {
   conflict: 'Both edited a note',
   'add-add': 'Both added a note',
   'modify-delete': 'Changed and deleted',
+  combine: 'Combined Workspaces',
 }
 
 export function kindLabel(kind: WorkspaceMergeItemKind): string {

@@ -469,7 +469,8 @@ export type WorkspaceResolveResult =
 // ── Agent-decided conflicts — what the decider did, for the review ──────────
 
 /** Every kind of item a sync can wait on (an ask's or a review's `kind`). */
-export type WorkspaceMergeItemKind = WorkspaceSyncAsk['kind'] | WorkspaceSyncReview['kind']
+/** `combine`: two Workspaces set up separately were combined — one item, agreed as a whole. */
+export type WorkspaceMergeItemKind = WorkspaceSyncAsk['kind'] | WorkspaceSyncReview['kind'] | 'combine'
 
 /**
  * How the agent settled an item — the stable key a review groups by:
@@ -478,7 +479,7 @@ export type WorkspaceMergeItemKind = WorkspaceSyncAsk['kind'] | WorkspaceSyncRev
  *   · `merged` — the agent wrote one text from both sides;
  *   · `identical` — both sides said the same thing.
  */
-export type WorkspaceMergeGroupKey = 'kept-both' | 'took-theirs' | 'kept-mine' | 'merged' | 'identical'
+export type WorkspaceMergeGroupKey = 'combined' | 'kept-both' | 'took-theirs' | 'kept-mine' | 'merged' | 'identical'
 
 /** What an agent decision applied (the CLI's take; `file` = the agent's merged text). */
 export type WorkspaceAgentTake = 'ours' | 'theirs' | 'file'

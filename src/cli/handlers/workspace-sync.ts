@@ -349,7 +349,8 @@ export interface SyncResult {
 export interface MergedItem {
   id: string;
   path: string;
-  kind: AskKind | ReviewKind;
+  /** `combine`: the whole merge is two Workspaces combined — one item, agreed as one. */
+  kind: AskKind | ReviewKind | 'combine';
   take: Take;
   held?: true;
 }
@@ -973,6 +974,18 @@ function untrackLocalOnly(git: WorkspaceGit, repo: string): string[] {
   return [...new Set(local)].sort();
 }
 
+/** Before a combine is committed: take every machine-only file out of the merge's index (kept on disk). */
+function untrackIncomingLocalOnly(git: WorkspaceGit, repo: string): void {
+  const workingSets = new Set(excludeWorkingSets(git, repo));
+  const indexed = splitZ(git(['ls-files', '-z'], repo));
+  const local = indexed.filter((path) => {
+    if (workingSets.has(path)) return true;
+    const knowledgeClass = classifyKnowledgePath(path, { root: 'workspace' });
+    return knowledgeClass === 'personal' || knowledgeClass === 'generated';
+  });
+  if (local.length > 0) git(['rm', '-q', '--cached', '--ignore-unmatch', '--', ...local], repo);
+}
+
 /**
  * Every chat thread's working set in the Workspace's feature folders, by
  * content (`isWorkingSetCapture`, the feature store's own rule). Auto-capture
@@ -1173,6 +1186,8 @@ type MergeStep =
       decided: string[];
       mergedItems: MergedItem[];
       held: HeldItem[];
+      /** Two Workspaces' unrelated histories were combined by this merge. */
+      combined: boolean;
     }
   | { kind: 'waiting'; asks: SyncAsk[]; reviews: SyncReview[]; decided: string[] };
 
@@ -1550,6 +1565,11 @@ function mergeIncoming(context: MergeContext, tracking: string | null): MergeSte
     if (!unmerged.ok || splitZ(unmerged.out).length > 0) {
       throw new WorkspaceRefusal('merge-failed', 'some files were still unmerged after every resolution, so nothing was merged', { pushed: false });
     }
+    // A COMBINE brings in another Workspace's whole history, written by another
+    // computer and perhaps another version of Flow: its machine-only files
+    // (working sets, personal and generated paths) never enter the combined
+    // commit (2026-11-25: 226 working sets arrived this way).
+    if (unrelated) untrackIncomingLocalOnly(git, repo);
     const log = writeMergeLog(facts, resolutions, { now: context.now, remoteRef: `${REMOTE_NAME}/${context.branch}` });
     const automatic = resolutions.filter((resolution) => resolution.kind !== 'decision').length;
     const message = `Merge ${REMOTE_NAME}/${context.branch}${automatic === 0 ? '' : ` — ${automatic} settled by Flow`}${log === null ? '' : ` (${log})`}`;
@@ -1575,8 +1595,11 @@ function mergeIncoming(context: MergeContext, tracking: string | null): MergeSte
       log,
       resolutions,
       decided: [...new Set([...decided, ...[...live.keys()]])],
-      mergedItems,
+      mergedItems: unrelated
+        ? [...mergedItems, { id: `combine:${incoming}`, path: '', kind: 'combine', take: 'theirs' }]
+        : mergedItems,
       held,
+      combined: unrelated,
     };
   } catch (error) {
     // Only a merge still in progress is undone. A HEAD that moved with no
@@ -2124,7 +2147,7 @@ function settleHeldItem(git: WorkspaceGit, repo: string, request: SettleRequest)
 interface ReviewEntry {
   id: string;
   path: string;
-  kind: AskKind | ReviewKind;
+  kind: AskKind | ReviewKind | 'combine';
   take: Take;
   merge: string;
 }
@@ -2232,6 +2255,11 @@ function holdBackReviewItems(git: WorkspaceGit, repo: string, ids: readonly stri
     { ids: [...ids] }
   );
   for (const entry of entries) {
+    if (entry.kind === 'combine') {
+      throw new WorkspaceRefusal('invalid-resolution', 'combining two Workspaces is agreed as a whole, never held back in part', { id: entry.id });
+    }
+  }
+  for (const entry of entries) {
     const full = join(repo, ...entry.path.split('/'));
     if (!isSafeRelative(entry.path) || crossesLink(repo, full) || isLink(full)) {
       throw new WorkspaceRefusal('invalid-resolution', 'that review item is not a plain file inside the Workspace', { id: entry.id, path: entry.path });
@@ -2247,7 +2275,7 @@ function holdBackReviewItems(git: WorkspaceGit, repo: string, ids: readonly stri
   for (const entry of entries) {
     const full = join(repo, ...entry.path.split('/'));
     const theirs = textAt(git, repo, `${entry.merge}^2`, entry.path);
-    held.push({ id: entry.id, path: entry.path, kind: entry.kind, text: textAt(git, repo, `${entry.merge}^1`, entry.path), heldAt });
+    held.push({ id: entry.id, path: entry.path, kind: entry.kind as AskKind | ReviewKind, text: textAt(git, repo, `${entry.merge}^1`, entry.path), heldAt });
     if (theirs === null) rmSync(full, { force: true });
     else {
       mkdirSync(dirname(full), { recursive: true });
@@ -2615,7 +2643,10 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
 
     // Decided items of a merge kept here wait for a person: they are recorded,
     // and while ANY is recorded a run publishes only when told a person agreed.
-    const gated = options.push && options.agreed !== true && readReviewRecord(git, repo).length > 0;
+    // A combine of two Workspaces is ALWAYS reviewed before it is shared: it
+    // is the one merge that can bring in a whole other history at once.
+    const combinedHere = result.mergedItems.some((item) => item.kind === 'combine');
+    const gated = options.push && options.agreed !== true && (combinedHere || readReviewRecord(git, repo).length > 0);
     const openReview = recordReview(git, repo, result.merge, result.mergedItems, !options.push || gated);
     if (!options.push || gated) {
       // A merge committed here and not published waits for a person's review.
