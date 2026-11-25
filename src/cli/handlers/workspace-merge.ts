@@ -101,7 +101,7 @@ import {
 } from '../state/knowledge-status-log.js';
 import { parseProvenanceRecords } from '../state/knowledge-status-fold.js';
 import { atomicWriteFile } from '../utils/atomic-write.js';
-import { classifyKnowledgePath } from './knowledge-classes.js';
+import { classifyKnowledgePath, isMachineFile } from './knowledge-classes.js';
 import { projectCheckout } from './knowledge-landing.js';
 import { readLocalProjects, workspaceFileProblem, type WorkspaceGit } from './workspace-model.js';
 
@@ -151,6 +151,12 @@ export interface SyncAsk {
   base?: string | null;
   /** agentMergeable only: git's author name of the Workspace side's last change to `existingPath`. */
   theirAuthor?: string | null;
+  /**
+   * The outcome the suggestion expects. `'both'` (overlapping-anchors only): two
+   * different features claim the same anchors, so keeping both notes unchanged
+   * is the expected answer. Additive — a consumer that ignores it loses nothing.
+   */
+  suggested?: 'both';
   truncated: boolean;
   /** Every `take` this item accepts (`file` always). */
   options: Take[];
@@ -188,6 +194,7 @@ export type MergeResolution =
       referencesNotUpdated: string[];
     }
   | { kind: 'workspace-file'; path: string }
+  | { kind: 'machine-file'; path: string }
   | { kind: 'line-merge'; path: string }
   | {
       kind: 'feature-rules';
@@ -231,6 +238,7 @@ export type PlannedResolution =
   | { kind: 'union'; path: string; attribute: boolean; content: string | null; lines: number }
   | { kind: 'renumber'; path: string; ours: string; theirs: string; family: VersionedName; walkthrough: string | null }
   | { kind: 'workspace-file'; path: string; content: string }
+  | { kind: 'machine-file'; path: string }
   | { kind: 'line-merge'; path: string }
   | {
       kind: 'feature-rules';
@@ -266,9 +274,9 @@ export interface MergeFacts {
 
 // ─── Git helpers ────────────────────────────────────────────────────────────
 
-function attempt(git: WorkspaceGit, args: string[], cwd: string): string | null {
+function attempt(git: WorkspaceGit, args: string[], cwd: string, input?: string): string | null {
   try {
-    return git(args, cwd);
+    return input === undefined ? git(args, cwd) : git(args, cwd, { input });
   } catch {
     return null;
   }
@@ -278,8 +286,127 @@ function splitZ(out: string | null): string[] {
   return (out ?? '').split('\0').filter((entry) => entry.length > 0);
 }
 
+// ─── Bulk reads (user report 2026-11-24) ─────────────────────────────────────
+//
+// A merge reads three blob ids and three texts for every path both sides
+// touched — one git process each. Two Workspaces combined share no history, so
+// that is EVERY file: on a real Workspace the merge was still reading one file
+// at a time when the app stopped it at five minutes, and every later sync did
+// the same. A commit's content never changes, so a commit (or tree) named by
+// its id is listed ONCE (`ls-tree`) and its texts read in a few `cat-file
+// --batch` calls; `blobAt`/`textAt` answer from that. Anything else — a ref
+// name, a git that cannot list — reads one file at a time, as before.
+
+const OBJECT_ID = /^[0-9a-f]{40}$/;
+/** A blob larger than this is read on its own, when asked for. */
+const BATCH_MAX_BLOB_BYTES = 1024 * 1024;
+/** One `cat-file --batch` answer stays well under the runner's 16 MB buffer. */
+const BATCH_MAX_BYTES = 8 * 1024 * 1024;
+const MAX_TREES = 8;
+const MAX_TEXT_BYTES = 64 * 1024 * 1024;
+
+interface TreeEntry {
+  id: string;
+  size: number;
+}
+
+const treeCache = new Map<string, Map<string, TreeEntry>>();
+const textCache = new Map<string, string>();
+let textCacheBytes = 0;
+
+function cacheKey(repo: string, id: string): string {
+  return `${repo}\0${id}`;
+}
+
+/** Every blob of an immutable commit or tree, by path — or null when it cannot be listed in one call. */
+function treeOf(git: WorkspaceGit, repo: string, rev: string): Map<string, TreeEntry> | null {
+  if (!OBJECT_ID.test(rev)) return null;
+  const key = cacheKey(repo, rev);
+  const cached = treeCache.get(key);
+  if (cached !== undefined) return cached;
+  const out = attempt(git, ['ls-tree', '-r', '-l', '-z', '--full-tree', rev], repo);
+  if (out === null) return null;
+  const entries = new Map<string, TreeEntry>();
+  for (const record of splitZ(out)) {
+    const tab = record.indexOf('\t');
+    if (tab === -1) continue;
+    const [, type, id, size] = record.slice(0, tab).trim().split(/\s+/);
+    if (type !== 'blob' || id === undefined) continue;
+    entries.set(record.slice(tab + 1), { id, size: Number.parseInt(size ?? '', 10) || 0 });
+  }
+  if (treeCache.size >= MAX_TREES) treeCache.delete(treeCache.keys().next().value as string);
+  treeCache.set(key, entries);
+  return entries;
+}
+
+function rememberText(repo: string, id: string, text: string): void {
+  if (textCacheBytes + text.length > MAX_TEXT_BYTES) {
+    textCache.clear();
+    textCacheBytes = 0;
+  }
+  textCache.set(cacheKey(repo, id), text);
+  textCacheBytes += text.length;
+}
+
+/**
+ * Parse a `cat-file --batch` answer into id → text. Sizes are bytes, so the
+ * answer is walked as bytes; anything that does not line up stops the walk
+ * (what was read stays, the rest is read one at a time).
+ */
+function parseBatch(out: string): Map<string, string> {
+  const bytes = Buffer.from(out, 'utf-8');
+  const texts = new Map<string, string>();
+  let at = 0;
+  while (at < bytes.length) {
+    const newline = bytes.indexOf(0x0a, at);
+    if (newline === -1) break;
+    const header = /^([0-9a-f]{40}) blob (\d+)$/.exec(bytes.subarray(at, newline).toString('utf-8'));
+    if (header === null) break;
+    const size = Number.parseInt(header[2], 10);
+    const end = newline + 1 + size;
+    if (end > bytes.length || bytes[end] !== 0x0a) break;
+    texts.set(header[1], bytes.subarray(newline + 1, end).toString('utf-8'));
+    at = end + 1;
+  }
+  return texts;
+}
+
+/** Read the texts of `paths` on each of `revs` in a few batched calls (a cache fill: failures are silent). */
+export function prefetchTexts(git: WorkspaceGit, repo: string, revs: readonly string[], paths: Iterable<string>): void {
+  const wanted = new Set<string>();
+  const wantedPaths = [...paths];
+  for (const rev of new Set(revs)) {
+    const tree = treeOf(git, repo, rev);
+    if (tree === null) continue;
+    for (const path of wantedPaths) {
+      const entry = tree.get(path);
+      if (entry === undefined || entry.size > BATCH_MAX_BLOB_BYTES || textCache.has(cacheKey(repo, entry.id))) continue;
+      wanted.add(`${entry.id}\0${entry.size}`);
+    }
+  }
+  let chunk: string[] = [];
+  let chunkBytes = 0;
+  const flush = (): void => {
+    if (chunk.length === 0) return;
+    const out = attempt(git, ['cat-file', '--batch'], repo, `${chunk.join('\n')}\n`);
+    if (out !== null) for (const [id, text] of parseBatch(out)) rememberText(repo, id, text);
+    chunk = [];
+    chunkBytes = 0;
+  };
+  for (const item of wanted) {
+    const [id, size] = item.split('\0') as [string, string];
+    const bytes = Number.parseInt(size, 10) + 64;
+    if (chunkBytes + bytes > BATCH_MAX_BYTES) flush();
+    chunk.push(id);
+    chunkBytes += bytes;
+  }
+  flush();
+}
+
 /** `<rev>:<path>`'s blob id, or null when the path is absent there. */
 export function blobAt(git: WorkspaceGit, repo: string, rev: string, path: string): string | null {
+  const tree = treeOf(git, repo, rev);
+  if (tree !== null) return tree.get(path)?.id ?? null;
   const out = attempt(git, ['rev-parse', '--verify', '-q', `${rev}:${path}`], repo);
   const id = out?.trim() ?? '';
   return id === '' ? null : id;
@@ -297,8 +424,13 @@ function authorAt(git: WorkspaceGit, repo: string, rev: string, path: string): s
 
 /** `<rev>:<path>`'s text, or null when the path is absent there. */
 export function textAt(git: WorkspaceGit, repo: string, rev: string, path: string): string | null {
-  if (blobAt(git, repo, rev, path) === null) return null;
-  return attempt(git, ['cat-file', 'blob', `${rev}:${path}`], repo);
+  const id = blobAt(git, repo, rev, path);
+  if (id === null) return null;
+  const cached = textCache.get(cacheKey(repo, id));
+  if (cached !== undefined) return cached;
+  const text = attempt(git, ['cat-file', 'blob', `${rev}:${path}`], repo);
+  if (text !== null && OBJECT_ID.test(id)) rememberText(repo, id, text);
+  return text;
 }
 
 /** Paths changed between two commits, with their status (renames off). */
@@ -323,18 +455,21 @@ export function unmergedPaths(git: WorkspaceGit, repo: string): Set<string> {
 }
 
 /** Read the facts of the merge in progress in `repo` (MERGE_HEAD must exist). */
+/** git's empty tree: the "common ancestor" of two histories that have none. */
+export const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
 export function readMergeFacts(git: WorkspaceGit, repo: string, ours: string, theirs: string): MergeFacts {
-  const base = git(['merge-base', ours, theirs], repo).trim();
-  return {
-    repo,
-    git,
-    base,
-    ours,
-    theirs,
-    oursChanged: changedPaths(git, repo, base, ours),
-    theirsChanged: changedPaths(git, repo, base, theirs),
-    conflicted: unmergedPaths(git, repo),
-  };
+  // Two Workspaces combined (unrelated histories): nothing is common, so every
+  // file each side holds counts as added by that side.
+  const found = attempt(git, ['merge-base', ours, theirs], repo);
+  const base = found !== null && found.trim() !== '' ? found.trim() : EMPTY_TREE;
+  const oursChanged = changedPaths(git, repo, base, ours);
+  const theirsChanged = changedPaths(git, repo, base, theirs);
+  const conflicted = unmergedPaths(git, repo);
+  // Every path both sides touched is read on all three sides: read them in bulk.
+  const both = [...oursChanged.keys()].filter((path) => theirsChanged.has(path));
+  prefetchTexts(git, repo, [base, ours, theirs], new Set([...both, ...conflicted]));
+  return { repo, git, base, ours, theirs, oursChanged, theirsChanged, conflicted };
 }
 
 function workingText(repo: string, path: string): string | null {
@@ -369,6 +504,16 @@ const PLAN_PATH = /^projects\/[^/]+\/plans\/[^/]+\.md$/;
 /** A decision, plan or discovery document — intent, which an agent may merge (FR-12). */
 export function isIntentPath(path: string): boolean {
   return DECISION_PATH.test(path) || DISCOVERY_PATH.test(path) || PLAN_PATH.test(path);
+}
+
+/**
+ * Any markdown note of a project — intent, a feature, an error, a learned
+ * note — which an agent may merge (user, 2026-11-24: "we are having
+ * conflicts that agent should fix"). Only the base text is extra; the app
+ * still decides, item by item, whether its answer is usable.
+ */
+export function isAgentMergeablePath(path: string): boolean {
+  return isIntentPath(path) || /^projects\/[^/]+\/.+\.md$/.test(path);
 }
 
 function versionedName(path: string): VersionedName | null {
@@ -472,7 +617,8 @@ function pick3(base: unknown, ours: unknown, theirs: unknown): { value: unknown 
  * then a person reviews it.
  */
 export function mergeWorkspaceFile(baseText: string | null, oursText: string | null, theirsText: string | null): string | null {
-  const base = parseJsonObject(baseText);
+  // Added on both sides (two Workspaces combined): nothing was common.
+  const base = parseJsonObject(baseText ?? (oursText !== null && theirsText !== null ? '{}' : null));
   const ours = parseJsonObject(oursText);
   const theirs = parseJsonObject(theirsText);
   if (base === null || ours === null || theirs === null) return null;
@@ -485,7 +631,13 @@ export function mergeWorkspaceFile(baseText: string | null, oursText: string | n
       out.projects = projects;
       continue;
     }
-    const picked = pick3(base[key], ours[key], theirs[key]);
+    // The shared name is only what someone who never renamed it sees; each
+    // machine keeps its own (settings/workspaces.local.json). Two different
+    // renames are not a reason to stop a sync: the team's version stands.
+    // The file's slug is informational (each machine's handle is its folder),
+    // so it follows the team's the same way.
+    const picked =
+      pick3(base[key], ours[key], theirs[key]) ?? (key === 'name' || key === 'slug' ? { value: theirs[key] ?? ours[key] } : undefined);
     if (picked === undefined) return null;
     if (picked.value !== undefined) out[key] = picked.value;
   }
@@ -511,11 +663,26 @@ function mergeProjects(base: unknown, ours: unknown, theirs: unknown): unknown[]
   const ids = [...new Set([...t.keys(), ...o.keys(), ...b.keys()])];
   const out: unknown[] = [];
   for (const id of ids) {
-    const picked = pick3(b.get(id), o.get(id), t.get(id));
+    const picked = pick3(b.get(id), o.get(id), t.get(id)) ?? addedOnBoth(b.get(id), o.get(id), t.get(id));
     if (picked === undefined) return null;
     if (picked.value !== undefined) out.push(picked.value);
   }
   return out;
+}
+
+/**
+ * One project both sides listed on their own (two Workspaces combined): the
+ * team's entry, with every remote either side knew. Only when it lives in the
+ * same folder on both — two folders for one project would split its knowledge,
+ * so that one is for a person.
+ */
+function addedOnBoth(base: unknown, ours: unknown, theirs: unknown): { value: unknown } | undefined {
+  if (base !== undefined || typeof ours !== 'object' || ours === null || typeof theirs !== 'object' || theirs === null) return undefined;
+  const o = ours as { slug?: unknown; remotes?: unknown };
+  const t = theirs as { slug?: unknown; remotes?: unknown };
+  if (typeof t.slug !== 'string' || t.slug !== o.slug) return undefined;
+  const remotes = [...new Set([...(Array.isArray(t.remotes) ? t.remotes : []), ...(Array.isArray(o.remotes) ? o.remotes : [])])];
+  return { value: { ...o, ...t, ...(remotes.length > 0 ? { remotes } : {}) } };
 }
 
 // ─── Feature notes: the draft/solid rules (FR-11) ──────────────────────────
@@ -866,7 +1033,7 @@ function askOf(
   topic: string,
   path: string,
   existingPath: string,
-  extra: { anchors?: string[]; agentMergeable?: boolean } = {}
+  extra: { anchors?: string[]; agentMergeable?: boolean; suggested?: 'both' } = {}
 ): SyncAsk {
   const { git, repo } = facts;
   const oursBlob = blobAt(git, repo, facts.ours, path);
@@ -891,6 +1058,7 @@ function askOf(
     ...(extra.agentMergeable === true
       ? { agentMergeable: true as const, base: base.text, theirAuthor: authorAt(git, repo, facts.theirs, existingPath) }
       : {}),
+    ...(extra.suggested === undefined ? {} : { suggested: extra.suggested }),
     truncated: existing.truncated || incoming.truncated || merged.truncated || base.truncated,
     options,
   };
@@ -914,7 +1082,7 @@ function reviewOf(facts: MergeFacts, path: string, sides: Sides): SyncReview {
     existing: existing.text,
     incoming: incoming.text,
     conflicted: conflicted.text,
-    ...(isIntentPath(path) ? { agentMergeable: true as const, theirAuthor: authorAt(facts.git, facts.repo, facts.theirs, path) } : {}),
+    ...(isAgentMergeablePath(path) ? { agentMergeable: true as const, theirAuthor: authorAt(facts.git, facts.repo, facts.theirs, path) } : {}),
     truncated: base.truncated || existing.truncated || incoming.truncated || conflicted.truncated,
     options: ['ours', 'theirs', 'file'],
   };
@@ -936,6 +1104,9 @@ function anchorsAdded(text: string | null, baseText: string | null, path: string
  * index is changed — so a merge that turns out to need a person can be
  * aborted onto exactly the commit it started from.
  */
+/** Files Flow generates at the Workspace repository's root (see `writeWorkspaceRepoFiles`). */
+const GENERATED_REPO_FILES = new Set(['README.md', '.gitignore', '.gitattributes']);
+
 export function inspectMerge(facts: MergeFacts): MergeInspection {
   const { git, repo, oursChanged, theirsChanged, conflicted } = facts;
   const inspection: MergeInspection = { resolutions: [], asks: [], reviews: [] };
@@ -966,6 +1137,12 @@ export function inspectMerge(facts: MergeFacts): MergeInspection {
     if (sides.oursBlob === sides.theirsBlob && !conflicted.has(path)) continue; // the same change on both sides
     const isConflict = conflicted.has(path);
 
+    // A file the operating system writes (Finder's .DS_Store): never knowledge,
+    // never a question. It leaves the Workspace; the OS rebuilds it on each machine.
+    if (isMachineFile(path)) {
+      inspection.resolutions.push({ kind: 'machine-file', path });
+      continue;
+    }
     if (isDecisionPath(path)) {
       inspection.asks.push(askOf(facts, 'decision', decisionTopic(path), path, path, { agentMergeable: true }));
       continue;
@@ -978,7 +1155,7 @@ export function inspectMerge(facts: MergeFacts): MergeInspection {
       }
       const feature = featureOf(path, sides.ours) ?? featureOf(path, sides.theirs) ?? featureOf(path, sides.base);
       const topic = feature === null ? path : featureAddress(feature.id);
-      inspection.asks.push(askOf(facts, 'same-feature', topic, path, path));
+      inspection.asks.push(askOf(facts, 'same-feature', topic, path, path, { agentMergeable: true }));
       continue;
     }
     const knowledgeClass = classifyKnowledgePath(path, { root: 'workspace' });
@@ -991,6 +1168,13 @@ export function inspectMerge(facts: MergeFacts): MergeInspection {
       const content = complete ? null : expected;
       const lines = contentLines(complete ? current : content).length;
       inspection.resolutions.push({ kind: 'union', path, attribute: attribute && complete, content, lines });
+      continue;
+    }
+    // The repository's own scaffolding — written by Flow from the Workspace's
+    // name and the sync classes, rewritten on the next write anyway. Two
+    // Workspaces combined disagree on its title only: the team's copy stands.
+    if (GENERATED_REPO_FILES.has(path) && sides.theirs !== null && sides.ours !== null) {
+      inspection.resolutions.push({ kind: 'workspace-file', path, content: sides.theirs });
       continue;
     }
     if (path === 'workspace.json') {
@@ -1021,7 +1205,7 @@ export function inspectMerge(facts: MergeFacts): MergeInspection {
     topic: string,
     path: string,
     existingPath: string,
-    extra: { anchors?: string[]; agentMergeable?: boolean } = {}
+    extra: { anchors?: string[]; agentMergeable?: boolean; suggested?: 'both' } = {}
   ): void => {
     const key = `${path}\0${existingPath}`;
     if (asked.has(key)) return;
@@ -1054,7 +1238,12 @@ export function inspectMerge(facts: MergeFacts): MergeInspection {
       const overlap = ourNew.filter((anchor) => theirNew.has(anchor));
       if (overlap.length > 0) {
         const project = FEATURE_PATH.exec(ourPath)?.[1] ?? '';
-        pushAsk('overlapping-anchors', `${project}: ${overlap.join(', ')}`, ourPath, theirPath, { anchors: overlap });
+        // Two different features (the ids differ here) on the same anchors: keeping both is the expected answer.
+        pushAsk('overlapping-anchors', `${project}: ${overlap.join(', ')}`, ourPath, theirPath, {
+          anchors: overlap,
+          agentMergeable: true,
+          suggested: 'both',
+        });
       }
     }
   }
@@ -1237,6 +1426,11 @@ export function applyResolutions(facts: MergeFacts, planned: readonly PlannedRes
         stage(git, repo, [resolution.path]);
         done.push({ kind: 'workspace-file', path: resolution.path });
         break;
+      case 'machine-file':
+        writeOrRemove(repo, resolution.path, null);
+        stage(git, repo, [resolution.path]);
+        done.push({ kind: 'machine-file', path: resolution.path });
+        break;
       case 'line-merge':
         done.push({ kind: 'line-merge', path: resolution.path });
         break;
@@ -1264,7 +1458,7 @@ export function applyResolutions(facts: MergeFacts, planned: readonly PlannedRes
 }
 
 /** What `take` puts at the item's path. */
-function decidedText(facts: MergeFacts, item: SyncAsk | SyncReview, decision: StoredDecision): string | null {
+export function decidedText(facts: MergeFacts, item: SyncAsk | SyncReview, decision: StoredDecision): string | null {
   switch (decision.take) {
     case 'ours':
       return textAt(facts.git, facts.repo, facts.ours, item.path);
@@ -1359,6 +1553,8 @@ function describeResolution(resolution: MergeResolution): string {
     }
     case 'workspace-file':
       return 'The Workspace description changed on both sides in different fields or projects — both changes kept.';
+    case 'machine-file':
+      return 'A file the operating system writes on each machine (not knowledge) — removed from the Workspace and ignored from now on.';
     case 'line-merge':
       return 'Edited on both sides in different places — git merged the two without a conflict.';
     case 'feature-rules':
@@ -1405,6 +1601,11 @@ export function writeMergeLog(
   ];
   resolutions.forEach((resolution, index) => {
     parts.push(`## ${index + 1}. ${resolution.kind} — ${resolution.path}`, '', describeResolution(resolution), '');
+    // A decision's sides are never copied into the log: the log is committed with the
+    // merge, so this machine's text for an item still under review (or held aside, or
+    // later held back) would reach the team through it before anyone agreed. The
+    // decided file itself is what gets shared, and only once it is agreed.
+    if (resolution.kind === 'decision') return;
     parts.push(sideBlock('This machine', textAt(git, repo, facts.ours, resolution.path), blobAt(git, repo, facts.ours, resolution.path)));
     parts.push(sideBlock('The Workspace', textAt(git, repo, facts.theirs, resolution.path), blobAt(git, repo, facts.theirs, resolution.path)));
   });

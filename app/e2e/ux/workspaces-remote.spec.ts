@@ -101,7 +101,7 @@ test('Default has no shared repository → Connect → an existing repository �
   await expect(dialog).toHaveCount(0)
 
   // ── The card now shows the address, an enabled Sync now and when it last synced ──
-  await expect(card.locator('.fl-wss-remote')).toHaveText(sandbox.remoteUrl, { timeout: 30_000 })
+  await expect(card.locator('[data-part="shared-repository"] .fl-wss-remote')).toHaveText(sandbox.remoteUrl, { timeout: 30_000 })
   const syncNow = card.locator('[data-part="sync-now"]')
   await expect(syncNow).toBeEnabled()
   await expect(card.locator('[data-part="sync-status"]')).toHaveText(/^(Synced|Up to date)/, { timeout: 30_000 })

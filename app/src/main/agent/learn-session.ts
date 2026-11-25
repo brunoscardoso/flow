@@ -1174,7 +1174,38 @@ export type CliRunner = (
  * capturing stdout (unlike provisioner.runBundledCli, which ignores it — we
  * need the `observed: note <fingerprint>` line). Never rejects.
  */
+let cliRunsInFlight = 0
+/** A run slower than this, or started with this many already running, is logged. */
+const SLOW_CLI_MS = 3000
+const BUSY_CLI_RUNS = 4
+
+/**
+ * Logs what a slow or crowded run was (verb and the next word only — never a
+ * message or a path), how long it took and how many ran beside it (user report
+ * 2026-11-24: a join froze a teammate's Mac with nothing in the log to say why).
+ */
 export async function runBundledCliCapturing(
+  bundledCli: BundledCli,
+  cwd: string,
+  args: readonly string[],
+  options: { timeoutMs?: number; env?: Record<string, string> } = {},
+): Promise<CliRunResult> {
+  cliRunsInFlight += 1
+  const beside = cliRunsInFlight - 1
+  const started = Date.now()
+  const verb = args.slice(0, 2).filter((arg) => !arg.startsWith('-')).join(' ')
+  if (beside >= BUSY_CLI_RUNS) console.log('[CLI] run started with others still running', { verb, running: beside })
+  try {
+    const result = await runBundledCliCapturingOnce(bundledCli, cwd, args, options)
+    const ms = Date.now() - started
+    if (ms >= SLOW_CLI_MS) console.log('[CLI] slow run', { verb, ms, ok: result.ok, runningBeside: beside })
+    return result
+  } finally {
+    cliRunsInFlight -= 1
+  }
+}
+
+async function runBundledCliCapturingOnce(
   bundledCli: BundledCli,
   cwd: string,
   args: readonly string[],

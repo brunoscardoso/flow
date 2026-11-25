@@ -42,7 +42,7 @@ test('every context mark draws its glyph on the same pixel', async ({ window }) 
   const root = await seedCommittedRepo(window, 'orbit-app-')
   const other1 = await seedProject(window, 'orbit-core-')
   const other2 = await seedProject(window, 'storefront-mobile-')
-  const other3 = await seedProject(window, 'argo-apps-')
+  const other3 = await seedProject(window, 'keel-apps-')
   await activateProject(window, root)
   await settleWorktree(window, root)
 

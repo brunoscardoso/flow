@@ -110,7 +110,7 @@ test('create a Workspace from the switcher, add projects, manage it in Settings,
   const card = section.locator('.fl-wss-card[data-workspace="acme"]')
   const defaultCard = section.locator('.fl-wss-card[data-workspace="default"]')
   await expect(card.locator('.fl-wss-name')).toHaveText('Acme')
-  await expect(card.locator('.fl-wss-remote')).toHaveText(sandbox.remoteUrl)
+  await expect(card.locator('[data-part="shared-repository"] .fl-wss-remote')).toHaveText(sandbox.remoteUrl)
   // The Workspace cards say where things live; the Flow folder block is gone
   // (the cards above are the positive — the section did render).
   await expect(section.locator('[data-part="flow-folder"]')).toHaveCount(0)
@@ -129,7 +129,30 @@ test('create a Workspace from the switcher, add projects, manage it in Settings,
   await expect(card.locator('.fl-wss-project')).toHaveCount(2, { timeout: 90_000 })
   await expect(card.locator('.fl-wss-project-name .fl-wss-value')).toHaveText(['backend', 'frontend'])
   expect(lstatSync(join(frontend, 'flow')).isSymbolicLink()).toBe(true)
-  await expect(card.locator('.fl-wss-project button', { hasText: 'Project settings' })).toHaveCount(2)
+  // Every row: name and where it is · Settings · ⋯ — the same columns on every row.
+  await expect(card.locator('.fl-wss-project [data-part="project-settings"]')).toHaveCount(2)
+  await expect(card.locator('.fl-wss-project [data-part="project-settings"]').first()).toHaveAccessibleName('Project settings for backend')
+  const columns = await card.locator('.fl-wss-project').evaluateAll((rows) =>
+    rows.map((row) => {
+      const settings = row.querySelector('[data-part="project-settings"]')!.getBoundingClientRect()
+      const more = row.querySelector('[data-part="project-menu"]')!.getBoundingClientRect()
+      return [Math.round(settings.right), Math.round(more.right)]
+    }),
+  )
+  expect(new Set(columns.map((pair) => pair.join(','))).size).toBe(1)
+  // Move and Remove live in the row's ⋯ menu; a project's only copy, which its
+  // checkout uses, can't be removed — only moved — and the menu says why.
+  await expect(card.locator('[data-part="remove-project"]:visible')).toHaveCount(0)
+  await card.locator('.fl-wss-project').first().locator('[data-part="project-menu"]').click()
+  const menu = card.locator('.fl-wss-menu:visible')
+  await expect(menu.locator('[data-part="move-project"]')).toHaveText('Move to another Workspace…')
+  const remove = menu.locator('[data-part="remove-project"]')
+  await expect(remove).toBeDisabled()
+  await expect(remove).toContainText('Remove from Acme…')
+  await expect(remove).toContainText('This is the only copy here, and the project uses it. Move it instead.')
+  await window.screenshot({ path: join(SCREENS, 'workspaces-settings-row-menu.png') })
+  await window.keyboard.press('Escape')
+  await expect(card.locator('.fl-wss-menu:visible')).toHaveCount(0)
   await window.screenshot({ path: join(SCREENS, 'workspaces-settings-section.png') })
 
   // ── Sync now really syncs — to the local bare repository, never the network ──

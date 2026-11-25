@@ -61,6 +61,20 @@ export const SYNC_LABEL = 'Sync'
 export const SYNC_NOW_LABEL = 'Sync now'
 export const SYNCING_LABEL = 'Syncing…'
 export const REVIEW_CHANGES_LABEL = 'Review the changes'
+/** `review`: an agent's merge is committed here and waits for a person before anything is shared. */
+export const REVIEW_WAITING_LINE = 'Merged here. Waiting for your review before it is shared with the team.'
+/** After a partial share: what is left waits for a person while the team keeps its version. */
+export const REVIEW_LEFTOVER_LINE = 'Some changes are waiting for your decision. The team keeps its version until then.'
+
+/** Whether a review still holds something no person has settled (the card shows while it does). */
+export function reviewWaits(review: WorkspaceSyncStatus['review']): boolean {
+  if (review === undefined) return false
+  return (
+    review.groups.some((group) => group.items.some((item) => item.state !== 'agreed')) ||
+    review.needsYou.some((entry) => entry.state !== 'agreed') ||
+    review.held.some((held) => held.state !== 'agreed')
+  )
+}
 export const NO_ACCESS_LINE = 'The shared repository did not accept this computer’s git sign-in. Sync waits until it does.'
 
 export const PROJECTS_LABEL = 'Projects'
@@ -78,6 +92,8 @@ export const MOVE_HERE_CHOOSE = 'Choose a project from another Workspace'
 export const NO_MOVE_HERE_CANDIDATES = 'Every project is already in this Workspace.'
 export const OPEN_PROJECT_HERE_LABEL = 'Open a project here…'
 export const MOVE_TO_LABEL = 'Move to…'
+export const REMOVE_PROJECT_LABEL = 'Remove…'
+export const ONLY_COPY_LINE = 'This is the only copy here, and the project uses it. Move it instead.'
 export const RENAME_LABEL = 'Rename…'
 export const DELETE_LABEL = 'Delete…'
 export const DEFAULT_LINE = 'Default — every project without another Workspace lives here. It can’t be deleted.'
@@ -112,8 +128,12 @@ export interface SyncLineView {
   tone: SyncTone
   /** "Sync now" can be pressed (not while syncing). */
   canSyncNow: boolean
-  /** A person must choose before sync runs again. */
+  /** A person must choose before sync runs again (the old paused dialog — the fallback when the agent could not run). */
   paused: boolean
+  /** An agent's merge waits for a person's review in the review card. */
+  review?: boolean
+  /** The repository holds another Workspace: offer to join it instead. */
+  joinInstead?: boolean
 }
 
 function waitingCount(status: WorkspaceSyncStatus): number {
@@ -127,6 +147,11 @@ function needsYou(count: number): string {
 
 /** One Workspace's sync, in words; `null` while it has not been read. */
 export function syncLine(status: WorkspaceSyncStatus | null, now: number, syncing = false): SyncLineView {
+  const line = syncLineOf(status, now, syncing)
+  return status?.cause === 'unrelated-history' && status.state !== 'syncing' && !syncing ? { ...line, joinInstead: true } : line
+}
+
+function syncLineOf(status: WorkspaceSyncStatus | null, now: number, syncing: boolean): SyncLineView {
   if (syncing || status?.state === 'syncing') {
     return { text: SYNCING_LABEL, tone: 'muted', canSyncNow: false, paused: false }
   }
@@ -134,6 +159,7 @@ export function syncLine(status: WorkspaceSyncStatus | null, now: number, syncin
   const last = status.lastSyncedAt
   switch (status.state) {
     case 'synced':
+      if (reviewWaits(status.review)) return { text: REVIEW_LEFTOVER_LINE, tone: 'warning', canSyncNow: true, paused: false, review: true }
       return {
         text: last === null ? 'Up to date' : `Synced ${relativeTime(last, now)}`,
         tone: 'ok',
@@ -149,6 +175,8 @@ export function syncLine(status: WorkspaceSyncStatus | null, now: number, syncin
       }
     case 'paused':
       return { text: needsYou(waitingCount(status)), tone: 'warning', canSyncNow: true, paused: true }
+    case 'review':
+      return { text: REVIEW_WAITING_LINE, tone: 'warning', canSyncNow: true, paused: false, review: true }
     case 'offline':
       return {
         text: last === null ? 'Offline — will retry' : `Offline — will retry. Last synced ${relativeTime(last, now)}`,
@@ -194,6 +222,12 @@ export interface WorkspaceProjectRow {
   canMapSameProject: boolean
   /** It can move to another Workspace (there is another one). */
   canMove: boolean
+  /** The other Workspaces here that also hold this project, by name. */
+  alsoIn: string[]
+  /** Remove… is offered and pressable. */
+  canRemove: boolean
+  /** Why Remove… can't be pressed, or null. */
+  removeBlocked: string | null
 }
 
 export interface WorkspaceCardView {
@@ -209,6 +243,8 @@ export interface WorkspaceCardView {
   /** Why Flow moved it to that branch by itself, or null. */
   branchMoveText: string | null
   sync: SyncLineView
+  /** "Your team calls it Team" — only when this computer named it differently, and it is shared. */
+  teamNameText: string | null
   projects: WorkspaceProjectRow[]
   /** Projects of the other Workspaces that may move here. */
   moveHereCandidates: MoveCandidate[]
@@ -227,8 +263,14 @@ export function projectRows(
   workspace: WorkspaceListing,
   open: readonly OpenProject[],
   canMove = false,
+  all: readonly WorkspaceListing[] = [workspace],
 ): WorkspaceProjectRow[] {
   return workspace.projects.map((project) => {
+    const alsoIn = all
+      .filter((other) => other.slug !== workspace.slug && other.projects.some((candidate) => candidate.id === project.id))
+      .map((other) => other.name)
+    // The one copy of a project this computer works in can't be removed — only moved.
+    const removeBlocked = alsoIn.length === 0 && project.localPath !== null ? ONLY_COPY_LINE : null
     const localPath = project.localPath
     const match =
       localPath === null ? undefined : open.find((candidate) => samePath(candidate.rootPath, localPath))
@@ -243,6 +285,9 @@ export function projectRows(
       canOpenSettings: match !== undefined,
       canMapSameProject: localPath === null,
       canMove,
+      alsoIn,
+      canRemove: removeBlocked === null,
+      removeBlocked,
     }
   })
 }
@@ -294,7 +339,11 @@ export function workspaceCard(input: {
     branchText: workspace.branch ?? NO_BRANCH_YET,
     branchMoveText: branchMoveLine(workspace.branchMove ?? null),
     sync: syncLine(input.sync, input.now, input.syncing === true),
-    projects: projectRows(workspace, input.open, all.length > 1),
+    teamNameText:
+      workspace.remote !== null && workspace.sharedName !== undefined && workspace.sharedName !== workspace.name
+        ? teamNameLine(workspace.sharedName)
+        : null,
+    projects: projectRows(workspace, input.open, all.length > 1, all),
     moveHereCandidates: moveHereCandidates(all, workspace.slug),
   }
 }
@@ -302,7 +351,8 @@ export function workspaceCard(input: {
 // ── Rename, delete, move ────────────────────────────────────────────────────
 
 export const RENAME_TITLE = 'Rename the Workspace'
-export const RENAME_BODY = 'Only its name changes. Its projects, knowledge and shared repository stay as they are.'
+export const RENAME_BODY =
+  'Only what this computer calls it changes. Teammates keep their own name for it, and its projects, knowledge and shared repository stay as they are.'
 export const RENAME_CONFIRM = 'Rename'
 
 /** Trimmed input, or the sentence that keeps the dialog open. */
@@ -324,13 +374,26 @@ export interface DeleteConfirmView {
 }
 
 /** What the person reads before a Workspace is deleted: which projects move to Default, and what is kept. */
-export function deleteConfirmView(workspace: WorkspaceListing, defaultName: string): DeleteConfirmView {
-  const names = workspace.projects.map((project) => project.name)
-  const moving =
-    names.length === 0
-      ? 'It has no projects.'
-      : `${names.length === 1 ? 'Its project moves' : `Its ${names.length} projects move`} to ${defaultName}: ${names.join(', ')}.`
-  return { title: `Delete ${workspace.name}?`, lines: [moving, DELETE_KEEPS], confirm: DELETE_CONFIRM }
+export function deleteConfirmView(
+  workspace: WorkspaceListing,
+  defaultName: string,
+  /** The ids of the projects Default already has — those merge instead of moving. */
+  defaultHas: readonly string[] = [],
+): DeleteConfirmView {
+  const merging = workspace.projects.filter((project) => defaultHas.includes(project.id)).map((project) => project.name)
+  const moving = workspace.projects.filter((project) => !defaultHas.includes(project.id)).map((project) => project.name)
+  const lines: string[] = []
+  if (moving.length === 0 && merging.length === 0) lines.push('It has no projects.')
+  if (moving.length > 0) {
+    lines.push(`${moving.length === 1 ? 'Its project moves' : `Its ${moving.length} projects move`} to ${defaultName}: ${moving.join(', ')}.`)
+  }
+  if (merging.length > 0) {
+    lines.push(
+      `${defaultName} already has ${merging.join(', ')}. Anything only this Workspace's copy has goes into ${defaultName}'s copy, and nothing there is replaced.`,
+    )
+  }
+  lines.push(DELETE_KEEPS)
+  return { title: `Delete ${workspace.name}?`, lines, confirm: DELETE_CONFIRM }
 }
 
 export function deletedLine(name: string, defaultName: string): string {
@@ -542,6 +605,9 @@ export function joinOutcome(result: WorkspaceJoinResult): JoinOutcomeView {
     checked: false as const,
   }))
   const proposed = new Set(candidates.map((candidate) => candidate.projectId))
+  for (const workspace of result.disconnected ?? []) {
+    lines.push(`${workspace.name} pointed at the same repository, so it let go of it. Its knowledge stays on this computer.`)
+  }
   if (result.linked.length > 0) lines.push(`Linked on this computer: ${names(result.linked)}.`)
   else if (candidates.length === 0) lines.push('No project was added yet — none of its projects are open in Flow on this computer.')
   if (candidates.length > 0) lines.push(JOIN_CANDIDATES_LINE)
@@ -724,3 +790,91 @@ export const FIXED_STRINGS: readonly string[] = [
   ONBOARDING_UNAVAILABLE,
   ONBOARDING_LATER,
 ]
+
+// ── Remove a project from a Workspace ───────────────────────────────────────
+
+export const REMOVE_PROJECT_CONFIRM = 'Remove project'
+
+/** "Also in My Mac" — the tag beside a project that more than one Workspace holds. */
+export function alsoInTag(names: readonly string[]): string | null {
+  return names.length === 0 ? null : `Also in ${names.join(', ')}`
+}
+
+export interface RemoveProjectView {
+  title: string
+  lines: Array<{ text: string; warn: boolean }>
+  confirm: string
+}
+
+export function removeProjectView(input: {
+  projectName: string
+  workspaceName: string
+  /** Where the project stays, or null (no other Workspace holds it). */
+  keptIn: string | null
+  shared: boolean
+}): RemoveProjectView {
+  const { projectName, workspaceName, keptIn } = input
+  const lines: RemoveProjectView['lines'] = []
+  if (keptIn !== null) {
+    lines.push({
+      text: `${keptIn} also has ${projectName}, so it stays there. Anything only this copy has, like a discovery or a plan, goes into ${keptIn}'s copy. Nothing in ${keptIn}'s copy is replaced.`,
+      warn: false,
+    })
+  } else {
+    lines.push({ text: `No other Workspace here has ${projectName}.`, warn: false })
+  }
+  lines.push({ text: 'This copy is kept on this computer as a backup.', warn: false })
+  if (input.shared) {
+    lines.push({
+      text: `${workspaceName} is shared with your team. Removing the project removes it for everyone who syncs ${workspaceName}.`,
+      warn: true,
+    })
+  }
+  return { title: `Remove ${projectName} from ${workspaceName}?`, lines, confirm: REMOVE_PROJECT_CONFIRM }
+}
+
+export function removedProjectLine(projectName: string, workspaceName: string, keptIn: string | null): string {
+  return keptIn === null
+    ? `${projectName} was removed from ${workspaceName}.`
+    : `${projectName} was removed from ${workspaceName}. It is in ${keptIn}.`
+}
+
+/** The button that turns "this repository holds another Workspace" into joining it. */
+export const JOIN_INSTEAD_LABEL = 'Join it instead'
+
+// ── The card's layout (user, 2026-11-24: "Workspaces settings, redesigned") ──
+
+export const DEFAULT_BADGE = 'Default'
+/** Under a Default card's name — the badge already says "Default". */
+export const DEFAULT_CARD_LINE = 'Every project without another Workspace lives here. It can’t be deleted.'
+export const SHOW_WORKSPACE_LABEL = 'Show'
+export const HIDE_WORKSPACE_LABEL = 'Hide'
+export const ON_THIS_COMPUTER = 'On this computer'
+/** The row's gear button; its accessible name says which project. */
+export const SETTINGS_SHORT_LABEL = 'Settings'
+export const MOVE_TO_WORKSPACE_LABEL = 'Move to another Workspace…'
+
+export function removeFromLabel(workspaceName: string): string {
+  return `Remove from ${workspaceName}…`
+}
+
+/** A folded card's one line: "Shared with your team · 3 projects". */
+export function foldedSummary(shared: boolean, projects: number): string {
+  const where = shared ? 'Shared with your team' : 'Kept on this computer'
+  return `${where} · ${projects === 1 ? '1 project' : `${projects} projects`}`
+}
+
+/** Beside a shared Workspace this computer renamed: what everyone else sees by default. */
+export function teamNameLine(sharedName: string): string {
+  return `Your team calls it ${sharedName}`
+}
+
+/** The gear's accessible name: which project's settings it opens. */
+export function projectSettingsFor(projectName: string): string {
+  return `${PROJECT_SETTINGS_LABEL} for ${projectName}`
+}
+
+/** The ⋯ button's accessible name. */
+export function moreFor(projectName: string): string {
+  return `More for ${projectName}`
+}

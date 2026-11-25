@@ -234,6 +234,60 @@ export function defaultNewThreadProject(input: {
   return candidates[0] ?? null
 }
 
+// ── Where each Workspace was left ────────────────────────────────────────────
+
+/**
+ * The conversation last open in each Workspace (per machine), so switching back
+ * brings it back — and with it the tabs, terminals and pages that follow it.
+ */
+export const LAST_THREAD_STORAGE_KEY = 'flow.workspaces.lastThread'
+
+export interface LastThread {
+  root: string
+  threadId: string
+}
+
+/** Parse the remembered map; anything malformed reads as "nothing remembered". */
+export function parseLastThreads(raw: string | null): Record<string, LastThread> {
+  if (raw === null || raw === '') return {}
+  try {
+    const value: unknown = JSON.parse(raw)
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+    const out: Record<string, LastThread> = {}
+    for (const [slug, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof entry !== 'object' || entry === null) continue
+      const { root, threadId } = entry as Record<string, unknown>
+      if (typeof root === 'string' && root !== '' && typeof threadId === 'string' && threadId !== '') out[slug] = { root, threadId }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** A new copy of the map with `slug → { root, threadId }` recorded (never mutates the input). */
+export function rememberLastThread(
+  map: Readonly<Record<string, LastThread>>,
+  slug: string,
+  entry: LastThread,
+): Record<string, LastThread> {
+  return { ...map, [slug]: entry }
+}
+
+/**
+ * What switching to a Workspace opens: its project (see `defaultNewThreadProject`)
+ * and, when the conversation last open there was in that project, that
+ * conversation. A thread remembered for another project is not reopened.
+ */
+export function workspaceLanding(input: {
+  target: string | null
+  remembered: LastThread | null
+}): { root: string; threadId: string | null } | null {
+  if (input.target === null) return null
+  const threadId = input.remembered !== null && input.remembered.root === input.target ? input.remembered.threadId : null
+  return { root: input.target, threadId }
+}
+
 // ── Sync status (Workspace sync, when the app offers it) ─────────────────────
 
 /**

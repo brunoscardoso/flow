@@ -117,6 +117,8 @@ describe('classifyKnowledgePath', () => {
     expect(classifyKnowledgePath('projects/backend/brain/index.md', { root: 'workspace' })).toBe('generated');
     expect(classifyKnowledgePath('workspace.json', { root: 'workspace' })).toBe('authored');
     expect(classifyKnowledgePath('links.jsonl', { root: 'workspace' })).toBe('append-only');
+    expect(classifyKnowledgePath('merge-decisions.jsonl', { root: 'workspace' })).toBe('append-only');
+    expect(classifyKnowledgePathDetailed('merge-decisions.jsonl', { root: 'workspace' }).row?.pattern).toBe('/merge-decisions.jsonl');
     expect(classifyKnowledgePath('merges/2026-10-06-abc.md', { root: 'workspace' })).toBe('authored');
     // A personal file dropped at the root by hand is still recognised.
     expect(classifyKnowledgePath('.scratchpad.md', { root: 'workspace' })).toBe('personal');
@@ -132,10 +134,10 @@ describe('classifyKnowledgePath', () => {
     expect(classifyKnowledgePath('qa.jsonl', { root: 'workspace' })).toBe('personal');
     expect(classifyKnowledgePathDetailed('qa.jsonl', { root: 'workspace' }).row?.pattern).toBe('/qa.jsonl');
     expect(classifyKnowledgePath('brain/.structure/qa.jsonl')).toBe('personal');
-    expect(classifyKnowledgePath('projects/jupiter-app/brain/.structure/qa.jsonl', { root: 'workspace' })).toBe('personal');
+    expect(classifyKnowledgePath('projects/lumen-app/brain/.structure/qa.jsonl', { root: 'workspace' })).toBe('personal');
     // …and the pre-push guard names one that was staged.
-    expect(findPersonalFiles(['projects/jupiter-app/brain/.structure/qa.jsonl']).map((hit) => hit.path)).toEqual([
-      'projects/jupiter-app/brain/.structure/qa.jsonl',
+    expect(findPersonalFiles(['projects/lumen-app/brain/.structure/qa.jsonl']).map((hit) => hit.path)).toEqual([
+      'projects/lumen-app/brain/.structure/qa.jsonl',
     ]);
   });
 
@@ -163,7 +165,7 @@ describe('classifyKnowledgePath', () => {
       'qa-checklist-ticket-4471.md',
       'test-plan-migration.md',
       'schema-guard.patch',
-      '.DS_Store',
+      // `.DS_Store` is not here any more: it has its own rule (generated, any folder) — see 'operating-system files'.
     ]) {
       expect(classifyKnowledgePath(stray)).toBe('personal');
       expect(classifyKnowledgePath(`projects/orders-api/${stray}`, { root: 'workspace' })).toBe('personal');
@@ -221,6 +223,33 @@ describe('classifyKnowledgePath', () => {
     expect(matchesKnowledgePattern('.evidence/', '.evidence')).toBe(false);
     expect(matchesKnowledgePattern('brain/.structure/*', 'brain/.structure/feature-views/a.json')).toBe(true);
     expect(matchesKnowledgePattern('brain/.structure/*.jsonl', 'brain/.structure/views/a.jsonl')).toBe(false);
+  });
+});
+
+describe('operating-system files', () => {
+  it('are generated wherever they sit: never shared, untracked when already held', () => {
+    // A real knowledge file beside them is still shared (the positive)…
+    expect(classifyKnowledgePath('projects/backend/plans/plan_x_v1.md', { root: 'workspace' })).toBe('authored');
+    // …and the files the OS writes are not, in a project, a canvas folder, or the root, in any case.
+    for (const path of [
+      'projects/backend/plans/.DS_Store',
+      'projects/backend/drafts/checkout/.DS_Store',
+      'projects/backend/.ds_store',
+      '.DS_Store',
+      'merges/.DS_Store',
+      'projects/web/brain/Thumbs.db',
+      'projects/web/desktop.ini',
+    ]) {
+      expect(classifyKnowledgePath(path, { root: 'workspace' })).toBe('generated');
+      expect(classes.isMachineFile(path)).toBe(true);
+    }
+    expect(classes.isMachineFile('projects/backend/plans/DS_Store.md')).toBe(false);
+  });
+
+  it('are ignored by the Workspace repository at any depth', () => {
+    const ignore = workspaceGitignore();
+    expect(ignore.split('\n')).toContain('.DS_Store');
+    expect(ignore.split('\n')).toContain('Thumbs.db');
   });
 });
 

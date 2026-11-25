@@ -5,9 +5,7 @@
  * asked, not just the answer it got.
  */
 
-import { createHash } from 'node:crypto'
-
-import type { WorkspaceIntentMergeSet, WorkspaceSyncStatus } from '../../shared/workspaces-contract'
+import type { WorkspaceSyncStatus } from '../../shared/workspaces-contract'
 import { createWorkspacePauseNotifier } from './pause-notice'
 import { OPEN_SYNC_COOLDOWN_MS, RETRY_BASE_MS, type EngineTimers } from './sync-timing'
 import {
@@ -20,6 +18,7 @@ import {
   TURN_SYNC_DELAY_MS,
   WORKSPACE_SYNC_SENTENCES,
   createWorkspaceSyncEngine,
+  reviewOf,
   turnsMessage,
   type WorkspaceSyncCliRun,
 } from './workspace-sync-engine'
@@ -152,8 +151,12 @@ function harness(
   options: {
     rows?: Map<string, number>
     nameOf?: (slug: string) => Promise<string | null>
-    /** The agent; default answers nothing (a pause stays a pause). */
+    /** The capable agent; default answers nothing. */
     mergeIntent?: (input: { title: string; ours: string; theirs: string; base: string | null }) => Promise<string | null>
+    /** The fast agent that sorts; default answers nothing (the agent is unavailable: a pause stays a pause). */
+    decideFast?: (input: { prompt: string }) => Promise<string | null>
+    /** The shared record's `merge-decision list` answer; default an empty record. */
+    reasons?: WorkspaceSyncCliRun
   } = {},
 ) {
   const timers = new FakeTimers()
@@ -169,8 +172,10 @@ function harness(
   /** Every `workspace promote` the engine started, and the answers it gets (no change by default). */
   const promotions: Array<{ key: string; timeoutMs: number }> = []
   const promoteAnswers: Array<WorkspaceSyncCliRun | (() => Promise<WorkspaceSyncCliRun>)> = []
-  const merges: WorkspaceIntentMergeSet[] = []
   const agentCalls: string[] = []
+  const fastPrompts: string[] = []
+  /** `workspace merge-decision list` runs — kept apart from `calls`, which are the syncs. */
+  const reasonReads: string[] = []
   const engine = createWorkspaceSyncEngine({
     runPromotionCli: async (_cwd, args, runOptions) => {
       promotions.push({ key: args.join(' '), timeoutMs: runOptions.timeoutMs })
@@ -181,10 +186,17 @@ function harness(
       agentCalls.push(input.title)
       return options.mergeIntent === undefined ? null : options.mergeIntent(input)
     },
-    onIntentMerged: (_slug, _name, set) => void merges.push(set),
+    decideFast: async (input) => {
+      fastPrompts.push(input.prompt)
+      return options.decideFast === undefined ? null : options.decideFast(input)
+    },
     nameOf: options.nameOf ?? (async () => null),
     runCli: async (cwd, args, runOptions) => {
       const key = keyOf(args)
+      if (args[1] === 'merge-decision') {
+        reasonReads.push(key)
+        return options.reasons ?? { ok: true, stdout: `${JSON.stringify({ action: 'merge-decision', op: 'list', decisions: [], unreadable: 0 })}\n` }
+      }
       const message = args.find((arg) => arg.startsWith('--message='))?.slice('--message='.length) ?? null
       calls.push({ key, message, cwd, timeoutMs: runOptions.timeoutMs })
       const queue = table.get(key)
@@ -230,8 +242,9 @@ function harness(
     answer,
     promotions,
     promoteAnswers,
-    merges,
     agentCalls,
+    fastPrompts,
+    reasonReads,
     last: () => statuses[statuses.length - 1],
   }
 }
@@ -793,106 +806,572 @@ describe('workspace sync engine — promotion', () => {
   })
 })
 
-// ── A pause made only of intent documents (FR-12, change note 8) ──
+// ── The agent decides a pause, applied in ONE batch (Phase 4, change note 7) ──
 
-const MERGEABLE = { ...ASK, agentMergeable: true, base: '# Queue\n\nNone.\n', theirAuthor: 'Bea' }
-const MERGED_TEXT = '# Queue\n\nSQS for jobs, Kafka for events.\n'
+const NOTE_REVIEW = { ...REVIEW, options: ['ours', 'theirs', 'file'] }
+const BATCH_ARGV = (hold: string): string =>
+  `workspace sync --workspace ${SLUG} --decisions=/tmp/decision-0.md${hold === '' ? '' : ` --hold=${hold}`} --no-push --json`
 
-function sha(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex')
+/** The labels a fast-model batch gave its items, in order. */
+function labelsIn(prompt: string): string[] {
+  return [...prompt.matchAll(/<item label="([^"]+)"/g)].map((match) => match[1])
 }
 
-describe('workspace sync engine — intent merges', () => {
-  it('an agent merges the pause away: resolved through the CLI with its text, no pause notice, ONE merge set', async () => {
-    const h = harness({ nameOf: async () => 'Acme', mergeIntent: async () => MERGED_TEXT })
-    h.answer(SYNC_ARGV, result('ask', { asks: [MERGEABLE] }))
-    h.answer(
-      `workspace sync --workspace ${SLUG} --resolve=${DECISION} --id=ask-1 --take=file:/tmp/decision-0.md --json`,
-      result('synced', { decided: ['ask-1'], pushed: true }),
-    )
-    await h.engine.open(SLUG)
-    // Positive first: the agent was asked, and the CLI resolved with its text.
-    expect(h.agentCalls).toEqual(['Queue'])
-    expect(h.temps).toEqual([MERGED_TEXT])
-    expect(h.disposed).toEqual(['/tmp/decision-0.md'])
-    expect(h.last()).toMatchObject({ state: 'synced', asks: [] })
-    expect(h.statuses.some((status) => status.state === 'paused')).toBe(false)
-    expect(h.notices).toEqual([])
-    expect(h.merges).toHaveLength(1)
-    expect(h.merges[0]?.documents).toEqual([
-      expect.objectContaining({ id: 'ask-1', kind: 'decision', title: 'Queue', theirName: 'Bea', ours: ASK.incoming, theirs: ASK.existing, merged: MERGED_TEXT, current: 'merged' }),
-    ])
-  })
-
-  it('an agent that cannot merge leaves the pause — and the collision card — exactly as before', async () => {
-    const h = harness({ nameOf: async () => 'Acme', mergeIntent: async () => 'CANNOT_MERGE' })
-    h.answer(SYNC_ARGV, result('ask', { asks: [MERGEABLE] }))
-    await h.engine.open(SLUG)
-    expect(h.agentCalls).toEqual(['Queue'])
-    expect(h.last()).toMatchObject({ state: 'paused', asks: [expect.objectContaining({ id: 'ask-1' })] })
-    expect(h.notices).toEqual(['Two people changed the same decision in Acme. Flow needs you to choose which one to keep.'])
-    expect(h.calls.map((call) => call.key)).toEqual([SYNC_ARGV])
-    expect(h.merges).toEqual([])
-  })
-
-  it('a pause with anything that is not intent never reaches the agent', async () => {
-    const h = harness({ mergeIntent: async () => MERGED_TEXT })
-    h.answer(SYNC_ARGV, result('ask', { asks: [MERGEABLE, { ...ASK, id: 'ask-2', kind: 'same-feature', path: 'projects/api/brain/features/q.md', existingPath: 'projects/api/brain/features/q.md' }] }))
-    await h.engine.open(SLUG)
-    // Positive first: the pause is shown.
-    expect(h.last()).toMatchObject({ state: 'paused' })
-    expect(h.agentCalls).toEqual([])
-    expect(h.temps).toEqual([])
-  })
-
-  it('Undo puts back this computer\'s version: a put-back over exactly the merged text, then the set says so', async () => {
-    const h = harness({ mergeIntent: async () => MERGED_TEXT })
-    h.answer(SYNC_ARGV, result('ask', { asks: [MERGEABLE] }))
-    h.answer(
-      `workspace sync --workspace ${SLUG} --resolve=${DECISION} --id=ask-1 --take=file:/tmp/decision-0.md --json`,
-      result('synced', { decided: ['ask-1'] }),
-    )
-    await h.engine.open(SLUG)
-    const set = h.merges[0] as WorkspaceIntentMergeSet
-    h.answer(
-      `workspace sync --workspace ${SLUG} --put-back=${DECISION} --expect=${sha(MERGED_TEXT)} --take=file:/tmp/decision-1.md --json`,
-      result('synced', { putBack: { path: DECISION } }),
-    )
-    const undone = await h.engine.keepIntent({ slug: SLUG, mergeId: set.mergeId, keep: 'ours' })
-    expect(undone).toMatchObject({ ok: true, detail: 'Flow put back your version of "Queue".' })
-    // The text put back is this computer's own version.
-    expect(h.temps[1]).toBe(ASK.incoming)
-    expect(h.calls[h.calls.length - 1]?.message).toBe('Flow: a merged document put back')
-    expect(h.engine.intentMerges({ slug: SLUG, mergeId: set.mergeId })?.documents[0]?.current).toBe('ours')
-    // Keep merged from See both now puts the merge back over YOUR text.
-    h.answer(
-      `workspace sync --workspace ${SLUG} --put-back=${DECISION} --expect=${sha(ASK.incoming)} --take=file:/tmp/decision-2.md --json`,
-      result('synced'),
-    )
-    expect(await h.engine.keepIntent({ slug: SLUG, mergeId: set.mergeId, documentId: 'ask-1', keep: 'merged' })).toMatchObject({ ok: true })
-    expect(h.temps[2]).toBe(MERGED_TEXT)
-  })
-
-  it('a document a teammate changed since is never overwritten: stale, and the status is read again', async () => {
-    const h = harness({ mergeIntent: async () => MERGED_TEXT })
-    h.answer(SYNC_ARGV, result('ask', { asks: [MERGEABLE] }))
-    h.answer(
-      `workspace sync --workspace ${SLUG} --resolve=${DECISION} --id=ask-1 --take=file:/tmp/decision-0.md --json`,
-      result('synced'),
-    )
-    await h.engine.open(SLUG)
-    const set = h.merges[0] as WorkspaceIntentMergeSet
-    h.answer(
-      `workspace sync --workspace ${SLUG} --put-back=${DECISION} --expect=${sha(MERGED_TEXT)} --take=file:/tmp/decision-1.md --json`,
-      refused('stale-decision'),
-    )
-    h.answer(SYNC_ARGV, result('synced'))
-    expect(await h.engine.keepIntent({ slug: SLUG, mergeId: set.mergeId, keep: 'ours' })).toMatchObject({
-      ok: false,
-      reason: 'stale',
-      detail: 'Someone changed "Queue" since Flow merged it, so Flow left it as it is.',
+describe('workspace sync engine — the agent decides a pause', () => {
+  it('ONE batch call with every decision, items left for a person held aside, nothing pushed — and no per-item resolve', async () => {
+    const h = harness({
+      nameOf: async () => 'Acme',
+      decideFast: async ({ prompt }) => labelsIn(prompt).map((label) => `${label} theirs the teammate's holds it`).join('\n'),
     })
-    expect(h.last()).toMatchObject({ state: 'synced' })
-    expect(await h.engine.keepIntent({ slug: SLUG, mergeId: 'nope', keep: 'ours' })).toMatchObject({ ok: false, reason: 'not-found' })
+    // A note the agent may decide, and a decision document it may only suggest on.
+    h.answer(SYNC_ARGV, result('review', { asks: [ASK], reviews: [NOTE_REVIEW] }))
+    h.answer(
+      BATCH_ARGV('ask-1'),
+      result('merged-local', {
+        awaitingReview: true,
+        mergedItems: [
+          { id: 'review-1', path: REVIEW.path, kind: 'conflict', take: 'theirs' },
+          { id: 'ask-1', path: DECISION, kind: 'decision', take: 'theirs', held: true },
+        ],
+        heldAside: [{ id: 'ask-1', path: DECISION, kind: 'decision', heldAt: '2026-11-25T00:00:00.000Z' }],
+      }),
+    )
+    await h.engine.open(SLUG)
+    // Positive first: the agent was asked, and the CLI got ONE batch.
+    expect(h.fastPrompts).toHaveLength(1)
+    expect(h.calls.map((call) => call.key)).toEqual([SYNC_ARGV, BATCH_ARGV('ask-1')])
+    expect(h.calls.some((call) => call.key.includes('--resolve'))).toBe(false)
+    // The batch decides only what the agent may decide; the held item carries no decision of its own.
+    expect(JSON.parse(h.temps[0] as string)).toEqual({ decisions: [{ id: 'review-1', take: 'theirs' }] })
+    expect(h.disposed).toEqual(['/tmp/decision-0.md'])
+    // Merged here, waiting for review: nothing retries on its own, so nothing publishes it.
+    expect(h.last()).toMatchObject({ state: 'review', detail: WORKSPACE_SYNC_SENTENCES.mergedForReview('Acme', 2), asks: [], reviews: [] })
+    expect(h.timers.syncTimers()).toBe(0)
+    // A turn during the review is only committed here.
+    h.answer(COMMIT_ONLY_ARGV, result('committed', { heldAside: [{ id: 'ask-1', path: DECISION, kind: 'decision', heldAt: '2026-11-25T00:00:00.000Z' }] }))
+    h.engine.commitAfterTurn(SLUG, 'turn in api')
+    await h.timers.advance(TURN_SYNC_DELAY_MS * 2)
+    expect(h.calls.map((call) => call.key)).toEqual([SYNC_ARGV, BATCH_ARGV('ask-1'), COMMIT_ONLY_ARGV])
+    expect(h.last()).toMatchObject({ state: 'review' })
+  })
+
+  it('a combine of two Workspaces arrives as its own group, first, waiting for review — and is never recorded as a file decision', async () => {
+    const h = harness({ nameOf: async () => 'Acme' })
+    h.answer(
+      SYNC_ARGV,
+      result('merged-local', {
+        awaitingReview: true,
+        mergedItems: [
+          { id: 'review-1', path: REVIEW.path, kind: 'conflict', take: 'theirs' },
+          { id: 'combine:abc', path: '', kind: 'combine', take: 'theirs' },
+        ],
+        heldAside: [],
+      }),
+    )
+    await h.engine.open(SLUG)
+    const shown = h.last()
+    expect(shown).toMatchObject({ state: 'review' })
+    expect(shown.review?.groups.map((group) => group.key)).toEqual(['combined', 'took-theirs'])
+    expect(shown.review?.groups[0]?.items.map((item) => [item.id, item.kind])).toEqual([['combine:abc', 'combine']])
+    expect(h.timers.syncTimers()).toBe(0)
+  })
+
+  it('a merged text goes in the batch as content', async () => {
+    const plan = { ...NOTE_REVIEW, id: 'review-plan', path: 'projects/api/plans/plan_q_v1.md' }
+    const h = harness({
+      decideFast: async ({ prompt }) => `${labelsIn(prompt)[0]} merge both changed it`,
+      mergeIntent: async () => MERGED_TEXT,
+    })
+    h.answer(SYNC_ARGV, result('review', { reviews: [plan] }))
+    h.answer(BATCH_ARGV(''), result('merged-local', { mergedItems: [{ id: 'review-plan', path: plan.path, kind: 'conflict', take: 'file' }], heldAside: [] }))
+    await h.engine.open(SLUG)
+    expect(JSON.parse(h.temps[0] as string)).toEqual({ decisions: [{ id: 'review-plan', take: 'file', content: MERGED_TEXT }] })
+    expect(h.calls.map((call) => call.key)).toEqual([SYNC_ARGV, BATCH_ARGV('')])
+  })
+
+  it('the agent unavailable → the pause, and its per-item choices, exactly as before — no batch', async () => {
+    const h = harness({ nameOf: async () => 'Acme' })
+    h.answer(SYNC_ARGV, result('review', { reviews: [NOTE_REVIEW] }))
+    await h.engine.open(SLUG)
+    expect(h.fastPrompts).toHaveLength(1)
+    expect(h.calls.map((call) => call.key)).toEqual([SYNC_ARGV])
+    expect(h.last()).toMatchObject({ state: 'paused', reviews: [expect.objectContaining({ id: 'review-1' })] })
+    expect(h.notices).toEqual([WORKSPACE_SYNC_SENTENCES.review('Acme')])
+  })
+
+  it('a batch the CLI refuses (a side changed meanwhile) leaves the pause as the CLI first put it', async () => {
+    const h = harness({ decideFast: async ({ prompt }) => `${labelsIn(prompt)[0]} theirs ok` })
+    h.answer(SYNC_ARGV, result('review', { reviews: [NOTE_REVIEW] }))
+    h.answer(BATCH_ARGV(''), refused('stale-decision', { stale: ['review-1'] }))
+    await h.engine.open(SLUG)
+    expect(h.calls.map((call) => call.key)).toEqual([SYNC_ARGV, BATCH_ARGV('')])
+    expect(h.last()).toMatchObject({ state: 'paused', reviews: [expect.objectContaining({ id: 'review-1' })] })
+  })
+
+  it('reads the recorded reasons ONCE and hands those of the item\'s kind and project to the agent', async () => {
+    const decision = (kind: string, project: string, reason: string, ts: string) => ({
+      type: 'decision', id: reason, kind, project, path: 'p', take: 'theirs', summary: 'took theirs', reason, outcome: 'agreed', author: null, ts,
+    })
+    const h = harness({
+      decideFast: async () => null,
+      reasons: {
+        ok: true,
+        stdout: `${JSON.stringify({
+          action: 'merge-decision',
+          op: 'list',
+          decisions: [
+            decision('conflict', 'api', 'older reason', '2026-01-01'),
+            decision('conflict', 'api', 'newer reason', '2026-02-01'),
+            decision('conflict', 'web', 'other project', '2026-03-01'),
+            decision('add-add', 'api', 'other kind', '2026-03-01'),
+          ],
+        })}\n`,
+      },
+    })
+    h.answer(SYNC_ARGV, result('review', { reviews: [NOTE_REVIEW, { ...NOTE_REVIEW, id: 'review-2', path: 'projects/api/other.md' }] }))
+    await h.engine.open(SLUG)
+    expect(h.reasonReads).toEqual([`workspace merge-decision list --workspace ${SLUG} --json`])
+    const prompt = h.fastPrompts[0] as string
+    expect(prompt.indexOf('newer reason')).toBeLessThan(prompt.indexOf('older reason'))
+    expect(prompt).not.toContain('other project')
+    expect(prompt).not.toContain('other kind')
+  })
+
+  it('reviewOf groups what the CLI applied, lists what waits for a person, and what is held', () => {
+    const review = reviewOf(
+      Date.UTC(2026, 10, 25),
+      [ASK as never, NOTE_REVIEW as never, { ...NOTE_REVIEW, id: 'review-2' } as never],
+      {
+        decisions: [
+          { id: 'review-1', take: 'theirs', group: 'took-theirs', reason: 'r' },
+          { id: 'review-2', take: 'ours', group: 'identical', reason: 'same' },
+        ],
+        needsYou: [{ id: 'ask-1', reason: 'decision-document', suggestion: { verdict: 'theirs', reason: 's' } }],
+      },
+      {
+        mergedItems: [
+          { id: 'review-1', path: REVIEW.path, take: 'theirs', held: false },
+          { id: 'review-2', path: REVIEW.path, take: 'ours', held: false },
+          { id: 'ask-1', path: DECISION, take: 'theirs', held: true },
+        ],
+        heldAside: [{ id: 'ask-1', path: DECISION, kind: 'decision', heldAt: 'then' }],
+      },
+    )
+    expect(review).toEqual({
+      mergedAt: '2026-11-25T00:00:00.000Z',
+      groups: [
+        { key: 'took-theirs', count: 1, items: [{ id: 'review-1', path: REVIEW.path, kind: 'conflict', take: 'theirs', reason: 'r', state: 'pending' }] },
+        { key: 'identical', count: 1, items: [{ id: 'review-2', path: REVIEW.path, kind: 'conflict', take: 'ours', reason: 'same', state: 'pending' }] },
+      ],
+      needsYou: [
+        { id: 'ask-1', path: DECISION, kind: 'decision', reason: 'decision-document', suggestion: { verdict: 'theirs', reason: 's' }, state: 'needs-you' },
+      ],
+      held: [{ id: 'ask-1', path: DECISION, kind: 'decision', heldAt: 'then', state: 'needs-you' }],
+    })
+  })
+})
+
+const MERGED_TEXT = '# Queue\n\nSQS for jobs, Kafka for events.\n'
+
+// ── The review: nothing unagreed is shared (Phase 5) ──
+
+const HELD_ASK = { id: 'ask-1', path: DECISION, kind: 'decision', heldAt: '2026-11-25T00:00:00.000Z' }
+const NOTE_2 = { ...NOTE_REVIEW, id: 'review-2', path: 'projects/api/other.md' }
+const SHARE_ARGV = `workspace sync --workspace ${SLUG} --agreed --json`
+const HOLD_BACK_ARGV = (ids: string): string => `workspace sync --workspace ${SLUG} --commit-only --hold-back=${ids} --json`
+const SETTLE_ARGV = (id: string, take: string): string => `workspace sync --workspace ${SLUG} --commit-only --settle-held=${id} --take=${take} --json`
+
+/** A harness whose fast agent answers each call with the next verdict (the last one repeats). */
+function reviewHarness(verdicts: string[] = ['theirs']) {
+  let call = 0
+  const h = harness({
+    nameOf: async () => 'Acme',
+    decideFast: async ({ prompt }) => {
+      const verdict = verdicts[Math.min(call, verdicts.length - 1)]
+      call += 1
+      return labelsIn(prompt).map((label) => `${label} ${verdict} the agent's reason`).join('\n')
+    },
+  })
+  return h
+}
+
+/** Open a Workspace whose pause the agent settles: two notes taken from the Workspace, a decision left to the person. */
+async function inReview(h: ReturnType<typeof harness>): Promise<void> {
+  h.answer(SYNC_ARGV, result('review', { asks: [ASK], reviews: [NOTE_REVIEW, NOTE_2] }))
+  h.answer(
+    BATCH_ARGV('ask-1'),
+    result('merged-local', {
+      awaitingReview: true,
+      mergedItems: [
+        { id: 'review-1', path: NOTE_REVIEW.path, kind: 'conflict', take: 'theirs' },
+        { id: 'review-2', path: NOTE_2.path, kind: 'conflict', take: 'theirs' },
+        { id: 'ask-1', path: DECISION, kind: 'decision', take: 'theirs', held: true },
+      ],
+      heldAside: [HELD_ASK],
+    }),
+  )
+  await h.engine.open(SLUG)
+  expect(h.last()).toMatchObject({ state: 'review' })
+}
+
+/** The items of a fast-model batch, as [label, file] pairs. */
+function itemsIn(prompt: string): Array<[string, string]> {
+  return [...prompt.matchAll(/<item label="([^"]+)" kind="[^"]+" file="([^"]+)"/g)].map((match) => [match[1] as string, match[2] as string])
+}
+
+/** The agent merges the first note into one text and takes the Workspace's version of the second; later calls keep mine. */
+function twoGroupHarness() {
+  let call = 0
+  return harness({
+    nameOf: async () => 'Acme',
+    mergeIntent: async () => MERGED_TEXT,
+    decideFast: async ({ prompt }) => {
+      call += 1
+      return itemsIn(prompt)
+        .map(([label, file]) => `${label} ${call > 1 ? 'ours' : file === NOTE_REVIEW.path ? 'merge' : 'theirs'} the agent's reason`)
+        .join('\n')
+    },
+  })
+}
+
+/** In review with two groups — "merged" (review-1) and "took the Workspace's version" (review-2) — and a decision left to the person. */
+async function inTwoGroups(h: ReturnType<typeof harness>): Promise<void> {
+  h.answer(SYNC_ARGV, result('review', { asks: [ASK], reviews: [NOTE_REVIEW, NOTE_2] }))
+  h.answer(
+    BATCH_ARGV('ask-1'),
+    result('merged-local', {
+      awaitingReview: true,
+      mergedItems: [
+        { id: 'review-1', path: NOTE_REVIEW.path, kind: 'conflict', take: 'file' },
+        { id: 'review-2', path: NOTE_2.path, kind: 'conflict', take: 'theirs' },
+        { id: 'ask-1', path: DECISION, kind: 'decision', take: 'theirs', held: true },
+      ],
+      heldAside: [HELD_ASK],
+    }),
+  )
+  await h.engine.open(SLUG)
+  expect(h.last()?.review?.groups.map((group) => group.key)).toEqual(['merged', 'took-theirs'])
+}
+
+/** The record lines the engine wrote, as their flags. */
+function recordsOf(h: ReturnType<typeof harness>): string[] {
+  return h.reasonReads.filter((key) => key.includes(' record '))
+}
+
+/** Every sync argv after the batch — none may publish while the review holds anything unagreed. */
+function publishingRuns(h: ReturnType<typeof harness>): string[] {
+  return h.calls.map((call) => call.key).filter((key) => !key.includes('--commit-only') && !key.includes('--no-push') && !key.includes('--agreed'))
+}
+
+describe('workspace sync engine — the review', () => {
+  it('a review is its own state, with every item and its state, and ONE notice', async () => {
+    const h = reviewHarness()
+    await inReview(h)
+    expect(h.last()).toMatchObject({
+      state: 'review',
+      detail: WORKSPACE_SYNC_SENTENCES.mergedForReview('Acme', 3),
+      review: {
+        groups: [
+          {
+            key: 'took-theirs',
+            count: 2,
+            items: [expect.objectContaining({ id: 'review-1', state: 'pending' }), expect.objectContaining({ id: 'review-2', state: 'pending' })],
+          },
+        ],
+        needsYou: [expect.objectContaining({ id: 'ask-1', reason: 'decision-document', state: 'needs-you' })],
+        held: [expect.objectContaining({ id: 'ask-1', state: 'needs-you' })],
+      },
+    })
+    expect(h.notices).toEqual(['Flow merged 3 changes. Review them before they\'re shared.'])
+    // A turn, an open and a "Sync now" later: still one notice.
+    h.answer(COMMIT_ONLY_ARGV, result('committed', { heldAside: [HELD_ASK] }), result('committed', { heldAside: [HELD_ASK] }))
+    h.engine.commitAfterTurn(SLUG, 'turn')
+    await h.timers.advance(TURN_SYNC_DELAY_MS)
+    await h.engine.syncNow(SLUG)
+    expect(h.notices).toHaveLength(1)
+  })
+
+  it('while a review is open, "Sync now", a turn and an open only COMMIT here — no run that can publish', async () => {
+    const h = reviewHarness()
+    await inReview(h)
+    h.answer(COMMIT_ONLY_ARGV, result('committed', { heldAside: [HELD_ASK] }), result('committed', { heldAside: [HELD_ASK] }))
+    const before = h.calls.length
+    const status = await h.engine.syncNow(SLUG)
+    h.engine.commitAfterTurn(SLUG, 'turn in api')
+    await h.timers.advance(TURN_SYNC_DELAY_MS)
+    await h.engine.open(SLUG)
+    // Positive first (#28): the syncs DID run…
+    expect(h.calls.slice(before).map((call) => call.key)).toEqual([COMMIT_ONLY_ARGV, COMMIT_ONLY_ARGV])
+    expect(h.promotions).toHaveLength(1) // the first open's; none during the review
+    // …and none of them could publish.
+    expect(publishingRuns(h)).toEqual([SYNC_ARGV]) // only the first sync, before anything was merged
+    expect(status.state).toBe('review')
+    expect(h.timers.syncTimers()).toBe(0)
+  })
+
+  it('a run the engine did not plan (a pause decided while a review is open) carries --no-push', async () => {
+    const h = reviewHarness(['theirs'])
+    await inReview(h)
+    // A new pause comes in during a share; the agent cannot settle it, so it waits for a person.
+    h.answer(SHARE_ARGV, result('ask', { asks: [{ ...ASK, id: 'ask-9' }] }))
+    h.answer(`workspace sync --workspace ${SLUG} --resolve=${DECISION} --id=ask-9 --take=ours --no-push --json`, result('merged-local', { mergedItems: [], heldAside: [HELD_ASK] }))
+    await h.engine.reviewAgree({ slug: SLUG, group: 'took-theirs' })
+    expect(h.last()).toMatchObject({ state: 'paused' })
+    // The review still holds agreed, unshared changes: the person's decision may not publish them.
+    const answer = await h.engine.resolve({ slug: SLUG, id: 'ask-9', path: DECISION, take: 'ours' })
+    expect(answer.ok).toBe(true)
+    expect(h.calls[h.calls.length - 1]?.key).toContain('--no-push')
+    expect(h.last()).toMatchObject({ state: 'review' })
+  })
+
+  it('agreeing every decided item records each decision, one run at a time, then shares ONCE', async () => {
+    const h = reviewHarness()
+    await inReview(h)
+    h.answer(SHARE_ARGV, result('synced', { heldAside: [HELD_ASK] }))
+    const answer = await h.engine.reviewAgree({ slug: SLUG, group: 'took-theirs' })
+    // Positive first: shared…
+    expect(answer).toMatchObject({ ok: true })
+    expect(h.calls.filter((call) => call.key === SHARE_ARGV)).toHaveLength(1)
+    expect(recordsOf(h)).toEqual([
+      expect.stringContaining('--kind=conflict --project=api --path=projects/api/notes.md --take=theirs'),
+      expect.stringContaining('--path=projects/api/other.md --take=theirs'),
+    ])
+    expect(recordsOf(h).every((key) => key.includes('--outcome=agreed'))).toBe(true)
+    // …and what still needs the person stays, held aside — it never held the share.
+    expect(h.last()).toMatchObject({ state: 'synced', review: { groups: [], needsYou: [expect.objectContaining({ id: 'ask-1', state: 'needs-you' })] } })
+
+    // The person decides it: settled here, then shared on its own.
+    h.answer(SETTLE_ARGV('ask-1', 'ours'), result('committed', { heldAside: [] }))
+    h.answer(SHARE_ARGV, result('synced', { heldAside: [] }))
+    const decided = await h.engine.reviewDecide({ slug: SLUG, id: 'ask-1', take: 'ours' })
+    expect(decided).toMatchObject({ ok: true })
+    expect(h.calls.map((call) => call.key).slice(-2)).toEqual([SETTLE_ARGV('ask-1', 'ours'), SHARE_ARGV])
+    expect(recordsOf(h)[2]).toContain('--kind=decision')
+    expect(h.last().review).toBeUndefined()
+  })
+
+  it('agreeing one group of two holds the other back in ONE local run, then shares the agreed group; agreeing the held group writes the agent\'s text and shares again', async () => {
+    const h = twoGroupHarness()
+    await inTwoGroups(h)
+    const afterBatch = h.calls.length
+    const heldMerged = { ...HELD_ASK, id: 'review-1', path: NOTE_REVIEW.path, kind: 'conflict' }
+    h.answer(HOLD_BACK_ARGV('review-1'), result('committed', { heldAside: [HELD_ASK, heldMerged] }))
+    h.answer(SHARE_ARGV, result('synced', { heldAside: [HELD_ASK, heldMerged] }))
+    const first = await h.engine.reviewAgree({ slug: SLUG, group: 'took-theirs' })
+    // Positive first (#28): the agreed group WAS shared…
+    expect(first).toMatchObject({ ok: true })
+    // …after the untouched group was held back, in one run, and nothing else ran.
+    expect(h.calls.slice(afterBatch).map((call) => call.key)).toEqual([HOLD_BACK_ARGV('review-1'), SHARE_ARGV])
+    expect(recordsOf(h)).toEqual([expect.stringContaining('--path=projects/api/other.md --take=theirs')])
+    // The held group waits here, still with the agent's decision and reason; "needs you" is untouched.
+    expect(h.last()).toMatchObject({
+      state: 'synced',
+      review: {
+        groups: [{ key: 'merged', count: 1, items: [expect.objectContaining({ id: 'review-1', take: 'file', state: 'held', reason: "the agent's reason" })] }],
+        needsYou: [expect.objectContaining({ id: 'ask-1', state: 'needs-you' })],
+      },
+    })
+
+    // Agreeing the held group writes the agent's MERGED text (the held store keeps this computer's own), then shares.
+    h.answer(SETTLE_ARGV('review-1', 'file:/tmp/decision-1.md'), result('committed', { heldAside: [HELD_ASK] }))
+    h.answer(SHARE_ARGV, result('synced', { heldAside: [HELD_ASK] }))
+    const second = await h.engine.reviewAgree({ slug: SLUG, group: 'merged' })
+    expect(second).toMatchObject({ ok: true })
+    expect(h.calls.slice(afterBatch).map((call) => call.key)).toEqual([HOLD_BACK_ARGV('review-1'), SHARE_ARGV, SETTLE_ARGV('review-1', 'file:/tmp/decision-1.md'), SHARE_ARGV])
+    expect(h.temps[1]).toBe(MERGED_TEXT)
+    expect(h.disposed).toContain('/tmp/decision-1.md')
+    expect(recordsOf(h)[1]).toContain('--path=projects/api/notes.md --take=file')
+    expect(h.last()).toMatchObject({ state: 'synced', review: { groups: [], needsYou: [expect.objectContaining({ id: 'ask-1' })] } })
+    // Every run after the first sync was local, or a share a person agreed to: nothing pending was ever published.
+    expect(publishingRuns(h)).toEqual([SYNC_ARGV])
+  })
+
+  it('a held-back "took the Workspace\'s version" decision, agreed later, keeps the Workspace\'s version', async () => {
+    const h = twoGroupHarness()
+    await inTwoGroups(h)
+    const heldTheirs = { ...HELD_ASK, id: 'review-2', path: NOTE_2.path, kind: 'conflict' }
+    h.answer(HOLD_BACK_ARGV('review-2'), result('committed', { heldAside: [HELD_ASK, heldTheirs] }))
+    h.answer(SHARE_ARGV, result('synced', { heldAside: [HELD_ASK, heldTheirs] }), result('synced', { heldAside: [HELD_ASK] }))
+    await h.engine.reviewAgree({ slug: SLUG, group: 'merged' })
+    h.answer(SETTLE_ARGV('review-2', 'theirs'), result('committed', { heldAside: [HELD_ASK] }))
+    const answer = await h.engine.reviewAgree({ slug: SLUG, ids: ['review-2'] })
+    expect(answer).toMatchObject({ ok: true })
+    expect(h.calls.map((call) => call.key).slice(-2)).toEqual([SETTLE_ARGV('review-2', 'theirs'), SHARE_ARGV])
+    expect(publishingRuns(h)).toEqual([SYNC_ARGV])
+  })
+
+  it('"Agree to all groups" shares in one go: nothing is held back, "needs you" stays', async () => {
+    const h = twoGroupHarness()
+    await inTwoGroups(h)
+    const afterBatch = h.calls.length
+    h.answer(SHARE_ARGV, result('synced', { heldAside: [HELD_ASK] }))
+    const answer = await h.engine.reviewAgree({ slug: SLUG, allGroups: true })
+    expect(answer).toMatchObject({ ok: true })
+    expect(h.calls.slice(afterBatch).map((call) => call.key)).toEqual([SHARE_ARGV])
+    expect(h.calls.some((call) => call.key.includes('--hold-back'))).toBe(false)
+    expect(recordsOf(h)).toHaveLength(2)
+    expect(h.last()).toMatchObject({ state: 'synced', review: { groups: [], needsYou: [expect.objectContaining({ id: 'ask-1', state: 'needs-you' })] } })
+  })
+
+  it('when the untouched items cannot be held back, nothing is shared — and the answer says so', async () => {
+    const h = twoGroupHarness()
+    await inTwoGroups(h)
+    h.answer(HOLD_BACK_ARGV('review-1'), refused('stale-decision'))
+    const answer = await h.engine.reviewAgree({ slug: SLUG, group: 'took-theirs' })
+    // Positive first: the hold-back WAS tried…
+    expect(h.calls[h.calls.length - 1]?.key).toBe(HOLD_BACK_ARGV('review-1'))
+    // …and nothing went out after it.
+    expect(answer).toMatchObject({ ok: false, reason: 'not-shared', detail: WORKSPACE_SYNC_SENTENCES.pendingChanged('Acme') })
+    expect(h.calls.some((call) => call.key.includes('--agreed'))).toBe(false)
+    expect(h.last()).toMatchObject({ state: 'review', detail: WORKSPACE_SYNC_SENTENCES.pendingChanged('Acme') })
+    expect(h.last().review?.groups.map((group) => group.items.map((item) => item.state))).toEqual([['pending'], ['agreed']])
+  })
+
+  it('a held-back decision can still be disagreed with: no second hold-back, the agent tries again', async () => {
+    const h = twoGroupHarness()
+    await inTwoGroups(h)
+    const heldMerged = { ...HELD_ASK, id: 'review-1', path: NOTE_REVIEW.path, kind: 'conflict' }
+    h.answer(HOLD_BACK_ARGV('review-1'), result('committed', { heldAside: [HELD_ASK, heldMerged] }))
+    h.answer(SHARE_ARGV, result('synced', { heldAside: [HELD_ASK, heldMerged] }))
+    await h.engine.reviewAgree({ slug: SLUG, group: 'took-theirs' })
+    const prompts = h.fastPrompts.length
+    const answer = await h.engine.reviewDisagree({ slug: SLUG, ids: ['review-1'], reason: 'keep mine' })
+    expect(answer).toMatchObject({ ok: true })
+    expect(h.fastPrompts.length).toBeGreaterThan(prompts)
+    expect(h.calls.filter((call) => call.key.includes('--hold-back'))).toHaveLength(1)
+    expect(h.last().review?.groups[0]?.items[0]).toMatchObject({ id: 'review-1', state: 'redone', disagreedReason: 'keep mine' })
+  })
+
+  it('"needs you" is never agreed in bulk — by id or in a group that holds one', async () => {
+    const h = reviewHarness(['theirs', 'ours'])
+    await inReview(h)
+    const byId = await h.engine.reviewAgree({ slug: SLUG, ids: ['review-1', 'ask-1'] })
+    expect(byId).toMatchObject({ ok: false, reason: 'needs-decision', detail: WORKSPACE_SYNC_SENTENCES.needsDecision })
+    // A twice-disagreed item makes its group need the person too.
+    h.answer(HOLD_BACK_ARGV('review-1'), result('committed', { heldAside: [HELD_ASK, { ...HELD_ASK, id: 'review-1', path: NOTE_REVIEW.path, kind: 'conflict' }] }))
+    await h.engine.reviewDisagree({ slug: SLUG, ids: ['review-1'], reason: 'keep mine' })
+    await h.engine.reviewDisagree({ slug: SLUG, ids: ['review-1'], reason: 'still mine' })
+    const byGroup = await h.engine.reviewAgree({ slug: SLUG, group: 'took-theirs' })
+    expect(byGroup).toMatchObject({ ok: false, reason: 'needs-decision' })
+    // Nothing was marked by the refused requests.
+    expect(h.last().review?.groups[0]?.items.find((item) => item.id === 'review-2')?.state).toBe('pending')
+    expect(h.calls.some((call) => call.key.includes('--agreed'))).toBe(false)
+  })
+
+  it('a disagreement needs a reason', async () => {
+    const h = reviewHarness()
+    await inReview(h)
+    const before = h.calls.length
+    const answer = await h.engine.reviewDisagree({ slug: SLUG, ids: ['review-1'], reason: '   ' })
+    expect(answer).toMatchObject({ ok: false, reason: 'reason-required', detail: WORKSPACE_SYNC_SENTENCES.reasonRequired })
+    expect(h.calls).toHaveLength(before)
+    expect(recordsOf(h)).toEqual([])
+  })
+
+  it('disagree → held back and redone once with the reason → a second disagreement leaves it to the person, who decides', async () => {
+    const h = reviewHarness(['theirs', 'ours'])
+    await inReview(h)
+    const heldReview = { ...HELD_ASK, id: 'review-1', path: NOTE_REVIEW.path, kind: 'conflict' }
+    h.answer(HOLD_BACK_ARGV('review-1'), result('committed', { heldAside: [HELD_ASK, heldReview] }))
+    const first = await h.engine.reviewDisagree({ slug: SLUG, ids: ['review-1'], reason: 'this computer has the newer note' })
+    expect(first).toMatchObject({ ok: true })
+    // Held back first (the Workspace's version committed, this computer's text aside), the reason recorded…
+    expect(h.calls[h.calls.length - 1]?.key).toBe(HOLD_BACK_ARGV('review-1'))
+    expect(recordsOf(h)).toEqual([expect.stringContaining('--outcome=disagreed')])
+    expect(recordsOf(h)[0]).toContain('--reason=this computer has the newer note')
+    // …then the agent decided it again, with the reason in its prompt.
+    expect(h.fastPrompts).toHaveLength(2)
+    expect(h.fastPrompts[1]).toContain('this computer has the newer note')
+    const redone = h.last().review?.groups[0]?.items.find((item) => item.id === 'review-1')
+    expect(redone).toMatchObject({ state: 'redone', disagreedReason: 'this computer has the newer note', redo: { take: 'ours' } })
+
+    // A second disagreement: no third try, the person decides.
+    const second = await h.engine.reviewDisagree({ slug: SLUG, ids: ['review-1'], reason: 'not like that either' })
+    expect(second).toMatchObject({ ok: true })
+    expect(h.fastPrompts).toHaveLength(2)
+    expect(h.calls.filter((call) => call.key.includes('--hold-back'))).toHaveLength(1)
+    expect(h.last().review?.groups[0]?.items.find((item) => item.id === 'review-1')?.state).toBe('needs-you')
+
+    // The person writes the text: the held item is settled here, never shared yet (review-2 is untouched).
+    h.answer(SETTLE_ARGV('review-1', 'file:/tmp/decision-1.md'), result('committed', { heldAside: [HELD_ASK] }))
+    const decided = await h.engine.reviewDecide({ slug: SLUG, id: 'review-1', take: 'text', text: 'both\n' })
+    expect(decided).toMatchObject({ ok: true })
+    expect(h.temps[1]).toBe('both\n')
+    expect(h.disposed).toContain('/tmp/decision-1.md')
+    expect(h.last().review?.groups[0]?.items.find((item) => item.id === 'review-1')?.state).toBe('agreed')
+    expect(publishingRuns(h)).toEqual([SYNC_ARGV])
+  })
+
+  it('agreeing a redo writes it here, then the share goes out', async () => {
+    const h = reviewHarness(['theirs', 'ours'])
+    await inReview(h)
+    const heldReview = { ...HELD_ASK, id: 'review-1', path: NOTE_REVIEW.path, kind: 'conflict' }
+    h.answer(HOLD_BACK_ARGV('review-1'), result('committed', { heldAside: [HELD_ASK, heldReview] }))
+    await h.engine.reviewDisagree({ slug: SLUG, ids: ['review-1'], reason: 'mine is newer' })
+    h.answer(SETTLE_ARGV('review-1', 'ours'), result('committed', { heldAside: [HELD_ASK] }))
+    h.answer(SHARE_ARGV, result('synced', { heldAside: [HELD_ASK] }))
+    const answer = await h.engine.reviewAgree({ slug: SLUG, ids: ['review-1', 'review-2'] })
+    expect(answer).toMatchObject({ ok: true })
+    expect(h.calls.map((call) => call.key).slice(-2)).toEqual([SETTLE_ARGV('review-1', 'ours'), SHARE_ARGV])
+    // The agreed redo is recorded with the person's reason.
+    expect(recordsOf(h).find((key) => key.includes('--outcome=agreed') && key.includes('notes.md'))).toContain('--reason=mine is newer')
+  })
+
+  it('a share that did not go out is reported as not shared — the review stays open and says why; "Sync now" tries again', async () => {
+    const h = reviewHarness()
+    await inReview(h)
+    h.answer(SHARE_ARGV, result('offline', { heldAside: [HELD_ASK] }))
+    const answer = await h.engine.reviewAgree({ slug: SLUG, group: 'took-theirs' })
+    expect(answer).toMatchObject({ ok: false, reason: 'not-shared', detail: WORKSPACE_SYNC_SENTENCES.offline('Acme') })
+    expect(h.last()).toMatchObject({ state: 'review', detail: WORKSPACE_SYNC_SENTENCES.offline('Acme') })
+    expect(h.last().review?.groups[0]?.items.map((item) => item.state)).toEqual(['agreed', 'agreed'])
+    // Nothing retries on its own over a review.
+    expect(h.timers.syncTimers()).toBe(0)
+    // A refused share too.
+    h.answer(SHARE_ARGV, refused('personal-files'))
+    const refusedShare = await h.engine.syncNow(SLUG)
+    expect(refusedShare).toMatchObject({ state: 'review', detail: WORKSPACE_SYNC_SENTENCES.personalFiles('Acme') })
+    // "Sync now" shares again; the decisions are not recorded twice.
+    h.answer(SHARE_ARGV, result('synced', { heldAside: [HELD_ASK] }))
+    const shared = await h.engine.syncNow(SLUG)
+    expect(shared.state).toBe('synced')
+    expect(h.calls.filter((call) => call.key === SHARE_ARGV)).toHaveLength(3)
+    expect(recordsOf(h)).toHaveLength(2)
+  })
+
+  it('after a restart the CLI\'s own record brings the review back — and it is still never shared unagreed', async () => {
+    const h = harness({ nameOf: async () => 'Acme' })
+    // The CLI refuses to publish an open review without --agreed and says merged-local.
+    h.answer(
+      SYNC_ARGV,
+      result('merged-local', {
+        awaitingReview: true,
+        mergedItems: [{ id: 'review-1', path: NOTE_REVIEW.path, kind: 'conflict', take: 'file' }],
+        heldAside: [HELD_ASK],
+      }),
+    )
+    await h.engine.open(SLUG)
+    expect(h.last()).toMatchObject({
+      state: 'review',
+      review: {
+        groups: [{ key: 'merged', count: 1, items: [expect.objectContaining({ id: 'review-1', state: 'pending' })] }],
+        held: [expect.objectContaining({ id: 'ask-1', state: 'held' })],
+      },
+    })
+    h.answer(COMMIT_ONLY_ARGV, result('committed', { heldAside: [HELD_ASK] }))
+    await h.engine.syncNow(SLUG)
+    expect(h.calls.map((call) => call.key)).toEqual([SYNC_ARGV, COMMIT_ONLY_ARGV])
+    // A held item with no decision remembered is the person's to decide, never to agree.
+    const agreed = await h.engine.reviewAgree({ slug: SLUG, ids: ['ask-1'] })
+    expect(agreed).toMatchObject({ ok: false, reason: 'needs-decision' })
+  })
+
+  it('a request with no review open, or about an item not in it, says so', async () => {
+    const h = reviewHarness()
+    expect(await h.engine.reviewAgree({ slug: SLUG, group: 'merged' })).toMatchObject({ ok: false, reason: 'not-waiting' })
+    await inReview(h)
+    expect(await h.engine.reviewAgree({ slug: SLUG, ids: ['nope'] })).toMatchObject({ ok: false, reason: 'not-waiting' })
+    expect(await h.engine.reviewDecide({ slug: SLUG, id: 'review-1', take: 'ours' })).toMatchObject({ ok: false, reason: 'not-allowed' })
+    expect(await h.engine.reviewAgree({ slug: 'Not A Slug', group: 'merged' })).toMatchObject({ ok: false, reason: 'unknown-workspace' })
   })
 })

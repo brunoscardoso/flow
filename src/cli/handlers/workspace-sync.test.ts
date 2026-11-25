@@ -36,6 +36,7 @@ import { dirname, join } from 'node:path';
 
 const model = await import('./workspace-model.js');
 const syncModule = await import('./workspace-sync.js');
+const { onlyIgnoresMore, syncNetworkTimeout } = syncModule;
 const merge = await import('./workspace-merge.js');
 const moveModule = await import('./workspace-move.js');
 const remoteModule = await import('./workspace-remote.js');
@@ -105,6 +106,15 @@ describe('workspace-merge pure parts', () => {
     // Two different projects given the same folder name would not validate.
     const slugClash = { ...base, projects: [project('local:a', 'a'), project('local:z', 'c')] };
     expect(mergeWorkspaceFile(JSON.stringify(base), JSON.stringify(slugClash), JSON.stringify(theirs))).toBeNull();
+  });
+  it('two different shared names never stop a sync: the team\'s stands (each machine keeps its own name locally)', () => {
+    const base = { name: 'Team', slug: 'team', projects: [] }
+    const merged = JSON.parse(
+      mergeWorkspaceFile(JSON.stringify(base), JSON.stringify({ ...base, name: 'A' }), JSON.stringify({ ...base, name: 'B' })) as string,
+    )
+    expect(merged.name).toBe('B')
+    // Anything else changed differently on both sides still asks a person.
+    expect(mergeWorkspaceFile(JSON.stringify(base), JSON.stringify({ ...base, slug: 'x' }), JSON.stringify({ ...base, slug: 'y' }))).toBeNull()
   });
 });
 
@@ -610,7 +620,8 @@ describeWithGit('workspace sync against real git, two machines', () => {
       const asked = sync(flowB);
       expect(asked.state).toBe('ask');
       expect(asked.asks).toEqual([expect.objectContaining({ kind: 'same-feature', topic: 'backend/auth', path: feature })]);
-      expect(asked.asks[0].agentMergeable).toBeUndefined();
+      // The agent may draft this one now; a person still sees it if the agent can't.
+      expect(asked.asks[0].agentMergeable).toBe(true);
       expect(remoteRefs()).toBe(refsBefore);
     },
     TEST_TIMEOUT_MS
@@ -631,8 +642,18 @@ describeWithGit('workspace sync against real git, two machines', () => {
           path: 'projects/backend/brain/features/checkout.md',
           existingPath: 'projects/backend/brain/features/orders.md',
           anchors: ['endpoint:POST /api/orders'],
+          // Agent-mergeable, with the base and the Workspace author; two different features keep both notes.
+          agentMergeable: true,
+          suggested: 'both',
         }),
       ]);
+      // checkout.md is new on this side, so its base is absent (null), but the field is present.
+      expect(asked.asks[0]).toHaveProperty('base', null);
+      expect(asked.asks[0]).toHaveProperty('theirAuthor', 'Test Person');
+      // Both notes' text reaches the agent: the Workspace's note and this machine's.
+      expect(asked.asks[0].existing).toBe(featureNote('feature:backend::orders', 'endpoint:POST /api/orders'));
+      expect(asked.asks[0].incoming).toBe(featureNote('feature:backend::checkout', 'endpoint:POST /api/orders'));
+      expect(asked.asks[0].truncated).toBe(false);
       // Keeping both is "ours" — this machine's file stays as it is.
       expect(sync(flowB, { resolve: { path: 'projects/backend/brain/features/checkout.md', take: 'ours' } })).toMatchObject({ state: 'synced', pushed: true });
       expect(existsSync(join(wsB, 'projects/backend/brain/features/orders.md'))).toBe(true);
@@ -703,26 +724,33 @@ describeWithGit('workspace sync against real git, two machines', () => {
   );
 
   it(
-    'refuses a personal file — staged by force or committed by hand — and commits and pushes nothing',
+    'lets go of a personal file — staged by force or committed by hand — and never sends it (user, 2026-11-24)',
     () => {
-      const refsBefore = remoteRefs();
-      const before = head(wsA);
+      const sentPaths = (): string => git(bare, 'log', '--all', '--name-only', '--format=');
       write(wsA, 'projects/backend/tasklist.md', '- [ ] my own todo\n');
       write(wsA, 'projects/backend/plans/plan_ok_v1.md', '# fine\n');
       git(wsA, 'add', '-f', '--', 'projects/backend/tasklist.md');
 
-      const refusal = refusalOf(() => sync(flowA), 'personal-files');
-      expect(refusal.payload).toMatchObject({ paths: ['projects/backend/tasklist.md'], committed: false, pushed: false });
-      expect(head(wsA)).toBe(before);
-      expect(git(wsA, 'diff', '--cached', '--name-only').trim()).toBe('');
-      expect(remoteRefs()).toBe(refsBefore);
+      // Staged by force: it is unstaged (kept on disk) and the rest syncs.
+      const first = sync(flowA);
+      expect(first.state).toBe('synced');
+      expect(first.pushed).toBe(true);
+      expect(first.untracked).toContain('projects/backend/tasklist.md');
+      expect(sentPaths()).toContain('projects/backend/plans/plan_ok_v1.md');
+      expect(sentPaths()).not.toContain('tasklist.md');
+      expect(existsSync(join(wsA, 'projects/backend/tasklist.md'))).toBe(true);
 
-      // Committed by hand behind Flow's back: the outgoing check still refuses before anything is pushed.
-      git(wsA, 'add', '-f', '--', 'projects/backend/tasklist.md');
+      // Committed by hand behind Flow's back: the unsent commits are rebuilt
+      // without it before anything is pushed, and the other change still goes.
+      write(wsA, 'projects/backend/plans/plan_two_v1.md', '# two\n');
+      git(wsA, 'add', '-f', '--', 'projects/backend/tasklist.md', 'projects/backend/plans/plan_two_v1.md');
       git(wsA, 'commit', '-q', '-m', 'oops');
-      refusalOf(() => sync(flowA), 'personal-files');
-      expect(remoteRefs()).toBe(refsBefore);
-      expect(calls.some((args) => args.includes('push'))).toBe(false);
+      const second = sync(flowA);
+      expect(second.pushed).toBe(true);
+      expect(sentPaths()).toContain('projects/backend/plans/plan_two_v1.md');
+      expect(sentPaths()).not.toContain('tasklist.md');
+      expect(git(wsA, 'log', '--name-only', '--format=', 'HEAD')).not.toContain('tasklist.md');
+      expect(readFileSync(join(wsA, 'projects/backend/tasklist.md'), 'utf-8')).toBe('- [ ] my own todo\n');
     },
     TEST_TIMEOUT_MS
   );
@@ -1111,10 +1139,11 @@ describeWithGit('workspace sync against real git, two machines', () => {
       expect(sync(flowA, { commitOnly: true })).toMatchObject({ state: 'nothing-to-do', committed: null });
       // A decision needs the merge it answers.
       refusalOf(() => sync(flowA, { commitOnly: true, resolve: { path: 'projects/backend/plans/plan_quit_v1.md', take: 'ours' } }), 'invalid-resolution');
-      // The guard still runs: a personal file refuses a commit-only run too.
+      // The guard still runs: a personal file staged by force is let go of in a commit-only run too.
       write(wsA, 'projects/backend/tasklist.md', 'mine\n');
       git(wsA, 'add', '-f', '--', 'projects/backend/tasklist.md');
-      refusalOf(() => sync(flowA, { commitOnly: true }), 'personal-files');
+      expect(sync(flowA, { commitOnly: true }).untracked).toContain('projects/backend/tasklist.md');
+      expect(git(wsA, 'ls-tree', '-r', '--name-only', 'HEAD')).not.toContain('tasklist.md');
       git(wsA, 'reset', '-q');
 
       const full = sync(flowA);
@@ -1184,6 +1213,67 @@ describeWithGit('workspace sync against real git, two machines', () => {
       expect(existsSync(join(wsB, '.git', 'plan-flow-sync.lock'))).toBe(false);
       // Never a hard reset in recovery.
       expect(calls.some((args) => args.includes('--hard'))).toBe(false);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    "undoes a half-done merge that broke the Workspace's own workspace.json, instead of refusing to read it for ever (user report 2026-11-24)",
+    () => {
+      const rename = (dir: string, name: string): void => {
+        const text = readFileSync(join(dir, 'workspace.json'), 'utf-8');
+        writeFileSync(join(dir, 'workspace.json'), text.replace(/"name": "[^"]*"/, `"name": "${name}"`));
+      };
+      rawPush('rename', (dir) => rename(dir, 'Theirs'));
+      rename(wsB, 'Mine');
+      crashMidMerge();
+      // The dead run left git's conflict markers in workspace.json: no longer JSON.
+      expect(read(wsB, 'workspace.json')).toContain('<<<<<<<');
+      expect(() => model.readWorkspace(flowB, 'team')).toThrow(/not valid JSON/);
+
+      const recovered = sync(flowB);
+      expect(recovered.recovered).toEqual({ lock: 'owner-gone', merge: true });
+      expect(() => JSON.parse(read(wsB, 'workspace.json'))).not.toThrow();
+      expect(existsSync(join(wsB, '.git', 'plan-flow-sync-merge.json'))).toBe(false);
+      expect(calls.some((args) => args.includes('--hard'))).toBe(false);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    "the app's launch migration undoes that merge too, so the Workspace comes back before any sync can run (user report 2026-11-24)",
+    async () => {
+      const { migrateWorkspaces } = await import('./workspace-migrate.js');
+      const rename = (dir: string, name: string): void => {
+        const text = readFileSync(join(dir, 'workspace.json'), 'utf-8');
+        writeFileSync(join(dir, 'workspace.json'), text.replace(/"name": "[^"]*"/, `"name": "${name}"`));
+      };
+      rawPush('rename-launch', (dir) => rename(dir, 'Theirs'));
+      rename(wsB, 'Mine');
+      crashMidMerge();
+      expect(() => model.readWorkspace(flowB, 'team')).toThrow(/not valid JSON/);
+      // A dry run writes nothing, so it still refuses.
+      refusalOf(() => migrateWorkspaces({ flowFolder: flowB, roots: [], workspace: 'team', dryRun: true, deps: { git: recordingGit } }), 'malformed-workspace');
+      expect(existsSync(join(wsB, '.git', 'MERGE_HEAD'))).toBe(true);
+
+      // The app's launch run names no Workspace: it reads this machine's Default.
+      model.writeDefaultWorkspace(flowB, 'team');
+      const migrated = migrateWorkspaces({ flowFolder: flowB, roots: [], deps: { git: recordingGit } });
+      expect(migrated.workspace.slug).toBe('team');
+      expect(model.readWorkspace(flowB, 'team').name).toBe('Mine');
+      expect(existsSync(join(wsB, '.git', 'MERGE_HEAD'))).toBe(false);
+      expect(calls.some((args) => args.includes('--hard'))).toBe(false);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'still refuses a workspace.json broken by hand, with no merge of Flow\'s to undo',
+    () => {
+      writeFileSync(join(wsB, 'workspace.json'), '{ not json');
+      refusalOf(() => sync(flowB), 'malformed-workspace');
+      refusalOf(() => syncModule.withWorkspaceRecovery(flowB, recordingGit, () => model.readWorkspace(flowB, 'team')), 'malformed-workspace');
+      expect(read(wsB, 'workspace.json')).toBe('{ not json');
     },
     TEST_TIMEOUT_MS
   );
@@ -1342,6 +1432,11 @@ describeWithGit('workspace sync against real git, two machines', () => {
       '.gitattributes',
     ],
     ['a nested .gitignore', (dir: string) => write(dir, 'projects/backend/.gitignore', '*.md\n'), 'projects/backend/.gitignore'],
+    [
+      'a root .gitignore line outside the block that un-ignores a file',
+      (dir: string) => writeFileSync(join(dir, '.gitignore'), `${readFileSync(join(dir, '.gitignore'), 'utf-8')}!/projects/*/memory.md\n`),
+      '.gitignore',
+    ],
   ])(
     'refuses an incoming change that carries %s — nothing merged, nothing pushed (review fix 4)',
     (_label, mutate, path) => {
@@ -1353,6 +1448,7 @@ describeWithGit('workspace sync against real git, two machines', () => {
       expect(refusal.payload).toMatchObject({ paths: [expect.objectContaining({ path })], pushed: false });
       expect(git(wsB, 'rev-parse', 'HEAD~1').trim()).toBe(before); // the local commit stays, nothing merged on top
       if (path === '.gitattributes') expect(read(wsB, path)).not.toContain('*.md merge=union');
+      else if (path === '.gitignore') expect(read(wsB, path)).not.toContain('!/projects/*/memory.md');
       else expect(existsSync(join(wsB, path))).toBe(false);
       expect(remoteRefs()).toBe(refsBefore);
       expect(calls.some((args) => args.includes('push'))).toBe(false);
@@ -1379,6 +1475,73 @@ describeWithGit('workspace sync against real git, two machines', () => {
   );
 
   it(
+    'lets in a root .gitignore that a member extended outside the block with plain ignore lines (user report 2026-11-24)',
+    () => {
+      rawPush('ignore-more', (dir) => {
+        const text = readFileSync(join(dir, '.gitignore'), 'utf-8');
+        writeFileSync(join(dir, '.gitignore'), `${text}\n# Misfiled deliverables, kept off the team repository.\n/projects/backend/pr-draft.md\n`);
+        write(dir, 'projects/backend/plans/plan_theirs_v1.md', '# theirs\n');
+      });
+      write(wsB, 'projects/backend/plans/plan_mine_v1.md', '# mine\n');
+      expect(sync(flowB)).toMatchObject({ state: 'synced', pulled: 1 });
+      expect(read(wsB, 'projects/backend/plans/plan_theirs_v1.md')).toBe('# theirs\n');
+      expect(read(wsB, '.gitignore')).toContain('/projects/backend/pr-draft.md');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'gives every fetch and push of a run a capped timeout, so a hung one answers before the app gives up on the run (user report 2026-11-24)',
+    () => {
+      const seen: { verb: string; timeoutMs: number | undefined }[] = [];
+      const watching: Git = (args, cwd, options) => {
+        if (options?.network === true) seen.push({ verb: args.includes('push') ? 'push' : 'fetch', timeoutMs: options.timeoutMs });
+        return recordingGit(args, cwd, options);
+      };
+      write(wsB, 'projects/backend/plans/plan_timed_v1.md', '# timed\n');
+      expect(syncWorkspace({ flowFolder: flowB, push: true, workspace: 'team', deps: { git: watching, now: () => NOW } })).toMatchObject({ pushed: true });
+      expect(seen.map((entry) => entry.verb)).toEqual(expect.arrayContaining(['fetch', 'push']));
+      for (const entry of seen) {
+        expect(entry.timeoutMs).toBeGreaterThanOrEqual(5_000);
+        expect(entry.timeoutMs).toBeLessThanOrEqual(120_000);
+      }
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'traces each step and each git call as it starts, so a run stopped at the time limit still says where it was (user report 2026-11-24)',
+    () => {
+      const lines: string[] = [];
+      write(wsB, 'projects/backend/plans/plan_traced_v1.md', '# traced\n');
+      sync(flowB, { trace: (line) => lines.push(line) });
+      expect(lines.every((line) => /^\[sync\] \+\d+\.\ds /.test(line))).toBe(true);
+      const steps = lines.filter((line) => line.includes('step: ')).map((line) => line.replace(/^.*step: /, ''));
+      expect(steps.slice(0, 4)).toEqual(['lock (Workspace team)', 'commit', 'remote', 'merge']);
+      expect(lines.some((line) => /git .*fetch.*network, up to \d+ ms/.test(line))).toBe(true);
+      // A sync with no trace stays silent: the option is how the CLI asks for it.
+      expect(() => sync(flowB)).not.toThrow();
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it('syncNetworkTimeout: capped per call, shrinking with the run budget, never below a floor', () => {
+    expect(syncNetworkTimeout(1_000_000, 0)).toBe(120_000);
+    expect(syncNetworkTimeout(30_000, 0)).toBe(30_000);
+    expect(syncNetworkTimeout(0, 10_000)).toBe(5_000);
+  });
+
+  it.each([
+    ['adds comments and plain patterns', '', '# why\n/a.md', true],
+    ['keeps what was there and adds more', '/a.md', '/a.md\n/b.md', true],
+    ['drops only a comment', '# old\n/a.md', '/a.md', true],
+    ['adds a negation', '', '!/projects/*/memory.md', false],
+    ['removes a pattern', '/a.md\n/b.md', '/a.md', false],
+  ])('onlyIgnoresMore: %s', (_label, before, after, safe) => {
+    expect(onlyIgnoresMore(before, after)).toBe(safe);
+  });
+
+  it(
     'checks every outgoing commit for personal files, not just the net change (review fix 5)',
     () => {
       const refsBefore = remoteRefs();
@@ -1387,9 +1550,16 @@ describeWithGit('workspace sync against real git, two machines', () => {
       git(wsA, 'commit', '-q', '-m', 'oops');
       git(wsA, 'rm', '-q', '--cached', '--', 'projects/backend/memory.md');
       git(wsA, 'commit', '-q', '-m', 'undo oops');
-      const refusal = refusalOf(() => sync(flowA), 'personal-files');
-      expect(refusal.payload).toMatchObject({ paths: ['projects/backend/memory.md'] });
+      // Added then removed: the net change is empty, but the history a push
+      // sends still holds it. The unsent commits are rebuilt without it.
+      const result = sync(flowA);
+      expect(result.untracked).toContain('projects/backend/memory.md');
+      // Nothing is left to send once it is gone, so nothing is pushed — and the
+      // unsent history no longer holds it either.
       expect(remoteRefs()).toBe(refsBefore);
+      expect(git(wsA, 'log', '--name-only', '--format=', 'HEAD')).not.toContain('memory.md');
+      expect(git(bare, 'log', '--all', '--name-only', '--format=')).not.toContain('memory.md');
+      expect(readFileSync(join(wsA, 'projects/backend/memory.md'), 'utf-8')).toBe('my memory\n');
     },
     TEST_TIMEOUT_MS
   );
@@ -1497,6 +1667,349 @@ describeWithGit('workspace sync against real git, two machines', () => {
       const resolved = sync(flowB, { resolve: { id: fetched.asks[0].id, take: 'theirs' } });
       expect(resolved).toMatchObject({ state: 'synced', pushed: true, decided: [fetched.asks[0].id] });
       expect(read(wsB, decision)).toBe('# DB\n\nA, revised.\n');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  /** N plans changed differently on both machines: B's next sync shows N reviews. */
+  function conflictingPlans(names: readonly string[]): string[] {
+    const paths = names.map((name) => `projects/backend/plans/plan_${name}_v1.md`);
+    for (const path of paths) write(wsA, path, `# ${path}\n\nBase.\n`);
+    sync(flowA);
+    sync(flowB);
+    for (const path of paths) write(wsA, path, `# ${path}\n\nBy A.\n`);
+    sync(flowA);
+    for (const path of paths) write(wsB, path, `# ${path}\n\nBy B.\n`);
+    return paths;
+  }
+
+  function decisionsFile(entries: readonly { id: string; take: string; content?: string }[]): string {
+    const file = join(sandbox, `decisions-${Math.random().toString(16).slice(2)}.json`);
+    writeFileSync(file, JSON.stringify({ decisions: entries }));
+    return file;
+  }
+
+  const onRemote = (path: string): string => git(bare, 'show', `refs/heads/main:${path}`);
+  const mergeCalls = (): number => calls.filter((args) => args.includes('merge') && args.includes('--no-commit')).length;
+
+  it(
+    "never asks about an operating-system file: two machines' .DS_Store leave the Workspace without a question",
+    () => {
+      const path = 'projects/backend/plans/.DS_Store';
+      // The Workspace already holds one (pushed before Flow ignored them), and this machine committed its own.
+      write(wsA, path, 'finder view of A');
+      git(wsA, 'add', '-f', '--', path);
+      git(wsA, 'commit', '-q', '-m', 'old machine file');
+      git(wsA, 'push', '-q', 'origin', 'HEAD:refs/heads/main');
+      expect(onRemote(path)).toBe('finder view of A');
+      write(wsB, path, 'finder view of B');
+      git(wsB, 'add', '-f', '--', path);
+      git(wsB, 'commit', '-q', '-m', 'old machine file');
+
+      const first = sync(flowB);
+      // The sync went through (the positive)…
+      expect(first).toMatchObject({ state: 'synced', pushed: true });
+      // …and asked nothing about it (the absence).
+      expect(first.asks).toEqual([]);
+      expect(first.reviews).toEqual([]);
+      sync(flowB);
+      const tracked = git(bare, 'ls-tree', '-r', '--name-only', 'refs/heads/main');
+      expect(tracked).toContain('projects/backend');
+      expect(tracked).not.toContain('.DS_Store');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    "keeps a chat thread's working set on this computer: never shared, already-shared ones leave, the file stays",
+    () => {
+      const shared = 'projects/backend/brain/features/aai-1-old-thread.md';
+      const fresh = 'projects/backend/brain/features/aai-2-new-thread.md';
+      const feature = 'projects/backend/brain/features/orders.md';
+      const workingSet = (title: string): string =>
+        `---\nfeature: ${title}\ntitle: "${title}"\nthread_id: 0f0e\ncaptured_at: 2026-11-25T00:00:00.000Z\n---\n\n# ${title}\n\nWorking set for "${title}" — 1 file(s): 1 edited, 0 read.\n`;
+      // One was shared before Flow kept them local (forced past nothing: nothing ignored it then).
+      write(wsB, shared, workingSet('aai-1-old-thread'));
+      git(wsB, 'add', '-f', '--', shared);
+      git(wsB, 'commit', '-q', '-m', 'old working set');
+      git(wsB, 'push', '-q', 'origin', 'HEAD:refs/heads/main');
+      expect(onRemote(shared)).toContain('Working set for');
+      write(wsB, fresh, workingSet('aai-2-new-thread'));
+      write(wsB, feature, '---\nid: feature:orders\nname: Orders\nkind: core\n---\n\n# Orders\n');
+
+      const result = sync(flowB);
+      // The real feature beside them is shared (the positive)…
+      expect(result).toMatchObject({ state: 'synced', pushed: true });
+      expect(onRemote(feature)).toContain('# Orders');
+      // …the working sets are not, and both stay on this computer.
+      const tracked = git(bare, 'ls-tree', '-r', '--name-only', 'refs/heads/main');
+      expect(tracked).not.toContain('aai-1-old-thread');
+      expect(tracked).not.toContain('aai-2-new-thread');
+      expect(readFileSync(join(wsB, shared), 'utf-8')).toContain('Working set for');
+      expect(readFileSync(join(wsB, fresh), 'utf-8')).toContain('Working set for');
+      // A second sync has nothing to send for them.
+      expect(sync(flowB).state).toMatch(/nothing-to-do|synced/);
+      expect(git(wsB, 'status', '--porcelain')).not.toContain('thread.md');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'applies a whole batch of decisions in ONE merge, and the merge commit names each one and who agreed',
+    () => {
+      const [ours, theirs, written] = conflictingPlans(['bat_one', 'bat_two', 'bat_three']);
+      const shown = sync(flowB);
+      expect(shown.state).toBe('review');
+      expect(shown.reviews).toHaveLength(3);
+      const idOf = (path: string): string => shown.reviews.find((review) => review.path === path)?.id as string;
+      calls = [];
+
+      const merged = sync(flowB, {
+        decisions: decisionsFile([
+          { id: idOf(ours), take: 'ours' },
+          { id: idOf(theirs), take: 'theirs' },
+          { id: idOf(written), take: 'file', content: '# Written\n\nBoth.\n' },
+        ]),
+      });
+      expect(merged).toMatchObject({ state: 'synced', pushed: true, asks: [], reviews: [] });
+      // One merge for the whole batch — not one per decision.
+      expect(mergeCalls()).toBe(1);
+      expect(merged.merge).not.toBeNull();
+      expect(merged.decided.sort()).toEqual([idOf(ours), idOf(theirs), idOf(written)].sort());
+      expect(merged.mergedItems).toEqual(
+        expect.arrayContaining([
+          { id: idOf(ours), path: ours, kind: 'conflict', take: 'ours' },
+          { id: idOf(theirs), path: theirs, kind: 'conflict', take: 'theirs' },
+          { id: idOf(written), path: written, kind: 'conflict', take: 'file' },
+        ])
+      );
+      expect(merged.heldAside).toEqual([]);
+      expect(onRemote(ours)).toBe(`# ${ours}\n\nBy B.\n`);
+      expect(onRemote(theirs)).toBe(`# ${theirs}\n\nBy A.\n`);
+      expect(onRemote(written)).toBe('# Written\n\nBoth.\n');
+      expect(existsSync(join(wsB, '.git', 'plan-flow-sync-decisions.json'))).toBe(false);
+
+      const message = git(wsB, 'log', '-1', '--format=%B', merged.merge?.sha as string);
+      expect(message.split('\n')[0]).toMatch(/^Merge origin\/main/);
+      expect(message).toContain('Decided (3):');
+      expect(message).toContain(`- ${ours}: ours`);
+      expect(message).toContain(`- ${theirs}: theirs`);
+      expect(message).toContain(`- ${written}: file`);
+      expect(message).toContain('Agreed-by: Test Person');
+      expect(message).not.toContain('test@example.com');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'refuses the WHOLE batch when one id is stale or one take is not allowed — nothing written, no merge left, nothing pushed',
+    () => {
+      const [first, second] = conflictingPlans(['stale_one', 'stale_two']);
+      const shown = sync(flowB);
+      expect(shown.reviews).toHaveLength(2);
+      const headBefore = head(wsB);
+      const refsBefore = remoteRefs();
+      const firstId = shown.reviews.find((review) => review.path === first)?.id as string;
+      const secondId = shown.reviews.find((review) => review.path === second)?.id as string;
+      calls = [];
+
+      const stale = refusalOf(
+        () => sync(flowB, { decisions: decisionsFile([{ id: firstId, take: 'ours' }, { id: 'deadbeef0000', take: 'theirs' }]) }),
+        'stale-decision'
+      );
+      expect(stale.payload).toMatchObject({ stale: ['deadbeef0000'] });
+      expect((stale.payload as { waiting: unknown[] }).waiting).toEqual(
+        expect.arrayContaining([
+          { id: firstId, path: first },
+          { id: secondId, path: second },
+        ])
+      );
+      const invalid = refusalOf(
+        () => sync(flowB, { decisions: decisionsFile([{ id: firstId, take: 'ours' }, { id: secondId, take: 'merged' }]) }),
+        'invalid-resolution'
+      );
+      expect(invalid.payload).toMatchObject({ invalid: [{ id: secondId, path: second, take: 'merged', options: ['ours', 'theirs', 'file'] }] });
+      // Malformed entries are refused before anything runs.
+      refusalOf(() => sync(flowB, { decisions: decisionsFile([{ id: firstId, take: 'file' }]) }), 'invalid-resolution');
+      refusalOf(() => sync(flowB, { decisions: decisionsFile([{ id: firstId, take: 'ours' }, { id: firstId, take: 'theirs' }]) }), 'invalid-resolution');
+      refusalOf(() => sync(flowB, { hold: [firstId] }), 'invalid-resolution');
+
+      // The merge really ran for the refused batches (the positive), and left nothing behind (the absence).
+      expect(calls.some((args) => args.includes('merge') && args.includes('--no-commit'))).toBe(true);
+      expect(existsSync(join(wsB, '.git', 'MERGE_HEAD'))).toBe(false);
+      expect(existsSync(join(wsB, '.git', 'plan-flow-sync-decisions.json'))).toBe(false);
+      expect(existsSync(join(wsB, '.git', 'plan-flow-held.json'))).toBe(false);
+      expect(head(wsB)).toBe(headBefore);
+      expect(read(wsB, first)).toBe(`# ${first}\n\nBy B.\n`);
+      expect(calls.some((args) => args.includes('push'))).toBe(false);
+      expect(remoteRefs()).toBe(refsBefore);
+
+      // The same items still decide in one valid batch afterwards.
+      const merged = sync(flowB, { decisions: decisionsFile([{ id: firstId, take: 'ours' }, { id: secondId, take: 'theirs' }]) });
+      expect(merged).toMatchObject({ state: 'synced', pushed: true });
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    '--no-push commits the merge here, says it waits for review, and leaves the remote as it was',
+    () => {
+      const [only] = conflictingPlans(['local_one']);
+      const shown = sync(flowB);
+      const id = shown.reviews[0].id;
+      const refsBefore = remoteRefs();
+      const headBefore = head(wsB);
+      calls = [];
+
+      const local = sync(flowB, { push: false, decisions: decisionsFile([{ id, take: 'ours' }]) });
+      // The merge is committed on this machine (the positive)…
+      expect(local).toMatchObject({ state: 'merged-local', awaitingReview: true, pushed: false, ahead: 2 });
+      expect(local.merge).not.toBeNull();
+      expect(head(wsB)).toBe(local.merge?.sha);
+      expect(head(wsB)).not.toBe(headBefore);
+      expect(local.mergedItems).toEqual([{ id, path: only, kind: 'conflict', take: 'ours' }]);
+      // …and nothing left the machine (the absence).
+      expect(calls.some((args) => args.includes('push'))).toBe(false);
+      expect(remoteRefs()).toBe(refsBefore);
+
+      // An ordinary run (no decisions) that merges with --no-push says the same.
+      write(wsA, 'projects/backend/plans/plan_elsewhere_v1.md', '# Elsewhere\n');
+      sync(flowA);
+      const ordinary = sync(flowB, { push: false });
+      // The open review is still reported (the first merge's decided item); this merge decided nothing new.
+      expect(ordinary).toMatchObject({ state: 'merged-local', awaitingReview: true, pushed: false, mergedItems: [{ id, path: only, kind: 'conflict', take: 'ours' }] });
+      expect(ordinary.merge).not.toBeNull();
+      const pushed = sync(flowB, { agreed: true });
+      expect(pushed).toMatchObject({ pushed: true, ahead: 0 });
+      expect(onRemote(only)).toBe(`# ${only}\n\nBy B.\n`);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'holds an item aside: the push publishes the Workspace\'s version there, this machine\'s text stays in .git until it is settled',
+    () => {
+      const [agreed, pending] = conflictingPlans(['hold_one', 'hold_two']);
+      const shown = sync(flowB);
+      const agreedId = shown.reviews.find((review) => review.path === agreed)?.id as string;
+      const pendingId = shown.reviews.find((review) => review.path === pending)?.id as string;
+
+      const merged = sync(flowB, {
+        decisions: decisionsFile([
+          { id: agreedId, take: 'ours' },
+          { id: pendingId, take: 'file', content: '# Redo\n\nNot agreed yet.\n' },
+        ]),
+        hold: [pendingId],
+      });
+      // Pushed (the positive): the agreed item is published as decided…
+      expect(merged).toMatchObject({ state: 'synced', pushed: true });
+      expect(onRemote(agreed)).toBe(`# ${agreed}\n\nBy B.\n`);
+      // …and the held item is published ONLY as the Workspace's version.
+      expect(onRemote(pending)).toBe(`# ${pending}\n\nBy A.\n`);
+      const grep = spawnSync('git', ['grep', '-l', 'Not agreed yet', 'refs/heads/main'], { cwd: bare, encoding: 'utf-8', env: process.env });
+      expect(grep.status).toBe(1); // git grep: 1 = searched, nothing found
+      expect(grep.stdout.trim()).toBe('');
+      // The merge log is committed with the merge: it names the decisions but never copies
+      // this machine's text, which would publish the held item's own version through it.
+      const logs = spawnSync('git', ['ls-tree', '-r', '--name-only', 'refs/heads/main', 'merges/'], { cwd: bare, encoding: 'utf-8', env: process.env });
+      expect(logs.stdout.trim()).not.toBe('');
+      const leaked = spawnSync('git', ['grep', '-l', '-F', 'By B.', 'refs/heads/main', '--', 'merges/'], { cwd: bare, encoding: 'utf-8', env: process.env });
+      expect(leaked.status).toBe(1);
+      expect(read(wsB, pending)).toBe(`# ${pending}\n\nBy A.\n`);
+      expect(merged.heldAside).toEqual([{ id: pendingId, path: pending, kind: 'conflict', heldAt: NOW.toISOString() }]);
+      expect(merged.mergedItems).toEqual(expect.arrayContaining([{ id: pendingId, path: pending, kind: 'conflict', take: 'theirs', held: true }]));
+      const store = JSON.parse(readFileSync(join(wsB, '.git', 'plan-flow-held.json'), 'utf-8')) as { version: number; held: { id: string; text: string }[] };
+      expect(store).toMatchObject({ version: 1, held: [{ id: pendingId, text: '# Redo\n\nNot agreed yet.\n' }] });
+      expect(git(wsB, 'log', '-1', '--format=%B', merged.merge?.sha as string)).toContain(`- ${pending}: held aside`);
+
+      // A later ordinary sync still never publishes it, and every result lists it.
+      const later = sync(flowB);
+      expect(later.heldAside).toEqual([{ id: pendingId, path: pending, kind: 'conflict', heldAt: NOW.toISOString() }]);
+      expect(onRemote(pending)).toBe(`# ${pending}\n\nBy A.\n`);
+
+      // An unknown id is refused with what IS held, and nothing is pushed.
+      const refsBefore = remoteRefs();
+      calls = [];
+      const unknown = refusalOf(() => sync(flowB, { settleHeld: { id: 'deadbeef0000', take: 'ours' } }), 'unknown-held');
+      expect(unknown.payload).toMatchObject({ id: 'deadbeef0000', held: [{ id: pendingId, path: pending }] });
+      expect(calls.some((args) => args.includes('push'))).toBe(false);
+      expect(remoteRefs()).toBe(refsBefore);
+
+      // Settled: the held text becomes an ordinary commit, and is pushed.
+      const settled = sync(flowB, { settleHeld: { id: pendingId, take: 'ours' } });
+      expect(settled).toMatchObject({ state: 'synced', pushed: true, heldAside: [], settled: { id: pendingId, path: pending, take: 'ours' } });
+      expect(settled.settled?.sha).toEqual(expect.any(String));
+      expect(git(wsB, 'log', '-1', '--format=%s', settled.settled?.sha as string).trim()).toBe(`knowledge: settle ${pending}`);
+      expect(onRemote(pending)).toBe('# Redo\n\nNot agreed yet.\n');
+      expect(existsSync(join(wsB, '.git', 'plan-flow-held.json'))).toBe(false);
+      expect(sync(flowA)).toMatchObject({ state: 'synced' });
+      expect(read(wsA, pending)).toBe('# Redo\n\nNot agreed yet.\n');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'an open review is never published without --agreed; --hold-back puts a disagreed item back to the Workspace\'s version',
+    () => {
+      const [kept, disputed] = conflictingPlans(['review_one', 'review_two']);
+      const shown = sync(flowB);
+      const keptId = shown.reviews.find((review) => review.path === kept)?.id as string;
+      const disputedId = shown.reviews.find((review) => review.path === disputed)?.id as string;
+      const refsBefore = remoteRefs();
+
+      const local = sync(flowB, {
+        push: false,
+        decisions: decisionsFile([
+          { id: keptId, take: 'ours' },
+          { id: disputedId, take: 'file', content: '# Agent text\n' },
+        ]),
+      });
+      expect(local).toMatchObject({ state: 'merged-local', awaitingReview: true });
+      const record = JSON.parse(readFileSync(join(wsB, '.git', 'plan-flow-review.json'), 'utf-8')) as { items: { id: string; merge: string }[] };
+      expect(record.items.map((entry) => entry.id).sort()).toEqual([keptId, disputedId].sort());
+      expect(record.items[0].merge).toBe(local.merge?.sha);
+
+      // An ordinary sync that WOULD push (a restart, a terminal run): it runs (the positive)…
+      calls = [];
+      write(wsB, 'projects/backend/resources/later.md', 'later\n');
+      const ordinary = sync(flowB);
+      expect(ordinary.committed).not.toBeNull();
+      expect(calls.some((args) => args.includes('fetch'))).toBe(true);
+      expect(ordinary).toMatchObject({ state: 'merged-local', awaitingReview: true, pushed: false });
+      expect(ordinary.mergedItems.map((item) => item.id).sort()).toEqual([keptId, disputedId].sort());
+      // …and publishes nothing (the absence).
+      expect(calls.some((args) => args.includes('push'))).toBe(false);
+      expect(remoteRefs()).toBe(refsBefore);
+
+      // An unknown id is refused, nothing written.
+      const unknown = refusalOf(() => sync(flowB, { holdBack: ['deadbeef0000'], commitOnly: true }), 'unknown-review-item');
+      expect(unknown.payload).toMatchObject({ unknown: ['deadbeef0000'] });
+
+      // Held back: the Workspace's version is committed there, this machine's own text aside.
+      const heldBack = sync(flowB, { holdBack: [disputedId], commitOnly: true });
+      expect(heldBack.heldBack?.ids).toEqual([disputedId]);
+      expect(git(wsB, 'log', '-1', '--format=%s', heldBack.heldBack?.sha as string).trim()).toBe(`knowledge: hold back ${disputed}`);
+      expect(read(wsB, disputed)).toBe(`# ${disputed}\n\nBy A.\n`);
+      expect(heldBack.heldAside).toEqual([{ id: disputedId, path: disputed, kind: 'conflict', heldAt: NOW.toISOString() }]);
+      const store = JSON.parse(readFileSync(join(wsB, '.git', 'plan-flow-held.json'), 'utf-8')) as { held: { id: string; text: string }[] };
+      expect(store.held).toEqual([expect.objectContaining({ id: disputedId, text: `# ${disputed}\n\nBy B.\n` })]);
+      expect(remoteRefs()).toBe(refsBefore);
+      // Holding it back again is refused: it no longer waits for review.
+      refusalOf(() => sync(flowB, { holdBack: [disputedId], commitOnly: true }), 'unknown-review-item');
+
+      // Agreed: published, the record cleared — the held item only as the Workspace's version.
+      const agreed = sync(flowB, { agreed: true });
+      expect(agreed).toMatchObject({ state: 'synced', pushed: true });
+      expect(onRemote(kept)).toBe(`# ${kept}\n\nBy B.\n`);
+      expect(onRemote(disputed)).toBe(`# ${disputed}\n\nBy A.\n`);
+      expect(existsSync(join(wsB, '.git', 'plan-flow-review.json'))).toBe(false);
+      const grep = spawnSync('git', ['grep', '-l', 'Agent text', 'refs/heads/main'], { cwd: bare, encoding: 'utf-8', env: process.env });
+      expect(grep.status).toBe(1);
+
+      // The redo settles the held item later as an ordinary change.
+      const settled = sync(flowB, { settleHeld: { id: disputedId, take: 'ours' } });
+      expect(settled).toMatchObject({ pushed: true, heldAside: [] });
+      expect(onRemote(disputed)).toBe(`# ${disputed}\n\nBy B.\n`);
     },
     TEST_TIMEOUT_MS
   );

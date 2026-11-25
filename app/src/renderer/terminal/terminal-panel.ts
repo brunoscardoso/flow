@@ -32,6 +32,7 @@ import type {
 import { ensureAccentProperty } from '../project-accent'
 import { baseName } from '../project-label'
 import { PendingBuffer } from './pending-buffer'
+import { rememberRecentRoot, runMenuTerminals, type RunMenuTerminals } from './run-menu-terminals'
 import {
   terminalAttachFailedToast,
   terminalCreateFailedToast,
@@ -241,20 +242,6 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
   takeoverButton.className = 'fl-term-tool fl-term-only'
   takeoverButton.hidden = true
 
-  // ONE button for a new shell, full or split (user decision 2026-11-15). The
-  // split button (#1133) and the + sat side by side and did nearly the same
-  // thing; now the + asks which one when there is a terminal to split beside,
-  // and opens a full one straight away when there is none.
-  const newButton = document.createElement('button')
-  newButton.className = 'fl-term-tool fl-term-only'
-  newButton.title = 'New terminal'
-  newButton.setAttribute('aria-label', 'New terminal')
-  newButton.setAttribute('aria-haspopup', 'menu')
-  const plusIcon = document.createElement('fl-icon')
-  plusIcon.setAttribute('name', 'plus')
-  plusIcon.setAttribute('size', '14')
-  newButton.appendChild(plusIcon)
-
   // Collapse/hide the terminal to give the editor the full height (#703). Reuses
   // the shell's honest hide (⌘J / ⌃` / the Terminal rail item) via a document
   // event — a visible affordance on the panel itself, which the keyboard/rail
@@ -273,7 +260,6 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
 
   header.appendChild(tabsEl)
   header.appendChild(takeoverButton)
-  header.appendChild(newButton)
   header.appendChild(collapseButton)
 
   const hosts = document.createElement('div')
@@ -290,7 +276,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
 
   const empty = document.createElement('div')
   empty.className = 'fl-term-empty'
-  empty.textContent = 'No terminals — press + to open one'
+  empty.textContent = 'No terminals. Open one from Run.'
   hosts.append(splitEl, stash, empty)
   // The grouped Launchpad tab's body — its own layer over the split row; the
   // step hosts are MOVED into its panes (never copied, never re-created).
@@ -442,6 +428,38 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
   let deferredNewFor: string | null = null
   /** The Run group — built once the panel's wiring is in place (below). */
   let runGroup: RunGroupView | null = null
+  /** Roots a terminal was opened in, most recent first — the Run menu's short list. */
+  let recentTerminalRoots: string[] = []
+
+  /** Where the keyboard goes back to when a header menu closes: the Run pill. */
+  function focusHome(): HTMLElement {
+    return runGroup?.element.querySelector<HTMLElement>('.fl-run-pill-run') ?? tabsEl
+  }
+
+  /**
+   * The Run menu's New terminal section (user decision 2026-11-24). A project
+   * row is offered only when the scope has settled on several available
+   * roots; anything else — one project, a conversation still arriving, the
+   * project view — is the plain "New terminal", which asks when it must.
+   */
+  function runMenuTerminalSection(): RunMenuTerminals {
+    const state = scopeState()
+    const projects = ownerSpawnOverride(state) === null ? newTerminalMenu(state) : null
+    const focused = activeId === null ? null : (tabs.get(activeId) ?? null)
+    const focusedRoot = focused?.info.projectRoot ?? null
+    const focusedName =
+      focusedRoot === null
+        ? null
+        : (scopeRoots?.find((root) => root.rootPath === focusedRoot)?.name ?? (baseName(focusedRoot) || focusedRoot))
+    return runMenuTerminals({
+      projects,
+      recent: recentTerminalRoots,
+      focusedRoot,
+      focusedName,
+      hasFocused: focused !== null,
+      splitBlocked: focused !== null && !canSplit(layout, focused.info.terminalId) ? `At most ${MAX_SPLIT_PANES} terminals side by side` : null,
+    })
+  }
   /** A Launchpad terminal to show as soon as its tab arrives (main may answer before the tab exists). */
   let focusWhenCreated: string | null = null
   /**
@@ -1323,7 +1341,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     renderPanes()
     renderTabs()
     // #940: closing the LAST terminal leaves an empty panel occupying the
-    // bottom slot ("No terminals — press + to open one"). Give the space back
+    // bottom slot ("No terminals. Open one from Run."). Give the space back
     // to the editor automatically; the rail item, ⌃`/⌘J and the footer button
     // all still bring it back (and a reveal auto-starts a shell, #439).
     if (options.userInitiated === true && visibleTabCount() === 0) {
@@ -1360,6 +1378,9 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
     } = {},
   ): Promise<void> {
     const owner = options.owner ?? ownerScope ?? undefined
+    if (rootId !== undefined && options.restoring !== true) {
+      recentTerminalRoots = rememberRecentRoot(recentTerminalRoots, rootId)
+    }
     // Counted from the start — before the restore await below — so an
     // auto-start resuming in the same tick sees this shell is on its way.
     const busyKey = owner === undefined ? null : ownerKey(owner)
@@ -1550,7 +1571,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
         showRootMenu(menuItems, {
           label: 'New terminal in:',
           onPick: (rootPath) => void createTerminal(rootPath, undefined, { focus: true }),
-          returnFocusTo: newButton,
+          returnFocusTo: focusHome(),
         })
         return
       }
@@ -1582,7 +1603,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
       {
         label: 'New terminal in:',
         onPick: (rootPath) => void createTerminal(rootPath, undefined, { focus: true }),
-        returnFocusTo: newButton,
+        returnFocusTo: focusHome(),
       },
     )
   }
@@ -1612,24 +1633,6 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
         onPick: () => options.onPick(rootPath),
       })),
       options.returnFocusTo,
-    )
-  }
-
-  /** The + button's choice: a new full terminal, or one split beside this pane. */
-  function showChoiceMenu(
-    items: Array<{ label: string; icon: string; disabledReason?: string | null; onPick: () => void }>,
-    returnFocusTo: HTMLElement,
-  ): void {
-    openMenu(
-      null,
-      items.map((item) => ({
-        label: item.label,
-        icon: item.icon,
-        title: item.disabledReason ?? undefined,
-        disabled: item.disabledReason !== undefined && item.disabledReason !== null,
-        onPick: item.onPick,
-      })),
-      returnFocusTo,
     )
   }
 
@@ -1791,6 +1794,17 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
         focusWhenCreated = terminalId
       }
     },
+    terminals: () => runMenuTerminalSection(),
+    // A project row opens there at once; the plain row is the old + exactly
+    // (it waits for an arriving conversation, and asks under several roots).
+    openTerminal: (rootPath) => {
+      if (rootPath === null) void onNewTerminal(true)
+      else void createTerminal(rootPath, undefined, { focus: true })
+    },
+    // "Split beside <project>" names its project, so it splits there without asking.
+    splitTerminal: () => {
+      if (activeId !== null) splitFrom(activeId)
+    },
   })
   runGroup = group
   // A terminal control: hidden while the Problems view is shown, like the others.
@@ -1799,30 +1813,6 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
   if (ownerScope !== undefined) group.setScope(ownerScope)
 
   // ── Wiring ─────────────────────────────────────────────────────────────
-
-  // The + opens a full terminal at once when there is nothing to split beside;
-  // otherwise it asks: a new full terminal, or one split beside the focused
-  // pane. Split stays in the menu when there is no room, disabled, with the
-  // reason on hover — a disabled row with a reason beats a missing one (#1133).
-  newButton.addEventListener('click', () => {
-    if (activeId === null) {
-      void onNewTerminal(true)
-      return
-    }
-    const splittable = canSplit(layout, activeId)
-    showChoiceMenu(
-      [
-        { label: 'New terminal', icon: 'plus', onPick: () => void onNewTerminal(true) },
-        {
-          label: 'Split terminal',
-          icon: 'split-horizontal',
-          disabledReason: splittable ? null : `At most ${MAX_SPLIT_PANES} terminals side by side`,
-          onPick: () => splitTerminal(),
-        },
-      ],
-      newButton,
-    )
-  })
 
   takeoverButton.addEventListener('click', () => {
     const active = activeId ? tabs.get(activeId) : null
@@ -1885,13 +1875,13 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
           rows.push({ label: entry.label, separator, onPick: () => setGrouped(false) })
         }
       }
-      openMenu(null, rows, newButton, anchor)
+      openMenu(null, rows, focusHome(), anchor)
       return
     }
     openMenu(
       null,
       separateStepMenu().map((entry) => ({ label: entry.label, onPick: () => setGrouped(true) })),
-      newButton,
+      focusHome(),
       anchor,
     )
   })
@@ -2081,7 +2071,7 @@ export function createTerminalPanel(panel: FlPanel, api: FlowApi): TerminalPanel
       showRootMenu(menuItems, {
         label: 'Split with:',
         onPick: (rootPath) => splitFrom(anchorId, rootPath),
-        returnFocusTo: newButton,
+        returnFocusTo: focusHome(),
       })
       return
     }

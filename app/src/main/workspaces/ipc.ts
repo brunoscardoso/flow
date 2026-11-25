@@ -19,16 +19,18 @@ import type {
   WorkspacePlacementState,
   WorkspaceResolveRequest,
   WorkspaceResolveResult,
-  WorkspaceIntentMergeSet,
-  WorkspaceIntentMergesRequest,
-  WorkspaceKeepIntentRequest,
-  WorkspaceKeepIntentResult,
+  WorkspaceMergeGroupKey,
+  WorkspaceReviewAgreeRequest,
+  WorkspaceReviewDecideRequest,
+  WorkspaceReviewDisagreeRequest,
+  WorkspaceReviewResult,
   WorkspacesChangedEvent,
   WorkspaceSyncStatus,
 } from '../../shared/workspaces-contract'
 import { timed } from '../ipc/slow-handler'
 import type { WorkspaceRegistry } from './workspace-registry'
 import type { WorkspaceRemoteSetup } from './workspace-remote'
+import type { MergeReasons } from './merge-reasons'
 
 export interface WorkspaceChannelDependencies {
   registry: WorkspaceRegistry
@@ -74,8 +76,9 @@ export interface WorkspaceChannelDependencies {
     status(slug: string): WorkspaceSyncStatus
     syncNow(slug: string): Promise<WorkspaceSyncStatus>
     resolve(request: WorkspaceResolveRequest): Promise<WorkspaceResolveResult>
-    intentMerges(request: WorkspaceIntentMergesRequest): WorkspaceIntentMergeSet | null
-    keepIntent(request: WorkspaceKeepIntentRequest): Promise<WorkspaceKeepIntentResult>
+    reviewAgree(request: WorkspaceReviewAgreeRequest): Promise<WorkspaceReviewResult>
+    reviewDisagree(request: WorkspaceReviewDisagreeRequest): Promise<WorkspaceReviewResult>
+    reviewDecide(request: WorkspaceReviewDecideRequest): Promise<WorkspaceReviewResult>
   }
   /**
    * REQUIRED (allowed-pattern #26): connecting a Workspace to a shared
@@ -83,6 +86,11 @@ export interface WorkspaceChannelDependencies {
    * `unset-remote`, then one sync.
    */
   remote: WorkspaceRemoteSetup
+  /**
+   * REQUIRED (allowed-pattern #26): the Workspace's shared merge reasons —
+   * the CLI's `merge-decision list` / `remove`, run async.
+   */
+  mergeReasons: MergeReasons
   /**
    * REQUIRED (allowed-pattern #26): connections learning — a person's run of
    * a project's Workspace, and the run going now (or the last one).
@@ -111,6 +119,29 @@ const MAX_FIELD_LENGTH = 2048
 /** A merged text a person settled on — far beyond any note, well inside one IPC message. */
 const MAX_RESOLVE_TEXT_LENGTH = 1024 * 1024
 const RESOLVE_TAKES = ['ours', 'theirs', 'merged', 'text'] as const
+const REVIEW_GROUPS: readonly WorkspaceMergeGroupKey[] = ['kept-both', 'took-theirs', 'kept-mine', 'merged', 'identical']
+/** The most items one review request names (a review is bounded by the CLI's batch anyway). */
+const MAX_REVIEW_IDS = 5000
+/** A disagreement's reason is one short paragraph. */
+const MAX_REASON_LENGTH = 2000
+
+/** A Workspace slug that goes on a CLI argv: never empty, never shaped like a flag. */
+const CLI_SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+/** A recorded decision's id: hex (the CLI writes 16; a longer hash is still an id). */
+const MERGE_REASON_ID = /^[0-9a-f]{8,64}$/
+
+function cliSlug(value: unknown, channel: string): string {
+  if (typeof value !== 'string' || !CLI_SLUG.test(value)) throw new WorkspaceRequestError(channel, 'slug must be a Workspace slug')
+  return value
+}
+
+/** A list of item ids, each a plain string — nothing else is passed on. */
+function idList(value: unknown, channel: string): string[] {
+  if (!Array.isArray(value) || value.length > MAX_REVIEW_IDS || !value.every((id) => typeof id === 'string' && id !== '' && id.length <= 128)) {
+    throw new WorkspaceRequestError(channel, 'ids must be a list of item ids')
+  }
+  return [...value] as string[]
+}
 
 function record(request: unknown, channel: string): Record<string, unknown> {
   if (typeof request !== 'object' || request === null || Array.isArray(request)) {
@@ -230,13 +261,29 @@ export function registerWorkspaceChannels(deps: WorkspaceChannelDependencies): (
     })
   })
 
-  handle('workspaces:join', (request) => {
+  handle('workspaces:join', async (request) => {
     const channel = 'workspaces:join'
     const body = record(request, channel)
     const remote = requiredString(body['remote'], channel, 'remote')
     const name = optionalString(body['name'], channel, 'name')
     const branch = optionalString(body['branch'], channel, 'branch')
-    return registry.join(remote, name, { openRoots: deps.openRoots(), ...(branch === undefined ? {} : { branch }) })
+    const started = Date.now()
+    console.log('[Workspaces] join started')
+    const answer = await registry.join(remote, name, { openRoots: deps.openRoots(), ...(branch === undefined ? {} : { branch }) })
+    console.log('[Workspaces] join finished', {
+      ms: Date.now() - started,
+      ok: answer.ok,
+      ...(answer.ok
+        ? { slug: answer.workspace.slug, disconnected: (answer.disconnected ?? []).map((entry) => entry.slug) }
+        : { reason: answer.reason }),
+    })
+    // A Workspace the join disconnected still shows its last sync — an
+    // "unrelated history" error that is no longer true. One sync, the same
+    // as a hand disconnect runs, turns it into "kept on this computer".
+    if (answer.ok) {
+      for (const entry of answer.disconnected ?? []) void deps.sync.syncNow(entry.slug).catch(() => undefined)
+    }
+    return answer
   })
 
   handle('workspaces:current', () => registry.current())
@@ -280,6 +327,14 @@ export function registerWorkspaceChannels(deps: WorkspaceChannelDependencies): (
     // falls back to Default, and the scope follows the broadcast.
     if (answer.ok) deps.broadcastChanged({ cause: 'current' })
     return answer
+  })
+
+  handle('workspaces:removeProject', (request) => {
+    const channel = 'workspaces:removeProject'
+    const body = record(request, channel)
+    const slug = requiredString(body['slug'], channel, 'slug')
+    const project = requiredString(body['project'], channel, 'project')
+    return registry.removeProject({ slug, project })
   })
 
   handle('workspaces:placement', () => deps.placement.state())
@@ -362,30 +417,69 @@ export function registerWorkspaceChannels(deps: WorkspaceChannelDependencies): (
     return deps.sync.resolve({ slug, ...(id === undefined ? {} : { id }), path, take: take as 'ours' | 'theirs' | 'merged' })
   })
 
-  handle('workspaces:intentMerges', (request) => {
-    const channel = 'workspaces:intentMerges'
+  // ── The review of an agent-decided merge — rebuilt field by field ──
+
+  handle('workspaces:reviewAgree', (request) => {
+    const channel = 'workspaces:reviewAgree'
     const body = record(request, channel)
-    return deps.sync.intentMerges({
-      slug: requiredString(body['slug'], channel, 'slug'),
-      mergeId: requiredString(body['mergeId'], channel, 'mergeId'),
+    const slug = requiredString(body['slug'], channel, 'slug')
+    const group = body['group']
+    if (group !== undefined && !(REVIEW_GROUPS as readonly unknown[]).includes(group)) {
+      throw new WorkspaceRequestError(channel, 'group must be one of the review groups')
+    }
+    const ids = body['ids'] === undefined ? undefined : idList(body['ids'], channel)
+    const allGroups = body['allGroups']
+    if (allGroups !== undefined && allGroups !== true) throw new WorkspaceRequestError(channel, 'allGroups must be true when given')
+    const named = [ids, group, allGroups].filter((value) => value !== undefined).length
+    if (named !== 1) throw new WorkspaceRequestError(channel, 'name exactly one of ids, a group or allGroups')
+    return deps.sync.reviewAgree({
+      slug,
+      ...(ids === undefined ? {} : { ids }),
+      ...(group === undefined ? {} : { group: group as WorkspaceMergeGroupKey }),
+      ...(allGroups === true ? { allGroups: true as const } : {}),
     })
   })
 
-  handle('workspaces:keepIntent', (request) => {
-    const channel = 'workspaces:keepIntent'
+  handle('workspaces:reviewDisagree', (request) => {
+    const channel = 'workspaces:reviewDisagree'
     const body = record(request, channel)
-    const keep = body['keep']
-    if (keep !== 'ours' && keep !== 'theirs' && keep !== 'merged') {
-      throw new WorkspaceRequestError(channel, 'keep must be ours, theirs or merged')
+    const reason = body['reason']
+    if (typeof reason !== 'string' || reason.length > MAX_REASON_LENGTH) {
+      throw new WorkspaceRequestError(channel, 'reason must be a string of at most 2000 characters')
     }
-    const documentId = optionalString(body['documentId'], channel, 'documentId')
-    // Rebuilt field by field: no text and no path is ever taken from the renderer.
-    return deps.sync.keepIntent({
-      slug: requiredString(body['slug'], channel, 'slug'),
-      mergeId: requiredString(body['mergeId'], channel, 'mergeId'),
-      ...(documentId === undefined ? {} : { documentId }),
-      keep,
-    })
+    // An empty reason is the engine's to refuse, with a sentence for the person.
+    return deps.sync.reviewDisagree({ slug: requiredString(body['slug'], channel, 'slug'), ids: idList(body['ids'], channel), reason })
+  })
+
+  handle('workspaces:reviewDecide', (request) => {
+    const channel = 'workspaces:reviewDecide'
+    const body = record(request, channel)
+    const slug = requiredString(body['slug'], channel, 'slug')
+    const id = requiredString(body['id'], channel, 'id')
+    const take = body['take']
+    if (take === 'ours' || take === 'theirs') return deps.sync.reviewDecide({ slug, id, take })
+    if (take !== 'text') throw new WorkspaceRequestError(channel, 'take must be ours, theirs or text')
+    const text = body['text']
+    if (typeof text !== 'string' || text.length > MAX_RESOLVE_TEXT_LENGTH) {
+      throw new WorkspaceRequestError(channel, 'text must be a string of at most 1 MB')
+    }
+    return deps.sync.reviewDecide({ slug, id, take: 'text', text })
+  })
+
+  // ── The shared merge reasons — a slug and an id, nothing else passed on ──
+
+  handle('workspaces:mergeReasons', (request) => {
+    const channel = 'workspaces:mergeReasons'
+    return deps.mergeReasons.list(cliSlug(record(request, channel)['slug'], channel))
+  })
+
+  handle('workspaces:removeMergeReason', (request) => {
+    const channel = 'workspaces:removeMergeReason'
+    const body = record(request, channel)
+    const slug = cliSlug(body['slug'], channel)
+    const id = body['id']
+    if (typeof id !== 'string' || !MERGE_REASON_ID.test(id)) throw new WorkspaceRequestError(channel, 'id must be a recorded decision id')
+    return deps.mergeReasons.remove(slug, id)
   })
 
   // ── Connecting a Workspace to a shared repository ──

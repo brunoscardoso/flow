@@ -147,6 +147,12 @@ export interface WorkspaceFile {
 export interface LoadedWorkspace {
   slug: string;
   path: string;
+  /**
+   * What THIS machine calls it: its own name from `settings/workspaces.local.json`,
+   * else the shared name in `workspace.json`. Two teammates syncing one
+   * Workspace may call it differently; only `file.name` is shared.
+   */
+  name: string;
   file: WorkspaceFile;
   /** The parsed JSON as read — unknown keys are written back untouched. */
   raw: Record<string, unknown>;
@@ -182,6 +188,12 @@ export type WorkspaceRefusalReason =
   | 'invalid-link-kind'
   | 'invalid-link-address'
   | 'same-project'
+  // the shared merge-decisions record (workspace-merge-decisions.ts)
+  | 'invalid-decision-kind'
+  | 'invalid-decision-take'
+  | 'invalid-decision-outcome'
+  | 'invalid-decision'
+  | 'unknown-decision'
   // workspace sync (workspace-sync.ts)
   | 'personal-files'
   | 'no-identity'
@@ -193,6 +205,10 @@ export type WorkspaceRefusalReason =
   | 'invalid-resolution'
   /** `--id` names an ask/review whose content changed since it was shown. */
   | 'stale-decision'
+  /** `--settle-held` names an id nothing is held aside under on this machine. */
+  | 'unknown-held'
+  /** `--hold-back` names an id nothing waits for review under on this machine. */
+  | 'unknown-review-item'
   /** The incoming side carries a personal file, a symlink or a repo-settings change. */
   | 'incoming-unsafe'
   /** The remote's history was rewritten (the new tip does not descend from the last one seen). */
@@ -218,6 +234,8 @@ export type WorkspaceRefusalReason =
   | 'default-workspace'
   /** delete: needs `--confirm`; the payload lists what would move. */
   | 'unconfirmed'
+  /** remove-project: the only copy of a project's knowledge here, and its checkout uses it — move it instead. */
+  | 'sole-copy'
   // connecting a Workspace to a shared repository (workspace-remote.ts / workspace-sync.ts)
   /** set-remote: the Workspace already has a different shared repository — needs `--replace`. */
   | 'remote-exists'
@@ -255,6 +273,10 @@ export class WorkspaceRefusal extends Error {
 export interface WorkspaceGitOptions {
   /** Talks to a remote (clone). */
   network?: boolean;
+  /** How long this one call may take; default by kind (local or network). */
+  timeoutMs?: number;
+  /** Written to the call's stdin (a `--batch` read); stdin is closed otherwise. */
+  input?: string;
 }
 
 /** Run git, return stdout, throw on a non-zero exit. */
@@ -321,9 +343,11 @@ export const defaultWorkspaceGit: WorkspaceGit = (args, cwd, options = {}) => {
     encoding: 'utf-8',
     cwd,
     env: workspaceGitEnv(process.env, cwd, network),
-    timeout: network ? NETWORK_GIT_TIMEOUT_MS : LOCAL_GIT_TIMEOUT_MS,
+    timeout: options.timeoutMs ?? (network ? NETWORK_GIT_TIMEOUT_MS : LOCAL_GIT_TIMEOUT_MS),
     maxBuffer: 16 * 1024 * 1024,
-    stdio: [...QUIET_CHILD_STDIO],
+    ...(options.input === undefined
+      ? { stdio: [...QUIET_CHILD_STDIO] }
+      : { input: options.input, stdio: ['pipe', QUIET_CHILD_STDIO[1], QUIET_CHILD_STDIO[2]] }),
   });
 };
 
@@ -493,7 +517,8 @@ export function readWorkspace(flowFolder: string, slug: string): LoadedWorkspace
     throw new WorkspaceRefusal('malformed-workspace', `the Workspace ${slug} can't be read: ${problem}`, { workspace: slug, path });
   }
   const raw = parsed as Record<string, unknown>;
-  return { slug, path, raw, file: raw as unknown as WorkspaceFile };
+  const file = raw as unknown as WorkspaceFile;
+  return { slug, path, raw, file, name: readLocalWorkspaceNames(flowFolder)[slug] ?? file.name };
 }
 
 /** Write a Workspace's file — unknown keys it was read with are kept. */
@@ -595,20 +620,53 @@ export function workspaceDefaultsPath(flowFolder: string): string {
  * unreadable, or the Workspace it names is gone. A preference, so never a
  * refusal: an unreadable record is the same as no record.
  */
-export function readDefaultWorkspace(flowFolder: string): string | null {
-  let parsed: unknown;
+function readWorkspaceDefaults(flowFolder: string): Record<string, unknown> {
   try {
-    parsed = JSON.parse(readFileSync(workspaceDefaultsPath(flowFolder), 'utf-8'));
+    const parsed: unknown = JSON.parse(readFileSync(workspaceDefaultsPath(flowFolder), 'utf-8'));
+    return isRecord(parsed) ? parsed : {};
   } catch {
-    return null;
+    return {};
   }
-  if (!isRecord(parsed) || !isSlug(parsed.default)) return null;
+}
+
+/** Keys this file does not know are written back untouched. */
+function writeWorkspaceDefaults(flowFolder: string, record: Record<string, unknown>): void {
+  mkdirSync(join(flowFolder, SETTINGS_DIRNAME), { recursive: true });
+  atomicWriteFile(workspaceDefaultsPath(flowFolder), `${JSON.stringify(record, null, 2)}\n`);
+}
+
+export function readDefaultWorkspace(flowFolder: string): string | null {
+  const parsed = readWorkspaceDefaults(flowFolder);
+  if (!isSlug(parsed.default)) return null;
   return existsSync(join(workspaceDir(flowFolder, parsed.default), WORKSPACE_FILENAME)) ? parsed.default : null;
 }
 
 export function writeDefaultWorkspace(flowFolder: string, slug: string): void {
-  mkdirSync(join(flowFolder, SETTINGS_DIRNAME), { recursive: true });
-  atomicWriteFile(workspaceDefaultsPath(flowFolder), `${JSON.stringify({ default: slug }, null, 2)}\n`);
+  writeWorkspaceDefaults(flowFolder, { ...readWorkspaceDefaults(flowFolder), default: slug });
+}
+
+/**
+ * What this machine calls each Workspace, by slug — LOCAL, like the Default.
+ * A rename writes here, never into the synced `workspace.json`, so each
+ * teammate keeps their own name for the same shared Workspace.
+ */
+export function readLocalWorkspaceNames(flowFolder: string): Record<string, string> {
+  const names = readWorkspaceDefaults(flowFolder).names;
+  if (!isRecord(names)) return {};
+  const out: Record<string, string> = {};
+  for (const [slug, name] of Object.entries(names)) if (typeof name === 'string' && name.trim() !== '') out[slug] = name;
+  return out;
+}
+
+/** Record this machine's name for a Workspace; null forgets it (the shared name shows again). */
+export function writeLocalWorkspaceName(flowFolder: string, slug: string, name: string | null): void {
+  const record = readWorkspaceDefaults(flowFolder);
+  const names = { ...readLocalWorkspaceNames(flowFolder) };
+  if (name === null) delete names[slug];
+  else names[slug] = name;
+  if (Object.keys(names).length === 0) delete record.names;
+  else record.names = names;
+  writeWorkspaceDefaults(flowFolder, record);
 }
 
 // ─── Repos and identity ─────────────────────────────────────────────────────
@@ -643,7 +701,10 @@ function projectNameFor(repo: string, origin: string | null): string {
 // ─── Public shapes ──────────────────────────────────────────────────────────
 
 export interface WorkspaceSummary {
+  /** What this machine calls it. */
   name: string;
+  /** The name in the shared `workspace.json` — what a teammate who never renamed it sees. */
+  sharedName: string;
   slug: string;
   path: string;
   remote: string | null;
@@ -757,7 +818,8 @@ export interface ProjectView {
 
 export function summaryOf(workspace: LoadedWorkspace, git: WorkspaceGit): WorkspaceSummary {
   return {
-    name: workspace.file.name,
+    name: workspace.name,
+    sharedName: workspace.file.name,
     slug: workspace.slug,
     path: workspace.path,
     remote: workspace.file.remote ?? originOf(workspace.path, git),
@@ -870,6 +932,7 @@ export function createWorkspace(options: CreateOptions): CreateResult {
       slug,
       path,
       raw: {},
+      name,
       file: { name, slug, ...(options.remote === undefined ? {} : { remote: options.remote }), projects: [] },
     };
     writeWorkspace(workspace);
@@ -948,10 +1011,11 @@ export interface RepoHints {
 }
 
 export function pickWorkspace(scan: WorkspaceScan, wanted: string | undefined, hints: RepoHints): LoadedWorkspace {
-  const choices = scan.workspaces.map((workspace) => ({ slug: workspace.slug, name: workspace.file.name }));
+  const choices = scan.workspaces.map((workspace) => ({ slug: workspace.slug, name: workspace.name }));
   if (wanted !== undefined) {
     const found =
       scan.workspaces.find((workspace) => workspace.slug === wanted) ??
+      scan.workspaces.find((workspace) => workspace.name === wanted) ??
       scan.workspaces.find((workspace) => workspace.file.name === wanted) ??
       scan.workspaces.find((workspace) => workspace.slug === slugify(wanted));
     if (found === undefined) {
@@ -1220,7 +1284,7 @@ function resolveProject(
   if (wanted !== undefined) {
     const found = projects.find((project) => project.id === wanted) ?? projects.find((project) => project.slug === wanted);
     if (found === undefined) {
-      throw new WorkspaceRefusal('unknown-project', `the ${workspace.file.name} Workspace has no project ${wanted}`, {
+      throw new WorkspaceRefusal('unknown-project', `the ${workspace.name} Workspace has no project ${wanted}`, {
         workspace: workspace.slug,
         projects: projects.map((project) => ({ id: project.id, name: project.name, slug: project.slug })),
       });
@@ -1474,6 +1538,19 @@ export interface JoinResult {
    * `localPath` is the matching checkout.
    */
   candidates: ProjectView[];
+  /**
+   * Workspaces on this machine that pointed at this repository without sharing
+   * its history — connected to it by hand, never synced with it. Their
+   * connection is let go of (their knowledge and history stay as they are),
+   * because that repository holds THIS Workspace, not theirs.
+   */
+  disconnected: WorkspaceSummary[];
+}
+
+/** The first commits of a repository's history — two histories are one when they share any. */
+function rootCommits(repo: string, git: WorkspaceGit): Set<string> {
+  const out = tryGit(git, ['rev-list', '--max-parents=0', 'HEAD'], repo);
+  return new Set((out ?? '').split('\n').map((line) => line.trim()).filter((line) => line.length > 0));
 }
 
 /** Clone a Workspace and link every project whose checkout this machine knows. */
@@ -1487,15 +1564,31 @@ export function joinWorkspace(options: JoinOptions): JoinResult {
     throw new WorkspaceRefusal('invalid-branch', `'${options.branch}' isn't a name a branch can have`, { branch: options.branch });
   }
 
+  // Workspaces here that point at the same repository. Pointing is not
+  // having: one connected to it by hand (user report 2026-11-24 — the Default
+  // connected to the team's repository) shares none of its history, and
+  // refusing "already joined" on its say-so left the person no way in. Which
+  // one truly holds it is decided once the clone can be compared below.
   const scan = scanWorkspaces(flowFolder);
-  const already = scan.workspaces.find((workspace) => {
+  const claimants = scan.workspaces.filter((workspace) => {
     const known = workspace.file.remote ?? originOf(workspace.path, deps.git);
     return known !== null && known !== undefined && remoteIdentity(known) === identity;
   });
-  if (already !== undefined) {
-    throw new WorkspaceRefusal('already-joined', `this machine already has that Workspace, as ${already.file.name}`, {
-      workspace: summaryOf(already, deps.git),
-    });
+  // The plain case first, with no network: a Workspace that has already
+  // fetched from that repository and shares its history IS that Workspace.
+  for (const claimant of claimants) {
+    const fetched = tryGit(deps.git, ['for-each-ref', '--format=%(objectname)', 'refs/remotes/origin/'], claimant.path);
+    const tips = (fetched ?? '').split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+    if (tips.length === 0) continue;
+    const mine = rootCommits(claimant.path, deps.git);
+    const theirs = new Set(
+      tips.flatMap((tip) => (tryGit(deps.git, ['rev-list', '--max-parents=0', tip], claimant.path) ?? '').split('\n').map((line) => line.trim()))
+    );
+    if ([...mine].some((sha) => theirs.has(sha))) {
+      throw new WorkspaceRefusal('already-joined', `this machine already has that Workspace, as ${claimant.name}`, {
+        workspace: summaryOf(claimant, deps.git),
+      });
+    }
   }
 
   const local = readLocalProjects(flowFolder);
@@ -1543,6 +1636,26 @@ export function joinWorkspace(options: JoinOptions): JoinResult {
     rmSync(staging, { recursive: true, force: true });
     throw new WorkspaceRefusal('not-a-workspace-repo', `that repository is not a Flow Workspace Flow can read: ${problem}`, { remote });
   }
+  const joinedRoots = rootCommits(staging, deps.git);
+  const holder = claimants.find((workspace) => [...rootCommits(workspace.path, deps.git)].some((sha) => joinedRoots.has(sha)));
+  if (holder !== undefined) {
+    rmSync(staging, { recursive: true, force: true });
+    throw new WorkspaceRefusal('already-joined', `this machine already has that Workspace, as ${holder.name}`, {
+      workspace: summaryOf(holder, deps.git),
+    });
+  }
+  // The others only pointed at it: let go of that connection, keep the rest.
+  const disconnected: WorkspaceSummary[] = [];
+  for (const claimant of claimants) {
+    tryGit(deps.git, ['remote', 'remove', 'origin'], claimant.path);
+    if (claimant.file.remote !== undefined) {
+      const file = { ...claimant.file };
+      delete file.remote;
+      writeWorkspace({ ...claimant, file });
+    }
+    disconnected.push(summaryOf(readWorkspace(flowFolder, claimant.slug), deps.git));
+  }
+
   const own = (parsed as WorkspaceFile).slug;
   const base = slugify(options.name ?? '') || own;
   const slug = uniqueSlug(base, new Set(readdirSync(root)));
@@ -1570,6 +1683,7 @@ export function joinWorkspace(options: JoinOptions): JoinResult {
     noLocalCheckout: [],
     needsReview: [],
     candidates: [],
+    disconnected,
   };
   // The checkouts this machine knows, by remote identity — candidates only.
   const knownCheckouts: { path: string; identity: string }[] = [];
@@ -1778,7 +1892,7 @@ export function describeProject(options: DescribeOptions): DescribeResult {
   const workspace = pickWorkspace(scan, options.workspace, { ...NO_HINTS, project: options.project });
   const project = workspace.file.projects.find((entry) => entry.slug === options.project || entry.id === options.project);
   if (project === undefined) {
-    throw new WorkspaceRefusal('unknown-project', `the Workspace ${workspace.file.name} has no project ${options.project}`, {
+    throw new WorkspaceRefusal('unknown-project', `the Workspace ${workspace.name} has no project ${options.project}`, {
       workspace: workspace.slug,
       projects: workspace.file.projects.map((entry) => ({ id: entry.id, slug: entry.slug, name: entry.name })),
     });
@@ -1858,10 +1972,10 @@ export function provisionWorkspaceLink(target: string, context: WorkspaceContext
       return {
         kind: 'suggestion',
         workspace: workspace.slug,
-        workspaceName: workspace.file.name,
+        workspaceName: workspace.name,
         project: project.id,
         projectSlug: project.slug,
-        sentence: `this checkout looks like ${project.name} of the ${workspace.file.name} Workspace — link it from the Workspace to keep its knowledge there`,
+        sentence: `this checkout looks like ${project.name} of the ${workspace.name} Workspace — link it from the Workspace to keep its knowledge there`,
       };
     }
     return { kind: 'not-in-workspace' };

@@ -106,10 +106,13 @@ import type {
   WorkspaceAnswer,
   WorkspaceResolveRequest,
   WorkspaceResolveResult,
-  WorkspaceIntentMergeSet,
-  WorkspaceIntentMergesRequest,
-  WorkspaceKeepIntentRequest,
-  WorkspaceKeepIntentResult,
+  WorkspaceReviewAgreeRequest,
+  WorkspaceReviewDecideRequest,
+  WorkspaceReviewDisagreeRequest,
+  WorkspaceReviewResult,
+  WorkspaceMergeReasonsRequest,
+  WorkspaceMergeReasonsResult,
+  WorkspaceRemoveMergeReasonRequest,
   WorkspaceCreateRemoteRequest,
   WorkspaceHostTools,
   WorkspaceRemoteResult,
@@ -127,6 +130,8 @@ import type {
   ThreadContextOfferEvent,
   WorkspacesChangedEvent,
   WorkspaceDeleteResult,
+  WorkspaceRemoveProjectRequest,
+  WorkspaceRemoveProjectResult,
   WorkspacePlacementState,
   WorkspacesList,
   WorkspaceSuggestion,
@@ -3636,7 +3641,7 @@ export interface BlueprintFeatureLimitations {
  *  CLI's `ExcludedFeatureFile` (separate runtimes, no shared import). */
 export interface BlueprintExcludedFeatureFile {
   slug: string
-  reason: 'working-set' | 'capture-note' | 'no-kind'
+  reason: 'working-set' | 'capture-note' | 'no-kind' | 'container'
   /** False when the file IS drawn and the reason is a declared guess. */
   dropped: boolean
 }
@@ -7018,6 +7023,8 @@ export interface IpcInvokeMap {
    * is not touched. Default refuses.
    */
   'workspaces:delete': { request: { slug: string }; response: WorkspaceAnswer<WorkspaceDeleteResult> }
+  /** Take one project out of one Workspace; its folder is kept as a backup. */
+  'workspaces:removeProject': { request: WorkspaceRemoveProjectRequest; response: WorkspaceAnswer<WorkspaceRemoveProjectResult> }
   /** The projects outside every Workspace (waiting on a person, or failed), and whether the launch migration still runs. */
   'workspaces:placement': { request: Record<string, never>; response: WorkspacePlacementState }
   /** "Move it in": the one confirmed commit a committed knowledge folder takes. A person's press only. */
@@ -7054,15 +7061,23 @@ export interface IpcInvokeMap {
    */
   'workspaces:resolve': { request: WorkspaceResolveRequest; response: WorkspaceResolveResult }
   /**
-   * The documents Flow merged in one sync (the "merged two edits"
-   * notification names it) — null when this computer no longer holds it.
+   * The review of an agent-decided merge. `reviewAgree`: agree by items, by
+   * group or to all groups (never items a person must choose for); the agreed
+   * part is shared at once, what nobody has looked at yet held back first — a share that did not go out is
+   * `not-shared`, never reported as done. `reviewDisagree`: a reason is
+   * required; the agent tries once more with it, and a second disagreement
+   * leaves the item to the person. `reviewDecide`: the person settles one item.
    */
-  'workspaces:intentMerges': { request: WorkspaceIntentMergesRequest; response: WorkspaceIntentMergeSet | null }
+  'workspaces:reviewAgree': { request: WorkspaceReviewAgreeRequest; response: WorkspaceReviewResult }
+  'workspaces:reviewDisagree': { request: WorkspaceReviewDisagreeRequest; response: WorkspaceReviewResult }
+  'workspaces:reviewDecide': { request: WorkspaceReviewDecideRequest; response: WorkspaceReviewResult }
   /**
-   * Put a merged document (or all of one sync's) to one text: `ours` is Undo.
-   * A new commit through the CLI, then a sync — never a force push.
+   * The Workspace's shared merge reasons: `mergeReasons` lists the live
+   * recorded decisions; `removeMergeReason` withdraws one (a recorded removal,
+   * never a rewrite) and answers the list as it is afterwards.
    */
-  'workspaces:keepIntent': { request: WorkspaceKeepIntentRequest; response: WorkspaceKeepIntentResult }
+  'workspaces:mergeReasons': { request: WorkspaceMergeReasonsRequest; response: WorkspaceMergeReasonsResult }
+  'workspaces:removeMergeReason': { request: WorkspaceRemoveMergeReasonRequest; response: WorkspaceMergeReasonsResult }
   /**
    * Connecting a Workspace to a shared repository. `hostTools`: which hosts
    * this computer's own signed-in tools can create a repository on, and where
@@ -8213,6 +8228,7 @@ export const IPC_INVOKE_CHANNELS = [
   'workspaces:rename',
   'workspaces:moveProject',
   'workspaces:delete',
+  'workspaces:removeProject',
   'workspaces:placement',
   'workspaces:moveIn',
   'workspaces:retryPlacement',
@@ -8225,8 +8241,11 @@ export const IPC_INVOKE_CHANNELS = [
   'workspaces:syncStatus',
   'workspaces:syncNow',
   'workspaces:resolve',
-  'workspaces:intentMerges',
-  'workspaces:keepIntent',
+  'workspaces:reviewAgree',
+  'workspaces:reviewDisagree',
+  'workspaces:reviewDecide',
+  'workspaces:mergeReasons',
+  'workspaces:removeMergeReason',
   'workspaces:hostTools',
   'workspaces:learnConnections',
   'workspaces:connectionsLearningStatus',
@@ -9441,6 +9460,7 @@ export interface FlowWorkspacesApi {
   rename(request: IpcRequest<'workspaces:rename'>): Promise<IpcResponse<'workspaces:rename'>>
   moveProject(request: IpcRequest<'workspaces:moveProject'>): Promise<IpcResponse<'workspaces:moveProject'>>
   delete(request: IpcRequest<'workspaces:delete'>): Promise<IpcResponse<'workspaces:delete'>>
+  removeProject(request: IpcRequest<'workspaces:removeProject'>): Promise<IpcResponse<'workspaces:removeProject'>>
   placement(): Promise<IpcResponse<'workspaces:placement'>>
   moveIn(request: IpcRequest<'workspaces:moveIn'>): Promise<IpcResponse<'workspaces:moveIn'>>
   retryPlacement(request: IpcRequest<'workspaces:retryPlacement'>): Promise<IpcResponse<'workspaces:retryPlacement'>>
@@ -9454,8 +9474,11 @@ export interface FlowWorkspacesApi {
   syncStatus(request: IpcRequest<'workspaces:syncStatus'>): Promise<IpcResponse<'workspaces:syncStatus'>>
   syncNow(request: IpcRequest<'workspaces:syncNow'>): Promise<IpcResponse<'workspaces:syncNow'>>
   resolve(request: IpcRequest<'workspaces:resolve'>): Promise<IpcResponse<'workspaces:resolve'>>
-  intentMerges(request: IpcRequest<'workspaces:intentMerges'>): Promise<IpcResponse<'workspaces:intentMerges'>>
-  keepIntent(request: IpcRequest<'workspaces:keepIntent'>): Promise<IpcResponse<'workspaces:keepIntent'>>
+  reviewAgree(request: IpcRequest<'workspaces:reviewAgree'>): Promise<IpcResponse<'workspaces:reviewAgree'>>
+  reviewDisagree(request: IpcRequest<'workspaces:reviewDisagree'>): Promise<IpcResponse<'workspaces:reviewDisagree'>>
+  reviewDecide(request: IpcRequest<'workspaces:reviewDecide'>): Promise<IpcResponse<'workspaces:reviewDecide'>>
+  mergeReasons(request: IpcRequest<'workspaces:mergeReasons'>): Promise<IpcResponse<'workspaces:mergeReasons'>>
+  removeMergeReason(request: IpcRequest<'workspaces:removeMergeReason'>): Promise<IpcResponse<'workspaces:removeMergeReason'>>
   hostTools(): Promise<IpcResponse<'workspaces:hostTools'>>
   createRemote(request: IpcRequest<'workspaces:createRemote'>): Promise<IpcResponse<'workspaces:createRemote'>>
   setRemote(request: IpcRequest<'workspaces:setRemote'>): Promise<IpcResponse<'workspaces:setRemote'>>

@@ -35,17 +35,6 @@ async function expectCardInWindow(window: Page): Promise<void> {
   expect(box.y + box.height).toBeLessThanOrEqual(size.height)
 }
 
-/** Close every tour that is open, and any that opens right behind it. */
-async function closeAnyTour(window: Page): Promise<void> {
-  for (let i = 0; i < 8; i += 1) {
-    if ((await window.locator('.fl-guide').count()) === 0) {
-      await window.waitForTimeout(1500)
-      if ((await window.locator('.fl-guide').count()) === 0) return
-    }
-    await card(window).locator('.fl-guide-x').click()
-  }
-}
-
 const SHOTS = process.env['FLOW_E2E_SHOTS'] ?? ''
 
 test('the overview, a first-open tour, Escape, the (i) replay, and the switch', async ({ window }) => {
@@ -70,11 +59,30 @@ test('the overview, a first-open tour, Escape, the (i) replay, and the switch', 
   await expect(overview).toHaveCount(0)
   await expect.poll(async () => (await guides(window)).overviewSeen).toBe(true)
 
+  // ── Explore on my own skips the tours: the board opens with none ──────────
+  await expect.poll(async () => (await guides(window)).enabled).toBe(false)
+  await window.evaluate(() => document.dispatchEvent(new CustomEvent('flow:open-board')))
+  await expect(window.locator('.fl-board')).toBeVisible({ timeout: 15_000 })
+  await window.waitForTimeout(3000)
+  await expect(window.locator('.fl-guide-card')).toHaveCount(0)
+  expect((await guides(window)).seen).toEqual([])
+
+  // Tips back on (as Settings › Guides would), for the first-open tour below.
+  await window.evaluate(async () => {
+    const flow = (window as unknown as { flow: { settings: { setGuides: (u: object) => Promise<unknown> } } }).flow
+    await flow.settings.setGuides({ enabled: true })
+    document.dispatchEvent(new CustomEvent('flow:guides-changed'))
+  })
+
   // ── The Tasks tour starts the first time the board is on screen ───────────
   // (whatever else is on screen — the composer, Launchpad — may tour first;
   // close those, the way a person who wants the board would)
-  await window.waitForTimeout(2500)
-  await closeAnyTour(window)
+  // The board is already up, so close every other tour until the Tasks one comes.
+  for (let i = 0; i < 10 && (await tour(window, 'tasks').count()) === 0; i += 1) {
+    await window.waitForTimeout(1500)
+    if ((await tour(window, 'tasks').count()) > 0) break
+    if ((await window.locator('.fl-guide').count()) > 0) await card(window).locator('.fl-guide-x').click()
+  }
   await window.evaluate(() => document.dispatchEvent(new CustomEvent('flow:open-board')))
   await expect(window.locator('.fl-board')).toBeVisible({ timeout: 15_000 })
   await expect(tour(window, 'tasks')).toHaveCount(1, { timeout: 10_000 })

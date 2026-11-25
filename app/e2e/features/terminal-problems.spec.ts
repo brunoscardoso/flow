@@ -36,7 +36,7 @@ const WARNING_MESSAGE = 'Stop signal resubscribe failed: Error 61 connecting to 
 const ERROR_MESSAGE = 'ConnectionRefusedError: [Errno 61] Connection refused'
 
 const STEP_COMMAND = [
-  `for i in 1 2 3 4 5; do printf '2026-11-18 20:56:0%s.890 | WARNING  | jupiter_core.harness.runtime.stop_signal:_resubscribe:588 - ${WARNING_MESSAGE}\\n' $i; sleep 0.3; done`,
+  `for i in 1 2 3 4 5; do printf '2026-11-18 20:56:0%s.890 | WARNING  | lumen_core.harness.runtime.stop_signal:_resubscribe:588 - ${WARNING_MESSAGE}\\n' $i; sleep 0.3; done`,
   `printf '  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection\\n    await waiter\\n'`,
   `printf '\\033[31m${ERROR_MESSAGE}\\033[0m\\n'`,
   'sleep 600',
@@ -83,13 +83,13 @@ test('terminal errors and warnings: counters, rows with counts, context, Copy an
   const group = window.locator('.fl-problems-tgroup')
   await expect(group).toHaveCount(1)
   await expect(group.locator('.fl-problems-thead b')).toHaveText('core-dev')
-  await expect(group.locator('.fl-problems-thead span')).toHaveText(/ · Launchpad$/)
+  await expect(group.locator('.fl-problems-thead span')).toHaveText(/ · run step$/)
   const warningRow = group.locator('.fl-problems-trow[data-severity="warning"]')
   const errorRow = group.locator('.fl-problems-trow[data-severity="error"]')
   await expect(warningRow).toHaveCount(1)
   await expect(warningRow.locator('.fl-problems-tmsg')).toHaveText(WARNING_MESSAGE)
   await expect(warningRow.locator('.fl-problems-times')).toHaveText('×5')
-  await expect(warningRow.locator('.fl-problems-tmeta')).toHaveText(/^jupiter_core\.harness\.runtime\.stop_signal · last \d\d:\d\d:\d\d$/)
+  await expect(warningRow.locator('.fl-problems-tmeta')).toHaveText(/^lumen_core\.harness\.runtime\.stop_signal · last \d\d:\d\d:\d\d$/)
   await expect(errorRow.locator('.fl-problems-tmsg')).toHaveText(ERROR_MESSAGE)
   await expect(errorRow.locator('.fl-problems-times')).toHaveText('×1')
   // Newest first: the error came last.

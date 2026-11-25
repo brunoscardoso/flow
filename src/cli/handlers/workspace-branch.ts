@@ -171,7 +171,7 @@ export function parseLsRemote(out: string): { branches: string[]; defaultBranch:
 
 function requireRepository(workspace: LoadedWorkspace, git: WorkspaceGit): void {
   if (!isRepoRoot(workspace.path, git)) {
-    throw new WorkspaceRefusal('not-a-git-repo', `the ${workspace.file.name} Workspace folder is not a git repository`, { workspace: workspace.slug });
+    throw new WorkspaceRefusal('not-a-git-repo', `the ${workspace.name} Workspace folder is not a git repository`, { workspace: workspace.slug });
   }
 }
 
@@ -198,7 +198,7 @@ export function listWorkspaceBranches(options: BranchesOptions): BranchesResult 
   const origin = originOf(workspace.path, deps.git);
   const asked = options.remote?.trim() || origin;
   if (asked === null || asked === undefined || asked === '') {
-    throw new WorkspaceRefusal('remote-unreadable', `the ${workspace.file.name} Workspace has no shared repository to read branches from`, {
+    throw new WorkspaceRefusal('remote-unreadable', `the ${workspace.name} Workspace has no shared repository to read branches from`, {
       workspace: workspace.slug,
     });
   }
@@ -268,7 +268,7 @@ export function chooseWorkspaceBranch(
   restore = false
 ): { previous: string | null; changed: boolean } {
   const previous = currentBranchOf(workspace.path, git);
-  const changed = switchWorkspaceBranch(git, workspace.path, branch, workspace.file.name);
+  const changed = switchWorkspaceBranch(git, workspace.path, branch, workspace.name);
   if (restore) {
     setChosenBranch(workspace.path, git, null);
   } else {
@@ -287,7 +287,7 @@ export function setWorkspaceBranch(options: SetBranchOptions): SetBranchResult {
   if (tryRun(deps.git, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], workspace.path)) {
     throw new WorkspaceRefusal(
       'merge-in-progress',
-      `a merge was left half-done in the ${workspace.file.name} Workspace, so its branch can't change until a sync settles it`,
+      `a merge was left half-done in the ${workspace.name} Workspace, so its branch can't change until a sync settles it`,
       { workspace: workspace.slug }
     );
   }

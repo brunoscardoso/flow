@@ -18,7 +18,7 @@ import { orderRunTabs, stepTabFace, type OrderedRunTab, type RunDotTone } from '
 
 /** Every fixed sentence of the grouped tab — scanned by the test for #12. */
 export const LAUNCHPAD_TAB_STRINGS = {
-  label: 'Launchpad',
+  label: 'Run steps',
   starting: 'Starting',
   stopped: 'Stopped',
   all: 'All',
@@ -41,9 +41,9 @@ export const LAUNCHPAD_TAB_STRINGS = {
   stopTitle: 'End only this step',
   stopIdleTitle: 'This step is not running',
   separate: 'Show as separate tabs',
-  group: 'Group Launchpad tabs',
+  group: 'Group run step tabs',
   caretTitle: 'Jump to a step',
-  stepMenuTitle: 'Launchpad options',
+  stepMenuTitle: 'Run step options',
   notStarted: 'Not started yet.',
   logEmpty: 'Nothing printed yet.',
 } as const

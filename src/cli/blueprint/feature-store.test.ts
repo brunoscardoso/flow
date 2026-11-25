@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import {
   AmbiguousLearnedSectionError,
+  containerFeatureSlugs,
   featuresDir,
   featureSummary,
   hasUnparsedContent,
@@ -17,7 +18,9 @@ import {
   mintFeatureId,
   normalizeEdges,
   parseEdges,
+  featureExclusion,
   parseFeatureFile,
+  resolveFeatureRef,
   readFeatures,
   readFeaturesWithExclusions,
   featureAdvisory,
@@ -80,6 +83,19 @@ describe('parsing a legacy file (no frontmatter)', () => {
   it('derives the display name from the heading, never inventing prose', () => {
     expect(parseFeatureFile('x', LEGACY).name).toBe('Blueprint Simulation')
     expect(parseFeatureFile('my-slug', 'no heading here\n').name).toBe('my-slug')
+  });
+});
+
+describe('a parent written without its feature: prefix', () => {
+  it('reads `project::slug` as the namespaced id, so the change attaches to its feature', () => {
+    const known = ['feature:lumen-app::chats', 'feature:lumen-app::spaces'];
+    const written = parseFeatureFile('chat-fix', '---\nid: feature:lumen-app::chat-fix\nname: Chat fix\nkind: child\nparent: lumen-app::chats\n---\n\n# Chat fix\n');
+    expect(written.parent).toBe('feature:lumen-app::chats');
+    expect(resolveFeatureRef(written.parent ?? '', known)).toBe('feature:lumen-app::chats');
+    // A well-formed parent is untouched (the control).
+    expect(parseFeatureFile('x', '---\nkind: child\nparent: feature:chats\n---\n').parent).toBe('feature:chats');
+    // Something that is not an id is kept exactly as written.
+    expect(parseFeatureFile('y', '---\nkind: child\nparent: chats\n---\n').parent).toBe('chats');
   });
 });
 
@@ -451,6 +467,42 @@ Working set for "ACME-2204" — 36 file(s): 5 edited, 31 read.
     writeFileSync(join(featuresDir(flow), 'acme-2204.md'), WORKING_SET);
     writeFileSync(join(featuresDir(flow), 'real.md'), '# Feature: Real Feature\n\nProse.\n');
     expect(readFeatures(flow).map((f) => f.slug)).toEqual(['real']);
+  });
+
+  it('the older capture shape (captured_at, no capture key) is a note, even once it was adopted as core', () => {
+    const flow = tempFlow();
+    const oldNote = '---\nid: feature:aai-3908-root-cause\nname: AAI-3908 root cause\nkind: core\nanchors: [file:src/a.ts]\ncaptured_at: 2026-09-28\nfeature: aai-3908-root-cause\njira: AAI-3908\nstatus: plan-complete\ntitle: "AAI-3908"\n---\n\n# AAI-3908\n';
+    writeFileSync(join(featuresDir(flow), 'aai-3908-root-cause.md'), oldNote);
+    writeFileSync(join(featuresDir(flow), 'playbooks.md'), '---\nid: feature:playbooks\nname: Playbooks\nkind: core\n---\n\n# Playbooks\n');
+    expect(readFeatures(flow).map((f) => f.slug)).toEqual(['playbooks']);
+    expect(featureExclusion(oldNote)).toBe('capture-note');
+    // …and a sweep never adopts one that was not adopted yet.
+    writeFileSync(join(featuresDir(flow), 'aai-1-note.md'), '---\ncaptured_at: 2026-09-01\nfeature: aai-1-note\ntitle: "AAI-1"\n---\n\n# AAI-1\n');
+    expect(seedFeatures(flow)).not.toContain('aai-1-note');
+  });
+
+  it('the oldest capture template (Created + Last Updated) is a note, whatever kind it was given', () => {
+    const flow = tempFlow();
+    const old = (kind: string): string =>
+      `---\n${kind}status: active\ncreated: 2026-07-15\n---\n\n# [[playbook-chat-history-webhook]]\n\n**Project**: [[core]]\n**Status**: active\n**Created**: 2026-07-15\n**Last Updated**: 2026-07-15\n\n## Links\n`;
+    writeFileSync(join(featuresDir(flow), 'never-adopted.md'), old(''));
+    writeFileSync(join(featuresDir(flow), 'adopted-as-core.md'), old('id: feature:adopted-as-core\nname: Adopted\nkind: core\n'));
+    writeFileSync(join(featuresDir(flow), 'adopted-as-change.md'), old('id: feature:adopted-as-change\nname: Adopted\nkind: child\n'));
+    // A real feature that merely has a Created line is still a feature (the positive).
+    writeFileSync(join(featuresDir(flow), 'playbooks.md'), '---\nid: feature:playbooks\nname: Playbooks\nkind: core\n---\n\n# Playbooks\n\n**Created**: 2026-01-01\n');
+    // Filed as a change, it is a change; unfiled or stamped core, it is a note.
+    expect(readFeatures(flow).map((f) => `${f.slug}:${f.kind}`)).toEqual(['adopted-as-change:child', 'playbooks:core']);
+    expect(seedFeatures(flow)).not.toContain('never-adopted');
+  });
+
+  it("a work record's header (Status beside Plan, Discovery, Jira, Date…) is a note, whatever kind it was given", () => {
+    const flow = tempFlow();
+    writeFileSync(join(featuresDir(flow), 'sse-keepalive.md'), '# Feature: sse-keepalive\n\n**Status**: Shipped (2026-05-12)\n**Plan**: `flow/archive/plan_sse_keepalive_v1.md`\n\n## Summary\n');
+    writeFileSync(join(featuresDir(flow), 'pr-1-fixes.md'), '---\nid: feature:pr-1-fixes\nname: PR 1\nkind: core\n---\n\n# PR 1\n\n**Status:** discovery complete\n**Date:** 2026-08-26\n');
+    // A status line alone, or a plan link alone, does not make a feature a note (the positives).
+    writeFileSync(join(featuresDir(flow), 'chats.md'), '---\nid: feature:chats\nname: Chats\nkind: core\n---\n\n# Chats\n\n**Status**: stable\n');
+    writeFileSync(join(featuresDir(flow), 'skills.md'), '---\nid: feature:skills\nname: Skills\nkind: core\n---\n\n# Skills\n\n**Plan**: see the roadmap\n');
+    expect(readFeatures(flow).map((f) => f.slug).sort()).toEqual(['chats', 'skills']);
   });
 
   it('a brain-capture note is excluded by the marker it CARRIES', () => {
@@ -1446,5 +1498,41 @@ describe('the two-key promise, end to end (plan feature-type-icons, note 10)', (
     expect(() => writeLearnedRole(flow, 'chats', 'wizard' as FeatureRole)).toThrow(/not a feature role/);
     expect(() => writeLearnedRole(flow, 'chats', 'wizard' as FeatureRole, 'List')).toThrow(/not a feature role/);
     expect(readFileSync(file).equals(before)).toBe(true);
+  });
+});
+
+describe('a feature that only outlines other features', () => {
+  function storeWith(entries: Record<string, string>): string {
+    const flow = tempFlow();
+    for (const [slug, anchors] of Object.entries(entries)) {
+      writeFileSync(join(featuresDir(flow), `${slug}.md`), `---\nid: feature:${slug}\nname: ${slug}\nkind: core\nanchors: ${anchors}\nrelates: []\n---\n\n# ${slug}\n`);
+    }
+    return flow;
+  }
+
+  it('is the folder holding three or more other features (the project package beside its own core folder)', () => {
+    const flow = storeWith({
+      'lumen-core': '[module:lumen_core]',
+      core: '[module:lumen_core/core]',
+      auth: '[file:lumen_core/auth/jwt.py, file:lumen_core/auth/models.py]',
+      db: '[module:lumen_core/db]',
+      docs: '[module:docs/api]',
+    });
+    // The positive: the inner folders are features…
+    const slugs = containerFeatureSlugs(readFeatures(flow));
+    expect(readFeatures(flow).map((f) => f.slug)).toEqual(expect.arrayContaining(['core', 'auth', 'db']));
+    // …and only the outline is not.
+    expect([...slugs]).toEqual(['lumen-core']);
+  });
+
+  it('holding two features is not enough, and a feature reaching outside the folder does not count', () => {
+    const flow = storeWith({
+      app: '[module:app]',
+      one: '[module:app/one]',
+      two: '[module:app/two]',
+      wide: '[module:app/three, module:lib/x]',
+      appendix: '[module:appendix]',
+    });
+    expect([...containerFeatureSlugs(readFeatures(flow))]).toEqual([]);
   });
 });

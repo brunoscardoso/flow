@@ -153,7 +153,7 @@ class ManualTimers implements EngineTimers {
         // The REAL promote verb too: a Workspace with no drafts costs no fetch and decides nothing.
         runPromotionCli: runCli,
         mergeIntent: async () => null,
-        onIntentMerged: () => undefined,
+        decideFast: async () => null,
         // Kept so a failure says what the CLI answered.
         log: (message, detail) => logs.push({ message, detail }),
       })

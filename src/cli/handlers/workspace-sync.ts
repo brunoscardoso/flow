@@ -28,7 +28,8 @@
  *      anything is checked out, what the remote changed since the common
  *      ancestor is judged: a personal file (any spelling), a symlink, a nested
  *      `.gitattributes`/`.gitignore`, or a root one changed outside Flow's
- *      generated block refuses `incoming-unsafe` (fast-forward included).
+ *      generated block refuses `incoming-unsafe` (fast-forward included) —
+ *      except a root `.gitignore` that only ignores MORE (`onlyIgnoresMore`).
  *      Every git call that writes the tree runs with `core.symlinks=false`.
  *      Then a fast-forward when we are behind it, otherwise `merge --no-ff
  *      --no-commit` and `workspace-merge.ts` sorts what both sides touched.
@@ -61,6 +62,30 @@
  * question was put about — no new fetch), records the decision in `.git`
  * (never committed; keyed to both sides' exact content, see workspace-merge.ts)
  * and completes the merge when nothing else is waiting.
+ *
+ * Many decisions in ONE run: `--decisions <file>` (`{ "decisions": [ { id,
+ * take, content? } ] }`) goes through the same matching, storing and applying
+ * as a single `--id`, and the merge completes in one pass. The batch is all or
+ * nothing: one id that no longer names a current item (`stale-decision`) or
+ * one take its item does not accept (`invalid-resolution`) refuses every
+ * decision, writes nothing and leaves no merge in progress.
+ * `--hold <ids>` (with `--decisions`) holds items still under review aside:
+ * the merge commits the WORKSPACE's version at their paths and this machine's
+ * decided text goes to `.git/plan-flow-held.json` (`holdPendingItems`), never
+ * committed — so no push publishes it. `--settle-held <id> --take
+ * ours|theirs|file:<path>` writes the agreed text as an ordinary commit
+ * (`knowledge: settle <path>`) and syncs on; every result lists `heldAside`.
+ * A merge that applied decisions names each decided path and who agreed
+ * (`Agreed-by:`, git's user.name) in its commit body; the subject is unchanged.
+ * With `--no-push` a committed merge is `merged-local`, `awaitingReview`, and
+ * `mergedItems` lists what was decided in it. Its decided items are recorded
+ * as the OPEN REVIEW (`.git/plan-flow-review.json`, never committed): while
+ * anything is recorded, a run that would push stops at `merged-local` instead
+ * unless it says `--agreed` (a person agreed), whose successful push clears
+ * the record — so a restart or another caller never publishes an unreviewed
+ * merge. `--hold-back <ids>` puts recorded items back to the Workspace's
+ * version as one local commit and holds this machine's text aside (a
+ * disagreed decision then no longer blocks publishing the agreed rest).
  *
  * `--commit-only` (`commitOnly`) stops after step 1: no fetch, no merge, no
  * push — `committed` or `nothing-to-do`. The app's quit path uses it, so
@@ -112,8 +137,9 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
+import { isWorkingSetCapture } from '../blueprint/feature-store.js';
 import { writeBrainIndex } from '../state/brain-index.js';
 import { summarizeArchivedRounds } from '../state/rounds-summary.js';
 import { atomicWriteFile } from '../utils/atomic-write.js';
@@ -129,14 +155,19 @@ import { parseGitRemote, redactRemote } from './knowledge-migration.js';
 import {
   applyDecisions,
   applyResolutions,
+  decidedText,
   inspectMerge,
   isIntentPath,
   MAX_DECISION_CONTENT,
   readDecisions,
   readMergeFacts,
+  textAt,
   writeDecisions,
   writeMergeLog,
+  type AskKind,
+  type MergeFacts,
   type MergeResolution,
+  type ReviewKind,
   type StoredDecision,
   type SyncAsk,
   type SyncReview,
@@ -149,6 +180,7 @@ import {
   projectFolder,
   recordBranchMove,
   readLocalProjects,
+  readLocalWorkspaceNames,
   readWorkspace,
   realOrResolved,
   scanWorkspaces,
@@ -157,6 +189,7 @@ import {
   WorkspaceRefusal,
   workspaceDir,
   writeWorkspaceRepoFiles,
+  writeLocalWorkspaceName,
   type LoadedWorkspace,
   type WorkspaceDeps,
   type WorkspaceGit,
@@ -169,6 +202,21 @@ export { WORKSPACE_FALLBACK_BRANCH } from './workspace-branch.js';
 export const SYNC_LOCK_GIT_PATH = 'plan-flow-sync.lock';
 /** Written right before Flow's own merge starts, removed once it is committed or undone. */
 export const SYNC_MERGE_MARKER_GIT_PATH = 'plan-flow-sync-merge.json';
+/**
+ * Inside `.git`: this machine's text of items still under review, held aside
+ * while the Workspace's version is what the merge committed (never committed).
+ */
+export const SYNC_HELD_GIT_PATH = 'plan-flow-held.json';
+/**
+ * Inside `.git`: the decided items of merges committed here with `--no-push`
+ * and not yet agreed by a person (never committed). While it lists anything,
+ * a sync publishes only with `--agreed`; without it the run is `merged-local`.
+ */
+export const SYNC_REVIEW_GIT_PATH = 'plan-flow-review.json';
+/** The largest `--decisions` file read (each `content` is still capped at MAX_DECISION_CONTENT). */
+export const MAX_DECISIONS_FILE = 256 * 1024 * 1024;
+/** How many decided paths a merge commit's body names before it says how many more. */
+const MAX_BODY_DECISIONS = 50;
 /** The longest one sync may run (the network git timeout, and the app's bound): a lock with no live owner older than this is stale. */
 export const LOCK_TIMEOUT_MS = 5 * 60 * 1000;
 /** Even a lock whose recorded process looks alive is stale after this — the pid was reused. */
@@ -197,7 +245,12 @@ export type SyncState =
   /** The remote answered and refused this machine's access. */
   | 'no-access'
   /** `--commit-only`: local changes were committed; nothing was exchanged. */
-  | 'committed';
+  | 'committed'
+  /**
+   * `--no-push`: a merge was committed on this machine and NOT published — it
+   * waits for a person's review (`awaitingReview`, `mergedItems`).
+   */
+  | 'merged-local';
 
 export interface SyncCommit {
   sha: string;
@@ -272,7 +325,51 @@ export interface SyncResult {
   detail?: string;
   /** `--put-back`: the intent document this run put back to the text it was given. */
   putBack?: { path: string };
+  /**
+   * Every ask/review decided in the merge this run committed (empty when none):
+   * what the app shows for review. A held item is listed with `take: 'theirs'`
+   * and `held: true` — the Workspace's version is what the merge holds.
+   */
+  mergedItems: MergedItem[];
+  /** `merged-local` only: the merge is committed here and waits for a person's review before it is pushed. */
+  awaitingReview?: true;
+  /**
+   * What is held aside on this machine now (read from the store in `.git`),
+   * whatever this run did. Not named `held`: that was the retired draft-hold
+   * report, and an older reader must not mistake one for the other.
+   */
+  heldAside: HeldSummary[];
+  /** `--settle-held`: the held item this run settled, and the commit it made (null when the text was already there, or `theirs`). */
+  settled?: { id: string; path: string; take: 'ours' | 'theirs' | 'file'; sha: string | null };
+  /** `--hold-back`: the review items put back to the Workspace's version, and the commit (null when nothing changed). */
+  heldBack?: { ids: string[]; sha: string | null };
 }
+
+/** One decided item of a merge. */
+export interface MergedItem {
+  id: string;
+  path: string;
+  /** `combine`: the whole merge is two Workspaces combined — one item, agreed as one. */
+  kind: AskKind | ReviewKind | 'combine';
+  take: Take;
+  held?: true;
+}
+
+/**
+ * One item held aside: the merge committed the Workspace's version at `path`;
+ * `text` is this machine's decided text (null = the file removed), kept in
+ * `.git` until it is settled.
+ */
+export interface HeldItem {
+  id: string;
+  path: string;
+  kind: AskKind | ReviewKind;
+  text: string | null;
+  heldAt: string;
+}
+
+/** A held item without its text — what every sync result carries. */
+export type HeldSummary = Omit<HeldItem, 'text'>;
 
 /**
  * Why a remote refused a sync:
@@ -323,6 +420,17 @@ export interface SyncResolve {
 }
 
 /**
+ * Settle ONE held item (`--settle-held <id> --take …`): `ours` writes the held
+ * text, `file:<path>` a new text, as an ordinary local commit
+ * (`knowledge: settle <path>`) that the same run then syncs; `theirs` keeps the
+ * Workspace's version and only lets go of the held text.
+ */
+export interface SyncSettleHeld {
+  id: string;
+  take: string;
+}
+
+/**
  * Put ONE intent document (a decision, plan or discovery) back to a given text —
  * the app's Undo of an agent's merge, and its "keep yours / theirs" — as an
  * ordinary new commit, which the same run then syncs. Never a force push.
@@ -348,8 +456,42 @@ export interface SyncOptions {
   workspace?: string;
   message?: string;
   resolve?: SyncResolve;
+  /**
+   * A JSON file `{ "decisions": [ { "id", "take", "content"? } ] }` deciding
+   * many waiting items in ONE run and one merge. Every id must name a current
+   * item and every take must be one it accepts — otherwise the WHOLE batch is
+   * refused (`stale-decision` / `invalid-resolution`) and nothing is written.
+   */
+  decisions?: string;
+  /**
+   * With `decisions`: ids of items still under review. The merge commits the
+   * Workspace's version at their paths and keeps this machine's decided text
+   * aside in `.git` (`SYNC_HELD_GIT_PATH`), so a push publishes only theirs.
+   */
+  hold?: readonly string[];
+  /** Settle one held item before committing (see SyncSettleHeld). */
+  settleHeld?: SyncSettleHeld;
+  /**
+   * Ids of decided items of the open review (`SYNC_REVIEW_GIT_PATH`) to put
+   * back to the Workspace's version as one local commit, this machine's own
+   * text held aside — a disagreed decision stops blocking the push of the rest.
+   */
+  holdBack?: readonly string[];
+  /**
+   * A person agreed to the open review: this run may publish it, and the
+   * review record is cleared once the push succeeds. Without it, a run that
+   * would push while a review is open stops at `merged-local`.
+   */
+  agreed?: boolean;
   /** Put one intent document back to a chosen text before committing (see SyncPutBack). */
   putBack?: SyncPutBack;
+  /**
+   * Called with one line as each step and each git call STARTS (and once more
+   * when a call took long). The CLI writes it to stderr, which the app keeps
+   * even when it kills a run at its time limit, so the last line names the step
+   * that hung (user report 2026-11-24: two five-minute syncs, no output at all).
+   */
+  trace?: (line: string) => void;
   /** Commit only: no fetch, no merge, no push. */
   commitOnly?: boolean;
   /** Where a relative `file:` path is read from. Default: the process's cwd. */
@@ -359,9 +501,27 @@ export interface SyncOptions {
 
 // ─── Small helpers ──────────────────────────────────────────────────────────
 
-function attempt(git: WorkspaceGit, args: string[], cwd: string, network = false): { ok: true; out: string } | { ok: false; detail: string } {
+/**
+ * THE NETWORK BUDGET of one sync run. The app gives a whole sync five minutes
+ * (`WORKSPACE_SYNC_TIMEOUT_MS`), and one network git call used to be allowed
+ * the same five minutes — so a fetch that hung (a sign-in window nobody saw, a
+ * stalled connection) let the app kill the run with no answer at all, possibly
+ * mid-merge (user report 2026-11-24). Every fetch and push of a run now shares
+ * this budget, each call capped, so the run always answers first.
+ */
+const SYNC_NETWORK_BUDGET_MS = 4 * 60_000;
+const SYNC_NETWORK_CALL_MAX_MS = 2 * 60_000;
+const SYNC_NETWORK_CALL_MIN_MS = 5_000;
+
+/** The timeout of a run's next network call, from the run's deadline (wall clock). */
+export function syncNetworkTimeout(deadline: number, clock: number = Date.now()): number {
+  return Math.max(SYNC_NETWORK_CALL_MIN_MS, Math.min(SYNC_NETWORK_CALL_MAX_MS, deadline - clock));
+}
+
+/** `network`: false for a local call, or the timeout of a network one. */
+function attempt(git: WorkspaceGit, args: string[], cwd: string, network: false | number = false): { ok: true; out: string } | { ok: false; detail: string } {
   try {
-    return { ok: true, out: git(args, cwd, network ? { network: true } : {}) };
+    return { ok: true, out: git(args, cwd, network === false ? {} : { network: true, timeoutMs: network }) };
   } catch (error) {
     return { ok: false, detail: errorText(error) };
   }
@@ -443,7 +603,7 @@ export function classifyRejection(detail: string): SyncRejection {
 
 function findWorkspace(flowFolder: string, wanted: string | undefined): LoadedWorkspace {
   const scan = scanWorkspaces(flowFolder);
-  const choices = scan.workspaces.map((workspace) => ({ slug: workspace.slug, name: workspace.file.name }));
+  const choices = scan.workspaces.map((workspace) => ({ slug: workspace.slug, name: workspace.name }));
   if (wanted === undefined) {
     if (scan.workspaces.length === 1) return scan.workspaces[0];
     if (scan.workspaces.length === 0) {
@@ -455,12 +615,82 @@ function findWorkspace(flowFolder: string, wanted: string | undefined): LoadedWo
   if (broken !== undefined) throw new WorkspaceRefusal('malformed-workspace', broken.detail, { workspace: wanted });
   const found =
     scan.workspaces.find((workspace) => workspace.slug === wanted) ??
-    scan.workspaces.find((workspace) => workspace.file.name === wanted) ??
+    scan.workspaces.find((workspace) => workspace.name === wanted) ??
     scan.workspaces.find((workspace) => workspace.slug === slugify(wanted));
   if (found === undefined) {
     throw new WorkspaceRefusal('unknown-workspace', `there is no Workspace called ${wanted} on this machine`, { workspaces: choices });
   }
   return found;
+}
+
+/**
+ * `findWorkspace`, except when the Workspace's own `workspace.json` is
+ * unreadable BECAUSE a sync of Flow's died mid-merge and left conflict markers
+ * in it: that merge is undone first (`recoverLeftoverMerge`, under the lock),
+ * then the Workspace is read again. Without this, the refusal came before the
+ * recovery that would have fixed it, so the Workspace could never sync again
+ * (user report 2026-11-24: a sync killed by the app's timeout mid-merge). Any
+ * other unreadable file, or a merge Flow did not start, is refused as before.
+ */
+function findWorkspaceRecovering(
+  flowFolder: string,
+  wanted: string | undefined,
+  git: WorkspaceGit,
+  now: () => Date
+): { workspace: LoadedWorkspace; early: { lock: LockRecovery | null; merge: boolean } } {
+  try {
+    return { workspace: findWorkspace(flowFolder, wanted), early: { lock: null, merge: false } };
+  } catch (error) {
+    if (!(error instanceof WorkspaceRefusal) || error.reason !== 'malformed-workspace' || wanted === undefined) throw error;
+    const early = recoverUnreadableWorkspace(flowFolder, wanted, git, now);
+    if (early === null) throw error;
+    return { workspace: findWorkspace(flowFolder, wanted), early };
+  }
+}
+
+/**
+ * Undo the merge a killed sync of Flow's left in a Workspace folder, so its
+ * conflicted `workspace.json` reads again. Null when there is nothing of that
+ * kind to undo (not a repository, no merge in progress); throws
+ * `merge-in-progress` for a merge Flow may not touch (see recoverLeftoverMerge).
+ * Under the sync lock, so it never races a running sync.
+ */
+export function recoverUnreadableWorkspace(
+  flowFolder: string,
+  slug: string,
+  git: WorkspaceGit = defaultWorkspaceGit,
+  now: () => Date = () => new Date()
+): { lock: LockRecovery | null; merge: boolean } | null {
+  const repo = workspaceDir(flowFolder, slug);
+  if (!existsSync(repo)) return null;
+  const top = attempt(git, ['rev-parse', '--show-toplevel'], repo);
+  if (!top.ok || realOrResolved(top.out.trim()) !== realOrResolved(repo)) return null;
+  if (revParse(git, repo, 'MERGE_HEAD') === null) return null;
+  const lock = acquireLock(git, repo, now());
+  try {
+    return { lock: lock.recovered, merge: recoverLeftoverMerge(git, repo, slug) };
+  } finally {
+    lock.release();
+  }
+}
+
+/**
+ * Run a Workspace verb; when it refuses `malformed-workspace` for a Workspace
+ * whose file a killed sync left mid-merge, undo that merge and run it ONCE
+ * more. The app's launch migration and promote read the Workspace before any
+ * sync can, so without this the repair never got a turn (user report
+ * 2026-11-24: the Workspace vanished from Settings and nothing could sync it).
+ */
+export function withWorkspaceRecovery<T>(flowFolder: string, git: WorkspaceGit | undefined, run: () => T): T {
+  try {
+    return run();
+  } catch (error) {
+    if (!(error instanceof WorkspaceRefusal) || error.reason !== 'malformed-workspace') throw error;
+    const slug = error.payload.workspace;
+    if (typeof slug !== 'string' || slug === '') throw error;
+    if (recoverUnreadableWorkspace(flowFolder, slug, git ?? defaultWorkspaceGit) === null) throw error;
+    return run();
+  }
 }
 
 // ─── The lock ───────────────────────────────────────────────────────────────
@@ -696,6 +926,12 @@ function recoverLeftoverMerge(git: WorkspaceGit, repo: string, workspace: string
 function outgoingPaths(git: WorkspaceGit, repo: string, tracking: string | null): string[] {
   const head = revParse(git, repo, 'HEAD');
   if (head === null) return [];
+  // A shared repository with NO history in common with this one (a Workspace
+  // connected by hand to a repository that holds another Workspace): nothing
+  // can be pushed — the merge step refuses `unrelated-history` and says what
+  // to do. Asking git for a three-dot diff here would fail with "no merge
+  // base" and bury that answer under a raw git error (user report 2026-11-24).
+  if (tracking !== null && !attempt(git, ['merge-base', head, tracking], repo).ok) return [];
   const range = tracking === null ? [head, '--not', '--remotes'] : [`${tracking}..${head}`];
   const log = git(['log', '--name-only', '--no-renames', '--diff-filter=AMTC', '--format=', '-z', ...range], repo);
   const paths = log
@@ -721,6 +957,12 @@ function untrackLocalOnly(git: WorkspaceGit, repo: string): string[] {
     const knowledgeClass = classifyKnowledgePath(path, { root: 'workspace' });
     return knowledgeClass === 'personal' || knowledgeClass === 'generated';
   });
+  // A chat thread's working set is personal too, but only its CONTENT says so
+  // (it sits beside real features), so no path rule can name it.
+  const workingSets = excludeWorkingSets(git, repo);
+  // In the index, not only in HEAD: `add -A` ran before this, so a new one is staged.
+  const indexed = new Set(splitZ(git(['ls-files', '-z', '--', `${WORKSPACE_PROJECTS_DIRNAME}/`], repo)));
+  local.push(...workingSets.filter((path) => indexed.has(path)));
   // A symlink is never published either: every other machine refuses one
   // incoming (`incoming-unsafe`), so it would block the whole team.
   const raw = splitZ(git(['diff', '--cached', '--raw', '-z', '--no-renames', '--no-abbrev'], repo));
@@ -730,6 +972,78 @@ function untrackLocalOnly(git: WorkspaceGit, repo: string): string[] {
   }
   if (local.length > 0) git(['rm', '-q', '--cached', '--ignore-unmatch', '--', ...local], repo);
   return [...new Set(local)].sort();
+}
+
+/** Before a combine is committed: take every machine-only file out of the merge's index (kept on disk). */
+function untrackIncomingLocalOnly(git: WorkspaceGit, repo: string): void {
+  const workingSets = new Set(excludeWorkingSets(git, repo));
+  const indexed = splitZ(git(['ls-files', '-z'], repo));
+  const local = indexed.filter((path) => {
+    if (workingSets.has(path)) return true;
+    const knowledgeClass = classifyKnowledgePath(path, { root: 'workspace' });
+    return knowledgeClass === 'personal' || knowledgeClass === 'generated';
+  });
+  if (local.length > 0) git(['rm', '-q', '--cached', '--ignore-unmatch', '--', ...local], repo);
+}
+
+/**
+ * Every chat thread's working set in the Workspace's feature folders, by
+ * content (`isWorkingSetCapture`, the feature store's own rule). Auto-capture
+ * writes one per thread beside the real features, and they are this person's
+ * session records — the per-project knowledge repo kept them local with a
+ * content-generated ignore file, but a Workspace shared them: 226 across one
+ * real Workspace, 2026-11-25. Listed in this clone's own `info/exclude` (never
+ * the committed `.gitignore`, which every machine shares), so `add -A` leaves
+ * them alone; the list is regenerated on every sync.
+ */
+const WORKING_SET_EXCLUDE_START = '# plan-flow: chat working sets (generated on every sync)';
+const WORKING_SET_EXCLUDE_END = '# plan-flow: end of chat working sets';
+
+export function excludeWorkingSets(git: WorkspaceGit, repo: string): string[] {
+  const found: string[] = [];
+  const projects = join(repo, WORKSPACE_PROJECTS_DIRNAME);
+  if (existsSync(projects)) {
+    for (const project of readdirSync(projects).sort()) {
+      if (project.startsWith('.')) continue;
+      const features = join(projects, project, 'brain', 'features');
+      let entries: string[];
+      try {
+        if (!lstatSync(features).isDirectory()) continue;
+        entries = readdirSync(features).sort();
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.endsWith('.md')) continue;
+        const path = join(features, entry);
+        try {
+          if (!lstatSync(path).isFile()) continue;
+          if (isWorkingSetCapture(readFileSync(path, 'utf-8'))) found.push(`${WORKSPACE_PROJECTS_DIRNAME}/${project}/brain/features/${entry}`);
+        } catch {
+          // unreadable: not judged, left as it is
+        }
+      }
+    }
+  }
+  const excludePath = resolve(repo, git(['rev-parse', '--git-path', 'info/exclude'], repo).trim());
+  const existing = existsSync(excludePath) ? readFileSync(excludePath, 'utf-8') : '';
+  const start = existing.indexOf(WORKING_SET_EXCLUDE_START);
+  const end = existing.indexOf(WORKING_SET_EXCLUDE_END);
+  const kept =
+    start === -1 || end === -1 || end < start
+      ? existing
+      : existing.slice(0, start) + existing.slice(end + WORKING_SET_EXCLUDE_END.length).replace(/^\n/, '');
+  const block =
+    found.length === 0
+      ? ''
+      : [WORKING_SET_EXCLUDE_START, ...found.map((path) => `/${path.replace(/([*?[\\!#])/g, '\\$1')}`), WORKING_SET_EXCLUDE_END, ''].join('\n');
+  const prefix = kept.length === 0 || kept.endsWith('\n') ? kept : `${kept}\n`;
+  const next = prefix + block;
+  if (next !== existing) {
+    mkdirSync(dirname(excludePath), { recursive: true });
+    writeFileSync(excludePath, next, 'utf-8');
+  }
+  return found;
 }
 
 /**
@@ -773,7 +1087,34 @@ function guardPersonal(paths: readonly string[], extra: Record<string, unknown>)
 }
 
 function defaultMessage(workspace: LoadedWorkspace): string {
-  return `${DEFAULT_MESSAGE_PREFIX} ${workspace.file.name}`;
+  return `${DEFAULT_MESSAGE_PREFIX} ${workspace.name}`;
+}
+
+/**
+ * Rebuild the commits this machine has not sent yet without the personal
+ * files in them (user, 2026-11-24: sync stuck on "personal files … nothing was
+ * sent" for ever). The index already holds what should be shared — personal
+ * files are untracked by now and stay on disk — so the unsent commits are
+ * folded into one from where this machine and the remote last agreed. Nothing
+ * is lost: every file is still in the tree or on disk, and nothing the remote
+ * has is rewritten. Returns false when it cannot tell where they agreed (no
+ * tracking ref, and part of this history is on some other remote ref).
+ */
+function dropPersonalHistory(git: WorkspaceGit, repo: string, tracking: string | null, message: string): boolean {
+  if (tracking !== null) {
+    const base = attempt(git, ['merge-base', 'HEAD', tracking], repo);
+    if (!base.ok || base.out.trim() === '') return false;
+    git(['reset', '-q', '--soft', base.out.trim()], repo);
+    return true;
+  }
+  const all = countRange(git, repo, 'HEAD');
+  const unsent = Number(git(['rev-list', '--count', 'HEAD', '--not', '--remotes'], repo).trim());
+  if (all !== unsent) return false;
+  const tree = git(['write-tree'], repo).trim();
+  const made = attempt(git, ['-c', 'user.useConfigOnly=true', 'commit-tree', tree, '-m', message], repo);
+  if (!made.ok) return false;
+  git(['reset', '-q', '--soft', made.out.trim()], repo);
+  return true;
 }
 
 function commitLocal(
@@ -781,6 +1122,7 @@ function commitLocal(
   repo: string,
   message: string,
   tracking: string | null,
+  hasRemote: boolean,
   untracked: string[] = []
 ): SyncCommit | null {
   summarizeRoundsRecords(repo);
@@ -788,6 +1130,22 @@ function commitLocal(
   let staged: string[];
   try {
     untracked.push(...untrackLocalOnly(git, repo));
+    // A personal file staged by hand (forced past the ignore file) is let go
+    // of the same way: it stays on disk, it is just not shared.
+    const stagedPersonal = findPersonalFiles(
+      splitZ(git(['diff', '--cached', '--name-only', '--no-renames', '--diff-filter=AMTC', '-z'], repo))
+    ).map((hit) => hit.path);
+    if (stagedPersonal.length > 0) {
+      git(['rm', '-q', '--cached', '--ignore-unmatch', '--', ...stagedPersonal], repo);
+      untracked.push(...stagedPersonal);
+    }
+    // History only matters once there is somewhere to send it: a Workspace
+    // with no shared repository sends nothing, so an old commit that once held
+    // a personal file must not block it for ever.
+    if (hasRemote) {
+      const inHistory = findPersonalFiles(outgoingPaths(git, repo, tracking)).map((hit) => hit.path);
+      if (inHistory.length > 0 && dropPersonalHistory(git, repo, tracking, message)) untracked.push(...inHistory);
+    }
     // Drafts are committed like any knowledge (discovery
     // `workspace_knowledge_draft_solid`, FR-3): the team sees work in progress,
     // tagged with its branch by its provenance, and promotion — not this
@@ -795,7 +1153,7 @@ function commitLocal(
     staged = splitZ(git(['diff', '--cached', '--name-only', '--no-renames', '-z'], repo));
     // A removal publishes nothing of the file; everything else is judged.
     const published = splitZ(git(['diff', '--cached', '--name-only', '--no-renames', '--diff-filter=AMTC', '-z'], repo));
-    guardPersonal([...published, ...outgoingPaths(git, repo, tracking)], {});
+    guardPersonal([...published, ...(hasRemote ? outgoingPaths(git, repo, tracking) : [])], {});
   } catch (error) {
     unstageAll(git, repo);
     throw error;
@@ -819,7 +1177,18 @@ function commitLocal(
 type MergeStep =
   | { kind: 'none' }
   | { kind: 'fast-forward'; pulled: number }
-  | { kind: 'merged'; pulled: number; sha: string; log: string | null; resolutions: MergeResolution[]; decided: string[] }
+  | {
+      kind: 'merged';
+      pulled: number;
+      sha: string;
+      log: string | null;
+      resolutions: MergeResolution[];
+      decided: string[];
+      mergedItems: MergedItem[];
+      held: HeldItem[];
+      /** Two Workspaces' unrelated histories were combined by this merge. */
+      combined: boolean;
+    }
   | { kind: 'waiting'; asks: SyncAsk[]; reviews: SyncReview[]; decided: string[] };
 
 interface ResolveRequest {
@@ -835,11 +1204,28 @@ interface MergeContext {
   branch: string;
   now: Date;
   resolve?: ResolveRequest;
+  /** `--decisions`: many decisions, each by id, applied in this one merge. */
+  batch?: readonly ResolveRequest[];
+  /** `--hold`: ids whose decided text is held aside; the merge takes the Workspace's version. */
+  hold?: readonly string[];
 }
 
 /** What a resolve request is about, for a sentence or a payload. */
 function resolveSubject(request: ResolveRequest): string {
   return request.path ?? request.id ?? '';
+}
+
+/** A decision run met no merge waiting for it. */
+function refuseNothingToResolve(context: MergeContext): never {
+  throw new WorkspaceRefusal(
+    'nothing-to-resolve',
+    'there is no merge waiting for a decision in this Workspace',
+    context.resolve !== undefined ? { path: resolveSubject(context.resolve) } : { ids: (context.batch ?? []).map((entry) => entry.id ?? '') }
+  );
+}
+
+function decidingIn(context: MergeContext): boolean {
+  return context.resolve !== undefined || context.batch !== undefined;
 }
 
 /**
@@ -883,7 +1269,8 @@ const REPO_SETTINGS_FILE = /(?:^|\/)\.git(?:attributes|ignore|modules)$/i;
  * merged on a person's behalf: a personal-class path (any spelling), a
  * symlink, a nested `.gitattributes`/`.gitignore`, or a root one changed
  * outside Flow's generated block (for `.gitattributes`, the block itself too
- * — it decides how THIS merge resolves files). Read-only.
+ * — it decides how THIS merge resolves files; for `.gitignore`, only a change
+ * that un-ignores something). Read-only.
  */
 function unsafeIncoming(git: WorkspaceGit, repo: string, head: string | null, tracking: string): UnsafeIncomingPath[] {
   let from = EMPTY_TREE;
@@ -928,13 +1315,41 @@ function unsafeIncoming(git: WorkspaceGit, repo: string, head: string | null, tr
       }
       const before = splitWorkspaceBlock(textAt(from, path));
       const after = splitWorkspaceBlock(removed ? null : textAt(tracking, path));
-      const outsideChanged = before.outside !== after.outside;
+      const isIgnore = /^\.gitignore$/i.test(path);
+      const outsideChanged =
+        before.outside !== after.outside && !(isIgnore && onlyIgnoresMore(before.outside, after.outside));
       const attributesBlockChanged =
         /^\.gitattributes$/i.test(path) && after.block !== before.block && after.block !== workspaceGitattributes();
       if (outsideChanged || attributesBlockChanged) unsafe.push({ path, why: 'repo-settings' });
     }
   }
   return unsafe;
+}
+
+/**
+ * Whether a root `.gitignore`'s lines outside Flow's block changed ONLY by
+ * ignoring more: added comments and plain patterns, removed comments. Ignoring
+ * more can never publish a file from this machine, so a teammate's hand-added
+ * ignore lines merge like any other change (user report 2026-11-24: lines a
+ * member added outside the block on 2026-10-16 refused every sync of a member
+ * whose last common commit was older, for ever). Un-ignoring is still refused:
+ * a negation (`!pattern`) or a removed pattern.
+ */
+export function onlyIgnoresMore(beforeOutside: string, afterOutside: string): boolean {
+  const lines = (text: string): string[] => (text === '' ? [] : text.split('\n'));
+  const before = lines(beforeOutside);
+  const after = lines(afterOutside);
+  const comment = (line: string): boolean => line.trimStart().startsWith('#');
+  const remaining = [...after];
+  for (const line of before) {
+    const at = remaining.indexOf(line);
+    if (at !== -1) {
+      remaining.splice(at, 1);
+      continue;
+    }
+    if (!comment(line)) return false;
+  }
+  return remaining.every((line) => comment(line) || !line.trimStart().startsWith('!'));
 }
 
 function refuseUnsafeIncoming(unsafe: readonly UnsafeIncomingPath[]): never {
@@ -952,19 +1367,24 @@ function mergeIncoming(context: MergeContext, tracking: string | null): MergeSte
   const { git, repo } = context;
   const head = revParse(git, repo, 'HEAD');
   if (tracking === null || (head !== null && isAncestor(git, repo, tracking, head))) {
-    if (context.resolve !== undefined) {
-      throw new WorkspaceRefusal('nothing-to-resolve', 'there is no merge waiting for a decision in this Workspace', { path: resolveSubject(context.resolve) });
-    }
+    if (decidingIn(context)) refuseNothingToResolve(context);
     return { kind: 'none' };
   }
   // A shared repository whose history has nothing in common with this
   // Workspace's — another Workspace, a repository someone started by hand —
   // is never mixed in: git would refuse the merge anyway, and the person
   // needs to hear WHY in words, not as a failed merge.
-  if (head !== null && !attempt(git, ['merge-base', head, tracking], repo).ok) {
-    if (context.resolve !== undefined) {
-      throw new WorkspaceRefusal('nothing-to-resolve', 'there is no merge waiting for a decision in this Workspace', { path: resolveSubject(context.resolve) });
-    }
+  // …UNLESS it is the same work: when both list at least one project in
+  // common, two people set up "the same" Workspace on their own (user,
+  // 2026-11-24 — "the agent should automatically combine and sync it"). Then
+  // the histories are merged in place, every file both wrote goes through the
+  // same merge as any sync (the agent combines notes written two ways), and
+  // nothing stops for a person unless that merge asks. With no project in
+  // common it may be anyone's Workspace — a mistyped address must never send
+  // this one's knowledge there — so that still refuses.
+  const unrelated = head !== null && !attempt(git, ['merge-base', head, tracking], repo).ok;
+  if (unrelated && !sharesAProject(git, repo, head as string, tracking)) {
+    if (decidingIn(context)) refuseNothingToResolve(context);
     throw new WorkspaceRefusal(
       'unrelated-history',
       "the shared repository already holds a history that has nothing in common with this Workspace's, so nothing was merged or pushed — connect the Workspace to an empty repository, or join the Workspace that repository holds instead",
@@ -976,9 +1396,7 @@ function mergeIncoming(context: MergeContext, tracking: string | null): MergeSte
   if (unsafe.length > 0) refuseUnsafeIncoming(unsafe);
   const pulled = countRange(git, repo, head === null ? tracking : `${head}..${tracking}`);
   if (head === null || isAncestor(git, repo, head, tracking)) {
-    if (context.resolve !== undefined) {
-      throw new WorkspaceRefusal('nothing-to-resolve', 'there is no merge waiting for a decision in this Workspace', { path: resolveSubject(context.resolve) });
-    }
+    if (decidingIn(context)) refuseNothingToResolve(context);
     const ff = attempt(
       git,
       head === null ? [...NO_SYMLINKS, 'reset', '-q', '--hard', tracking] : [...NO_SYMLINKS, 'merge', '--ff-only', '-q', tracking],
@@ -997,7 +1415,19 @@ function mergeIncoming(context: MergeContext, tracking: string | null): MergeSte
   writeMarker(git, repo, { pid: process.pid, head, incoming, startedAt: context.now.toISOString() });
   const merge = attempt(
     git,
-    [...NO_SYMLINKS, '-c', 'rerere.enabled=false', '-c', 'merge.conflictStyle=merge', 'merge', '--no-ff', '--no-commit', '-q', tracking],
+    [
+      ...NO_SYMLINKS,
+      '-c',
+      'rerere.enabled=false',
+      '-c',
+      'merge.conflictStyle=merge',
+      'merge',
+      '--no-ff',
+      '--no-commit',
+      '-q',
+      ...(unrelated ? ['--allow-unrelated-histories'] : []),
+      tracking,
+    ],
     repo
   );
   if (revParse(git, repo, 'MERGE_HEAD') === null) {
@@ -1008,18 +1438,23 @@ function mergeIncoming(context: MergeContext, tracking: string | null): MergeSte
     throw new WorkspaceRefusal('merge-failed', `the Workspace's changes could not be merged: ${detail}`, { pushed: false });
   }
 
+  let heldBefore: HeldItem[] | null = null;
+  let held: HeldItem[] = [];
   try {
     const facts = readMergeFacts(git, repo, head, tracking);
     const inspection = inspectMerge(facts);
     const items: (SyncAsk | SyncReview)[] = [...inspection.asks, ...inspection.reviews];
 
-    // Decisions: the stored ones that still match, plus the one this call brings.
+    // Decisions: the stored ones that still match, plus the ones this call brings.
     const stored = readDecisions(git, repo);
     const live = new Map<string, StoredDecision>();
     for (const decision of stored) {
       if (items.some((item) => item.id === decision.id)) live.set(decision.id, decision);
     }
-    const decided: string[] = [];
+    const waitingList = (): { id: string; path: string }[] => items.map((item) => ({ id: item.id, path: item.path }));
+    // Every decision this call brings, matched to its item and checked BEFORE
+    // anything is written: one path for a single decision and for a batch.
+    const brought: { item: SyncAsk | SyncReview; take: Take; content?: string }[] = [];
     if (context.resolve !== undefined) {
       const wanted = context.resolve;
       let matching: (SyncAsk | SyncReview)[];
@@ -1031,7 +1466,7 @@ function mergeIncoming(context: MergeContext, tracking: string | null): MergeSte
           throw new WorkspaceRefusal(
             'stale-decision',
             'what this decision was about has changed since it was shown, so it was not applied — look at it again',
-            { path: wanted.path ?? null, id: wanted.id, current: current?.id ?? null, waiting: items.map((item) => ({ id: item.id, path: item.path })) }
+            { path: wanted.path ?? null, id: wanted.id, current: current?.id ?? null, waiting: waitingList() }
           );
         }
       } else {
@@ -1051,24 +1486,78 @@ function mergeIncoming(context: MergeContext, tracking: string | null): MergeSte
             options: item.options,
           });
         }
-        const decision: StoredDecision = {
+        brought.push({ item, take: wanted.take, ...(wanted.content === undefined ? {} : { content: wanted.content }) });
+      }
+    }
+    if (context.batch !== undefined) {
+      // A BATCH is all or nothing: one id that no longer names a current item,
+      // or one take its item does not accept, refuses every decision in it.
+      const stale: string[] = [];
+      const invalid: { id: string; path: string; take: Take; options: Take[] }[] = [];
+      for (const wanted of context.batch) {
+        const item = items.find((candidate) => candidate.id === wanted.id);
+        if (item === undefined) {
+          stale.push(wanted.id ?? '');
+          continue;
+        }
+        if (!item.options.includes(wanted.take)) {
+          invalid.push({ id: item.id, path: item.path, take: wanted.take, options: item.options });
+          continue;
+        }
+        brought.push({ item, take: wanted.take, ...(wanted.content === undefined ? {} : { content: wanted.content }) });
+      }
+      if (stale.length > 0) {
+        throw new WorkspaceRefusal(
+          'stale-decision',
+          `${stale.length} of these decisions ${stale.length === 1 ? 'is' : 'are'} about something that changed since it was shown, so none of them was applied — look at them again`,
+          { stale, invalid, waiting: waitingList() }
+        );
+      }
+      if (invalid.length > 0) {
+        throw new WorkspaceRefusal(
+          'invalid-resolution',
+          `${invalid.length} of these decisions take${invalid.length === 1 ? 's' : ''} something ${invalid.length === 1 ? 'its item does' : 'their items do'} not accept, so none of them was applied`,
+          { invalid, waiting: waitingList() }
+        );
+      }
+    }
+    const holding = context.hold ?? [];
+    const unknownHeld = holding.filter((id) => !items.some((item) => item.id === id));
+    if (unknownHeld.length > 0) {
+      throw new WorkspaceRefusal(
+        'stale-decision',
+        'an item to hold aside is not waiting in this merge (it changed since it was shown), so nothing was applied — look at it again',
+        { stale: unknownHeld, invalid: [], waiting: waitingList() }
+      );
+    }
+    const decided: string[] = [];
+    if (brought.length > 0) {
+      for (const { item, take, content } of brought) {
+        live.set(item.id, {
           id: item.id,
           path: item.path,
-          take: wanted.take,
-          ...(wanted.take === 'file' ? { content: wanted.content ?? '' } : {}),
+          take,
+          ...(take === 'file' ? { content: content ?? '' } : {}),
           decidedAt: context.now.toISOString(),
-        };
-        live.set(item.id, decision);
+        });
         decided.push(item.id);
       }
-      writeDecisions(git, repo, [...stored.filter((entry) => !matching.some((item) => item.id === entry.id)), ...matching.map((item) => live.get(item.id) as StoredDecision)]);
+      const replaced = new Set(brought.map((entry) => entry.item.id));
+      writeDecisions(git, repo, [...stored.filter((entry) => !replaced.has(entry.id)), ...[...replaced].map((id) => live.get(id) as StoredDecision)]);
     }
 
-    const waitingAsks = inspection.asks.filter((ask) => !live.has(ask.id));
-    const waitingReviews = inspection.reviews.filter((review) => !live.has(review.id));
+    const settledHere = (id: string): boolean => live.has(id) || holding.includes(id);
+    const waitingAsks = inspection.asks.filter((ask) => !settledHere(ask.id));
+    const waitingReviews = inspection.reviews.filter((review) => !settledHere(review.id));
     if (waitingAsks.length > 0 || waitingReviews.length > 0) {
       abortMerge(git, repo, head, incoming);
       return { kind: 'waiting', asks: waitingAsks, reviews: waitingReviews, decided };
+    }
+
+    // Held items: this machine's text goes aside, the merge takes the Workspace's.
+    if (holding.length > 0) {
+      heldBefore = readHeld(git, repo);
+      held = holdPendingItems(git, repo, holding, context.now, { facts, items, live });
     }
 
     const resolutions = [...applyResolutions(facts, inspection.resolutions), ...applyDecisions(facts, items, live)];
@@ -1076,16 +1565,29 @@ function mergeIncoming(context: MergeContext, tracking: string | null): MergeSte
     if (!unmerged.ok || splitZ(unmerged.out).length > 0) {
       throw new WorkspaceRefusal('merge-failed', 'some files were still unmerged after every resolution, so nothing was merged', { pushed: false });
     }
+    // A COMBINE brings in another Workspace's whole history, written by another
+    // computer and perhaps another version of Flow: its machine-only files
+    // (working sets, personal and generated paths) never enter the combined
+    // commit (2026-11-25: 226 working sets arrived this way).
+    if (unrelated) untrackIncomingLocalOnly(git, repo);
     const log = writeMergeLog(facts, resolutions, { now: context.now, remoteRef: `${REMOTE_NAME}/${context.branch}` });
     const automatic = resolutions.filter((resolution) => resolution.kind !== 'decision').length;
     const message = `Merge ${REMOTE_NAME}/${context.branch}${automatic === 0 ? '' : ` — ${automatic} settled by Flow`}${log === null ? '' : ` (${log})`}`;
-    const commit = attempt(git, ['-c', 'user.useConfigOnly=true', 'commit', '-q', '--no-edit', '-m', message], repo);
+    const heldIds = new Set(held.map((entry) => entry.id));
+    const body = decisionsBody(git, repo, resolutions, heldIds);
+    const commit = attempt(git, ['-c', 'user.useConfigOnly=true', 'commit', '-q', '--no-edit', '-m', message, ...(body === null ? [] : ['-m', body])], repo);
     if (!commit.ok) {
       throw new WorkspaceRefusal('merge-failed', `the merge could not be committed: ${commit.detail}`, { pushed: false });
     }
     clearMarker(git, repo);
     // Decisions are spent once the merge they answered is committed.
     writeDecisions(git, repo, stored.filter((entry) => !live.has(entry.id)));
+    const mergedItems: MergedItem[] = [];
+    for (const item of items) {
+      const decision = live.get(item.id);
+      if (decision === undefined) continue;
+      mergedItems.push({ id: item.id, path: item.path, kind: item.kind, take: decision.take, ...(heldIds.has(item.id) ? { held: true as const } : {}) });
+    }
     return {
       kind: 'merged',
       pulled,
@@ -1093,14 +1595,113 @@ function mergeIncoming(context: MergeContext, tracking: string | null): MergeSte
       log,
       resolutions,
       decided: [...new Set([...decided, ...[...live.keys()]])],
+      mergedItems: unrelated
+        ? [...mergedItems, { id: `combine:${incoming}`, path: '', kind: 'combine', take: 'theirs' }]
+        : mergedItems,
+      held,
+      combined: unrelated,
     };
   } catch (error) {
     // Only a merge still in progress is undone. A HEAD that moved with no
     // merge in progress is a merge commit already made — never reset away.
-    if (revParse(git, repo, 'MERGE_HEAD') !== null) abortMerge(git, repo, head, incoming);
+    const stillMerging = revParse(git, repo, 'MERGE_HEAD') !== null;
+    // Held text written for a merge that is not committed is let go of again.
+    if (stillMerging && heldBefore !== null && held.length > 0) writeHeld(git, repo, heldBefore);
+    if (stillMerging) abortMerge(git, repo, head, incoming);
     else clearMarker(git, repo);
     throw error;
   }
+}
+
+// ─── Held-aside items (inside .git, never committed) ────────────────────────
+
+function heldFile(git: WorkspaceGit, repo: string): string {
+  return resolve(repo, git(['rev-parse', '--git-path', SYNC_HELD_GIT_PATH], repo).trim());
+}
+
+/** What is held aside on this machine. A damaged store reads as empty — never as a wrong text. */
+export function readHeld(git: WorkspaceGit, repo: string): HeldItem[] {
+  const path = heldFile(git, repo);
+  if (!existsSync(path)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as { held?: unknown };
+    if (!Array.isArray(parsed.held)) return [];
+    return parsed.held.filter(
+      (entry): entry is HeldItem =>
+        typeof entry === 'object' &&
+        entry !== null &&
+        typeof (entry as HeldItem).id === 'string' &&
+        typeof (entry as HeldItem).path === 'string' &&
+        typeof (entry as HeldItem).kind === 'string' &&
+        typeof (entry as HeldItem).heldAt === 'string' &&
+        ((entry as HeldItem).text === null || typeof (entry as HeldItem).text === 'string')
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writeHeld(git: WorkspaceGit, repo: string, held: readonly HeldItem[]): void {
+  const path = heldFile(git, repo);
+  if (held.length === 0) {
+    rmSync(path, { force: true });
+    return;
+  }
+  atomicWriteFile(path, `${JSON.stringify({ version: 1, held }, null, 2)}\n`);
+}
+
+function heldSummaries(held: readonly HeldItem[]): HeldSummary[] {
+  return held.map(({ id, path, kind, heldAt }) => ({ id, path, kind, heldAt }));
+}
+
+/**
+ * Hold items still under review aside, during Flow's merge in progress: each
+ * one's text as this machine decided it (its decision's text, or this
+ * machine's version when it has none) is written to the held store in `.git`,
+ * and the merge is told to take the WORKSPACE's version at its path instead —
+ * so the merge commit, and any push after it, carries only what the team
+ * already had there. Returns what was held. The caller puts the store back if
+ * the merge is not committed.
+ */
+export function holdPendingItems(
+  git: WorkspaceGit,
+  repo: string,
+  ids: readonly string[],
+  now: Date,
+  merge: { facts: MergeFacts; items: readonly (SyncAsk | SyncReview)[]; live: Map<string, StoredDecision> }
+): HeldItem[] {
+  if (ids.length === 0) return [];
+  const heldAt = now.toISOString();
+  const held: HeldItem[] = [];
+  for (const id of new Set(ids)) {
+    const item = merge.items.find((candidate) => candidate.id === id);
+    if (item === undefined) continue;
+    const decision = merge.live.get(id);
+    const text = decision === undefined ? textAt(git, repo, merge.facts.ours, item.path) : decidedText(merge.facts, item, decision);
+    held.push({ id, path: item.path, kind: item.kind, text, heldAt });
+    // The Workspace's version — whatever `options` offers: holding is not a choice of the item's.
+    merge.live.set(id, { id, path: item.path, take: 'theirs', decidedAt: heldAt });
+  }
+  const replaced = new Set(held.map((entry) => entry.path));
+  writeHeld(git, repo, [...readHeld(git, repo).filter((entry) => !replaced.has(entry.path)), ...held]);
+  return held;
+}
+
+/**
+ * The body of a merge commit that applied decisions: each decided path with
+ * its take (a held one says so), bounded, and who agreed — git's NAME for this
+ * machine's person, never the email. Null when the merge applied no decision.
+ */
+function decisionsBody(git: WorkspaceGit, repo: string, resolutions: readonly MergeResolution[], heldIds: ReadonlySet<string>): string | null {
+  const decisions = resolutions.filter((resolution): resolution is Extract<MergeResolution, { kind: 'decision' }> => resolution.kind === 'decision');
+  if (decisions.length === 0) return null;
+  const lines = decisions
+    .slice(0, MAX_BODY_DECISIONS)
+    .map((decision) => (heldIds.has(decision.item) ? `- ${decision.path}: held aside, the Workspace's version kept` : `- ${decision.path}: ${decision.take}`));
+  if (decisions.length > MAX_BODY_DECISIONS) lines.push(`- and ${decisions.length - MAX_BODY_DECISIONS} more`);
+  const name = attempt(git, ['config', 'user.name'], repo);
+  const agreedBy = name.ok ? name.out.trim().replace(/\s+/g, ' ').slice(0, MAX_MESSAGE_LENGTH) : '';
+  return [`Decided (${decisions.length}):`, ...lines, ...(agreedBy === '' ? [] : ['', `Agreed-by: ${agreedBy}`])].join('\n');
 }
 
 // ─── Step 4: indexes ────────────────────────────────────────────────────────
@@ -1392,6 +1993,315 @@ function applyPutBack(repo: string, request: PutBackRequest): void {
   atomicWriteFile(full, request.content);
 }
 
+// ─── The decisions batch ────────────────────────────────────────────────────
+
+const ITEM_ID = /^[0-9a-f]{6,64}$/;
+const BATCH_TAKES: readonly Take[] = ['ours', 'theirs', 'merged', 'file'];
+
+/**
+ * Read a `--decisions` file. Anything malformed refuses the whole batch
+ * (`invalid-resolution`) with every problem found, before any git call.
+ */
+function parseDecisionsFile(file: string, cwd: string): ResolveRequest[] {
+  const source = resolve(cwd, file);
+  let raw: string;
+  try {
+    if (statSync(source).size > MAX_DECISIONS_FILE) {
+      throw new WorkspaceRefusal('invalid-resolution', 'that decisions file is too large to read', { file: source });
+    }
+    raw = readFileSync(source, 'utf-8');
+  } catch (error) {
+    if (error instanceof WorkspaceRefusal) throw error;
+    throw new WorkspaceRefusal('invalid-resolution', `the decisions file could not be read: ${errorText(error)}`, { file: source });
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new WorkspaceRefusal('invalid-resolution', 'the decisions file is not JSON', { file: source });
+  }
+  const list = typeof parsed === 'object' && parsed !== null ? (parsed as { decisions?: unknown }).decisions : undefined;
+  if (!Array.isArray(list) || list.length === 0) {
+    throw new WorkspaceRefusal('invalid-resolution', 'the decisions file holds no decisions — it needs { "decisions": [ { "id", "take", "content"? } ] }', {
+      file: source,
+      takes: BATCH_TAKES,
+    });
+  }
+  const problems: { index: number; id: string | null; problem: string }[] = [];
+  const requests: ResolveRequest[] = [];
+  const seen = new Set<string>();
+  list.forEach((entry: unknown, index) => {
+    const record = typeof entry === 'object' && entry !== null ? (entry as Record<string, unknown>) : {};
+    const id = typeof record.id === 'string' ? record.id.trim() : '';
+    const take = typeof record.take === 'string' ? record.take.trim() : '';
+    const content = record.content;
+    const named = id === '' ? null : id;
+    if (!ITEM_ID.test(id)) return void problems.push({ index, id: named, problem: 'not the id of a waiting decision' });
+    if (seen.has(id)) return void problems.push({ index, id, problem: 'decided twice in this file' });
+    seen.add(id);
+    if (!(BATCH_TAKES as readonly string[]).includes(take)) {
+      return void problems.push({ index, id, problem: `'${take}' is not a take — ${BATCH_TAKES.join(', ')}` });
+    }
+    if (take === 'file') {
+      if (typeof content !== 'string') return void problems.push({ index, id, problem: 'a file take needs its content' });
+      if (Buffer.byteLength(content, 'utf-8') > MAX_DECISION_CONTENT) return void problems.push({ index, id, problem: 'that text is too large to record' });
+      requests.push({ id, take: 'file', content });
+      return;
+    }
+    if (content !== undefined) return void problems.push({ index, id, problem: `content goes only with a file take, not '${take}'` });
+    requests.push({ id, take: take as Take });
+  });
+  if (problems.length > 0) {
+    throw new WorkspaceRefusal('invalid-resolution', `${problems.length} of the decisions in that file can't be read, so none of them was applied`, {
+      file: source,
+      problems,
+      takes: BATCH_TAKES,
+    });
+  }
+  return requests;
+}
+
+function parseHold(ids: readonly string[]): string[] {
+  const cleaned = ids.map((id) => id.trim()).filter((id) => id !== '');
+  const bad = cleaned.filter((id) => !ITEM_ID.test(id));
+  if (bad.length > 0) throw new WorkspaceRefusal('invalid-resolution', 'these are not ids of waiting decisions', { hold: bad });
+  return [...new Set(cleaned)];
+}
+
+// ─── Settling a held item ───────────────────────────────────────────────────
+
+interface SettleRequest {
+  id: string;
+  take: 'ours' | 'theirs' | 'file';
+  content?: string;
+}
+
+function parseSettleHeld(option: SyncSettleHeld, cwd: string): SettleRequest {
+  const id = option.id.trim();
+  if (!ITEM_ID.test(id)) throw new WorkspaceRefusal('invalid-resolution', 'that is not the id of a held item', { id });
+  const take = option.take.trim();
+  if (take === 'ours' || take === 'theirs') return { id, take };
+  if (take.startsWith('file:')) {
+    const source = resolve(cwd, take.slice('file:'.length));
+    try {
+      if (statSync(source).size > MAX_DECISION_CONTENT) {
+        throw new WorkspaceRefusal('invalid-resolution', 'that text is too large to record', { id });
+      }
+      return { id, take: 'file', content: readFileSync(source, 'utf-8') };
+    } catch (error) {
+      if (error instanceof WorkspaceRefusal) throw error;
+      throw new WorkspaceRefusal('invalid-resolution', `the text to settle could not be read: ${errorText(error)}`, { id });
+    }
+  }
+  throw new WorkspaceRefusal('invalid-resolution', `'${take}' is not a way to settle a held item — take ours, theirs or file:<path>`, {
+    id,
+    options: ['ours', 'theirs', 'file:<path>'],
+  });
+}
+
+/**
+ * Write a held item's agreed text as an ordinary local commit of that one path
+ * (`knowledge: settle <path>`), then let go of it. `theirs` writes nothing.
+ * The rest of the run commits and syncs as usual.
+ */
+function settleHeldItem(git: WorkspaceGit, repo: string, request: SettleRequest): NonNullable<SyncResult['settled']> {
+  const held = readHeld(git, repo);
+  const entry = held.find((candidate) => candidate.id === request.id);
+  if (entry === undefined) {
+    throw new WorkspaceRefusal('unknown-held', 'nothing with that id is held aside on this machine', { id: request.id, held: heldSummaries(held) });
+  }
+  const rest = held.filter((candidate) => candidate.id !== request.id);
+  if (request.take === 'theirs') {
+    writeHeld(git, repo, rest);
+    return { id: entry.id, path: entry.path, take: 'theirs', sha: null };
+  }
+  guardPersonal([entry.path], { id: entry.id });
+  const full = join(repo, ...entry.path.split('/'));
+  if (!isSafeRelative(entry.path) || crossesLink(repo, full) || isLink(full)) {
+    throw new WorkspaceRefusal('invalid-resolution', 'that held item is not a plain file inside the Workspace', { id: entry.id, path: entry.path });
+  }
+  const text = request.take === 'file' ? (request.content ?? '') : entry.text;
+  if (text === null) rmSync(full, { force: true });
+  else {
+    mkdirSync(dirname(full), { recursive: true });
+    atomicWriteFile(full, text);
+  }
+  attempt(git, ['add', '-A', '--', entry.path], repo);
+  let sha: string | null = null;
+  if (!attempt(git, ['diff', '--cached', '--quiet', '--', entry.path], repo).ok) {
+    const message = `knowledge: settle ${entry.path}`.slice(0, MAX_MESSAGE_LENGTH);
+    const committed = attempt(git, ['-c', 'user.useConfigOnly=true', 'commit', '-q', '-m', message, '--', entry.path], repo);
+    if (!committed.ok) {
+      attempt(git, ['reset', '-q', '--', entry.path], repo);
+      throw new WorkspaceRefusal('commit-failed', `the settled text could not be committed: ${committed.detail}`, { committed: false, id: entry.id });
+    }
+    sha = git(['rev-parse', 'HEAD'], repo).trim();
+  }
+  writeHeld(git, repo, rest);
+  return { id: entry.id, path: entry.path, take: request.take, sha };
+}
+
+// ─── The open review (inside .git, never committed) ─────────────────────────
+
+/** One decided item of a merge committed here and not yet agreed: the merge it is in, so it can be held back. */
+interface ReviewEntry {
+  id: string;
+  path: string;
+  kind: AskKind | ReviewKind | 'combine';
+  take: Take;
+  merge: string;
+}
+
+function reviewFile(git: WorkspaceGit, repo: string): string {
+  return resolve(repo, git(['rev-parse', '--git-path', SYNC_REVIEW_GIT_PATH], repo).trim());
+}
+
+/**
+ * What waits for review on this machine. An entry whose merge is no longer in
+ * HEAD's history (the branch was moved by hand) is dropped: it cannot be
+ * published by this branch any more. A damaged record reads as empty.
+ */
+export function readReviewRecord(git: WorkspaceGit, repo: string): ReviewEntry[] {
+  const path = reviewFile(git, repo);
+  if (!existsSync(path)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as { items?: unknown };
+    if (!Array.isArray(parsed.items)) return [];
+    const entries = parsed.items.filter(
+      (entry): entry is ReviewEntry =>
+        typeof entry === 'object' &&
+        entry !== null &&
+        typeof (entry as ReviewEntry).id === 'string' &&
+        typeof (entry as ReviewEntry).path === 'string' &&
+        typeof (entry as ReviewEntry).kind === 'string' &&
+        typeof (entry as ReviewEntry).take === 'string' &&
+        typeof (entry as ReviewEntry).merge === 'string'
+    );
+    const merges = new Map<string, boolean>();
+    return entries.filter((entry) => {
+      let inHistory = merges.get(entry.merge);
+      if (inHistory === undefined) {
+        inHistory = isAncestor(git, repo, entry.merge, 'HEAD');
+        merges.set(entry.merge, inHistory);
+      }
+      return inHistory;
+    });
+  } catch {
+    return [];
+  }
+}
+
+function writeReviewRecord(git: WorkspaceGit, repo: string, entries: readonly ReviewEntry[]): void {
+  const path = reviewFile(git, repo);
+  if (entries.length === 0) {
+    rmSync(path, { force: true });
+    return;
+  }
+  atomicWriteFile(path, `${JSON.stringify({ version: 1, items: entries }, null, 2)}\n`);
+}
+
+/**
+ * Add this run's decided, not-held items to the open review when the run
+ * keeps its merge here (`keep`), and answer what is open now.
+ */
+function recordReview(
+  git: WorkspaceGit,
+  repo: string,
+  merge: SyncResult['merge'],
+  mergedItems: readonly MergedItem[],
+  keep: boolean
+): ReviewEntry[] {
+  const open = readReviewRecord(git, repo);
+  if (!keep || merge === null) return open;
+  const fresh = mergedItems
+    .filter((item) => item.held !== true)
+    .map((item): ReviewEntry => ({ id: item.id, path: item.path, kind: item.kind, take: item.take, merge: merge.sha }));
+  if (fresh.length === 0) return open;
+  const ids = new Set(fresh.map((entry) => entry.id));
+  const next = [...open.filter((entry) => !ids.has(entry.id)), ...fresh];
+  writeReviewRecord(git, repo, next);
+  return next;
+}
+
+/** Every item the open review holds, plus this run's held ones (as the run reported them). */
+function mergedItemsOf(open: readonly ReviewEntry[], thisRun: readonly MergedItem[]): MergedItem[] {
+  const ids = new Set(open.map((entry) => entry.id));
+  return [
+    ...open.map(({ id, path, kind, take }): MergedItem => ({ id, path, kind, take })),
+    ...thisRun.filter((item) => item.held === true && !ids.has(item.id)),
+  ];
+}
+
+/**
+ * Put decided items of the open review back to the Workspace's version (the
+ * merge's incoming side) as ONE ordinary local commit, and hold this
+ * machine's own text (the merge's first parent) aside — so a later push
+ * carries the Workspace's version there until the item is settled. A path
+ * changed since its merge refuses `stale-decision`: never over a later edit.
+ */
+function holdBackReviewItems(git: WorkspaceGit, repo: string, ids: readonly string[], now: Date): NonNullable<SyncResult['heldBack']> {
+  const open = readReviewRecord(git, repo);
+  const chosen = ids.map((id) => open.find((entry) => entry.id === id));
+  const unknown = ids.filter((_, index) => chosen[index] === undefined);
+  if (unknown.length > 0) {
+    throw new WorkspaceRefusal('unknown-review-item', 'nothing with that id waits for review on this machine', {
+      unknown,
+      open: open.map(({ id, path }) => ({ id, path })),
+    });
+  }
+  const entries = chosen as ReviewEntry[];
+  guardPersonal(
+    entries.map((entry) => entry.path),
+    { ids: [...ids] }
+  );
+  for (const entry of entries) {
+    if (entry.kind === 'combine') {
+      throw new WorkspaceRefusal('invalid-resolution', 'combining two Workspaces is agreed as a whole, never held back in part', { id: entry.id });
+    }
+  }
+  for (const entry of entries) {
+    const full = join(repo, ...entry.path.split('/'));
+    if (!isSafeRelative(entry.path) || crossesLink(repo, full) || isLink(full)) {
+      throw new WorkspaceRefusal('invalid-resolution', 'that review item is not a plain file inside the Workspace', { id: entry.id, path: entry.path });
+    }
+    const atHead = revParse(git, repo, `HEAD:${entry.path}`);
+    const atMerge = revParse(git, repo, `${entry.merge}:${entry.path}`);
+    if (atHead !== atMerge) {
+      throw new WorkspaceRefusal('stale-decision', 'that item changed since it was merged, so nothing was held back', { id: entry.id, path: entry.path });
+    }
+  }
+  const heldAt = now.toISOString();
+  const held: HeldItem[] = [];
+  for (const entry of entries) {
+    const full = join(repo, ...entry.path.split('/'));
+    const theirs = textAt(git, repo, `${entry.merge}^2`, entry.path);
+    held.push({ id: entry.id, path: entry.path, kind: entry.kind as AskKind | ReviewKind, text: textAt(git, repo, `${entry.merge}^1`, entry.path), heldAt });
+    if (theirs === null) rmSync(full, { force: true });
+    else {
+      mkdirSync(dirname(full), { recursive: true });
+      atomicWriteFile(full, theirs);
+    }
+  }
+  const paths = entries.map((entry) => entry.path);
+  attempt(git, ['add', '-A', '--', ...paths], repo);
+  let sha: string | null = null;
+  if (!attempt(git, ['diff', '--cached', '--quiet', '--', ...paths], repo).ok) {
+    const subject = paths.length === 1 ? `knowledge: hold back ${paths[0]}` : `knowledge: hold back ${paths.length} documents`;
+    const committed = attempt(git, ['-c', 'user.useConfigOnly=true', 'commit', '-q', '-m', subject.slice(0, MAX_MESSAGE_LENGTH), '--', ...paths], repo);
+    if (!committed.ok) {
+      attempt(git, ['reset', '-q', '--', ...paths], repo);
+      for (const entry of entries) attempt(git, ['checkout', '-q', 'HEAD', '--', entry.path], repo);
+      throw new WorkspaceRefusal('commit-failed', `the held-back items could not be committed: ${committed.detail}`, { committed: false, ids: [...ids] });
+    }
+    sha = git(['rev-parse', 'HEAD'], repo).trim();
+  }
+  const replaced = new Set(paths);
+  writeHeld(git, repo, [...readHeld(git, repo).filter((entry) => !replaced.has(entry.path)), ...held]);
+  const gone = new Set(ids);
+  writeReviewRecord(git, repo, open.filter((entry) => !gone.has(entry.id)));
+  return { ids: [...ids], sha };
+}
+
 // ─── Identity ───────────────────────────────────────────────────────────────
 
 /**
@@ -1424,16 +2334,38 @@ function adoptProjectIdentity(git: WorkspaceGit, repo: string, flowFolder: strin
 // ─── The verb ───────────────────────────────────────────────────────────────
 
 /** Sync one Workspace. See the module header for the steps. */
+const TRACE_SLOW_CALL_MS = 2_000;
+const TRACE_MAX_ARGS = 10;
+
+/** A git runner that announces each call before it runs, and a long one after. */
+function tracingGit(git: WorkspaceGit, say: (what: string) => void): WorkspaceGit {
+  return (args, cwd, gitOptions) => {
+    const shown = args.length > TRACE_MAX_ARGS ? [...args.slice(0, TRACE_MAX_ARGS), `… ${args.length - TRACE_MAX_ARGS} more`] : args;
+    const where = basename(cwd);
+    say(`git ${shown.join(' ')} (in ${where}${gitOptions?.network === true ? `, network, up to ${gitOptions.timeoutMs ?? 'default'} ms` : ''})`);
+    const started = Date.now();
+    try {
+      return git(args, cwd, gitOptions);
+    } finally {
+      const took = Date.now() - started;
+      if (took >= TRACE_SLOW_CALL_MS) say(`  … that git call took ${took} ms`);
+    }
+  };
+}
+
 export function syncWorkspace(options: SyncOptions): SyncResult {
   const flowFolder = resolve(options.flowFolder);
-  const git = options.deps?.git ?? defaultWorkspaceGit;
+  const runStarted = Date.now();
+  const say = (what: string): void => options.trace?.(`[sync] +${((Date.now() - runStarted) / 1000).toFixed(1)}s ${what}`);
+  const baseGit = options.deps?.git ?? defaultWorkspaceGit;
+  const git = options.trace === undefined ? baseGit : tracingGit(baseGit, say);
   const now = options.deps?.now ?? (() => new Date());
-  const workspace = findWorkspace(flowFolder, options.workspace);
+  const { workspace, early } = findWorkspaceRecovering(flowFolder, options.workspace, git, now);
   const repo = workspaceDir(flowFolder, workspace.slug);
 
   const top = attempt(git, ['rev-parse', '--show-toplevel'], repo);
   if (!top.ok || realOrResolved(top.out.trim()) !== realOrResolved(repo)) {
-    throw new WorkspaceRefusal('not-a-git-repo', `the ${workspace.file.name} Workspace folder is not a git repository`, { workspace: workspace.slug });
+    throw new WorkspaceRefusal('not-a-git-repo', `the ${workspace.name} Workspace folder is not a git repository`, { workspace: workspace.slug });
   }
   const resolveRequest = options.resolve === undefined ? undefined : parseResolve(options.resolve, repo, options.cwd ?? process.cwd());
 
@@ -1444,13 +2376,44 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     });
   }
 
+  const cwd = options.cwd ?? process.cwd();
+  const batchRequest = options.decisions === undefined ? undefined : parseDecisionsFile(options.decisions, cwd);
+  const holdRequest = options.hold === undefined ? undefined : parseHold(options.hold);
+  const settleRequest = options.settleHeld === undefined ? undefined : parseSettleHeld(options.settleHeld, cwd);
+  if (batchRequest !== undefined && (resolveRequest !== undefined || putBackRequest !== undefined || options.commitOnly === true)) {
+    throw new WorkspaceRefusal('invalid-resolution', 'a decisions file is its own sync — it takes no single decision, no put-back and no --commit-only', {
+      file: options.decisions,
+    });
+  }
+  if (holdRequest !== undefined && holdRequest.length > 0 && batchRequest === undefined) {
+    throw new WorkspaceRefusal('invalid-resolution', 'holding items aside goes with a decisions file — the merge it applies to', { hold: holdRequest });
+  }
+  if (settleRequest !== undefined && (resolveRequest !== undefined || putBackRequest !== undefined || batchRequest !== undefined)) {
+    throw new WorkspaceRefusal('invalid-resolution', 'settling a held item is its own sync — it takes no decision and no put-back', { id: settleRequest.id });
+  }
+  const holdBackRequest = options.holdBack === undefined ? undefined : parseHold(options.holdBack);
+  if (
+    holdBackRequest !== undefined &&
+    (holdBackRequest.length === 0 || resolveRequest !== undefined || putBackRequest !== undefined || batchRequest !== undefined || settleRequest !== undefined)
+  ) {
+    throw new WorkspaceRefusal('invalid-resolution', 'holding review items back is its own sync — it takes ids, and no decision, put-back or settle', {
+      holdBack: holdBackRequest ?? [],
+    });
+  }
+
   if (options.commitOnly === true && resolveRequest !== undefined) {
     throw new WorkspaceRefusal('invalid-resolution', 'a decision needs the merge it answers, so it cannot be made by a commit-only run', {
       path: resolveSubject(resolveRequest),
     });
   }
 
+  const networkDeadline = Date.now() + SYNC_NETWORK_BUDGET_MS;
+  say(`step: lock (Workspace ${workspace.slug})`);
   const lock = acquireLock(git, repo, now());
+  // A sync never changes what THIS machine calls the Workspace: when the
+  // merged file brings another shared name (two Workspaces combined, an older
+  // client's rename), the name this machine showed is kept as its own.
+  const nameBefore = workspace.name;
   try {
     const recoveredMerge = recoverLeftoverMerge(git, repo, workspace.slug);
     const branchOut = attempt(git, ['symbolic-ref', '--short', '-q', 'HEAD'], repo);
@@ -1468,7 +2431,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
 
     const result: SyncResult = {
       action: 'sync',
-      workspace: { name: workspace.file.name, slug: workspace.slug, path: repo },
+      workspace: { name: workspace.name, slug: workspace.slug, path: repo },
       branch,
       remote: remote === null ? null : redactRemote(remote),
       state: 'nothing-to-do',
@@ -1487,14 +2450,25 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
       indexes: { rebuilt: [], failed: [] },
       rules: { copied: [], skipped: [], failed: [] },
       mode: options.commitOnly === true ? 'commit-only' : 'full',
-      recovered: { lock: lock.recovered, merge: recoveredMerge },
+      recovered: { lock: lock.recovered ?? early.lock, merge: recoveredMerge || early.merge },
       untracked: [],
+      mergedItems: [],
+      heldAside: heldSummaries(readHeld(git, repo)),
     };
 
     // ── 1. Commit ──
+    say('step: commit');
     const adopted = adoptProjectIdentity(git, repo, flowFolder, workspace);
     if (adopted !== null) result.identity = { email: adopted, source: 'projects' };
     writeWorkspaceRepoFiles(repo);
+    if (settleRequest !== undefined) {
+      result.settled = settleHeldItem(git, repo, settleRequest);
+      result.heldAside = heldSummaries(readHeld(git, repo));
+    }
+    if (holdBackRequest !== undefined) {
+      result.heldBack = holdBackReviewItems(git, repo, holdBackRequest, now());
+      result.heldAside = heldSummaries(readHeld(git, repo));
+    }
     if (putBackRequest !== undefined) {
       applyPutBack(repo, putBackRequest);
       result.putBack = { path: putBackRequest.path };
@@ -1505,6 +2479,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
       repo,
       message,
       remote === null ? null : revParse(git, repo, trackingRef),
+      remote !== null,
       result.untracked
     );
 
@@ -1517,9 +2492,14 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     }
 
     // ── 2. Remote ──
+    say('step: remote');
     if (remote === null) {
-      if (resolveRequest !== undefined) {
-        throw new WorkspaceRefusal('nothing-to-resolve', 'this Workspace has no remote, so nothing is waiting to be merged', { path: resolveSubject(resolveRequest) });
+      if (resolveRequest !== undefined || batchRequest !== undefined) {
+        throw new WorkspaceRefusal(
+          'nothing-to-resolve',
+          'this Workspace has no remote, so nothing is waiting to be merged',
+          resolveRequest !== undefined ? { path: resolveSubject(resolveRequest) } : { ids: (batchRequest ?? []).map((entry) => entry.id ?? '') }
+        );
       }
       result.state = 'local-only';
       result.ahead = countRange(git, repo, 'HEAD');
@@ -1534,7 +2514,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
       if (branch !== WORKSPACE_FALLBACK_BRANCH) {
         refspecs.push(`+refs/heads/${WORKSPACE_FALLBACK_BRANCH}*:refs/remotes/${REMOTE_NAME}/${WORKSPACE_FALLBACK_BRANCH}*`);
       }
-      const fetched = attempt(git, [...NO_SYMLINKS, 'fetch', '-q', '--no-tags', '--', REMOTE_NAME, ...refspecs], repo, true);
+      const fetched = attempt(git, [...NO_SYMLINKS, 'fetch', '-q', '--no-tags', '--', REMOTE_NAME, ...refspecs], repo, syncNetworkTimeout(networkDeadline));
       if (!fetched.ok) {
         // A remote that does not have this branch yet is not an error: the first push creates it.
         if (/couldn't find remote ref/i.test(fetched.detail)) return { ok: true };
@@ -1582,7 +2562,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
       const existing = revParse(git, repo, `refs/heads/${target}`);
       if (existing !== null && !isAncestor(git, repo, existing, 'HEAD')) return false;
       try {
-        switchWorkspaceBranch(git, repo, target, workspace.file.name);
+        switchWorkspaceBranch(git, repo, target, workspace.name);
       } catch {
         return false;
       }
@@ -1595,7 +2575,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     };
 
     // A decision is made about the remote state the question was put about — no new fetch.
-    if (resolveRequest === undefined) {
+    if (resolveRequest === undefined && batchRequest === undefined) {
       const fetched = fetchOnce();
       if (!fetched.ok) return offline(fetched.detail);
       // Another member already moved the Workspace: follow it (one merge brings
@@ -1606,7 +2586,16 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     }
 
     // ── 3. Merge ──
-    const mergeContext: MergeContext = { git, repo, branch, now: now(), ...(resolveRequest === undefined ? {} : { resolve: resolveRequest }) };
+    say('step: merge');
+    const mergeContext: MergeContext = {
+      git,
+      repo,
+      branch,
+      now: now(),
+      ...(resolveRequest === undefined ? {} : { resolve: resolveRequest }),
+      ...(batchRequest === undefined ? {} : { batch: batchRequest }),
+      ...(holdRequest === undefined || holdRequest.length === 0 ? {} : { hold: holdRequest }),
+    };
     const settle = (step: MergeStep): boolean => {
       switch (step.kind) {
         case 'none':
@@ -1619,6 +2608,8 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
           result.merge = { sha: step.sha, log: step.log };
           result.resolutions.push(...step.resolutions);
           result.decided.push(...step.decided);
+          result.mergedItems.push(...step.mergedItems);
+          if (step.held.length > 0) result.heldAside = heldSummaries(readHeld(git, repo));
           return true;
         case 'waiting':
           result.asks = step.asks;
@@ -1639,7 +2630,9 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     // ── 5. Push ── (4. runs once, after every pull this run made)
     const finish = (): SyncResult => {
       if (result.pulled > 0) {
+        say('step: rebuild project indexes');
         result.indexes = rebuildIndexes(flowFolder, workspace, mergeContext.now);
+        say('step: team rules');
         result.rules = materializeWorkspaceRules(flowFolder, workspace.slug, git);
       }
       const tracking = revParse(git, repo, trackingRef);
@@ -1648,18 +2641,41 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
       return result;
     };
 
-    if (!options.push) return finish();
+    // Decided items of a merge kept here wait for a person: they are recorded,
+    // and while ANY is recorded a run publishes only when told a person agreed.
+    // A combine of two Workspaces is ALWAYS reviewed before it is shared: it
+    // is the one merge that can bring in a whole other history at once.
+    const combinedHere = result.mergedItems.some((item) => item.kind === 'combine');
+    const gated = options.push && options.agreed !== true && (combinedHere || readReviewRecord(git, repo).length > 0);
+    const openReview = recordReview(git, repo, result.merge, result.mergedItems, !options.push || gated);
+    if (!options.push || gated) {
+      // A merge committed here and not published waits for a person's review.
+      if (result.merge !== null || openReview.length > 0) {
+        result.state = 'merged-local';
+        result.awaitingReview = true;
+        result.mergedItems = mergedItemsOf(openReview, result.mergedItems);
+        result.detail = "The Workspace's changes were merged on this machine and not published; the merge waits for review.";
+      }
+      return finish();
+    }
+    const clearReviewIfAgreed = (): void => {
+      if (options.agreed === true) writeReviewRecord(git, repo, []);
+    };
     let movedForPush = false;
     for (let round = 0; round < 2; round += 1) {
       const tracking = revParse(git, repo, trackingRef);
       const ahead = countRange(git, repo, tracking === null ? 'HEAD' : `${trackingRef}..HEAD`);
-      if (ahead === 0) return finish();
+      if (ahead === 0) {
+        clearReviewIfAgreed();
+        return finish();
+      }
       guardPersonal(outgoingPaths(git, repo, tracking), { committed: result.committed !== null, merged: result.merge !== null });
-      const pushed = attempt(git, ['push', '-q', '--', REMOTE_NAME, `HEAD:refs/heads/${branch}`], repo, true);
+      const pushed = attempt(git, ['push', '-q', '--', REMOTE_NAME, `HEAD:refs/heads/${branch}`], repo, syncNetworkTimeout(networkDeadline));
       if (pushed.ok) {
         result.pushed = true;
         // Record what the remote now holds, so `ahead` reads true without a fetch.
         attempt(git, ['update-ref', trackingRef, 'HEAD'], repo);
+        clearReviewIfAgreed();
         return finish();
       }
       if (!REJECTED_PUSH.test(pushed.detail) || REMOTE_REJECTED.test(pushed.detail)) {
@@ -1699,7 +2715,41 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     return result;
   } finally {
     lock.release();
+    keepLocalName(flowFolder, workspace.slug, nameBefore);
   }
+}
+
+function keepLocalName(flowFolder: string, slug: string, nameBefore: string): void {
+  try {
+    if (readLocalWorkspaceNames(flowFolder)[slug] !== undefined) return;
+    if (readWorkspace(flowFolder, slug).file.name !== nameBefore) writeLocalWorkspaceName(flowFolder, slug, nameBefore);
+  } catch {
+    // A name is never a reason for a sync to fail.
+  }
+}
+
+/** Project ids a commit's workspace.json lists. */
+function projectIdsAt(git: WorkspaceGit, repo: string, rev: string): Set<string> {
+  const text = textAt(git, repo, rev, 'workspace.json');
+  if (text === null) return new Set();
+  try {
+    const parsed = JSON.parse(text) as { projects?: unknown };
+    if (!Array.isArray(parsed.projects)) return new Set();
+    return new Set(
+      parsed.projects
+        .map((entry) => (typeof entry === 'object' && entry !== null ? (entry as { id?: unknown }).id : undefined))
+        .filter((id): id is string => typeof id === 'string' && id !== '')
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+/** Whether two histories' Workspaces list at least one project in common — "the same work". */
+function sharesAProject(git: WorkspaceGit, repo: string, ours: string, theirs: string): boolean {
+  const mine = projectIdsAt(git, repo, ours);
+  for (const id of projectIdsAt(git, repo, theirs)) if (mine.has(id)) return true;
+  return false;
 }
 
 /** Sync every Workspace on this machine, one after another. One refusal never stops the others. */

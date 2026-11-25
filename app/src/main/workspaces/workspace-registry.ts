@@ -56,6 +56,8 @@ import {
   type WorkspaceJoinResult,
   type WorkspaceLinkResult,
   type WorkspaceDeleteResult,
+  type WorkspaceRemoveProjectRequest,
+  type WorkspaceRemoveProjectResult,
   type WorkspaceImported,
   type WorkspaceListing,
   type WorkspaceMembership,
@@ -211,6 +213,12 @@ export interface WorkspaceRegistry {
    */
   deleteWorkspace(workspace: string): Promise<WorkspaceAnswer<WorkspaceDeleteResult>>
   /**
+   * Take one project out of one Workspace (`workspace remove-project`). When
+   * another Workspace here has it too, that copy stays and gains what only
+   * this one had. Only ever asked after a person confirmed (`--confirm`).
+   */
+  removeProject(request: WorkspaceRemoveProjectRequest): Promise<WorkspaceAnswer<WorkspaceRemoveProjectResult>>
+  /**
    * Connect a Workspace to a shared repository (`workspace set-remote`). The
    * CLI contacts nothing — the next sync publishes. `replace` only when a
    * person chose to change the repository it already has (forbidden-pattern #15).
@@ -318,6 +326,8 @@ export function readSummary(value: unknown): WorkspaceSummary {
   if (remote === undefined) throw new MalformedAnswer('workspace.remote')
   return {
     name: need(str(value['name']), 'workspace.name'),
+    // An older CLI has no per-machine names: the name IS the shared one.
+    ...(typeof value['sharedName'] === 'string' && value['sharedName'] !== '' ? { sharedName: value['sharedName'] } : {}),
     slug: need(str(value['slug']), 'workspace.slug'),
     path: need(str(value['path']), 'workspace.path'),
     remote,
@@ -497,6 +507,8 @@ function readJoin(payload: Json): WorkspaceJoinResult {
     candidates: payload['candidates'] === undefined ? [] : readProjects(payload['candidates']),
     // Filled by the registry from the projects open in the app (see `join`).
     openCandidates: [],
+    // Older CLIs never let go of a Workspace's repository — none, then.
+    disconnected: Array.isArray(payload['disconnected']) ? payload['disconnected'].map(readSummary) : [],
   }
 }
 
@@ -1027,6 +1039,34 @@ export function createWorkspaceRegistry(deps: WorkspaceRegistryDeps): WorkspaceR
     })
   }
 
+  function removeProject(request: WorkspaceRemoveProjectRequest): Promise<WorkspaceAnswer<WorkspaceRemoveProjectResult>> {
+    if (!isSlug(request.slug)) return Promise.resolve(refusal('unknown-workspace'))
+    if (!isProjectId(request.project)) return Promise.resolve(refusal('unknown-project'))
+    return serial(async () => {
+      // THE TYPED FLAG IS THE CONFIRMATION (forbidden-pattern #15): only ever
+      // called after a person read what removing it does.
+      const answer = shape(
+        await runWhenFree(
+          'remove-project',
+          deps.homeDir,
+          [`--workspace=${request.slug}`, `--project=${request.project}`, '--confirm'],
+          COPY_TIMEOUT_MS,
+        ),
+        (payload): WorkspaceRemoveProjectResult => {
+          const kept = payload['keptIn']
+          return {
+            workspace: request.slug,
+            project: request.project,
+            keptIn: isRecord(kept) ? (str(kept['name']) ?? null) : null,
+          }
+        },
+        'remove-project',
+      )
+      if (answer.ok) changed('moved')
+      return answer
+    })
+  }
+
   function readRemoteAnswer(payload: Json): { workspace: WorkspaceSummary; changed: boolean } {
     if (typeof payload['changed'] !== 'boolean') throw new MalformedAnswer('changed')
     return { workspace: readSummary(payload['workspace']), changed: payload['changed'] }
@@ -1120,6 +1160,7 @@ export function createWorkspaceRegistry(deps: WorkspaceRegistryDeps): WorkspaceR
     rename,
     moveProject,
     deleteWorkspace,
+    removeProject,
     setRemote,
     unsetRemote,
     branches,

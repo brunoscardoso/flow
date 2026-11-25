@@ -583,8 +583,8 @@ describe('ThreadStore', () => {
     })
 
     it('matches an attached project’s doc written through that project’s WORKTREE (live 2026-10-23)', () => {
-      // The live report: a jupiter-core thread with celeste-desktop attached
-      // wrote its discovery into celeste-desktop's thread worktree. Neither
+      // The live report: a lumen-core thread with quill-desktop attached
+      // wrote its discovery into quill-desktop's thread worktree. Neither
       // `<root>/<relPath>` nor the link's realpath names that path, so the doc
       // had no writer and the marker fell to the thread on screen — another
       // conversation entirely.

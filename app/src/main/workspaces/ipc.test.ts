@@ -80,6 +80,10 @@ function harness(options: { trusted?: boolean } = {}) {
       received.push({ moveProject: request })
       return { ok: true, to: request.to }
     },
+    removeProject: async (request) => {
+      received.push({ removeProject: request })
+      return { ok: true, workspace: request.slug, project: request.project, keptIn: null }
+    },
     deleteWorkspace: async (slug) => {
       received.push({ delete: slug })
       return { ok: true, workspace: slug, moved: [] }
@@ -133,13 +137,17 @@ function harness(options: { trusted?: boolean } = {}) {
         received.push({ resolve: request })
         return { ok: true, status: { state: 'synced', lastSyncedAt: null, detail: null, asks: [], reviews: [] } }
       },
-      intentMerges: (request) => {
-        received.push({ intentMerges: request })
-        return null
+      reviewAgree: async (request) => {
+        received.push({ reviewAgree: request })
+        return { ok: true, status: { state: 'review', lastSyncedAt: null, detail: null, asks: [], reviews: [] } }
       },
-      keepIntent: async (request) => {
-        received.push({ keepIntent: request })
-        return { ok: false, reason: 'not-found', detail: 'gone', status: { state: 'idle', lastSyncedAt: null, detail: null, asks: [], reviews: [] } }
+      reviewDisagree: async (request) => {
+        received.push({ reviewDisagree: request })
+        return { ok: true, status: { state: 'review', lastSyncedAt: null, detail: null, asks: [], reviews: [] } }
+      },
+      reviewDecide: async (request) => {
+        received.push({ reviewDecide: request })
+        return { ok: true, status: { state: 'review', lastSyncedAt: null, detail: null, asks: [], reviews: [] } }
       },
     },
     remote: {
@@ -166,6 +174,16 @@ function harness(options: { trusted?: boolean } = {}) {
       setBranch: async (request) => {
         received.push({ setBranch: request })
         return { ok: true, remote: 'https://h/r', status: { state: 'synced', lastSyncedAt: null, detail: null, asks: [], reviews: [] } }
+      },
+    },
+    mergeReasons: {
+      list: async (slug) => {
+        received.push({ mergeReasons: slug })
+        return { ok: true, reasons: [] }
+      },
+      remove: async (slug, id) => {
+        received.push({ removeMergeReason: { slug, id } })
+        return { ok: true, reasons: [] }
       },
     },
     connections: {
@@ -319,18 +337,46 @@ describe('workspaces channels', () => {
     await expect(harness({ trusted: false }).call('workspaces:syncNow', { slug: 'acme' })).rejects.toThrow(/not available here/)
   })
 
-  it('the intent-merge channels rebuild their request field by field: never a text or a path from the renderer', async () => {
+  it('the review channels rebuild their request field by field: ids, a group or all groups, a reason, and a take or a text — never a path', async () => {
     const h = harness()
-    await h.call('workspaces:intentMerges', { slug: 'acme', mergeId: 'm1', path: '/etc/passwd' })
-    await h.call('workspaces:keepIntent', { slug: 'acme', mergeId: 'm1', keep: 'ours', text: 'injected', path: '/etc/passwd' })
-    await h.call('workspaces:keepIntent', { slug: 'acme', mergeId: 'm1', documentId: 'ask-1', keep: 'theirs' })
+    await h.call('workspaces:reviewAgree', { slug: 'acme', group: 'kept-both', path: '/etc/passwd' })
+    await h.call('workspaces:reviewAgree', { slug: 'acme', ids: ['a1', 'b2'] })
+    await h.call('workspaces:reviewAgree', { slug: 'acme', allGroups: true, ids: undefined })
+    await h.call('workspaces:reviewDisagree', { slug: 'acme', ids: ['a1'], reason: 'keep both', take: 'file:/etc/passwd' })
+    // An empty reason is passed on: the engine refuses it with a sentence for the person.
+    await h.call('workspaces:reviewDisagree', { slug: 'acme', ids: ['a1'], reason: '' })
+    await h.call('workspaces:reviewDecide', { slug: 'acme', id: 'a1', take: 'theirs', text: 'ignored' })
+    await h.call('workspaces:reviewDecide', { slug: 'acme', id: 'a1', take: 'text', text: 'mine\n' })
     expect(h.received).toEqual([
-      { intentMerges: { slug: 'acme', mergeId: 'm1' } },
-      { keepIntent: { slug: 'acme', mergeId: 'm1', keep: 'ours' } },
-      { keepIntent: { slug: 'acme', mergeId: 'm1', documentId: 'ask-1', keep: 'theirs' } },
+      { reviewAgree: { slug: 'acme', group: 'kept-both' } },
+      { reviewAgree: { slug: 'acme', ids: ['a1', 'b2'] } },
+      { reviewAgree: { slug: 'acme', allGroups: true } },
+      { reviewDisagree: { slug: 'acme', ids: ['a1'], reason: 'keep both' } },
+      { reviewDisagree: { slug: 'acme', ids: ['a1'], reason: '' } },
+      { reviewDecide: { slug: 'acme', id: 'a1', take: 'theirs' } },
+      { reviewDecide: { slug: 'acme', id: 'a1', take: 'text', text: 'mine\n' } },
     ])
-    await expect(h.call('workspaces:keepIntent', { slug: 'acme', mergeId: 'm1', keep: 'file:/etc/passwd' })).rejects.toThrow(/keep must be/)
-    await expect(h.call('workspaces:intentMerges', { slug: 'acme' })).rejects.toThrow(/mergeId/)
+    await expect(h.call('workspaces:reviewAgree', { slug: 'acme', group: 'needs-you' })).rejects.toThrow(/group must be/)
+    await expect(h.call('workspaces:reviewAgree', { slug: 'acme' })).rejects.toThrow(/exactly one of/)
+    await expect(h.call('workspaces:reviewAgree', { slug: 'acme', ids: ['a'], group: 'merged' })).rejects.toThrow(/exactly one of/)
+    await expect(h.call('workspaces:reviewAgree', { slug: 'acme', allGroups: true, group: 'merged' })).rejects.toThrow(/exactly one of/)
+    await expect(h.call('workspaces:reviewAgree', { slug: 'acme', allGroups: 'yes' })).rejects.toThrow(/allGroups must be/)
+    await expect(h.call('workspaces:reviewAgree', { slug: 'acme', ids: [7] })).rejects.toThrow(/ids must be/)
+    await expect(h.call('workspaces:reviewDisagree', { slug: 'acme', ids: ['a1'] })).rejects.toThrow(/reason must be/)
+    await expect(h.call('workspaces:reviewDecide', { slug: 'acme', id: 'a1', take: 'file:/etc/passwd' })).rejects.toThrow(/take must be/)
+    await expect(h.call('workspaces:reviewDecide', { slug: 'acme', id: 'a1', take: 'text' })).rejects.toThrow(/text must be/)
+  })
+
+  it('the merge-reasons channels pass on a slug and a decision id only, and refuse anything shaped like a flag', async () => {
+    const h = harness()
+    await expect(h.call('workspaces:mergeReasons', { slug: 'acme', path: '/etc/passwd' })).resolves.toEqual({ ok: true, reasons: [] })
+    await h.call('workspaces:removeMergeReason', { slug: 'acme', id: '0123456789abcdef', reason: 'ignored' })
+    expect(h.received).toEqual([{ mergeReasons: 'acme' }, { removeMergeReason: { slug: 'acme', id: '0123456789abcdef' } }])
+    await expect(h.call('workspaces:mergeReasons', { slug: '--target=/etc' })).rejects.toThrow(/slug must be/)
+    await expect(h.call('workspaces:mergeReasons', {})).rejects.toThrow(/slug must be/)
+    await expect(h.call('workspaces:removeMergeReason', { slug: 'acme', id: '--all' })).rejects.toThrow(/id must be/)
+    await expect(h.call('workspaces:removeMergeReason', { slug: 'acme' })).rejects.toThrow(/id must be/)
+    expect(h.received).toHaveLength(2)
   })
 
   it('the shared-repository channels rebuild every request field by field; replace only as an explicit true', async () => {

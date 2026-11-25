@@ -670,6 +670,27 @@ export function buildWorkspaceSheet(graph: BlueprintWorkspaceGraph, options: Wor
   }
 }
 
+/**
+ * The map shows only the projects on this computer (user, 2026-11-25): a
+ * project a teammate shared is knowledge the Workspace keeps, and it stays out
+ * of sight until a person attaches its checkout here. Its links go with it,
+ * and each remaining project's connection count is recounted from what is left.
+ */
+export function onThisComputer(graph: BlueprintWorkspaceGraph): BlueprintWorkspaceGraph {
+  const kept = graph.projects.filter((project) => project.state !== 'remote')
+  if (kept.length === graph.projects.length) return graph
+  const slugs = new Set(kept.map((project) => project.slug))
+  const links = graph.links === null ? null : graph.links.filter((link) => slugs.has(link.from.project) && slugs.has(link.to.project))
+  const projects =
+    links === null
+      ? kept
+      : kept.map((project) => ({
+          ...project,
+          connections: links.filter((link) => link.from.project === project.slug || link.to.project === project.slug).length,
+        }))
+  return { ...graph, projects, links }
+}
+
 /** A project's own understood figure — the same function the CLI used for its band. */
 export function projectUnderstood(project: BlueprintWorkspaceProject): { done: number; total: number } | null {
   return project.graph === null ? null : featuresUnderstood(project.graph.nodes)

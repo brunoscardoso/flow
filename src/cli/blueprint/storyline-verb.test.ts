@@ -736,11 +736,11 @@ describe("a plan's own story (--plan alone)", () => {
     '',
   ].join('\n');
 
-  /** Workspace `team`: argo (this repo — the plan only), core (Python) and web (TypeScript) checked out. */
-  function seedWorkspace(): { argo: string; core: string; web: string } {
+  /** Workspace `team`: keel (this repo — the plan only), core (Python) and web (TypeScript) checked out. */
+  function seedWorkspace(): { keel: string; core: string; web: string } {
     const home = mkdtempSync(join(tmpdir(), 'storyline-plan-home-'));
     roots.push(home);
-    const argo = repo({ 'flow/plans/plan_sort_v1.md': PLAN, 'deploy/values.yaml': 'a: 1\n' });
+    const keel = repo({ 'flow/plans/plan_sort_v1.md': PLAN, 'deploy/values.yaml': 'a: 1\n' });
     // A sibling with its own flow folder: the story must never cache into it.
     const core = repo({ 'core/views.py': VIEWS, 'core/service.py': SERVICE, 'core/README.md': '# core\n' });
     const web = repo({ 'src/api.ts': API, 'src/lib.ts': LIB }, false);
@@ -748,16 +748,16 @@ describe("a plan's own story (--plan alone)", () => {
     mkdirSync(join(home, 'workspaces', 'team'), { recursive: true });
     writeFileSync(
       join(home, 'workspaces', 'team', 'workspace.json'),
-      JSON.stringify({ name: 'Team', slug: 'team', projects: [project('web'), project('core'), project('argo')] }),
+      JSON.stringify({ name: 'Team', slug: 'team', projects: [project('web'), project('core'), project('keel')] }),
     );
-    writeFileSync(join(home, 'projects.local.json'), JSON.stringify({ projects: { 'local:argo': argo, 'local:core': core, 'local:web': web } }));
+    writeFileSync(join(home, 'projects.local.json'), JSON.stringify({ projects: { 'local:keel': keel, 'local:core': core, 'local:web': web } }));
     process.env.PLAN_FLOW_HOME = home;
-    return { argo, core, web };
+    return { keel, core, web };
   }
 
   it('draws every noted function from the sibling checkouts with its code, wired by calls, a linking function included', async () => {
-    const { argo, core } = seedWorkspace();
-    const result = story(await runStorylineVerb({ repoRoot: argo, plan: 'sort' }));
+    const { keel, core } = seedWorkspace();
+    const result = story(await runStorylineVerb({ repoRoot: keel, plan: 'sort' }));
 
     expect(result.scope).toBe('part');
     expect(result.language).toBe('mixed');
@@ -814,14 +814,14 @@ describe("a plan's own story (--plan alone)", () => {
   });
 
   it("reads a sibling's file by its story path with --file", async () => {
-    const { argo, core } = seedWorkspace();
-    const result = story(await runStorylineVerb({ repoRoot: argo, file: 'core/core/service.py' }));
+    const { keel, core } = seedWorkspace();
+    const result = story(await runStorylineVerb({ repoRoot: keel, file: 'core/core/service.py' }));
     expect(result.files).toEqual(['core/core/service.py']);
     expect(result.pieces.map((piece) => piece.id)).toContain('core/core/service.py#Service._paginate');
     expect(result.calls.find((call) => call.from === 'core/core/service.py#Service._filter')?.to).toBe('core/core/service.py#Service._paginate');
     expect(existsSync(cacheDir(core))).toBe(false);
     // A local file is still the local file, and an unknown project is still not found.
-    expect(refusal(await runStorylineVerb({ repoRoot: argo, file: 'nobody/core/service.py' })).reason).toBe('not-found');
+    expect(refusal(await runStorylineVerb({ repoRoot: keel, file: 'nobody/core/service.py' })).reason).toBe('not-found');
   });
 
   it('answers not-found for a plan with no notes or no active plan, and refuses no subject without a plan', async () => {

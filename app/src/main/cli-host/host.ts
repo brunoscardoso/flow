@@ -11,7 +11,33 @@
 // runs the child, and posts back {id, ok, stdout, stderr}. It holds no state
 // and makes no decisions: the caller still owns timeouts, retries and meaning.
 
-import { spawn } from 'child_process'
+import { ChildGroups, killGroup, spawnInGroup } from './child-group'
+
+// Every child this host is running. Each is its own process group, so stopping
+// one stops what it started too (see child-group.ts).
+const children = new ChildGroups()
+
+// The host never outlives the app, and neither do its children: a sync left
+// running after Flow quit held the Workspace's lock and refused every later
+// launch (user report 2026-11-24). Stopped on every way out — a signal, a
+// normal exit, or the app going away (this process re-parented).
+const parentAtStart = process.ppid
+function stopEverything(): void {
+  children.killAll()
+}
+process.on('exit', stopEverything)
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+  process.on(signal, () => {
+    stopEverything()
+    process.exit(0)
+  })
+}
+setInterval(() => {
+  if (process.ppid !== parentAtStart) {
+    stopEverything()
+    process.exit(0)
+  }
+}, 2_000).unref()
 
 interface RunRequest {
   id: string
@@ -44,9 +70,9 @@ process.parentPort?.on('message', (event: { data: RunRequest }) => {
   const request = event.data
   let stdout = ''
   let stderr = ''
-  let child: ReturnType<typeof spawn>
+  let child: ReturnType<typeof spawnInGroup>
   try {
-    child = spawn(request.execPath, request.args, {
+    child = spawnInGroup(request.execPath, request.args, {
       cwd: request.cwd,
       stdio: ['ignore', request.captureStdout ? 'pipe' : 'ignore', 'pipe'],
       ...(request.env === undefined ? {} : { env: request.env }),
@@ -55,8 +81,9 @@ process.parentPort?.on('message', (event: { data: RunRequest }) => {
     reply({ id: request.id, ok: false, stdout: '', stderr: '', error: (error as Error).message })
     return
   }
+  children.track(child)
   const timer = setTimeout(() => {
-    child.kill('SIGKILL')
+    killGroup(child)
     reply({ id: request.id, ok: false, stdout, stderr, error: 'timed out' })
   }, request.timeoutMs)
   child.stdout?.on('data', (chunk: Buffer | string) => {
@@ -64,7 +91,7 @@ process.parentPort?.on('message', (event: { data: RunRequest }) => {
     const cap = request.maxStdoutBytes
     if (cap !== undefined && stdout.length > cap) {
       clearTimeout(timer)
-      child.kill('SIGKILL')
+      killGroup(child)
       reply({ id: request.id, ok: false, stdout: '', stderr, error: 'maxBuffer length exceeded' })
     }
   })

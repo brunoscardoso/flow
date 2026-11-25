@@ -41,6 +41,9 @@ import {
   type SwitcherMenuEntry,
   type WorkspaceScope,
   workspaceAfterDelete,
+  parseLastThreads,
+  rememberLastThread,
+  workspaceLanding,
 } from './workspace-switcher-model'
 import { PICKER_UNAVAILABLE } from '../editor/file-tree-picker-model'
 
@@ -550,5 +553,24 @@ describe('the dialog seam', () => {
       expect(notice.title).toMatch(/Workspace/)
       expect(`${notice.title} ${notice.body}`).not.toMatch(/planflow-ai|\/|worktree|\p{Extended_Pictographic}/u)
     }
+  })
+})
+
+describe('where each Workspace was left', () => {
+  it('reopens the conversation last open there, only in the project it lands on', () => {
+    const remembered = { root: '/code/api', threadId: 't-1' }
+    expect(workspaceLanding({ target: '/code/api', remembered })).toEqual({ root: '/code/api', threadId: 't-1' })
+    expect(workspaceLanding({ target: '/code/web', remembered })).toEqual({ root: '/code/web', threadId: null })
+    expect(workspaceLanding({ target: '/code/api', remembered: null })).toEqual({ root: '/code/api', threadId: null })
+    expect(workspaceLanding({ target: null, remembered })).toBeNull()
+  })
+  it('reads only well-formed entries and records without mutating', () => {
+    expect(parseLastThreads('{"a":{"root":"/r","threadId":"t"},"b":{"root":""},"c":3}')).toEqual({ a: { root: '/r', threadId: 't' } })
+    expect(parseLastThreads('not json')).toEqual({})
+    expect(parseLastThreads(null)).toEqual({})
+    const before = { a: { root: '/r', threadId: 't' } }
+    const after = rememberLastThread(before, 'b', { root: '/s', threadId: 'u' })
+    expect(after).toEqual({ a: { root: '/r', threadId: 't' }, b: { root: '/s', threadId: 'u' } })
+    expect(before).toEqual({ a: { root: '/r', threadId: 't' } })
   })
 })

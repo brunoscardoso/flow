@@ -318,6 +318,22 @@ export const FEATURE_NAMESPACE_SEPARATOR = '::';
  * namespace null. `rest` is a feature slug, or `<slug>/<part>` for a part id.
  * Null for a non-feature id or an empty half.
  */
+/**
+ * A parent written as a namespaced id without its `feature:` prefix
+ * (`lumen-app::chats`) — an older writer's shape. Nine changes on a real
+ * project named their feature this way and attached to nothing (2026-11-25).
+ * It is unambiguous, so it is read as the id it means; anything else is kept
+ * exactly as written.
+ */
+export function normalizeParentRef(ref: string): string {
+  const trimmed = ref.trim().replace(/^["']|["']$/g, '');
+  if (trimmed.startsWith(FEATURE_ID_PREFIX)) return trimmed;
+  const separator = trimmed.indexOf(FEATURE_NAMESPACE_SEPARATOR);
+  if (separator <= 0) return ref;
+  const id = `${FEATURE_ID_PREFIX}${trimmed}`;
+  return parseFeatureId(id) === null ? ref : id;
+}
+
 export function parseFeatureId(id: string): { namespace: string | null; slug: string } | null {
   if (!id.startsWith(FEATURE_ID_PREFIX)) return null;
   const rest = id.slice(FEATURE_ID_PREFIX.length);
@@ -439,6 +455,9 @@ export function isWorkingSetCapture(raw: string): boolean {
  */
 export const CAPTURE_KEY = 'capture';
 
+/** The key the older capture shape carries instead of `capture:` — see `featureExclusion`. */
+export const CAPTURED_AT_KEY = 'captured_at';
+
 /**
  * WHY A FILE IS NOT A FEATURE — or `null` when it is one.
  *
@@ -464,10 +483,40 @@ export type FeatureExclusion = 'working-set' | 'capture-note';
 
 export function featureExclusion(raw: string): FeatureExclusion | null {
   if (isWorkingSetCapture(raw)) return 'working-set';
-  const { fm } = splitFrontmatter(raw);
+  const { fm, body } = splitFrontmatter(raw);
   if (fm.some((line) => line.trimStart().startsWith(`${CAPTURE_KEY}:`))) return 'capture-note';
+  // The OLDER capture shape, written before notes stamped `capture:` — it
+  // carries the time it was captured instead. Adoption gave three of these
+  // `kind: core` on a real project, so a ticket's notes drew as a feature
+  // (2026-11-25). A positive marker like the others: no feature records when
+  // it was captured.
+  // The three older shapes below are a note about ONE piece of work. Filed as
+  // a change (`kind: child`) it is exactly that, and counts under its feature
+  // (user, 2026-11-25); left unfiled — no kind, or the `core` an adoption
+  // stamped — it is a note, never a capability.
+  if (fm.some((line) => /^kind:[ \t]*child[ \t]*$/.test(line.trim()))) return null;
+  if (fm.some((line) => line.trimStart().startsWith(`${CAPTURED_AT_KEY}:`))) return 'capture-note';
+  // The OLDEST capture shape: the first brain-capture template (2026-03) wrote
+  // one note per piece of work, always with both a `**Created**:` and a
+  // `**Last Updated**:` line. Read as features they were most of a real
+  // project's board — 62 on one, 7 on this repository's own — and adopted as
+  // changes they were 272 more on another (2026-11-25). The pair is the
+  // template's own fingerprint; no feature writer has ever produced it.
+  if (OLD_CAPTURE_CREATED.test(body) && OLD_CAPTURE_UPDATED.test(body)) return 'capture-note';
+  // A WORK RECORD'S HEADER: a `**Status**:` line beside one naming the work's
+  // own documents or dates (`**Plan**:`, `**Discovery**:`, `**Jira**:`…) — how
+  // every per-ticket note an agent kept was opened, in any template. 25 such
+  // notes on two real projects, none of them a capability; no feature writer
+  // produces a status line.
+  if (WORK_STATUS.test(body) && WORK_FIELD.test(body)) return 'capture-note';
   return null;
 }
+
+const WORK_STATUS = /^\*\*Status(?:\*\*:|:\*\*)/m;
+const WORK_FIELD = /^\*\*(?:Discovery|Discovery doc|Plan|Created|Date|Jira|Branch|Phase|Source review)(?:\*\*:|:\*\*)/m;
+
+const OLD_CAPTURE_CREATED = /^\*\*Created\*\*:/m;
+const OLD_CAPTURE_UPDATED = /^\*\*Last Updated\*\*:/m;
 
 /**
  * A file that IS admitted but could not say what it is.
@@ -483,6 +532,40 @@ export function featureExclusion(raw: string): FeatureExclusion | null {
  */
 export type FeatureAdvisory = 'no-kind';
 
+/**
+ * Graph-level, not per file: a feature anchored on ONE folder that holds at
+ * least {@link CONTAINER_MIN_CHILDREN} other features is an outline of them —
+ * the project's own package ("Lumen Core" at `lumen_core`, beside "Core" at
+ * `lumen_core/core`), or a solution's `Source` folder. Drawn, it repeats its
+ * children's code as one more capability. Writers and links still read it.
+ */
+export type FeatureGrouping = 'container';
+export const CONTAINER_MIN_CHILDREN = 3;
+
+/** The slugs of the core features that only outline other features (see {@link FeatureGrouping}). */
+export function containerFeatureSlugs(features: readonly FeatureNode[]): Set<string> {
+  const cores = features.filter((feature) => feature.kind === 'core');
+  const folderOf = (anchor: string): string | null => {
+    const match = /^(?:module|dir):(.+?)\/?$/.exec(anchor.trim());
+    return match === null ? null : match[1];
+  };
+  const pathOf = (anchor: string): string => anchor.trim().replace(/^[a-z]+:/, '').replace(/#.*$/, '');
+  const out = new Set<string>();
+  for (const feature of cores) {
+    if (feature.anchors.length !== 1) continue;
+    const folder = folderOf(feature.anchors[0]);
+    if (folder === null || folder === '.' || folder === '') continue;
+    const inside = cores.filter(
+      (other) =>
+        other !== feature &&
+        other.anchors.length > 0 &&
+        other.anchors.every((anchor) => pathOf(anchor).startsWith(`${folder}/`)),
+    ).length;
+    if (inside >= CONTAINER_MIN_CHILDREN) out.add(feature.slug);
+  }
+  return out;
+}
+
 export function featureAdvisory(raw: string): FeatureAdvisory | null {
   if (featureExclusion(raw) !== null) return null;
   const { fm } = splitFrontmatter(raw);
@@ -494,7 +577,8 @@ export function featureAdvisory(raw: string): FeatureAdvisory | null {
 /** What a reader is told about a file the board did not draw, or drew on a
  *  guess. One sentence each, no path, no key — reasons a person can act on, in
  *  their own terms (forbidden-pattern #12). */
-export const EXCLUSION_REASON: Record<FeatureExclusion | FeatureAdvisory, string> = {
+export const EXCLUSION_REASON: Record<FeatureExclusion | FeatureAdvisory | FeatureGrouping, string> = {
+  container: 'a folder that holds other features, so its code is already drawn by them',
   'working-set': 'a chat thread\u2019s working notes, not a capability',
   'capture-note': 'a note the assistant captured about a feature, not the feature itself',
   'no-kind': 'this file does not say whether it is a capability or a change, so it is shown as a capability',
@@ -709,7 +793,7 @@ export function parseFeatureFile(slug: string, raw: string): FeatureNode {
     extra,
   };
   const parent = fields.get('parent');
-  if (parent !== undefined && parent.length > 0 && parent !== 'null') node.parent = parent;
+  if (parent !== undefined && parent.length > 0 && parent !== 'null') node.parent = normalizeParentRef(parent);
   const domain = fields.get('domain');
   if (domain !== undefined && domain.length > 0 && domain !== 'null') node.domain = domain;
   return node;
@@ -909,7 +993,7 @@ export function persistFeatureNode(flowDir: string, node: FeatureNode): void {
  *  and why. */
 export interface ExcludedFeatureFile {
   slug: string;
-  reason: FeatureExclusion | FeatureAdvisory;
+  reason: FeatureExclusion | FeatureAdvisory | FeatureGrouping;
   /** False when the file IS drawn and the reason is a declared guess. */
   dropped: boolean;
 }

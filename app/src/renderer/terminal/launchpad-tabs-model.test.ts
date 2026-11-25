@@ -21,8 +21,8 @@ import {
   subBar,
 } from './launchpad-tabs-model'
 
-const APP = '/work/jupiter-app'
-const CORE = '/work/jupiter-core'
+const APP = '/work/lumen-app'
+const CORE = '/work/lumen-core'
 const SCOPE = `${APP}::t1`
 
 function step(name: string, status: RunStepStatus, extra: Partial<RunStepState> = {}): RunStepState {
@@ -81,7 +81,7 @@ describe('the strip', () => {
 
   it('a step with no terminal yet joins the group; a one-time action keeps its own tab', () => {
     const steps = [step('db', 'running'), step('api', 'idle')]
-    const once = [{ key: `${APP}::lint`, name: 'lint', projectRoot: APP, projectName: 'jupiter-app', status: 'running' as const, terminalId: 'term-lint', exitCode: null, durationMs: null }]
+    const once = [{ key: `${APP}::lint`, name: 'lint', projectRoot: APP, projectName: 'lumen-app', status: 'running' as const, terminalId: 'term-lint', exitCode: null, durationMs: null }]
     const entries = planStrip([tab('term-db'), tab('term-lint'), tab('shell')], idOf, state(steps, once), true)
     expect(entries.map((entry) => entry.kind)).toEqual(['group', 'once', 'plain'])
     expect(entries[0].kind === 'group' ? entries[0].steps.map((s) => s.name) : []).toEqual(['db', 'api'])
@@ -107,7 +107,7 @@ describe('the group tab’s face', () => {
     expect(face.label).toBe('3 of 4 running')
     expect(face).not.toHaveProperty('count')
     expect(face.tones).toEqual(['ok', 'ok', 'ok', 'bad'])
-    expect(face.tooltip).toBe('Launchpad: 3 running, 1 not running as expected')
+    expect(face.tooltip).toBe('Run steps: 3 running, 1 not running as expected')
   })
 
   it('labels: all running, some running, starting, stopped', () => {
@@ -158,10 +158,10 @@ describe('the sub-bar', () => {
     const bar = subBar(FOUR, DEFAULT_GROUP_VIEW, names)
     expect(bar.items.map((item) => [item.key === 'all' ? 'all' : item.label, item.tone, item.project, item.pressed])).toEqual([
       ['all', null, null, true],
-      ['app-dev', 'ok', 'jupiter-app', false],
-      ['core-dev', 'ok', 'jupiter-core', false],
-      ['temporal-dev', 'ok', 'jupiter-core', false],
-      ['temporal-worker', 'bad', 'jupiter-core', false],
+      ['app-dev', 'ok', 'lumen-app', false],
+      ['core-dev', 'ok', 'lumen-core', false],
+      ['temporal-dev', 'ok', 'lumen-core', false],
+      ['temporal-worker', 'bad', 'lumen-core', false],
     ])
     expect(bar.showLayout).toBe(true)
     expect(bar.layout).toBe('tiles')
@@ -182,7 +182,7 @@ describe('a pane’s header', () => {
     const face = paneFace(FOUR[1], names)
     expect(face).toMatchObject({
       name: 'core-dev',
-      project: 'jupiter-core',
+      project: 'lumen-core',
       state: 'running',
       primary: 'Restart',
       canStop: true,
@@ -216,7 +216,7 @@ describe('the caret menus', () => {
   })
 
   it('a step tab in separate mode offers the way back', () => {
-    expect(separateStepMenu()).toEqual([{ kind: 'group', label: 'Group Launchpad tabs' }])
+    expect(separateStepMenu()).toEqual([{ kind: 'group', label: 'Group run step tabs' }])
   })
 })
 

@@ -177,7 +177,7 @@ describeWithGit('inspectMerge — the draft/solid rules against a real merge', (
     expect(git(['diff', '--cached', '--name-only'], repo)).toContain(STATUS);
   });
 
-  it('prose changed in the same place on both sides: still an ask, not agent-mergeable', () => {
+  it('prose changed in the same place on both sides: still an ask, now flagged agent-mergeable with its base (user, 2026-11-24)', () => {
     const { inspection } = mergeOf(
       { [FEATURE]: feature('Human prose.', [line(null)]), ...stores([]) },
       { [FEATURE]: feature('Prose by ours.', [line(null)]) },
@@ -185,7 +185,8 @@ describeWithGit('inspectMerge — the draft/solid rules against a real merge', (
     );
     expect(inspection.resolutions.filter((resolution) => resolution.kind === 'feature-rules')).toEqual([]);
     expect(inspection.asks).toEqual([expect.objectContaining({ kind: 'same-feature', path: FEATURE, topic: 'backend/orders' })]);
-    expect(inspection.asks[0].agentMergeable).toBeUndefined();
+    expect(inspection.asks[0].agentMergeable).toBe(true);
+    expect(inspection.asks[0].base).toContain('Human prose.');
   });
 
   it('a decision changed on both sides stays an ask, flagged agent-mergeable with its base; a conflicting plan review too', () => {

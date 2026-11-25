@@ -19,7 +19,7 @@ export const TERMINAL_PROBLEMS_STRINGS = {
   filterWarnings: 'Warnings',
   sectionTerminals: 'Terminals',
   sectionFiles: 'Files',
-  launchpad: 'Launchpad',
+  launchpad: 'run step',
   copy: 'Copy',
   copyAll: 'Copy all',
   copyAllTitle: 'Copy every problem shown, with what was printed before it',
@@ -99,7 +99,7 @@ export function timesLabel(count: number): string {
   return `×${count}`
 }
 
-/** A group's heading: its label, then "project · Launchpad". */
+/** A group's heading: its label, then "project · run step". */
 export function groupHeading(group: Pick<TerminalProblemGroup, 'label' | 'projectName' | 'launchpad'>): {
   label: string
   detail: string
@@ -117,7 +117,7 @@ function seenText(problem: Pick<TerminalProblem, 'count' | 'firstSeen' | 'lastSe
 
 /**
  * What Copy puts on the clipboard:
- *   core-dev (jupiter-core) — seen 14 times, 20:55:14 to 20:56:06
+ *   core-dev (lumen-core) — seen 14 times, 20:55:14 to 20:56:06
  *   ConnectionRefusedError: [Errno 61] Connection refused
  *
  *     File ".../asyncpg/connect_utils.py", line 969, in …
@@ -190,7 +190,7 @@ export function terminalFixMessage(
 ): string {
   const word = problem.severity === 'error' ? 'error' : 'warning'
   const where = group.launchpad
-    ? `the Launchpad step "${group.label}" in ${group.projectName}`
+    ? `the run step "${group.label}" in ${group.projectName}`
     : `the terminal "${group.label}" in ${group.projectName}`
   const lines = [
     `Fix this ${word}. It was printed by ${where}, ${seenText(problem)}.`,

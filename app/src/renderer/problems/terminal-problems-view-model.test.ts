@@ -44,23 +44,23 @@ function problem(overrides: Partial<TerminalProblem> = {}): TerminalProblem {
 }
 
 function group(overrides: Partial<TerminalProblemGroup> = {}): TerminalProblemGroup {
-  return { terminalId: 't1', label: 'core-dev', projectName: 'jupiter-core', launchpad: true, problems: [problem()], ...overrides }
+  return { terminalId: 't1', label: 'core-dev', projectName: 'lumen-core', launchpad: true, problems: [problem()], ...overrides }
 }
 
 describe('the row', () => {
   test('meta line: first and last times, the logger and last time, or just the last time', () => {
     expect(clockTime(at(9, 5, 3))).toBe('09:05:03')
     expect(problemMetaLine(problem())).toBe('First 20:55:14 · last 20:56:06')
-    expect(problemMetaLine(problem({ meta: 'jupiter_core.harness.runtime.stop_signal', count: 31 }))).toBe(
-      'jupiter_core.harness.runtime.stop_signal · last 20:56:06',
+    expect(problemMetaLine(problem({ meta: 'lumen_core.harness.runtime.stop_signal', count: 31 }))).toBe(
+      'lumen_core.harness.runtime.stop_signal · last 20:56:06',
     )
     expect(problemMetaLine(problem({ count: 1, lastSeen: at(20, 55, 52) }))).toBe('last 20:55:52')
     expect(timesLabel(14)).toBe('×14')
   })
 
   test('the group heading names the project and says Launchpad for a step', () => {
-    expect(groupHeading(group())).toEqual({ label: 'core-dev', detail: 'jupiter-core · Launchpad' })
-    expect(groupHeading(group({ label: 'zsh', launchpad: false }))).toEqual({ label: 'zsh', detail: 'jupiter-core' })
+    expect(groupHeading(group())).toEqual({ label: 'core-dev', detail: 'lumen-core · run step' })
+    expect(groupHeading(group({ label: 'zsh', launchpad: false }))).toEqual({ label: 'zsh', detail: 'lumen-core' })
   })
 
   test('the open row shows the lines before, then the problem line', () => {
@@ -72,7 +72,7 @@ describe('Copy', () => {
   test('exactly the agreed format: who and how often, the message, a blank line, the context', () => {
     expect(problemCopyText(group(), problem())).toBe(
       [
-        'core-dev (jupiter-core) — seen 14 times, 20:55:14 to 20:56:06',
+        'core-dev (lumen-core) — seen 14 times, 20:55:14 to 20:56:06',
         'ConnectionRefusedError: [Errno 61] Connection refused',
         '',
         '  File ".../asyncpg/connect_utils.py", line 969, in _create_ssl_connection',
@@ -85,7 +85,7 @@ describe('Copy', () => {
 
   test('once, and without context', () => {
     expect(problemCopyText(group(), problem({ count: 1, context: [] }))).toBe(
-      'core-dev (jupiter-core) — seen once, at 20:56:06\nConnectionRefusedError: [Errno 61] Connection refused',
+      'core-dev (lumen-core) — seen once, at 20:56:06\nConnectionRefusedError: [Errno 61] Connection refused',
     )
   })
 
@@ -144,10 +144,10 @@ describe('the counters', () => {
 
 describe('Fix with agent', () => {
   test('names the terminal, the message and the context, ending with the problem line', () => {
-    const text = terminalFixMessage(group(), problem({ meta: 'jupiter_core.db' }))
-    expect(text).toContain('Fix this error. It was printed by the Launchpad step "core-dev" in jupiter-core, seen 14 times, 20:55:14 to 20:56:06.')
+    const text = terminalFixMessage(group(), problem({ meta: 'lumen_core.db' }))
+    expect(text).toContain('Fix this error. It was printed by the run step "core-dev" in lumen-core, seen 14 times, 20:55:14 to 20:56:06.')
     expect(text).toContain('Error: ConnectionRefusedError: [Errno 61] Connection refused')
-    expect(text).toContain('From: jupiter_core.db')
+    expect(text).toContain('From: lumen_core.db')
     expect(text).toContain('        await waiter\n    ConnectionRefusedError: [Errno 61] Connection refused')
     expect(terminalFixMessage(group({ launchpad: false, label: 'zsh' }), problem({ severity: 'warning' }))).toMatch(
       /^Fix this warning\. It was printed by the terminal "zsh"/,

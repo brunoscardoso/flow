@@ -430,7 +430,7 @@ export class RunSetupPanel {
     const head = el('div', 'fl-run-setup-head')
     const titles = el('div', 'fl-run-setup-titles')
     titles.appendChild(el('span', 'fl-run-setup-title', setupTitle(this.#view?.resolution.places ?? [], draft?.projectName ?? '')))
-    head.append(titles, guideInfoButton('launchpad-setup', 'Launchpad setup'))
+    head.append(titles, guideInfoButton('launchpad-setup', 'Run steps setup'))
     page.appendChild(head)
 
     if (draft === null) {

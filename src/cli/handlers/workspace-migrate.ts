@@ -30,6 +30,7 @@ import { isAbsolute, join } from 'node:path';
 
 import { isSymlink } from '../utils/files.js';
 import { locateWorkspaceProject } from './workspace-locate.js';
+import { withWorkspaceRecovery } from './workspace-sync.js';
 import { DEFAULT_WORKSPACE_NAME, ensureDefaultWorkspace, planDefaultWorkspace } from './workspace-admin.js';
 import type { ImportReport } from './workspace-import.js';
 import {
@@ -143,7 +144,11 @@ function chooseWorkspace(
 ): { workspace: LoadedWorkspace; created: boolean; exists: boolean } {
   const dryRun = options.dryRun === true;
   if (options.workspace !== undefined) {
-    return { workspace: pickWorkspace(scanWorkspaces(flowFolder), options.workspace, NO_HINTS), created: false, exists: true };
+    const scan = scanWorkspaces(flowFolder);
+    // A named Workspace whose file cannot be read is that, not unknown.
+    const broken = scan.unreadable.find((entry) => entry.workspace === options.workspace);
+    if (broken !== undefined) throw new WorkspaceRefusal('malformed-workspace', broken.detail, { workspace: broken.workspace });
+    return { workspace: pickWorkspace(scan, options.workspace, NO_HINTS), created: false, exists: true };
   }
   const name = options.name?.trim() || DEFAULT_WORKSPACE_NAME;
   if (!dryRun) {
@@ -153,7 +158,7 @@ function chooseWorkspace(
   const plan = planDefaultWorkspace(flowFolder, name);
   if (plan.kind !== 'create') return { workspace: plan.workspace, created: false, exists: true };
   return {
-    workspace: { slug: plan.slug, path: plan.path, raw: {}, file: { name: plan.name, slug: plan.slug, projects: [] } },
+    workspace: { slug: plan.slug, path: plan.path, raw: {}, name: plan.name, file: { name: plan.name, slug: plan.slug, projects: [] } },
     created: false,
     exists: false,
   };
@@ -163,12 +168,17 @@ export function migrateWorkspaces(options: MigrateOptions): MigrateResult {
   const { flowFolder, deps } = contextOf(options);
   const roots = validRoots(options.roots);
   const dryRun = options.dryRun === true;
-  const chosen = chooseWorkspace(flowFolder, deps, options);
+  // A real run first undoes a merge a killed sync left in the Workspace's own
+  // file — the app runs this at launch, before any sync gets a turn. A dry run
+  // writes nothing, so it only reports the refusal.
+  const chosen = dryRun
+    ? chooseWorkspace(flowFolder, deps, options)
+    : withWorkspaceRecovery(flowFolder, deps.git, () => chooseWorkspace(flowFolder, deps, options));
   const result: MigrateResult = {
     action: 'migrate',
     dryRun,
     ...(dryRun ? { would: chosen.exists ? ('use-workspace' as const) : ('create-workspace' as const) } : {}),
-    workspace: { name: chosen.workspace.file.name, slug: chosen.workspace.slug, path: chosen.workspace.path, created: chosen.created },
+    workspace: { name: chosen.workspace.name, slug: chosen.workspace.slug, path: chosen.workspace.path, created: chosen.created },
     migrated: [],
     unchanged: [],
     pending: [],
@@ -246,7 +256,7 @@ export function migrateWorkspaces(options: MigrateOptions): MigrateResult {
 
   if (!dryRun) {
     const updated = readWorkspace(flowFolder, chosen.workspace.slug);
-    result.workspace.name = updated.file.name;
+    result.workspace.name = updated.name;
   }
   return result;
 }

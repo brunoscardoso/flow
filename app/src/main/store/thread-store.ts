@@ -1773,7 +1773,7 @@ export class ThreadStore extends EventEmitter {
    * "Belong" means ANY of the thread's projects — its primary root or one
    * attached to it (thread_roots). A conversation started in one project
    * routinely writes its discovery into a sibling it attached (live
-   * 2026-10-09: a orbit-argo-applications thread wrote
+   * 2026-10-09: a orbit-keel-applications thread wrote
    * orbit-app/flow/discovery/…); scoping to the primary root alone left that
    * doc with no writer, no marker, and no card.
    *

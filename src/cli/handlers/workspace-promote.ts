@@ -14,6 +14,7 @@
  * default-branch commit. Nothing here deletes knowledge: abandoned learnings
  * and notes are only hidden by the status resolver.
  */
+import { withWorkspaceRecovery } from './workspace-sync.js';
 import * as childProcess from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
@@ -211,7 +212,7 @@ function resolvePromoteWorkspace(options: PromoteOptions): { flowFolder: string;
   }
   const flowFolder = options.flowFolder;
   const scan = scanWorkspaces(flowFolder);
-  const choices = scan.workspaces.map((workspace) => ({ slug: workspace.slug, name: workspace.file.name }));
+  const choices = scan.workspaces.map((workspace) => ({ slug: workspace.slug, name: workspace.name }));
   const wanted = options.workspace;
   if (wanted === undefined || wanted.trim() === '') {
     throw new WorkspaceRefusal('which-workspace', 'say which Workspace to promote', { workspaces: choices });
@@ -219,7 +220,7 @@ function resolvePromoteWorkspace(options: PromoteOptions): { flowFolder: string;
   const broken = scan.unreadable.find((entry) => entry.workspace === wanted);
   if (broken !== undefined) throw new WorkspaceRefusal('malformed-workspace', broken.detail, { workspace: wanted });
   const found =
-    scan.workspaces.find((workspace) => workspace.slug === wanted) ?? scan.workspaces.find((workspace) => workspace.file.name === wanted);
+    scan.workspaces.find((workspace) => workspace.slug === wanted) ?? scan.workspaces.find((workspace) => workspace.name === wanted);
   if (found === undefined) {
     throw new WorkspaceRefusal('unknown-workspace', `there is no Workspace called ${wanted} on this machine`, { workspaces: choices });
   }
@@ -228,7 +229,7 @@ function resolvePromoteWorkspace(options: PromoteOptions): { flowFolder: string;
 
 /** Promote one Workspace. See the module header. */
 export function promoteWorkspace(options: PromoteOptions): PromoteResult {
-  const { flowFolder, workspace } = resolvePromoteWorkspace(options);
+  const { flowFolder, workspace } = withWorkspaceRecovery(options.flowFolder, options.deps?.git, () => resolvePromoteWorkspace(options));
   const git = options.deps?.git ?? defaultWorkspaceGit;
   const host = options.deps?.host ?? ((checkout: string) => hostForCheckout(git, checkout, defaultHostRunner));
   const local = readLocalProjects(flowFolder);
@@ -260,7 +261,7 @@ export function promoteWorkspace(options: PromoteOptions): PromoteResult {
     }
     for (const key of Object.keys(totals) as (keyof PromoteCounts)[]) totals[key] += report.counts[key];
   }
-  return { action: 'promote', workspace: { name: workspace.file.name, slug: workspace.slug }, projects, totals };
+  return { action: 'promote', workspace: { name: workspace.name, slug: workspace.slug }, projects, totals };
 }
 
 /** FR-8: an abandoned plan or discovery moves to the archive through the archive code path. */

@@ -2,10 +2,12 @@
  * THE OVERVIEW — once, after setup: what Flow can do, in six cards, and the
  * promise that each part teaches itself the first time it opens.
  *
- * Every way out counts as an answer (Start, Explore on my own, ×, Escape, the
+ * Every way out counts as an answer (Start, Explore on my own, Escape, the
  * backdrop): the question is "have you seen this?", and all of them say yes.
- * The tick decides whether the per-screen tours follow; it is the same switch
- * as Settings › Guides.
+ * Only Start keeps the per-screen tours on. Every other way out turns them off
+ * (user, 2026-11-24: "when the user click explore my own to skip the tutorial,
+ * we are still showing anyway"). Skipping means skipping; the (i) beside each
+ * feature still runs its tour, and Settings › Guides turns them back on.
  */
 import { markModalOverlay } from '../modal-overlay'
 import { injectGuideStyles } from './guide-tour-view'
@@ -22,7 +24,7 @@ const CARDS: Array<{ icon: string; title: string; body: string }> = [
   { icon: 'checklist', title: 'Tasks and Loops', body: 'A board of work. Press play and the agent works the cards on its own.' },
   { icon: 'map', title: 'Blueprint and Brain', body: 'A map of what your code does. Ask it questions and get answers with sources.' },
   { icon: 'git-branch', title: 'Changes and plan review', body: 'Review a plan before it runs, then see every change it made.' },
-  { icon: 'rocket', title: 'Launchpad', body: 'Start your dev servers and scripts together, in one click.' },
+  { icon: 'rocket', title: 'Run', body: 'Open terminals, and start your dev servers and scripts together, in one click.' },
   { icon: 'globe', title: 'Browser and UI drafts', body: 'Open your app beside the code, inspect it, and see drafts of new screens.' },
 ]
 
@@ -50,7 +52,7 @@ const CSS = `
 .fl-guide-ov-card-title { font-size: 13.5px; font-weight: 600; }
 .fl-guide-ov-card-body { font-size: 12.5px; line-height: 1.45; color: var(--fl-color-text-secondary); }
 .fl-guide-ov-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.fl-guide-ov-tips { flex: 1; min-width: 220px; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--fl-color-text-secondary); }
+.fl-guide-ov-foot-gap { flex: 1; }
 .fl-guide-ov .fl-guide-btn { height: 34px; padding: 0 14px; }
 `
 
@@ -58,7 +60,6 @@ export class GuideOverview {
   readonly #overlay: HTMLElement
   #answered = false
   readonly #onAnswer: (answer: OverviewAnswer) => void
-  readonly #tips: HTMLInputElement
   readonly #onKey = (event: KeyboardEvent): void => {
     if (event.key !== 'Escape') return
     event.preventDefault()
@@ -68,7 +69,7 @@ export class GuideOverview {
     this.#answer(false)
   }
 
-  constructor(tipsOn: boolean, onAnswer: (answer: OverviewAnswer) => void) {
+  constructor(onAnswer: (answer: OverviewAnswer) => void) {
     injectGuideStyles()
     if (document.getElementById(STYLE_ID) === null) {
       const style = document.createElement('style')
@@ -101,7 +102,7 @@ export class GuideOverview {
     const lede = document.createElement('p')
     lede.className = 'fl-guide-ov-lede'
     lede.textContent =
-      'Each part has a short tour. It starts the first time you open that part, so you learn it when you need it.'
+      'Each part has a short tour that starts the first time you open it. To skip them, choose Explore on my own: the (i) beside each feature still shows its tour.'
     head.append(kicker, title, lede)
 
     const grid = document.createElement('div')
@@ -124,12 +125,8 @@ export class GuideOverview {
 
     const foot = document.createElement('div')
     foot.className = 'fl-guide-ov-foot'
-    const label = document.createElement('label')
-    label.className = 'fl-guide-ov-tips'
-    this.#tips = document.createElement('input')
-    this.#tips.type = 'checkbox'
-    this.#tips.checked = tipsOn
-    label.append(this.#tips, document.createTextNode('Show a tip the first time I open each part'))
+    const gap = document.createElement('span')
+    gap.className = 'fl-guide-ov-foot-gap'
     const explore = document.createElement('button')
     explore.type = 'button'
     explore.className = 'fl-guide-btn'
@@ -142,7 +139,7 @@ export class GuideOverview {
     start.dataset.guideAction = 'start'
     start.textContent = 'Start with Threads'
     start.addEventListener('click', () => this.#answer(true))
-    foot.append(label, explore, start)
+    foot.append(gap, explore, start)
 
     panel.append(head, grid, foot)
     this.#overlay.appendChild(panel)
@@ -163,6 +160,6 @@ export class GuideOverview {
     if (this.#answered) return
     this.#answered = true
     this.close()
-    this.#onAnswer({ tips: this.#tips.checked, startTour })
+    this.#onAnswer({ tips: startTour, startTour })
   }
 }

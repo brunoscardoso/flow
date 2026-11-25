@@ -31,7 +31,7 @@ import {
 import { parseRunSetup } from '../../shared/run-setup'
 import { SETUP_STRINGS, setupTitle } from './run-setup-model'
 
-const ROOT = '/work/jupiter'
+const ROOT = '/work/lumen'
 
 function step(name: string, status: RunStepStatus, extra: Partial<RunStepState> = {}): RunStepState {
   return {
@@ -55,12 +55,12 @@ function view(steps: RunStepState[], active = false, setupCount = steps.length):
     resolution: {
       scope: { rootPath: ROOT, threadId: 'thread-1' },
       scopeKey: `${ROOT}::thread-1`,
-      project: { root: ROOT, name: 'jupiter', cwd: ROOT, setup: null, personal: {}, conversation: {}, hasSharedSetup: false, problems: [] },
+      project: { root: ROOT, name: 'lumen', cwd: ROOT, setup: null, personal: {}, conversation: {}, hasSharedSetup: false, problems: [] },
       places: [],
       steps: Array.from({ length: setupCount }, (_, i) => ({
         key: `${ROOT}::s${i}`,
         projectRoot: ROOT,
-        projectName: 'jupiter',
+        projectName: 'lumen',
         cwd: ROOT,
         id: `s${i}`,
         name: `s${i}`,
@@ -78,7 +78,7 @@ function onceStep(name: string, extra: Partial<ResolvedRunStep> = {}): ResolvedR
   return {
     key: `${ROOT}::${name}`,
     projectRoot: ROOT,
-    projectName: 'jupiter',
+    projectName: 'lumen',
     cwd: ROOT,
     id: name,
     name,
@@ -96,7 +96,7 @@ function onceState(name: string, extra: Partial<RunOnceState> = {}): RunOnceStat
     key: `${ROOT}::${name}`,
     name,
     projectRoot: ROOT,
-    projectName: 'jupiter',
+    projectName: 'lumen',
     status: 'running',
     terminalId: `o-${name}`,
     exitCode: null,
@@ -219,21 +219,21 @@ describe('orderRunTabs (note 9)', () => {
 
 describe('asking the agent', () => {
   const found: RunSuggestion[] = [
-    { projectRoot: '/work/app', projectName: 'jupiter-app', name: 'dev', command: 'npm run dev', source: 'package.json' },
+    { projectRoot: '/work/app', projectName: 'lumen-app', name: 'dev', command: 'npm run dev', source: 'package.json' },
   ]
 
   it('asks the agent to propose, not to start anything, naming where steps may run', () => {
-    const prompt = askAgentPrompt('jupiter', found, ['jupiter', 'jupiter-core', 'jupiter-app'])
+    const prompt = askAgentPrompt('lumen', found, ['lumen', 'lumen-core', 'lumen-app'])
     expect(prompt).toContain('Do not start anything')
     expect(prompt).toContain('the project it runs in')
-    expect(prompt).toContain('A step can also run in jupiter-core, jupiter-app.')
-    expect(prompt).toContain('- npm run dev (jupiter-app, package.json)')
+    expect(prompt).toContain('A step can also run in lumen-core, lumen-app.')
+    expect(prompt).toContain('- npm run dev (lumen-app, package.json)')
   })
 })
 
 describe('a step whose project is not on this computer', () => {
   it("says it can't start, and clicking its tab after a Run does nothing", () => {
-    const lost = step('temporal', 'blocked', { terminalId: null, notHere: true, detail: "jupiter-core is not on this computer, so this step can't start." })
+    const lost = step('temporal', 'blocked', { terminalId: null, notHere: true, detail: "lumen-core is not on this computer, so this step can't start." })
     expect(stepTabFace(lost)).toMatchObject({ label: "temporal · can't start", tone: 'bad', tooltip: lost.detail })
     expect(pendingTabAction(lost, group([lost]))).toBe('none')
   })
@@ -256,7 +256,7 @@ function uiStrings(): string[] {
   const all: string[] = [
     ...Object.values(RUN_STRINGS),
     ...Object.values(SETUP_STRINGS),
-    setupTitle([{ name: 'jupiter-app' }, { name: 'jupiter-core' }]),
+    setupTitle([{ name: 'lumen-app' }, { name: 'lumen-core' }]),
   ]
   const statuses: RunStepStatus[] = ['idle', 'waiting', 'starting', 'running', 'ready', 'exited', 'stopped', 'blocked', 'timed-out']
   for (const status of statuses) {
@@ -283,7 +283,7 @@ function uiStrings(): string[] {
   }
   const menuViews = [
     view([], false, 0),
-    withOnce(view([step('a', 'running')], true), [onceStep('migrate', { confirm: true }), onceStep('seed', { unavailable: "jupiter-core is not on this computer, so this step can't start." })], [onceState('migrate')]),
+    withOnce(view([step('a', 'running')], true), [onceStep('migrate', { confirm: true }), onceStep('seed', { unavailable: "lumen-core is not on this computer, so this step can't start." })], [onceState('migrate')]),
     withOnce(view([step('a', 'idle')]), [onceStep('gen')]),
   ]
   for (const v of menuViews) {
@@ -294,7 +294,7 @@ function uiStrings(): string[] {
   const ask = onceAsk(onceStep('migrate'))
   const scriptAsk = onceAsk(onceStep('reset', { body: 'script', command: 'set -e\ndocker compose down -v' }))
   all.push(scriptAsk.where, scriptAsk.run, linesLabel(1), linesLabel(12))
-  all.push(ask.title, ask.where, onceAsk(onceStep('migrate', { cwd: '/work/.jupiter-threads/blue' })).where)
+  all.push(ask.title, ask.where, onceAsk(onceStep('migrate', { cwd: '/work/.lumen-threads/blue' })).where)
   // The sentence the page shows for a stored entry of a kind this build can't run.
   all.push(...parseRunSetup(JSON.stringify({ version: 1, steps: [{ name: 'x', command: 'y', kind: 'later' }] })).problems)
   return all.filter((text) => text !== '')
@@ -322,25 +322,25 @@ describe('the Launchpad menu', () => {
     const v = withOnce(
       view([step('web', 'idle')]),
       [
-        onceStep('migrate', { confirm: true, projectName: 'jupiter-core', projectRoot: '/work/core' }),
+        onceStep('migrate', { confirm: true, projectName: 'lumen-core', projectRoot: '/work/core' }),
         onceStep('codegen'),
-        onceStep('seed', { projectName: 'jupiter-core', projectRoot: '/work/core' }),
+        onceStep('seed', { projectName: 'lumen-core', projectRoot: '/work/core' }),
       ],
       [onceState('codegen')],
     )
     const menu = launchpadMenu(v)
     expect(menu.empty).toBe(false)
     expect(menu.groups.map((group) => [group.projectName, group.items.map((item) => item.name)])).toEqual([
-      ['jupiter-core', ['migrate', 'seed']],
-      ['jupiter', ['codegen']],
+      ['lumen-core', ['migrate', 'seed']],
+      ['lumen', ['codegen']],
     ])
     expect(menu.groups[0]!.items[0]).toMatchObject({ command: 'npm run migrate', asksFirst: true, running: false, disabled: false })
     expect(menu.groups[1]!.items[0]).toMatchObject({ running: true, title: RUN_STRINGS.onceRunningTitle })
     expect(menu.runAll).toEqual({ shown: true, disabled: false, title: RUN_STRINGS.runTitle })
     expect(launchpadMenuEntries(menu)).toEqual([
-      { kind: 'once', key: '/work/jupiter::migrate' },
-      { kind: 'once', key: '/work/jupiter::seed' },
-      { kind: 'once', key: '/work/jupiter::codegen' },
+      { kind: 'once', key: '/work/lumen::migrate' },
+      { kind: 'once', key: '/work/lumen::seed' },
+      { kind: 'once', key: '/work/lumen::codegen' },
       { kind: 'run-all' },
       { kind: 'edit' },
     ])
@@ -355,12 +355,12 @@ describe('the Launchpad menu', () => {
     expect(launchpadMenuEntries(going)).toEqual([{ kind: 'add' }, { kind: 'reload-all' }, { kind: 'stop-all' }, { kind: 'edit' }])
     const actionsOnly = launchpadMenu(withOnce(view([], false, 0), [onceStep('migrate')]))
     expect(actionsOnly.runAll.shown).toBe(false)
-    expect(launchpadMenuEntries(actionsOnly)).toEqual([{ kind: 'once', key: '/work/jupiter::migrate' }, { kind: 'edit' }])
+    expect(launchpadMenuEntries(actionsOnly)).toEqual([{ kind: 'once', key: '/work/lumen::migrate' }, { kind: 'edit' }])
     expect(launchpadMenu(null)).toMatchObject({ empty: true, groups: [], runAll: { shown: false } })
   })
 
   it('an action whose project is not here is shown disabled with the reason, and skipped by the keyboard', () => {
-    const reason = "jupiter-core is not on this computer, so this step can't start."
+    const reason = "lumen-core is not on this computer, so this step can't start."
     const menu = launchpadMenu(withOnce(view([], false, 0), [onceStep('seed', { unavailable: reason })]))
     expect(menu.groups[0]!.items[0]).toMatchObject({ disabled: true, title: reason })
     expect(launchpadMenuEntries(menu)).toEqual([{ kind: 'edit' }])
@@ -384,14 +384,14 @@ describe('the Launchpad menu', () => {
 
 describe('the ask before a one-time action runs', () => {
   it('names the action, the project and its checkout or folder, and shows the command', () => {
-    expect(onceAsk(onceStep('migrate', { cwd: '/work/.jupiter-threads/blue', command: 'uv run alembic upgrade head' }))).toEqual({
+    expect(onceAsk(onceStep('migrate', { cwd: '/work/.lumen-threads/blue', command: 'uv run alembic upgrade head' }))).toEqual({
       title: 'Run “migrate”?',
-      where: "This runs in jupiter, in this conversation's checkout:",
+      where: "This runs in lumen, in this conversation's checkout:",
       command: 'uv run alembic upgrade head',
       script: false,
       run: 'Run',
     })
-    expect(onceAsk(onceStep('migrate')).where).toBe('This runs in jupiter, in its folder:')
+    expect(onceAsk(onceStep('migrate')).where).toBe('This runs in lumen, in its folder:')
   })
 })
 
@@ -446,6 +446,6 @@ describe('scripts in the Launchpad menu and the ask', () => {
 
   it('shows the whole script before it runs, with "Run script"', () => {
     const ask = onceAsk(onceStep('reset', { body: 'script', command: SCRIPT }))
-    expect(ask).toMatchObject({ script: true, run: 'Run script', command: SCRIPT, where: 'This script runs in jupiter, in its folder:' })
+    expect(ask).toMatchObject({ script: true, run: 'Run script', command: SCRIPT, where: 'This script runs in lumen, in its folder:' })
   })
 })

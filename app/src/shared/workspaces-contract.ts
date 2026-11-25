@@ -43,6 +43,7 @@ export const WORKSPACE_CLI_REFUSALS = [
   'project-exists',
   'default-workspace',
   'unconfirmed',
+  'sole-copy',
   'remote-exists',
   'merge-in-progress',
   'invalid-branch',
@@ -71,7 +72,10 @@ export interface WorkspaceRefusal {
 export type WorkspaceAnswer<T> = ({ ok: true } & T) | WorkspaceRefusal
 
 export interface WorkspaceSummary {
+  /** What THIS computer calls it — a rename is local; teammates keep their own names. */
   name: string
+  /** The name in the shared repository, what a teammate who never renamed it sees; absent from an older CLI. */
+  sharedName?: string
   /** The Workspace's folder name on this machine — its handle everywhere in the app. */
   slug: string
   path: string
@@ -167,6 +171,11 @@ export interface WorkspaceLinkResult {
 
 export interface WorkspaceJoinResult {
   workspace: WorkspaceSummary
+  /**
+   * Workspaces here that only pointed at the joined repository: they let go
+   * of it and keep their own knowledge on this computer.
+   */
+  disconnected?: WorkspaceSummary[]
   linked: WorkspaceProject[]
   noLocalCheckout: WorkspaceProject[]
   /** Projects whose checkout needs a person first; `refusal` is the CLI's payload for it. */
@@ -264,6 +273,21 @@ export interface WorkspacePlacementState {
 }
 
 /** The answer to a delete asked without confirmation: what would move to Default. */
+/** Take one project out of one Workspace (`workspace remove-project`). */
+export interface WorkspaceRemoveProjectRequest {
+  /** The Workspace it leaves. */
+  slug: string
+  /** The project, by id. */
+  project: string
+}
+
+export interface WorkspaceRemoveProjectResult {
+  workspace: string
+  project: string
+  /** The Workspace on this computer that still has the project, or null. */
+  keptIn: string | null
+}
+
 export interface WorkspaceDeleteResult {
   workspace: string
   /** The projects that moved into Default. */
@@ -316,9 +340,13 @@ export interface ThreadContextOfferEvent {
  *  · `error` — sync can't run as things are (`detail` says why);
  *  · `local-only` — the Workspace has no shared repository; changes stay here;
  *  · `no-access` — the shared repository refused this person's access; changes
- *    stay here, nothing retries on its own ("Sync now" tries again).
+ *    stay here, nothing retries on its own ("Sync now" tries again);
+ *  · `review` — an agent settled what met and the merge is committed HERE,
+ *    waiting for a person's review (`review`). Nothing is shared until they
+ *    agree: every sync only commits this computer's work, and only an agree
+ *    publishes. `detail` says why the last share did not go out, when it didn't.
  */
-export type WorkspaceSyncState = 'idle' | 'syncing' | 'synced' | 'paused' | 'offline' | 'no-access' | 'error' | 'local-only'
+export type WorkspaceSyncState = 'idle' | 'syncing' | 'synced' | 'paused' | 'offline' | 'no-access' | 'error' | 'local-only' | 'review'
 
 /** How one ask or review may be settled (the CLI's `--take`); `file` means "this text" — the app sends `text`. */
 export type WorkspaceSyncTake = 'ours' | 'theirs' | 'merged' | 'file'
@@ -347,6 +375,8 @@ export interface WorkspaceSyncAsk {
   base?: string | null
   /** agentMergeable only: git's name for whoever last changed the Workspace side, or null. */
   theirAuthor?: string | null
+  /** overlapping-anchors only: `'both'` means keeping both notes unchanged is the expected answer. Additive. */
+  suggested?: 'both'
   truncated: boolean
   options: WorkspaceSyncTake[]
 }
@@ -402,6 +432,11 @@ export interface WorkspaceSyncStatus {
   asks: WorkspaceSyncAsk[]
   /** `paused` only: what needs a merged version. */
   reviews: WorkspaceSyncReview[]
+  /**
+   * The agent-decided merge waiting for review, and the items still waiting
+   * for a person after the agreed part was shared. Absent when there is none.
+   */
+  review?: WorkspaceMergeReview
 }
 
 /** `workspaces:syncChanged` — sent only when a Workspace's status actually changed. */
@@ -431,70 +466,228 @@ export type WorkspaceResolveResult =
   | { ok: true; status: WorkspaceSyncStatus }
   | { ok: false; reason: WorkspaceResolveRefusal; detail: string; status: WorkspaceSyncStatus }
 
-// ── Intent merges — Flow merged two edits to a decision, plan or discovery ──
+// ── Agent-decided conflicts — what the decider did, for the review ──────────
 
-/** What kind of intent document Flow merged — the word a sentence uses. */
-export type IntentDocumentKind = 'decision' | 'plan' | 'discovery'
+/** Every kind of item a sync can wait on (an ask's or a review's `kind`). */
+/** `combine`: two Workspaces set up separately were combined — one item, agreed as a whole. */
+export type WorkspaceMergeItemKind = WorkspaceSyncAsk['kind'] | WorkspaceSyncReview['kind'] | 'combine'
 
-/** Which text an intent document holds: Flow's merge, or one of the two originals. */
-export type IntentMergeKeep = 'ours' | 'theirs' | 'merged'
+/**
+ * How the agent settled an item — the stable key a review groups by:
+ *   · `kept-both` — two different notes on the same code: both kept unchanged;
+ *   · `took-theirs` / `kept-mine` — one side kept as it is;
+ *   · `merged` — the agent wrote one text from both sides;
+ *   · `identical` — both sides said the same thing.
+ */
+export type WorkspaceMergeGroupKey = 'combined' | 'kept-both' | 'took-theirs' | 'kept-mine' | 'merged' | 'identical'
 
-/** One document Flow merged — what "See both" shows and "Undo" puts back. */
-export interface WorkspaceIntentMergeDocument {
-  /** The paused item's id this merge settled. */
-  id: string
-  /** Workspace-relative path — data for main, never shown as text. */
-  path: string
-  kind: IntentDocumentKind
-  /** The document's own title (its first heading), for sentences. */
-  title: string
-  /** The teammate's name from git, or null (the UI says "a teammate"). */
-  theirName: string | null
-  /** This computer's version. */
-  ours: string
-  /** The teammate's version. */
-  theirs: string
-  base: string | null
-  /** The agent's merged text. */
-  merged: string
-  /** Which text the document holds now. */
-  current: IntentMergeKeep
-}
+/** What an agent decision applied (the CLI's take; `file` = the agent's merged text). */
+export type WorkspaceAgentTake = 'ours' | 'theirs' | 'file'
 
-/** One sync's merges — one notification. */
-export interface WorkspaceIntentMergeSet {
-  slug: string
-  /** Names this set; the notification's buttons carry it. */
-  mergeId: string
-  /** ISO time the merge was made. */
-  at: string
-  documents: WorkspaceIntentMergeDocument[]
-}
+/**
+ * Why an item was left for a person:
+ *   · `agent-unavailable` — the agent could not be asked (every item falls back to a person);
+ *   · `decision-document` / `deletion` — the agent only suggests on these, never decides;
+ *   · `truncated` / `one-sided` — not decided blind;
+ *   · `unsure` — the agent said it could not tell;
+ *   · `unreadable-answer` — the agent's answer for it could not be read;
+ *   · `could-not-merge` — the agent could not write one text from both sides;
+ *   · `cap` — this run's limit on merges was reached;
+ *   · `not-offered` — the agent's answer is not a choice this item accepts.
+ */
+export type WorkspaceNeedsYouReason =
+  | 'agent-unavailable'
+  | 'decision-document'
+  | 'deletion'
+  | 'truncated'
+  | 'one-sided'
+  | 'unsure'
+  | 'unreadable-answer'
+  | 'could-not-merge'
+  | 'cap'
+  | 'not-offered'
 
-/** `workspaces:intentMerges` — the merge set a notification names (null when this computer no longer has it). */
-export interface WorkspaceIntentMergesRequest {
-  slug: string
-  mergeId: string
+/** The agent's verdict word for one item. */
+export type WorkspaceAgentVerdict = 'ours' | 'theirs' | 'both' | 'merge' | 'unsure'
+
+/** What the agent would do with an item it may not decide alone. */
+export interface WorkspaceAgentSuggestion {
+  verdict: WorkspaceAgentVerdict
+  /** The agent's one-line reason. */
+  reason: string
+  /** A merged text the agent drafted, when it suggested a merge. */
+  content?: string
 }
 
 /**
- * `workspaces:keepIntent` — put documents of a merge set to one text: `ours`
- * is Undo. Each change is a new commit through the CLI, then a sync; never a
- * force push. `documentId` omitted → every document of the set.
+ * Where one item of a review stands:
+ *   · `pending` — the agent's decision, not looked at yet (committed here, not shared);
+ *   · `agreed` — a person agreed (or decided it): it goes out with the next share;
+ *   · `disagreed` — a person disagreed; the Workspace's version is kept and this
+ *     computer's text held aside while the agent tries again;
+ *   · `redone` — the agent decided it again with the person's reason (still held aside);
+ *   · `needs-you` — a person decides it directly (the agent may not, could not,
+ *     or was disagreed with twice); held aside meanwhile;
+ *   · `held` — held aside on this computer with no decision Flow remembers.
  */
-export interface WorkspaceKeepIntentRequest {
-  slug: string
-  mergeId: string
-  documentId?: string
-  keep: IntentMergeKeep
+export type WorkspaceMergeItemState = 'pending' | 'agreed' | 'disagreed' | 'redone' | 'needs-you' | 'held'
+
+/** The agent's second decision for a disagreed item. */
+export interface WorkspaceMergeRedo {
+  take: WorkspaceAgentTake
+  /** The agent's one-line reason. */
+  reason: string
+  /** The merged text, when the redo wrote one. */
+  content?: string
 }
 
-export type WorkspaceKeepIntentRefusal = 'not-found' | 'stale' | 'failed'
+export interface WorkspaceMergeReviewItem {
+  id: string
+  /** Workspace-relative path — data for main, never shown as text. */
+  path: string
+  kind: WorkspaceMergeItemKind
+  take: WorkspaceAgentTake
+  /** The agent's one-line reason. */
+  reason: string
+  state: WorkspaceMergeItemState
+  /** The person's reason, once they disagreed. */
+  disagreedReason?: string
+  /** `redone`: what the agent decided the second time. */
+  redo?: WorkspaceMergeRedo
+  /** `needs-you` after a redo: what the agent would do. */
+  suggestion?: WorkspaceAgentSuggestion
+}
 
-/** `detail` is a plain sentence either way. */
-export type WorkspaceKeepIntentResult =
-  | { ok: true; detail: string; set: WorkspaceIntentMergeSet; status: WorkspaceSyncStatus }
-  | { ok: false; reason: WorkspaceKeepIntentRefusal; detail: string; status: WorkspaceSyncStatus }
+export interface WorkspaceMergeReviewGroup {
+  key: WorkspaceMergeGroupKey
+  count: number
+  items: WorkspaceMergeReviewItem[]
+}
+
+export interface WorkspaceMergeReviewNeedsYou {
+  id: string
+  path: string
+  kind: WorkspaceMergeItemKind
+  reason: WorkspaceNeedsYouReason
+  suggestion?: WorkspaceAgentSuggestion
+  /** `needs-you` until the person decides it (`agreed`). Never agreed in bulk. */
+  state: 'needs-you' | 'agreed'
+}
+
+/** An item whose Workspace version was kept while this computer's text waits aside. */
+export interface WorkspaceMergeReviewHeld {
+  id: string
+  path: string
+  kind: WorkspaceMergeItemKind
+  /** ISO time it was held. */
+  heldAt: string
+  /** Where the item stands (its group or "needs you" entry's state); `held` when Flow remembers no decision for it. */
+  state?: WorkspaceMergeItemState
+}
+
+/**
+ * One agent-decided merge, committed on this computer and not yet shared:
+ * the decisions grouped by how they were settled, what was left for a person,
+ * and what is held aside. Built in main from the decider and the CLI's answer.
+ */
+export interface WorkspaceMergeReview {
+  /** ISO time the merge was made. */
+  mergedAt: string
+  groups: WorkspaceMergeReviewGroup[]
+  needsYou: WorkspaceMergeReviewNeedsYou[]
+  held: WorkspaceMergeReviewHeld[]
+}
+
+/**
+ * `workspaces:reviewAgree` — agree to items of the review: by `ids`, a whole
+ * `group`, or `allGroups` ("Agree to all groups": every group item a person
+ * may agree to, never "Needs you"). Exactly one of the three. Items that need
+ * a person's own choice are never agreed in bulk (refused `needs-decision`).
+ * The agreed part is shared at once: items nobody has looked at yet are held
+ * back first (they show as `held`, still in their group, and can be agreed
+ * later); agreeing every group holds nothing back.
+ */
+export interface WorkspaceReviewAgreeRequest {
+  slug: string
+  ids?: string[]
+  group?: WorkspaceMergeGroupKey
+  allGroups?: true
+}
+
+/** `workspaces:reviewDisagree` — the reason is required; the agent tries ONCE more with it. */
+export interface WorkspaceReviewDisagreeRequest {
+  slug: string
+  ids: string[]
+  reason: string
+}
+
+/** `workspaces:reviewDecide` — a person decides one item directly (`text` sends the text itself). */
+export type WorkspaceReviewDecideRequest =
+  | { slug: string; id: string; take: 'ours' | 'theirs' }
+  | { slug: string; id: string; take: 'text'; text: string }
+
+/**
+ *   · `not-waiting` — nothing (or not that item) waits for review;
+ *   · `needs-decision` — the request would agree items a person must choose for;
+ *   · `reason-required` — a disagreement without a reason;
+ *   · `not-allowed` — the item can't be settled that way in the state it is in;
+ *   · `stale` — the item changed since it was merged;
+ *   · `not-shared` — the agreed changes were NOT shared (the sentence says why);
+ *   · `failed` — Flow could not do it just now.
+ */
+export type WorkspaceReviewRefusal = 'unknown-workspace' | 'not-waiting' | 'needs-decision' | 'reason-required' | 'not-allowed' | 'stale' | 'not-shared' | 'failed'
+
+/** `detail` is a plain sentence. */
+export type WorkspaceReviewResult =
+  | { ok: true; status: WorkspaceSyncStatus }
+  | { ok: false; reason: WorkspaceReviewRefusal; detail: string; status: WorkspaceSyncStatus }
+
+// ── Shared merge reasons — the Workspace's record of decisions and why ──────
+
+/**
+ * One recorded merge decision, as the CLI's `merge-decision list` answers it
+ * (rebuilt field by field in main). `path` and `project` are data for a
+ * label, never shown as a path.
+ */
+export interface WorkspaceMergeReason {
+  id: string
+  kind: WorkspaceMergeItemKind
+  project: string
+  path: string
+  /** What the path held afterwards (`ours` | `theirs` | `merged` | `file` | `both`). */
+  take: string
+  /** One line of what was taken. */
+  summary: string
+  /** One line of why (may be empty for an agreed decision). */
+  reason: string
+  outcome: 'agreed' | 'disagreed'
+  /** Git's name for whoever recorded it, or null. */
+  author: string | null
+  /** ISO time it was recorded. */
+  ts: string
+}
+
+/** `workspaces:mergeReasons` — the Workspace's live (not removed) decisions. */
+export interface WorkspaceMergeReasonsRequest {
+  slug: string
+}
+
+/** `workspaces:removeMergeReason` — withdraw one recorded decision (a removal line; nothing is rewritten). */
+export interface WorkspaceRemoveMergeReasonRequest {
+  slug: string
+  id: string
+}
+
+/** `detail` is a plain sentence (no paths, commands or setting names). */
+export type WorkspaceMergeReasonsResult =
+  | { ok: true; reasons: WorkspaceMergeReason[] }
+  | { ok: false; detail: string }
+
+// ── Intent documents — what the agent decides about with care ──
+
+/** What kind of intent document an item is — the word a sentence uses. */
+/** `note`: any other markdown note of a project (a feature, an error, a learned note). */
+export type IntentDocumentKind = 'decision' | 'plan' | 'discovery' | 'note'
 
 // ── Connecting a Workspace to a shared repository ───────────────────────────
 

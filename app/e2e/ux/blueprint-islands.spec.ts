@@ -446,18 +446,16 @@ test('every Blueprint screen wears one top island, at most one bottom island, an
   await expect(bottom.locator('.fb-deep-issue')).toHaveAttribute('title', /holds every other pass/)
   await expect(page.locator('.flow-board-root .fb-curated-band:visible, .flow-board-root .fb-brief-foot:visible')).toHaveCount(0)
   await shot(page, 'feature-diagram')
-  // The saved question's band sits wholly ABOVE the bottom island.
-  const asked = page.locator('.flow-board-root .fb-brief-asked')
-  await expect(asked).toContainText('How does a learn pass start?')
-  const gap = await page.evaluate(() => {
-    const vis = (sel: string): HTMLElement | null =>
-      [...document.querySelectorAll<HTMLElement>(sel)].find((el) => el.getClientRects().length > 0) ?? null
-    const row = vis('.flow-board-root .fb-brief-asked .fb-asked-row, .flow-board-root .fb-brief-asked button, .flow-board-root .fb-brief-asked li')
-    const island = vis('.flow-board-root .fb-deep-chrome .fb-float-bottom')
-    return row === null || island === null ? null : island.getBoundingClientRect().top - row.getBoundingClientRect().bottom
-  })
-  expect(gap).not.toBeNull()
-  expect(gap!).toBeGreaterThanOrEqual(0)
+  // The questions asked are hidden by default: a History button on the Ask
+  // field opens them (user, 2026-11-24).
+  await expect(page.locator('.flow-board-root .fb-brief-asked')).toHaveCount(0)
+  const history = top.locator('[data-ask="history"]')
+  await expect(history).toBeVisible({ timeout: 15_000 })
+  await expect(history).toHaveText(/History · 1/)
+  await expect(page.getByText('How does a learn pass start?')).toHaveCount(0)
+  await history.click()
+  await expect(page.locator('.fb-ask-history').getByText('How does a learn pass start?')).toBeVisible()
+  await page.keyboard.press('Escape')
   // A NARROW PANE (the board here is ~716px): where you are stays readable,
   // nothing in either island is cut, and the folded Ask field opens on focus.
   const fit = await page.evaluate(() => {
@@ -562,4 +560,42 @@ test('every Blueprint screen wears one top island, at most one bottom island, an
   mkdirSync(SHOTS, { recursive: true })
   writeFileSync(join(SHOTS, 'islands-measure.json'), JSON.stringify(measured, null, 2))
   expect(await whereName(page)).not.toBeUndefined()
+})
+
+test('the questions asked about a feature hide behind a History button on the Ask field', async ({ window: page }) => {
+  test.setTimeout(300_000)
+  const root = await seedProject(page, 'flow-ux-asked-', seed)
+  const sibling = await seedProject(page, 'flow-ux-asked-sib-', seedSibling)
+  await activateProject(page, sibling)
+  await activateProject(page, root)
+  await waitForWorkspaceLink(root)
+  writeView(root)
+  await page.locator('[data-view-action="blueprint"]').click()
+  await expect(page.locator('.flow-board-root')).toBeVisible()
+  await dismissOffers(page)
+  await expect(page.locator(WHERE)).toBeVisible({ timeout: 120_000 })
+  await enterProject(page, root.split('/').pop() ?? '')
+  await expect
+    .poll(
+      async () => {
+        if ((await whereName(page)) === 'Learning') return true
+        await page.mouse.move(0, 0)
+        await page.locator('.fb-terr-cell', { hasText: 'Learning' }).first().dblclick({ position: { x: 8, y: 26 }, timeout: 5_000 }).catch(() => undefined)
+        await page.waitForTimeout(1_200)
+        return (await whereName(page)) === 'Learning'
+      },
+      { timeout: 45_000, intervals: [100], message: 'the dive into Learning never happened' },
+    )
+    .toBe(true)
+  await openFeatureView(page, 'Learning')
+  const top = page.locator('.flow-board-root .fb-deep-chrome .fb-float-tl')
+  const history = top.locator('[data-ask="history"]')
+  // The positive first: the button is there and counts the saved question…
+  await expect(history).toBeVisible({ timeout: 30_000 })
+  await expect(history).toHaveText(/History · 1/)
+  // …and the list is not drawn until it is pressed.
+  await expect(page.locator('.flow-board-root .fb-brief-asked')).toHaveCount(0)
+  await expect(page.getByText('How does a learn pass start?', { exact: true }).locator('visible=true')).toHaveCount(0)
+  await history.click()
+  await expect(page.locator('.fb-ask-history').getByText('How does a learn pass start?')).toBeVisible({ timeout: 15_000 })
 })

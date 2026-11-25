@@ -107,6 +107,7 @@ import {
   type KnowledgeRouter,
 } from './knowledge-sync'
 import { registerWorkspaceChannels } from './workspaces/ipc'
+import { createMergeReasons } from './workspaces/merge-reasons'
 import { createWorkspaceRegistry, type WorkspaceRegistry } from './workspaces/workspace-registry'
 import { createHostToolSpawner, createHostTools, type HostToolSpawner } from './workspaces/host-tools'
 import { createWorkspaceRemoteSetup } from './workspaces/workspace-remote'
@@ -125,7 +126,7 @@ import {
   shouldAskBasicDiscovery,
   type BasicDiscovery,
 } from './learn/basic-discovery'
-import { createWorkspacePauseNotifier, workspaceIntentMergeNotification } from './knowledge-sync/pause-notice'
+import { createWorkspacePauseNotifier } from './knowledge-sync/pause-notice'
 import { intentMergePrompt } from './knowledge-sync/intent-merge'
 import { appEntryFor, isAppEntryUrl, opensExternally, shouldBlockNavigation, type AppEntry } from './share/app-entry'
 import { createProjectIds } from './share/share-project-id'
@@ -942,6 +943,33 @@ function bootstrapMainProcess(): void {
    * Fire-and-forget; the coordinator reads asynchronously and runs one sweep
    * at a time (allowed-pattern #19).
    */
+  /**
+   * For a minute after a Workspace change, every 5 s: each Flow process's
+   * memory and CPU. Diagnostic only — one sampler at a time, nothing decided
+   * from it (user report 2026-11-24: a join froze a teammate's Mac).
+   */
+  let processSampler: ReturnType<typeof setInterval> | null = null
+  const watchProcessesAfter = (cause: string): void => {
+    if (processSampler !== null) clearInterval(processSampler)
+    let ticks = 0
+    const sample = (): void => {
+      const processes = app.getAppMetrics().map((metric) => ({
+        type: metric.type,
+        pid: metric.pid,
+        cpu: Math.round(metric.cpu.percentCPUUsage),
+        mb: Math.round(metric.memory.workingSetSize / 1024),
+      }))
+      const totalMb = processes.reduce((sum, entry) => sum + entry.mb, 0)
+      console.log('[Workspaces] processes after a change', { cause, second: ticks * 5, totalMb, processes })
+      ticks += 1
+      if (ticks > 12 && processSampler !== null) {
+        clearInterval(processSampler)
+        processSampler = null
+      }
+    }
+    sample()
+    processSampler = setInterval(sample, 5000)
+  }
   const reconcileBasicDiscovery = (): void => {
     const roots = (projectRegistry?.getRoots() ?? []).filter((root) => root.available !== false).map((root) => root.rootPath)
     void basicDiscovery?.reconcile(roots).catch((error: unknown) => {
@@ -956,10 +984,15 @@ function bootstrapMainProcess(): void {
       broadcast('workspaces:changed', event)
       // These rewrite projects' `flow` links: the watchers follow the new targets.
       if (['linked', 'joined', 'migrated', 'moved', 'deleted'].includes(event.cause)) {
+        // TIMED (user report 2026-11-24: a join froze a teammate's Mac and the
+        // log said nothing about what ran after it).
+        const relinkStarted = Date.now()
         announceFlowLinksChanged()
+        console.log('[Workspaces] watchers re-followed the flow links', { cause: event.cause, ms: Date.now() - relinkStarted })
         // A project joined (or moved between) Workspaces: one without its
         // basic discovery gets it now, without being asked.
         reconcileBasicDiscovery()
+        watchProcessesAfter(event.cause)
       }
     },
   })
@@ -990,8 +1023,8 @@ function bootstrapMainProcess(): void {
     },
     // The brief model through the agent manager's one-shot path; a hidden run
     // answers it only through its seam, so no hidden run reaches a real model.
-    mergeIntent: async ({ slug, kind, title, base, ours, theirs, signal }) => {
-      const prompt = intentMergePrompt({ kind, title, base, ours, theirs })
+    mergeIntent: async ({ slug, kind, title, base, ours, theirs, reasons, signal }) => {
+      const prompt = intentMergePrompt({ kind, title, base, ours, theirs, reasons })
       if (process.env['FLOW_E2E'] === '1') {
         const standIn = e2eSeams()?.mergeIntent
         return standIn === undefined ? null : standIn({ projectRoot: app.getPath('home'), prompt, signal })
@@ -999,9 +1032,15 @@ function bootstrapMainProcess(): void {
       if (agentManager === null) return null
       return agentManager.askMergeModel({ projectRoot: await rootOfWorkspace(slug), prompt, signal })
     },
-    onIntentMerged: (_slug, name, set) => {
-      const notice = workspaceIntentMergeNotification(set, new Date().toISOString(), name)
-      if (notice !== null) broadcastNotification(notice)
+    // The fast model sorts a waiting merge's items in batches (the decider
+    // builds the prompt); a hidden run answers only through its seam.
+    decideFast: async ({ slug, prompt, signal }) => {
+      if (process.env['FLOW_E2E'] === '1') {
+        const standIn = e2eSeams()?.decideFast
+        return standIn === undefined ? null : standIn({ projectRoot: app.getPath('home'), prompt, signal })
+      }
+      if (agentManager === null) return null
+      return agentManager.askFastModel({ projectRoot: await rootOfWorkspace(slug), prompt, signal })
     },
     cwd: app.getPath('home'),
     lastSynced: {
@@ -3602,6 +3641,11 @@ const understandFeature = async (request: {
       ),
     broadcastChanged: (event) => broadcast('workspaces:changed', event),
     sync: workspaceSync,
+    mergeReasons: createMergeReasons({
+      runCli: (cwd, args, options) => runBundledCliCapturing(bundledCli, cwd, args, options),
+      cwd: app.getPath('home'),
+      log: (message, details) => console.warn(`[Workspaces] ${message}`, details),
+    }),
     // Connecting a Workspace to a shared repository: the person's own signed-in
     // `gh` / `az` (never a credential of Flow's), then the CLI's set-remote,
     // then one sync. A hidden end-to-end run never reaches a real host tool:

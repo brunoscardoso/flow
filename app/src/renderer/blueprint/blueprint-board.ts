@@ -269,7 +269,7 @@ import {
   type AskSavedThread,
 } from '../../shared/ask-contract'
 import { questionCountLabel, questionCounts, type SuggestInput } from './ask-answer-model'
-import { savedSectionView, type SavedRowView } from './ask-saved-model'
+import { savedSectionView } from './ask-saved-model'
 import {
   askDecoration,
   decorationKey,
@@ -345,6 +345,7 @@ import {
   projectUnderstood,
   workspaceIsRoot,
   type WorkspaceSheetView,
+  onThisComputer,
 } from './workspace-sheet'
 import {
   connectedCellKeys,
@@ -13239,6 +13240,8 @@ export class BlueprintBoard {
     } finally {
       if (this.#wsInFlight === rootId) this.#wsInFlight = null
     }
+    // Only the projects on this computer are drawn — see `onThisComputer`.
+    result = onThisComputer(result)
     const openRoots = await this.#readOpenRootPaths()
     // An answer that outlived its project is dropped, as every read here is.
     if (rootId !== this.#activeRoot) return
@@ -13705,6 +13708,8 @@ export class BlueprintBoard {
     askSlot.className = 'fb-float-ask'
     if (input.ask) {
       this.#mountAskField(askSlot)
+      // A repaint of the chrome keeps the open feature's history button.
+      if (this.#briefAsked !== null) askSlot.appendChild(this.#briefAsked)
     }
 
     const trail = document.createElement('nav')
@@ -19082,106 +19087,43 @@ export class BlueprintBoard {
       }
       const view = savedSectionView(list.threads, stale !== null && stale.ok ? stale.results : [], Date.now())
       if (view === null) return
-      const section = this.#buildBriefAsked(featureId, view)
-      this.#briefAsked = section
-      this.#stage.parentElement?.insertBefore(section, this.#stage.nextSibling)
+      // HIDDEN BY DEFAULT (user, 2026-11-24): the questions asked no longer
+      // take the bottom of the diagram. A button on the Ask field opens them.
+      const button = this.#buildAskedHistoryButton(featureId, list.threads.length, view.rows.some((row) => row.stale))
+      this.#briefAsked = button
+      this.#deepChrome?.querySelector('.fb-float-ask')?.appendChild(button)
     } catch (error) {
       console.warn('Saved questions could not be read:', error)
     }
   }
 
-  #buildBriefAsked(featureId: string, view: NonNullable<ReturnType<typeof savedSectionView>>): HTMLElement {
-    const section = document.createElement('div')
-    section.className = 'fb-brief-asked'
-    const head = document.createElement('div')
-    head.className = 'fb-asked-head'
-    const caps = document.createElement('span')
-    caps.className = 'fb-asked-caps'
-    caps.textContent = view.heading.toUpperCase()
-    head.appendChild(caps)
-    const spacer = document.createElement('span')
-    spacer.className = 'fb-asked-spacer'
-    head.appendChild(spacer)
-    if (view.hasMore) {
-      const all = document.createElement('button')
-      all.type = 'button'
-      all.className = 'fb-asked-link'
-      all.textContent = 'See all'
-      all.addEventListener('click', () => this.#askAbout(featureId, { view: 'history' }))
-      head.appendChild(all)
-    }
-    section.appendChild(head)
-    for (const row of view.rows) section.appendChild(this.#buildAskedRow(featureId, row))
-    return section
+  /** "History · 3" beside the Ask field: opens the questions asked about this feature. */
+  #buildAskedHistoryButton(featureId: string, count: number, stale: boolean): HTMLElement {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'fb-asked-history' + (stale ? ' stale' : '')
+    button.dataset['ask'] = 'history'
+    button.setAttribute('aria-label', `Questions asked · ${count}`)
+    button.title = stale ? 'Questions asked — the code under some answers changed since' : 'Questions asked'
+    const svgNs = 'http://www.w3.org/2000/svg'
+    const icon = document.createElementNS(svgNs, 'svg')
+    icon.setAttribute('viewBox', '0 0 16 16')
+    icon.setAttribute('aria-hidden', 'true')
+    icon.setAttribute('class', 'fb-asked-history-icon')
+    const circle = document.createElementNS(svgNs, 'circle')
+    circle.setAttribute('cx', '8')
+    circle.setAttribute('cy', '8')
+    circle.setAttribute('r', '6.2')
+    const hands = document.createElementNS(svgNs, 'path')
+    hands.setAttribute('d', 'M8 4.6V8l2.3 1.5')
+    icon.append(circle, hands)
+    const label = document.createElement('span')
+    label.textContent = `History · ${count}`
+    button.append(icon, label)
+    button.addEventListener('click', () => this.#askAbout(featureId, { view: 'history' }))
+    return button
   }
 
-  #buildAskedRow(featureId: string, row: SavedRowView): HTMLElement {
-    // A WORKSPACE ANSWER, listed here through its pointer, opens where it was
-    // saved — in the Workspace — and shows the whole answer (FR-10).
-    const open = (): void => {
-      if (row.workspaceEntry !== null) {
-        document.dispatchEvent(
-          new CustomEvent(ASK_BLUEPRINT_EVENT, {
-            detail: { entryId: row.workspaceEntry, workspace: true } satisfies AskBlueprintOpenDetail,
-          }),
-        )
-        return
-      }
-      this.#askAbout(featureId, { entryId: row.id })
-    }
-    const wrap = document.createElement('div')
-    wrap.className = 'fb-asked-row' + (row.stale ? ' stale' : '')
-    const main = document.createElement('button')
-    main.type = 'button'
-    main.className = 'fb-asked-main'
-    const question = document.createElement('span')
-    question.className = 'fb-asked-q'
-    question.textContent = row.question
-    const meta = document.createElement('span')
-    meta.className = 'fb-asked-meta'
-    if (row.chip !== null) {
-      const chip = document.createElement('span')
-      chip.className = 'fb-asked-chip'
-      chip.textContent = row.chip
-      meta.appendChild(chip)
-    }
-    meta.append(row.meta)
-    main.append(question, meta)
-    main.addEventListener('click', open)
-    wrap.appendChild(main)
-    if (row.stale) {
-      const foot = document.createElement('div')
-      foot.className = 'fb-asked-stale'
-      const note = document.createElement('span')
-      note.textContent = 'The code under this answer changed since'
-      const again = document.createElement('button')
-      again.type = 'button'
-      again.className = 'fb-asked-again'
-      again.textContent = 'Ask again'
-      again.addEventListener('click', () => {
-        // Only features and parts travel through an opener; a Workspace
-        // answer's project and connection tags are asked again by its scope.
-        const ids = (row.tags.length > 0 ? row.tags : [featureId]).filter((id) => id.startsWith('feature:'))
-        const tags: AskOpenTag[] = ids.map((id) => ({
-          id,
-          kind: kindOfId(id) === 'part' ? 'part' : 'feature',
-        }))
-        document.dispatchEvent(
-          new CustomEvent(ASK_BLUEPRINT_EVENT, {
-            detail: {
-              text: row.question,
-              tags,
-              submit: true,
-              ...(row.workspaceEntry !== null ? { workspace: true } : {}),
-            } satisfies AskBlueprintOpenDetail,
-          }),
-        )
-      })
-      foot.append(note, again)
-      wrap.appendChild(foot)
-    }
-    return wrap
-  }
 
   /**
    * Close an open level, landing at the depth it was opened from (Phase 5.4).
@@ -24320,6 +24262,18 @@ const BOARD_STYLES = `
   /* THE OPEN FEATURE'S ACTIONS, ON THE HEADER. Same buttons the brief built —
      re-parented, not restyled beyond sitting on a header row: they keep the
      ghost look every other control up here already has. */
+  /* THE QUESTION HISTORY BUTTON, beside the Ask field on a feature's level. */
+  .flow-board-root .fb-float-ask { gap: 6px; align-items: center; }
+  .flow-board-root .fb-asked-history {
+    flex: none; display: inline-flex; align-items: center; gap: 5px;
+    height: 26px; padding: 0 8px; border-radius: 6px;
+    border: 1px solid var(--fl-color-border, rgba(255,255,255,0.14));
+    background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  .flow-board-root .fb-asked-history:hover { background: var(--fl-color-surface-hover, rgba(255,255,255,0.06)); }
+  .flow-board-root .fb-asked-history:focus-visible { outline: 2px solid var(--fl-color-focus-ring, #4a9eff); outline-offset: 1px; }
+  .flow-board-root .fb-asked-history.stale { color: var(--fl-color-warning, #e0b25a); }
+  .flow-board-root .fb-asked-history-icon { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; }
   /* QUESTIONS ASKED — the saved answers about this feature, under the diagram.
      (No backticks in here: this block lives inside a template literal.) */
   .flow-board-root .fb-brief-asked {
