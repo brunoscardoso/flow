@@ -532,6 +532,40 @@ const OLD_CAPTURE_UPDATED = /^\*\*Last Updated\*\*:/m;
  */
 export type FeatureAdvisory = 'no-kind';
 
+/**
+ * Graph-level, not per file: a feature anchored on ONE folder that holds at
+ * least {@link CONTAINER_MIN_CHILDREN} other features is an outline of them —
+ * the project's own package ("Lumen Core" at `lumen_core`, beside "Core" at
+ * `lumen_core/core`), or a solution's `Source` folder. Drawn, it repeats its
+ * children's code as one more capability. Writers and links still read it.
+ */
+export type FeatureGrouping = 'container';
+export const CONTAINER_MIN_CHILDREN = 3;
+
+/** The slugs of the core features that only outline other features (see {@link FeatureGrouping}). */
+export function containerFeatureSlugs(features: readonly FeatureNode[]): Set<string> {
+  const cores = features.filter((feature) => feature.kind === 'core');
+  const folderOf = (anchor: string): string | null => {
+    const match = /^(?:module|dir):(.+?)\/?$/.exec(anchor.trim());
+    return match === null ? null : match[1];
+  };
+  const pathOf = (anchor: string): string => anchor.trim().replace(/^[a-z]+:/, '').replace(/#.*$/, '');
+  const out = new Set<string>();
+  for (const feature of cores) {
+    if (feature.anchors.length !== 1) continue;
+    const folder = folderOf(feature.anchors[0]);
+    if (folder === null || folder === '.' || folder === '') continue;
+    const inside = cores.filter(
+      (other) =>
+        other !== feature &&
+        other.anchors.length > 0 &&
+        other.anchors.every((anchor) => pathOf(anchor).startsWith(`${folder}/`)),
+    ).length;
+    if (inside >= CONTAINER_MIN_CHILDREN) out.add(feature.slug);
+  }
+  return out;
+}
+
 export function featureAdvisory(raw: string): FeatureAdvisory | null {
   if (featureExclusion(raw) !== null) return null;
   const { fm } = splitFrontmatter(raw);
@@ -543,7 +577,8 @@ export function featureAdvisory(raw: string): FeatureAdvisory | null {
 /** What a reader is told about a file the board did not draw, or drew on a
  *  guess. One sentence each, no path, no key — reasons a person can act on, in
  *  their own terms (forbidden-pattern #12). */
-export const EXCLUSION_REASON: Record<FeatureExclusion | FeatureAdvisory, string> = {
+export const EXCLUSION_REASON: Record<FeatureExclusion | FeatureAdvisory | FeatureGrouping, string> = {
+  container: 'a folder that holds other features, so its code is already drawn by them',
   'working-set': 'a chat thread\u2019s working notes, not a capability',
   'capture-note': 'a note the assistant captured about a feature, not the feature itself',
   'no-kind': 'this file does not say whether it is a capability or a change, so it is shown as a capability',
@@ -958,7 +993,7 @@ export function persistFeatureNode(flowDir: string, node: FeatureNode): void {
  *  and why. */
 export interface ExcludedFeatureFile {
   slug: string;
-  reason: FeatureExclusion | FeatureAdvisory;
+  reason: FeatureExclusion | FeatureAdvisory | FeatureGrouping;
   /** False when the file IS drawn and the reason is a declared guess. */
   dropped: boolean;
 }

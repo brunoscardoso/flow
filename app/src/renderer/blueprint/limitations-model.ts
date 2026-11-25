@@ -307,7 +307,8 @@ function excludedRows(limitations: BlueprintFeatureLimitations): LimitationRow[]
 
 /** One sentence per reason, in the reader's terms — no file path, no
  *  frontmatter key, no command (forbidden-pattern #12). */
-const EXCLUSION_DETAIL: Record<'working-set' | 'capture-note' | 'no-kind', string> = {
+const EXCLUSION_DETAIL: Record<'working-set' | 'capture-note' | 'no-kind' | 'container', string> = {
+  container: 'a folder that holds other features, so its code is already drawn by them',
   'working-set': 'a chat thread\u2019s working notes, not a capability',
   'capture-note': 'a note captured about a feature, not the feature itself',
   'no-kind':

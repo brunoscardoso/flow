@@ -3641,7 +3641,7 @@ export interface BlueprintFeatureLimitations {
  *  CLI's `ExcludedFeatureFile` (separate runtimes, no shared import). */
 export interface BlueprintExcludedFeatureFile {
   slug: string
-  reason: 'working-set' | 'capture-note' | 'no-kind'
+  reason: 'working-set' | 'capture-note' | 'no-kind' | 'container'
   /** False when the file IS drawn and the reason is a declared guess. */
   dropped: boolean
 }

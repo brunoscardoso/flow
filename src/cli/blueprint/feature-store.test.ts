@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import {
   AmbiguousLearnedSectionError,
+  containerFeatureSlugs,
   featuresDir,
   featureSummary,
   hasUnparsedContent,
@@ -1497,5 +1498,41 @@ describe('the two-key promise, end to end (plan feature-type-icons, note 10)', (
     expect(() => writeLearnedRole(flow, 'chats', 'wizard' as FeatureRole)).toThrow(/not a feature role/);
     expect(() => writeLearnedRole(flow, 'chats', 'wizard' as FeatureRole, 'List')).toThrow(/not a feature role/);
     expect(readFileSync(file).equals(before)).toBe(true);
+  });
+});
+
+describe('a feature that only outlines other features', () => {
+  function storeWith(entries: Record<string, string>): string {
+    const flow = tempFlow();
+    for (const [slug, anchors] of Object.entries(entries)) {
+      writeFileSync(join(featuresDir(flow), `${slug}.md`), `---\nid: feature:${slug}\nname: ${slug}\nkind: core\nanchors: ${anchors}\nrelates: []\n---\n\n# ${slug}\n`);
+    }
+    return flow;
+  }
+
+  it('is the folder holding three or more other features (the project package beside its own core folder)', () => {
+    const flow = storeWith({
+      'lumen-core': '[module:lumen_core]',
+      core: '[module:lumen_core/core]',
+      auth: '[file:lumen_core/auth/jwt.py, file:lumen_core/auth/models.py]',
+      db: '[module:lumen_core/db]',
+      docs: '[module:docs/api]',
+    });
+    // The positive: the inner folders are features…
+    const slugs = containerFeatureSlugs(readFeatures(flow));
+    expect(readFeatures(flow).map((f) => f.slug)).toEqual(expect.arrayContaining(['core', 'auth', 'db']));
+    // …and only the outline is not.
+    expect([...slugs]).toEqual(['lumen-core']);
+  });
+
+  it('holding two features is not enough, and a feature reaching outside the folder does not count', () => {
+    const flow = storeWith({
+      app: '[module:app]',
+      one: '[module:app/one]',
+      two: '[module:app/two]',
+      wide: '[module:app/three, module:lib/x]',
+      appendix: '[module:appendix]',
+    });
+    expect([...containerFeatureSlugs(readFeatures(flow))]).toEqual([]);
   });
 });

@@ -45,7 +45,7 @@ import { createFolderRowsBuilder, pinnedHomeExists, type FolderImportIndex } fro
 import { buildFeatureGraph, readModuleLearning, type FeatureGraph, type FolderRowsFor } from './feature-graph.js';
 import { computeFeatureLimitations, type FeatureLimitations } from './feature-limitations.js';
 import { createAnchorMeasurer, repoSizeHost, type SizeHost } from './feature-size.js';
-import { featureHome, readFeaturesWithExclusions, readParts, type FeatureNode, type FeaturePart } from './feature-store.js';
+import { containerFeatureSlugs, featureHome, readFeaturesWithExclusions, readParts, type FeatureNode, type FeaturePart } from './feature-store.js';
 import { readProjectImportIndex, storylineCacheDir, type ImportIndexReadOptions } from './storyline-imports.js';
 import { StorylineReaders } from './storyline-reader.js';
 import { computeStaleEdges, staleEdgeKeys } from './stale-check.js';
@@ -170,7 +170,11 @@ export function readProjectFeatureGraph(
   const structureDir = join(flowDir, BLUEPRINT_DIRNAME);
   // ONE READ answers both "what are the features" and "what in this directory
   // is not one" — see `readFeaturesWithExclusions`.
-  const { features, excluded } = readFeaturesWithExclusions(flowDir);
+  const read = readFeaturesWithExclusions(flowDir);
+  // A feature that only outlines others is not drawn — see `containerFeatureSlugs`.
+  const containers = containerFeatureSlugs(read.features);
+  const features = read.features.filter((feature) => !containers.has(feature.slug));
+  const excluded = [...read.excluded, ...[...containers].map((slug) => ({ slug, reason: 'container' as const, dropped: true }))];
   trace(`features read: ${features.length} (${excluded.length} excluded)`);
   // One view of the checkout for the whole read — sizes, folder rows and the
   // pinned-home check all ask it.
