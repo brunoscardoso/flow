@@ -17,7 +17,9 @@ import {
   mintFeatureId,
   normalizeEdges,
   parseEdges,
+  featureExclusion,
   parseFeatureFile,
+  resolveFeatureRef,
   readFeatures,
   readFeaturesWithExclusions,
   featureAdvisory,
@@ -80,6 +82,19 @@ describe('parsing a legacy file (no frontmatter)', () => {
   it('derives the display name from the heading, never inventing prose', () => {
     expect(parseFeatureFile('x', LEGACY).name).toBe('Blueprint Simulation')
     expect(parseFeatureFile('my-slug', 'no heading here\n').name).toBe('my-slug')
+  });
+});
+
+describe('a parent written without its feature: prefix', () => {
+  it('reads `project::slug` as the namespaced id, so the change attaches to its feature', () => {
+    const known = ['feature:lumen-app::chats', 'feature:lumen-app::spaces'];
+    const written = parseFeatureFile('chat-fix', '---\nid: feature:lumen-app::chat-fix\nname: Chat fix\nkind: child\nparent: lumen-app::chats\n---\n\n# Chat fix\n');
+    expect(written.parent).toBe('feature:lumen-app::chats');
+    expect(resolveFeatureRef(written.parent ?? '', known)).toBe('feature:lumen-app::chats');
+    // A well-formed parent is untouched (the control).
+    expect(parseFeatureFile('x', '---\nkind: child\nparent: feature:chats\n---\n').parent).toBe('feature:chats');
+    // Something that is not an id is kept exactly as written.
+    expect(parseFeatureFile('y', '---\nkind: child\nparent: chats\n---\n').parent).toBe('chats');
   });
 });
 
@@ -451,6 +466,18 @@ Working set for "ACME-2204" — 36 file(s): 5 edited, 31 read.
     writeFileSync(join(featuresDir(flow), 'acme-2204.md'), WORKING_SET);
     writeFileSync(join(featuresDir(flow), 'real.md'), '# Feature: Real Feature\n\nProse.\n');
     expect(readFeatures(flow).map((f) => f.slug)).toEqual(['real']);
+  });
+
+  it('the older capture shape (captured_at, no capture key) is a note, even once it was adopted as core', () => {
+    const flow = tempFlow();
+    const oldNote = '---\nid: feature:aai-3908-root-cause\nname: AAI-3908 root cause\nkind: core\nanchors: [file:src/a.ts]\ncaptured_at: 2026-09-28\nfeature: aai-3908-root-cause\njira: AAI-3908\nstatus: plan-complete\ntitle: "AAI-3908"\n---\n\n# AAI-3908\n';
+    writeFileSync(join(featuresDir(flow), 'aai-3908-root-cause.md'), oldNote);
+    writeFileSync(join(featuresDir(flow), 'playbooks.md'), '---\nid: feature:playbooks\nname: Playbooks\nkind: core\n---\n\n# Playbooks\n');
+    expect(readFeatures(flow).map((f) => f.slug)).toEqual(['playbooks']);
+    expect(featureExclusion(oldNote)).toBe('capture-note');
+    // …and a sweep never adopts one that was not adopted yet.
+    writeFileSync(join(featuresDir(flow), 'aai-1-note.md'), '---\ncaptured_at: 2026-09-01\nfeature: aai-1-note\ntitle: "AAI-1"\n---\n\n# AAI-1\n');
+    expect(seedFeatures(flow)).not.toContain('aai-1-note');
   });
 
   it('a brain-capture note is excluded by the marker it CARRIES', () => {

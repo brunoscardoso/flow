@@ -139,6 +139,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
+import { isWorkingSetCapture } from '../blueprint/feature-store.js';
 import { writeBrainIndex } from '../state/brain-index.js';
 import { summarizeArchivedRounds } from '../state/rounds-summary.js';
 import { atomicWriteFile } from '../utils/atomic-write.js';
@@ -955,6 +956,12 @@ function untrackLocalOnly(git: WorkspaceGit, repo: string): string[] {
     const knowledgeClass = classifyKnowledgePath(path, { root: 'workspace' });
     return knowledgeClass === 'personal' || knowledgeClass === 'generated';
   });
+  // A chat thread's working set is personal too, but only its CONTENT says so
+  // (it sits beside real features), so no path rule can name it.
+  const workingSets = excludeWorkingSets(git, repo);
+  // In the index, not only in HEAD: `add -A` ran before this, so a new one is staged.
+  const indexed = new Set(splitZ(git(['ls-files', '-z', '--', `${WORKSPACE_PROJECTS_DIRNAME}/`], repo)));
+  local.push(...workingSets.filter((path) => indexed.has(path)));
   // A symlink is never published either: every other machine refuses one
   // incoming (`incoming-unsafe`), so it would block the whole team.
   const raw = splitZ(git(['diff', '--cached', '--raw', '-z', '--no-renames', '--no-abbrev'], repo));
@@ -964,6 +971,66 @@ function untrackLocalOnly(git: WorkspaceGit, repo: string): string[] {
   }
   if (local.length > 0) git(['rm', '-q', '--cached', '--ignore-unmatch', '--', ...local], repo);
   return [...new Set(local)].sort();
+}
+
+/**
+ * Every chat thread's working set in the Workspace's feature folders, by
+ * content (`isWorkingSetCapture`, the feature store's own rule). Auto-capture
+ * writes one per thread beside the real features, and they are this person's
+ * session records — the per-project knowledge repo kept them local with a
+ * content-generated ignore file, but a Workspace shared them: 226 across one
+ * real Workspace, 2026-11-25. Listed in this clone's own `info/exclude` (never
+ * the committed `.gitignore`, which every machine shares), so `add -A` leaves
+ * them alone; the list is regenerated on every sync.
+ */
+const WORKING_SET_EXCLUDE_START = '# plan-flow: chat working sets (generated on every sync)';
+const WORKING_SET_EXCLUDE_END = '# plan-flow: end of chat working sets';
+
+export function excludeWorkingSets(git: WorkspaceGit, repo: string): string[] {
+  const found: string[] = [];
+  const projects = join(repo, WORKSPACE_PROJECTS_DIRNAME);
+  if (existsSync(projects)) {
+    for (const project of readdirSync(projects).sort()) {
+      if (project.startsWith('.')) continue;
+      const features = join(projects, project, 'brain', 'features');
+      let entries: string[];
+      try {
+        if (!lstatSync(features).isDirectory()) continue;
+        entries = readdirSync(features).sort();
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.endsWith('.md')) continue;
+        const path = join(features, entry);
+        try {
+          if (!lstatSync(path).isFile()) continue;
+          if (isWorkingSetCapture(readFileSync(path, 'utf-8'))) found.push(`${WORKSPACE_PROJECTS_DIRNAME}/${project}/brain/features/${entry}`);
+        } catch {
+          // unreadable: not judged, left as it is
+        }
+      }
+    }
+  }
+  const excludePath = resolve(repo, git(['rev-parse', '--git-path', 'info/exclude'], repo).trim());
+  const existing = existsSync(excludePath) ? readFileSync(excludePath, 'utf-8') : '';
+  const start = existing.indexOf(WORKING_SET_EXCLUDE_START);
+  const end = existing.indexOf(WORKING_SET_EXCLUDE_END);
+  const kept =
+    start === -1 || end === -1 || end < start
+      ? existing
+      : existing.slice(0, start) + existing.slice(end + WORKING_SET_EXCLUDE_END.length).replace(/^\n/, '');
+  const block =
+    found.length === 0
+      ? ''
+      : [WORKING_SET_EXCLUDE_START, ...found.map((path) => `/${path.replace(/([*?[\\!#])/g, '\\$1')}`), WORKING_SET_EXCLUDE_END, ''].join('\n');
+  const prefix = kept.length === 0 || kept.endsWith('\n') ? kept : `${kept}\n`;
+  const next = prefix + block;
+  if (next !== existing) {
+    mkdirSync(dirname(excludePath), { recursive: true });
+    writeFileSync(excludePath, next, 'utf-8');
+  }
+  return found;
 }
 
 /**

@@ -32,7 +32,7 @@
  * COPYFILE_EXCL, so even a race cannot overwrite.
  */
 
-import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { appendFileSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { classifyKnowledgePath } from './knowledge-classes.js';
@@ -44,6 +44,8 @@ export interface ImportReport {
   skipped: string[];
   /** Incoming files that clashed with a different file already there, and the name they were copied under. */
   renamed: { from: string; to: string }[];
+  /** Append-only stores that clashed: their new lines were added to the one already there. */
+  joined?: string[];
 }
 
 export const EMPTY_IMPORT: ImportReport = Object.freeze({ files: 0, skipped: [], renamed: [] }) as ImportReport;
@@ -62,6 +64,14 @@ export interface ImportPlan {
   copies: PlannedCopy[];
   skipped: string[];
   renamed: { from: string; to: string }[];
+  /**
+   * Clashing append-only stores (`*.jsonl`, the append-only class): JOINED into
+   * the one already there — each incoming line not already present is added —
+   * instead of copied beside it as `<name>.imported.jsonl`, which no reader
+   * opens. One real Workspace held six such copies of the blueprint's own
+   * logs, a fifth of its investigations unread (2026-11-25).
+   */
+  joins?: { from: string; rel: string }[];
 }
 
 /** Never copied, never reported. */
@@ -242,9 +252,19 @@ export function planKnowledgeImport(source: string | null, destination: string, 
     }
   }
 
-  // Everything else that clashes: `<name>.imported<ext>`.
+  // A clashing append-only store is joined, never renamed (see `ImportPlan.joins`).
+  const joined = new Set<string>();
   for (const file of keep) {
     if (!clashing.has(file.rel) || renames.has(file.rel)) continue;
+    if (occupant(plan.destination, file.rel) !== 'file') continue;
+    if (classifyKnowledgePath(file.rel) !== 'append-only') continue;
+    (plan.joins ??= []).push(file);
+    joined.add(file.rel);
+  }
+
+  // Everything else that clashes: `<name>.imported<ext>`.
+  for (const file of keep) {
+    if (!clashing.has(file.rel) || renames.has(file.rel) || joined.has(file.rel)) continue;
     const dir = posixDir(file.rel);
     const name = posixBase(file.rel);
     const ext = extname(name);
@@ -256,6 +276,7 @@ export function planKnowledgeImport(source: string | null, destination: string, 
   }
 
   for (const file of keep) {
+    if (joined.has(file.rel)) continue;
     const to = renames.get(file.rel) ?? file.rel;
     plan.copies.push({ from: file.from, rel: file.rel, to });
     if (to !== file.rel) plan.renamed.push({ from: file.rel, to });
@@ -281,5 +302,29 @@ export function applyKnowledgeImport(plan: ImportPlan): ImportReport {
       report.skipped.push(copy.rel);
     }
   }
+  for (const join_ of plan.joins ?? []) {
+    try {
+      joinAppendOnly(join_.from, join(plan.destination, ...join_.rel.split('/')));
+      (report.joined ??= []).push(join_.rel);
+    } catch {
+      report.skipped.push(join_.rel);
+    }
+  }
   return report;
+}
+
+/** Add each line of `from` that `to` does not hold yet, in `from`'s order. Never rewrites a line already there. */
+export function joinAppendOnly(from: string, to: string): number {
+  const existing = readFileSync(to, 'utf-8');
+  const have = new Set(existing.split('\n').filter((line) => line.trim() !== ''));
+  const added: string[] = [];
+  for (const line of readFileSync(from, 'utf-8').split('\n')) {
+    if (line.trim() === '' || have.has(line)) continue;
+    have.add(line);
+    added.push(line);
+  }
+  if (added.length === 0) return 0;
+  const prefix = existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
+  appendFileSync(to, `${prefix}${added.join('\n')}\n`, 'utf-8');
+  return added.length;
 }

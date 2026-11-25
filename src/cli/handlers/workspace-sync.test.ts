@@ -1721,6 +1721,40 @@ describeWithGit('workspace sync against real git, two machines', () => {
   );
 
   it(
+    "keeps a chat thread's working set on this computer: never shared, already-shared ones leave, the file stays",
+    () => {
+      const shared = 'projects/backend/brain/features/aai-1-old-thread.md';
+      const fresh = 'projects/backend/brain/features/aai-2-new-thread.md';
+      const feature = 'projects/backend/brain/features/orders.md';
+      const workingSet = (title: string): string =>
+        `---\nfeature: ${title}\ntitle: "${title}"\nthread_id: 0f0e\ncaptured_at: 2026-11-25T00:00:00.000Z\n---\n\n# ${title}\n\nWorking set for "${title}" — 1 file(s): 1 edited, 0 read.\n`;
+      // One was shared before Flow kept them local (forced past nothing: nothing ignored it then).
+      write(wsB, shared, workingSet('aai-1-old-thread'));
+      git(wsB, 'add', '-f', '--', shared);
+      git(wsB, 'commit', '-q', '-m', 'old working set');
+      git(wsB, 'push', '-q', 'origin', 'HEAD:refs/heads/main');
+      expect(onRemote(shared)).toContain('Working set for');
+      write(wsB, fresh, workingSet('aai-2-new-thread'));
+      write(wsB, feature, '---\nid: feature:orders\nname: Orders\nkind: core\n---\n\n# Orders\n');
+
+      const result = sync(flowB);
+      // The real feature beside them is shared (the positive)…
+      expect(result).toMatchObject({ state: 'synced', pushed: true });
+      expect(onRemote(feature)).toContain('# Orders');
+      // …the working sets are not, and both stay on this computer.
+      const tracked = git(bare, 'ls-tree', '-r', '--name-only', 'refs/heads/main');
+      expect(tracked).not.toContain('aai-1-old-thread');
+      expect(tracked).not.toContain('aai-2-new-thread');
+      expect(readFileSync(join(wsB, shared), 'utf-8')).toContain('Working set for');
+      expect(readFileSync(join(wsB, fresh), 'utf-8')).toContain('Working set for');
+      // A second sync has nothing to send for them.
+      expect(sync(flowB).state).toMatch(/nothing-to-do|synced/);
+      expect(git(wsB, 'status', '--porcelain')).not.toContain('thread.md');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
     'applies a whole batch of decisions in ONE merge, and the merge commit names each one and who agreed',
     () => {
       const [ours, theirs, written] = conflictingPlans(['bat_one', 'bat_two', 'bat_three']);

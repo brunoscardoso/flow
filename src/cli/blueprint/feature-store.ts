@@ -318,6 +318,22 @@ export const FEATURE_NAMESPACE_SEPARATOR = '::';
  * namespace null. `rest` is a feature slug, or `<slug>/<part>` for a part id.
  * Null for a non-feature id or an empty half.
  */
+/**
+ * A parent written as a namespaced id without its `feature:` prefix
+ * (`lumen-app::chats`) — an older writer's shape. Nine changes on a real
+ * project named their feature this way and attached to nothing (2026-11-25).
+ * It is unambiguous, so it is read as the id it means; anything else is kept
+ * exactly as written.
+ */
+export function normalizeParentRef(ref: string): string {
+  const trimmed = ref.trim().replace(/^["']|["']$/g, '');
+  if (trimmed.startsWith(FEATURE_ID_PREFIX)) return trimmed;
+  const separator = trimmed.indexOf(FEATURE_NAMESPACE_SEPARATOR);
+  if (separator <= 0) return ref;
+  const id = `${FEATURE_ID_PREFIX}${trimmed}`;
+  return parseFeatureId(id) === null ? ref : id;
+}
+
 export function parseFeatureId(id: string): { namespace: string | null; slug: string } | null {
   if (!id.startsWith(FEATURE_ID_PREFIX)) return null;
   const rest = id.slice(FEATURE_ID_PREFIX.length);
@@ -439,6 +455,9 @@ export function isWorkingSetCapture(raw: string): boolean {
  */
 export const CAPTURE_KEY = 'capture';
 
+/** The key the older capture shape carries instead of `capture:` — see `featureExclusion`. */
+export const CAPTURED_AT_KEY = 'captured_at';
+
 /**
  * WHY A FILE IS NOT A FEATURE — or `null` when it is one.
  *
@@ -466,6 +485,12 @@ export function featureExclusion(raw: string): FeatureExclusion | null {
   if (isWorkingSetCapture(raw)) return 'working-set';
   const { fm } = splitFrontmatter(raw);
   if (fm.some((line) => line.trimStart().startsWith(`${CAPTURE_KEY}:`))) return 'capture-note';
+  // The OLDER capture shape, written before notes stamped `capture:` — it
+  // carries the time it was captured instead. Adoption gave three of these
+  // `kind: core` on a real project, so a ticket's notes drew as a feature
+  // (2026-11-25). A positive marker like the others: no feature records when
+  // it was captured.
+  if (fm.some((line) => line.trimStart().startsWith(`${CAPTURED_AT_KEY}:`))) return 'capture-note';
   return null;
 }
 
@@ -709,7 +734,7 @@ export function parseFeatureFile(slug: string, raw: string): FeatureNode {
     extra,
   };
   const parent = fields.get('parent');
-  if (parent !== undefined && parent.length > 0 && parent !== 'null') node.parent = parent;
+  if (parent !== undefined && parent.length > 0 && parent !== 'null') node.parent = normalizeParentRef(parent);
   const domain = fields.get('domain');
   if (domain !== undefined && domain.length > 0 && domain !== 'null') node.domain = domain;
   return node;
