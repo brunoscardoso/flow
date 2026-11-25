@@ -1231,10 +1231,38 @@ describeWithGit('workspace sync against real git, two machines', () => {
   );
 
   it(
+    "the app's launch migration undoes that merge too, so the Workspace comes back before any sync can run (user report 2026-11-24)",
+    async () => {
+      const { migrateWorkspaces } = await import('./workspace-migrate.js');
+      const rename = (dir: string, name: string): void => {
+        const text = readFileSync(join(dir, 'workspace.json'), 'utf-8');
+        writeFileSync(join(dir, 'workspace.json'), text.replace(/"name": "[^"]*"/, `"name": "${name}"`));
+      };
+      rawPush('rename-launch', (dir) => rename(dir, 'Theirs'));
+      rename(wsB, 'Mine');
+      crashMidMerge();
+      expect(() => model.readWorkspace(flowB, 'team')).toThrow(/not valid JSON/);
+      // A dry run writes nothing, so it still refuses.
+      refusalOf(() => migrateWorkspaces({ flowFolder: flowB, roots: [], workspace: 'team', dryRun: true, deps: { git: recordingGit } }), 'malformed-workspace');
+      expect(existsSync(join(wsB, '.git', 'MERGE_HEAD'))).toBe(true);
+
+      // The app's launch run names no Workspace: it reads this machine's Default.
+      model.writeDefaultWorkspace(flowB, 'team');
+      const migrated = migrateWorkspaces({ flowFolder: flowB, roots: [], deps: { git: recordingGit } });
+      expect(migrated.workspace.slug).toBe('team');
+      expect(model.readWorkspace(flowB, 'team').name).toBe('Mine');
+      expect(existsSync(join(wsB, '.git', 'MERGE_HEAD'))).toBe(false);
+      expect(calls.some((args) => args.includes('--hard'))).toBe(false);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
     'still refuses a workspace.json broken by hand, with no merge of Flow\'s to undo',
     () => {
       writeFileSync(join(wsB, 'workspace.json'), '{ not json');
       refusalOf(() => sync(flowB), 'malformed-workspace');
+      refusalOf(() => syncModule.withWorkspaceRecovery(flowB, recordingGit, () => model.readWorkspace(flowB, 'team')), 'malformed-workspace');
       expect(read(wsB, 'workspace.json')).toBe('{ not json');
     },
     TEST_TIMEOUT_MS

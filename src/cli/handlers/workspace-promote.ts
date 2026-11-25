@@ -14,6 +14,7 @@
  * default-branch commit. Nothing here deletes knowledge: abandoned learnings
  * and notes are only hidden by the status resolver.
  */
+import { withWorkspaceRecovery } from './workspace-sync.js';
 import * as childProcess from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
@@ -228,7 +229,7 @@ function resolvePromoteWorkspace(options: PromoteOptions): { flowFolder: string;
 
 /** Promote one Workspace. See the module header. */
 export function promoteWorkspace(options: PromoteOptions): PromoteResult {
-  const { flowFolder, workspace } = resolvePromoteWorkspace(options);
+  const { flowFolder, workspace } = withWorkspaceRecovery(options.flowFolder, options.deps?.git, () => resolvePromoteWorkspace(options));
   const git = options.deps?.git ?? defaultWorkspaceGit;
   const host = options.deps?.host ?? ((checkout: string) => hostForCheckout(git, checkout, defaultHostRunner));
   const local = readLocalProjects(flowFolder);

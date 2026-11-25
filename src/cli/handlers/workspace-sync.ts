@@ -504,18 +504,54 @@ function findWorkspaceRecovering(
     return { workspace: findWorkspace(flowFolder, wanted), early: { lock: null, merge: false } };
   } catch (error) {
     if (!(error instanceof WorkspaceRefusal) || error.reason !== 'malformed-workspace' || wanted === undefined) throw error;
-    const repo = workspaceDir(flowFolder, wanted);
-    const top = attempt(git, ['rev-parse', '--show-toplevel'], repo);
-    if (!top.ok || realOrResolved(top.out.trim()) !== realOrResolved(repo)) throw error;
-    if (revParse(git, repo, 'MERGE_HEAD') === null) throw error;
-    const lock = acquireLock(git, repo, now());
-    let merge: boolean;
-    try {
-      merge = recoverLeftoverMerge(git, repo, wanted);
-    } finally {
-      lock.release();
-    }
-    return { workspace: findWorkspace(flowFolder, wanted), early: { lock: lock.recovered, merge } };
+    const early = recoverUnreadableWorkspace(flowFolder, wanted, git, now);
+    if (early === null) throw error;
+    return { workspace: findWorkspace(flowFolder, wanted), early };
+  }
+}
+
+/**
+ * Undo the merge a killed sync of Flow's left in a Workspace folder, so its
+ * conflicted `workspace.json` reads again. Null when there is nothing of that
+ * kind to undo (not a repository, no merge in progress); throws
+ * `merge-in-progress` for a merge Flow may not touch (see recoverLeftoverMerge).
+ * Under the sync lock, so it never races a running sync.
+ */
+export function recoverUnreadableWorkspace(
+  flowFolder: string,
+  slug: string,
+  git: WorkspaceGit = defaultWorkspaceGit,
+  now: () => Date = () => new Date()
+): { lock: LockRecovery | null; merge: boolean } | null {
+  const repo = workspaceDir(flowFolder, slug);
+  if (!existsSync(repo)) return null;
+  const top = attempt(git, ['rev-parse', '--show-toplevel'], repo);
+  if (!top.ok || realOrResolved(top.out.trim()) !== realOrResolved(repo)) return null;
+  if (revParse(git, repo, 'MERGE_HEAD') === null) return null;
+  const lock = acquireLock(git, repo, now());
+  try {
+    return { lock: lock.recovered, merge: recoverLeftoverMerge(git, repo, slug) };
+  } finally {
+    lock.release();
+  }
+}
+
+/**
+ * Run a Workspace verb; when it refuses `malformed-workspace` for a Workspace
+ * whose file a killed sync left mid-merge, undo that merge and run it ONCE
+ * more. The app's launch migration and promote read the Workspace before any
+ * sync can, so without this the repair never got a turn (user report
+ * 2026-11-24: the Workspace vanished from Settings and nothing could sync it).
+ */
+export function withWorkspaceRecovery<T>(flowFolder: string, git: WorkspaceGit | undefined, run: () => T): T {
+  try {
+    return run();
+  } catch (error) {
+    if (!(error instanceof WorkspaceRefusal) || error.reason !== 'malformed-workspace') throw error;
+    const slug = error.payload.workspace;
+    if (typeof slug !== 'string' || slug === '') throw error;
+    if (recoverUnreadableWorkspace(flowFolder, slug, git ?? defaultWorkspaceGit) === null) throw error;
+    return run();
   }
 }
 
