@@ -489,7 +489,8 @@ Working set for "ACME-2204" — 36 file(s): 5 edited, 31 read.
     writeFileSync(join(featuresDir(flow), 'adopted-as-change.md'), old('id: feature:adopted-as-change\nname: Adopted\nkind: child\n'));
     // A real feature that merely has a Created line is still a feature (the positive).
     writeFileSync(join(featuresDir(flow), 'playbooks.md'), '---\nid: feature:playbooks\nname: Playbooks\nkind: core\n---\n\n# Playbooks\n\n**Created**: 2026-01-01\n');
-    expect(readFeatures(flow).map((f) => f.slug)).toEqual(['playbooks']);
+    // Filed as a change, it is a change; unfiled or stamped core, it is a note.
+    expect(readFeatures(flow).map((f) => `${f.slug}:${f.kind}`)).toEqual(['adopted-as-change:child', 'playbooks:core']);
     expect(seedFeatures(flow)).not.toContain('never-adopted');
   });
 

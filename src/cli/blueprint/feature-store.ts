@@ -490,6 +490,11 @@ export function featureExclusion(raw: string): FeatureExclusion | null {
   // `kind: core` on a real project, so a ticket's notes drew as a feature
   // (2026-11-25). A positive marker like the others: no feature records when
   // it was captured.
+  // The three older shapes below are a note about ONE piece of work. Filed as
+  // a change (`kind: child`) it is exactly that, and counts under its feature
+  // (user, 2026-11-25); left unfiled — no kind, or the `core` an adoption
+  // stamped — it is a note, never a capability.
+  if (fm.some((line) => /^kind:[ \t]*child[ \t]*$/.test(line.trim()))) return null;
   if (fm.some((line) => line.trimStart().startsWith(`${CAPTURED_AT_KEY}:`))) return 'capture-note';
   // The OLDEST capture shape: the first brain-capture template (2026-03) wrote
   // one note per piece of work, always with both a `**Created**:` and a
