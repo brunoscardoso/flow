@@ -27,7 +27,7 @@ const STRUCTURED = [
   '',
   '### What a tenant stores',
   '- `externalTenantId` and `alias`, both unique',
-  '- `celesteAccessTier`: Light, Full or Foundations [2]',
+  '- `quillAccessTier`: Light, Full or Foundations [2]',
   '',
   '### How a tenant is created',
   'A provisioning call runs `createTenant.ts`, then syncs products. [3]',
