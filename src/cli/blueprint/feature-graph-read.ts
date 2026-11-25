@@ -149,15 +149,29 @@ export interface ProjectFeatureReadOptions {
   host?: SizeHost;
 }
 
+/**
+ * Step timings of one graph read, on stderr, when `PLANFLOW_TRACE_GRAPH` is set.
+ * The app sets it and logs the lines of a slow or timed-out read, so a report
+ * from a machine we cannot reach names the slow step (a teammate's board timed
+ * out at 30 s on a merged Workspace, 2026-11-25, and nothing said where).
+ */
+function graphTracer(): (step: string) => void {
+  if (process.env.PLANFLOW_TRACE_GRAPH === undefined) return () => {};
+  const started = Date.now();
+  return (step) => process.stderr.write(`[graph] +${Date.now() - started}ms ${step}\n`);
+}
+
 export function readProjectFeatureGraph(
   flowDir: string,
   repoRoot: string | null,
   options: ProjectFeatureReadOptions = {},
 ): ProjectFeatureRead {
+  const trace = graphTracer();
   const structureDir = join(flowDir, BLUEPRINT_DIRNAME);
   // ONE READ answers both "what are the features" and "what in this directory
   // is not one" — see `readFeaturesWithExclusions`.
   const { features, excluded } = readFeaturesWithExclusions(flowDir);
+  trace(`features read: ${features.length} (${excluded.length} excluded)`);
   // One view of the checkout for the whole read — sizes, folder rows and the
   // pinned-home check all ask it.
   const host = repoRoot === null ? null : (options.host ?? repoSizeHost(repoRoot));
@@ -169,13 +183,20 @@ export function readProjectFeatureGraph(
     excluded,
     ...(host === null ? {} : { homeExists: (home: string) => pinnedHomeExists(host, home) }),
   });
+  trace('limitations');
   const partsBySlug = readPartsBySlug(flowDir, features);
+  trace('parts');
   const imports =
     host === null || repoRoot === null
       ? null
       : options.imports !== undefined
         ? options.imports
         : readFolderImportIndex(repoRoot, { readBudget: options.importReadBudget ?? GRAPH_IMPORT_READ_BUDGET });
+  trace(`import index: ${imports === null ? 'none' : imports.complete === false ? 'partial' : 'complete'}`);
+  const staleEdges = repoRoot === null ? new Set<string>() : staleEdgeKeys(computeStaleEdges(flowDir, repoRoot, undefined, features));
+  trace(`stale edges: ${staleEdges.size}`);
+  const knowledge = createKnowledgeStatusReader(flowDir);
+  trace('knowledge status');
   const graph = buildFeatureGraph(
     features,
     readModuleLearning(structureDir),
@@ -184,7 +205,7 @@ export function readProjectFeatureGraph(
     partsBySlug,
     // ONE AUTHORITY ON STALENESS — and it needs the code. With no checkout
     // there is nothing to re-hash, so no edge is marked (absent = unchecked).
-    repoRoot === null ? new Set() : staleEdgeKeys(computeStaleEdges(flowDir, repoRoot, undefined, features)),
+    staleEdges,
     // HOW MUCH CODE EACH NODE STANDS ON — the board's area. Unmeasurable
     // without a checkout; the caller may lay a last-known size over it.
     host === null ? undefined : createAnchorMeasurer(host),
@@ -193,13 +214,15 @@ export function readProjectFeatureGraph(
     host === null || repoRoot === null ? undefined : folderRowsFor(host, imports, features),
     // DRAFT OR SOLID — the status log and provenance records, read once for
     // the whole graph (`knowledge-status-read.ts`, the readers' one door).
-    createKnowledgeStatusReader(flowDir),
+    knowledge,
   );
+  trace(`graph built: ${graph.nodes.length} nodes`);
   // What a draft merges INTO, named for the tag — asked of git only when a
   // node is draft, so a graph with nothing in progress pays no git call.
   if (repoRoot !== null && graph.nodes.some((node) => node.status === 'draft')) {
     const ref = defaultBranchOf(repoRoot);
     if (ref !== null) graph.defaultBranch = branchDisplayName(ref);
+    trace('default branch');
   }
   const importIndex: ImportIndexState = imports === null ? 'none' : imports.complete === false ? 'partial' : 'complete';
   return { graph, limitations, features, partsBySlug, importIndex };
@@ -228,8 +251,10 @@ export async function readProjectFeatureGraphPrefetched(
   options: Pick<ProjectFeatureReadOptions, 'importReadBudget'> & { concurrency?: number } = {},
 ): Promise<ProjectFeatureRead> {
   if (repoRoot === null) return readProjectFeatureGraph(flowDir, null, options);
+  const trace = graphTracer();
   const imports = readFolderImportIndex(repoRoot, { readBudget: options.importReadBudget ?? GRAPH_IMPORT_READ_BUDGET });
   const base = repoSizeHost(repoRoot);
+  trace(`prefetch: import index ${imports === null ? 'none' : imports.complete === false ? 'partial' : 'complete'}`);
   if (imports === null || imports.complete !== false) return readProjectFeatureGraph(flowDir, repoRoot, { imports, host: base });
   const wanted = new Set<string>();
   readProjectFeatureGraph(flowDir, repoRoot, {
@@ -243,7 +268,9 @@ export async function readProjectFeatureGraphPrefetched(
       },
     },
   });
+  trace(`prefetch: listing pass done, ${wanted.size} files to read`);
   const contents = await readFilesConcurrently(repoRoot, [...wanted], options.concurrency ?? GRAPH_PREFETCH_CONCURRENCY);
+  trace('prefetch: files read');
   return readProjectFeatureGraph(flowDir, repoRoot, {
     imports,
     host: {

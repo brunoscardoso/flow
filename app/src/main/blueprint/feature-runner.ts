@@ -21,6 +21,10 @@ import type {
 import { isFeatureRole, type FeatureRole, type FeatureRoleSource } from '../../shared/feature-role'
 
 const FEATURES_TIMEOUT_MS = 30_000
+/** A graph read this slow logs its step timings (the CLI's `[graph]` lines). */
+const SLOW_GRAPH_MS = 10_000
+/** How much of the CLI's step timings is kept for the log. */
+const GRAPH_TRACE_KEEP = 8_000
 
 function unavailable(reason: string): BlueprintFeatureGraph {
   return { available: false, reason, nodes: [], edges: [], limitations: null }
@@ -328,12 +332,19 @@ export function runFeatures(
   const args = [bundledCli.cliPath, 'blueprint', 'features', 'graph', '--json']
   return new Promise<BlueprintFeatureGraph>((resolve) => {
     let stdout = ''
+    // The CLI's step timings: logged only when the read was slow or timed out,
+    // so a report from another machine names the slow step.
+    let trace = ''
+    const started = Date.now()
+    const logTrace = (outcome: string): void => {
+      console.log('[Blueprint] slow feature graph', { rootPath, outcome, ms: Date.now() - started, steps: trace.trim().split('\n') })
+    }
     let child: ReturnType<typeof spawnFn>
     try {
       child = spawnFn(bundledCli.execPath, args, {
         cwd: rootPath,
-        stdio: ['ignore', 'pipe', 'ignore'],
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PLANFLOW_TRACE_GRAPH: '1' },
       })
     } catch (error) {
       resolve(unavailable((error as Error).message))
@@ -341,10 +352,14 @@ export function runFeatures(
     }
     const timer = setTimeout(() => {
       child.kill('SIGKILL')
+      logTrace('timed out')
       resolve(unavailable('timed out'))
     }, timeoutMs)
     child.stdout?.on('data', (chunk: Buffer | string) => {
       stdout += chunk.toString()
+    })
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      trace = (trace + chunk.toString()).slice(-GRAPH_TRACE_KEEP)
     })
     child.on('error', (error) => {
       clearTimeout(timer)
@@ -352,6 +367,7 @@ export function runFeatures(
     })
     child.on('close', () => {
       clearTimeout(timer)
+      if (Date.now() - started >= SLOW_GRAPH_MS) logTrace('finished')
       resolve(parseFeaturesJson(stdout))
     })
   })
