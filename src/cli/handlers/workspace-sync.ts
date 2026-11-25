@@ -113,7 +113,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import { writeBrainIndex } from '../state/brain-index.js';
 import { summarizeArchivedRounds } from '../state/rounds-summary.js';
@@ -354,6 +354,13 @@ export interface SyncOptions {
   resolve?: SyncResolve;
   /** Put one intent document back to a chosen text before committing (see SyncPutBack). */
   putBack?: SyncPutBack;
+  /**
+   * Called with one line as each step and each git call STARTS (and once more
+   * when a call took long). The CLI writes it to stderr, which the app keeps
+   * even when it kills a run at its time limit, so the last line names the step
+   * that hung (user report 2026-11-24: two five-minute syncs, no output at all).
+   */
+  trace?: (line: string) => void;
   /** Commit only: no fetch, no merge, no push. */
   commitOnly?: boolean;
   /** Where a relative `file:` path is read from. Default: the process's cwd. */
@@ -1616,9 +1623,31 @@ function adoptProjectIdentity(git: WorkspaceGit, repo: string, flowFolder: strin
 // ─── The verb ───────────────────────────────────────────────────────────────
 
 /** Sync one Workspace. See the module header for the steps. */
+const TRACE_SLOW_CALL_MS = 2_000;
+const TRACE_MAX_ARGS = 10;
+
+/** A git runner that announces each call before it runs, and a long one after. */
+function tracingGit(git: WorkspaceGit, say: (what: string) => void): WorkspaceGit {
+  return (args, cwd, gitOptions) => {
+    const shown = args.length > TRACE_MAX_ARGS ? [...args.slice(0, TRACE_MAX_ARGS), `… ${args.length - TRACE_MAX_ARGS} more`] : args;
+    const where = basename(cwd);
+    say(`git ${shown.join(' ')} (in ${where}${gitOptions?.network === true ? `, network, up to ${gitOptions.timeoutMs ?? 'default'} ms` : ''})`);
+    const started = Date.now();
+    try {
+      return git(args, cwd, gitOptions);
+    } finally {
+      const took = Date.now() - started;
+      if (took >= TRACE_SLOW_CALL_MS) say(`  … that git call took ${took} ms`);
+    }
+  };
+}
+
 export function syncWorkspace(options: SyncOptions): SyncResult {
   const flowFolder = resolve(options.flowFolder);
-  const git = options.deps?.git ?? defaultWorkspaceGit;
+  const runStarted = Date.now();
+  const say = (what: string): void => options.trace?.(`[sync] +${((Date.now() - runStarted) / 1000).toFixed(1)}s ${what}`);
+  const baseGit = options.deps?.git ?? defaultWorkspaceGit;
+  const git = options.trace === undefined ? baseGit : tracingGit(baseGit, say);
   const now = options.deps?.now ?? (() => new Date());
   const { workspace, early } = findWorkspaceRecovering(flowFolder, options.workspace, git, now);
   const repo = workspaceDir(flowFolder, workspace.slug);
@@ -1643,6 +1672,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
   }
 
   const networkDeadline = Date.now() + SYNC_NETWORK_BUDGET_MS;
+  say(`step: lock (Workspace ${workspace.slug})`);
   const lock = acquireLock(git, repo, now());
   // A sync never changes what THIS machine calls the Workspace: when the
   // merged file brings another shared name (two Workspaces combined, an older
@@ -1689,6 +1719,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     };
 
     // ── 1. Commit ──
+    say('step: commit');
     const adopted = adoptProjectIdentity(git, repo, flowFolder, workspace);
     if (adopted !== null) result.identity = { email: adopted, source: 'projects' };
     writeWorkspaceRepoFiles(repo);
@@ -1715,6 +1746,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     }
 
     // ── 2. Remote ──
+    say('step: remote');
     if (remote === null) {
       if (resolveRequest !== undefined) {
         throw new WorkspaceRefusal('nothing-to-resolve', 'this Workspace has no remote, so nothing is waiting to be merged', { path: resolveSubject(resolveRequest) });
@@ -1804,6 +1836,7 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     }
 
     // ── 3. Merge ──
+    say('step: merge');
     const mergeContext: MergeContext = { git, repo, branch, now: now(), ...(resolveRequest === undefined ? {} : { resolve: resolveRequest }) };
     const settle = (step: MergeStep): boolean => {
       switch (step.kind) {
@@ -1837,7 +1870,9 @@ export function syncWorkspace(options: SyncOptions): SyncResult {
     // ── 5. Push ── (4. runs once, after every pull this run made)
     const finish = (): SyncResult => {
       if (result.pulled > 0) {
+        say('step: rebuild project indexes');
         result.indexes = rebuildIndexes(flowFolder, workspace, mergeContext.now);
+        say('step: team rules');
         result.rules = materializeWorkspaceRules(flowFolder, workspace.slug, git);
       }
       const tracking = revParse(git, repo, trackingRef);

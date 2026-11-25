@@ -1499,6 +1499,22 @@ describeWithGit('workspace sync against real git, two machines', () => {
     TEST_TIMEOUT_MS
   );
 
+  it(
+    'traces each step and each git call as it starts, so a run stopped at the time limit still says where it was (user report 2026-11-24)',
+    () => {
+      const lines: string[] = [];
+      write(wsB, 'projects/backend/plans/plan_traced_v1.md', '# traced\n');
+      sync(flowB, { trace: (line) => lines.push(line) });
+      expect(lines.every((line) => /^\[sync\] \+\d+\.\ds /.test(line))).toBe(true);
+      const steps = lines.filter((line) => line.includes('step: ')).map((line) => line.replace(/^.*step: /, ''));
+      expect(steps.slice(0, 4)).toEqual(['lock (Workspace team)', 'commit', 'remote', 'merge']);
+      expect(lines.some((line) => /git .*fetch.*network, up to \d+ ms/.test(line))).toBe(true);
+      // A sync with no trace stays silent: the option is how the CLI asks for it.
+      expect(() => sync(flowB)).not.toThrow();
+    },
+    TEST_TIMEOUT_MS
+  );
+
   it('syncNetworkTimeout: capped per call, shrinking with the run budget, never below a floor', () => {
     expect(syncNetworkTimeout(1_000_000, 0)).toBe(120_000);
     expect(syncNetworkTimeout(30_000, 0)).toBe(30_000);

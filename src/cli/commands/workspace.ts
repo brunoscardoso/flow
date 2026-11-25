@@ -439,6 +439,9 @@ function dispatchSync(options: WorkspaceCommandOptions, runtime: WorkspaceRuntim
     ...(runtime.deps === undefined ? {} : { deps: runtime.deps }),
     ...(options.message === undefined ? {} : { message: options.message }),
     ...(options.commitOnly === true ? { commitOnly: true } : {}),
+    // Each step on stderr as it starts: when the app stops a run at its time
+    // limit, it still has these, so the last line names the step that hung.
+    trace: (line: string) => process.stderr.write(`${line}\n`),
   };
   const deciding = options.resolve !== undefined || options.id !== undefined;
   const puttingBack = options.putBack !== undefined;
