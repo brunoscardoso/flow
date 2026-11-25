@@ -480,6 +480,29 @@ Working set for "ACME-2204" — 36 file(s): 5 edited, 31 read.
     expect(seedFeatures(flow)).not.toContain('aai-1-note');
   });
 
+  it('the oldest capture template (Created + Last Updated) is a note, whatever kind it was given', () => {
+    const flow = tempFlow();
+    const old = (kind: string): string =>
+      `---\n${kind}status: active\ncreated: 2026-07-15\n---\n\n# [[playbook-chat-history-webhook]]\n\n**Project**: [[core]]\n**Status**: active\n**Created**: 2026-07-15\n**Last Updated**: 2026-07-15\n\n## Links\n`;
+    writeFileSync(join(featuresDir(flow), 'never-adopted.md'), old(''));
+    writeFileSync(join(featuresDir(flow), 'adopted-as-core.md'), old('id: feature:adopted-as-core\nname: Adopted\nkind: core\n'));
+    writeFileSync(join(featuresDir(flow), 'adopted-as-change.md'), old('id: feature:adopted-as-change\nname: Adopted\nkind: child\n'));
+    // A real feature that merely has a Created line is still a feature (the positive).
+    writeFileSync(join(featuresDir(flow), 'playbooks.md'), '---\nid: feature:playbooks\nname: Playbooks\nkind: core\n---\n\n# Playbooks\n\n**Created**: 2026-01-01\n');
+    expect(readFeatures(flow).map((f) => f.slug)).toEqual(['playbooks']);
+    expect(seedFeatures(flow)).not.toContain('never-adopted');
+  });
+
+  it("a work record's header (Status beside Plan, Discovery, Jira, Date…) is a note, whatever kind it was given", () => {
+    const flow = tempFlow();
+    writeFileSync(join(featuresDir(flow), 'sse-keepalive.md'), '# Feature: sse-keepalive\n\n**Status**: Shipped (2026-05-12)\n**Plan**: `flow/archive/plan_sse_keepalive_v1.md`\n\n## Summary\n');
+    writeFileSync(join(featuresDir(flow), 'pr-1-fixes.md'), '---\nid: feature:pr-1-fixes\nname: PR 1\nkind: core\n---\n\n# PR 1\n\n**Status:** discovery complete\n**Date:** 2026-08-26\n');
+    // A status line alone, or a plan link alone, does not make a feature a note (the positives).
+    writeFileSync(join(featuresDir(flow), 'chats.md'), '---\nid: feature:chats\nname: Chats\nkind: core\n---\n\n# Chats\n\n**Status**: stable\n');
+    writeFileSync(join(featuresDir(flow), 'skills.md'), '---\nid: feature:skills\nname: Skills\nkind: core\n---\n\n# Skills\n\n**Plan**: see the roadmap\n');
+    expect(readFeatures(flow).map((f) => f.slug).sort()).toEqual(['chats', 'skills']);
+  });
+
   it('a brain-capture note is excluded by the marker it CARRIES', () => {
     const flow = tempFlow();
     const note = `---\ncapture: brain\nstatus: active\n---\n\n# Tenant Id Alias Consolidation\n\nFindings.\n`;

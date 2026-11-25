@@ -483,7 +483,7 @@ export type FeatureExclusion = 'working-set' | 'capture-note';
 
 export function featureExclusion(raw: string): FeatureExclusion | null {
   if (isWorkingSetCapture(raw)) return 'working-set';
-  const { fm } = splitFrontmatter(raw);
+  const { fm, body } = splitFrontmatter(raw);
   if (fm.some((line) => line.trimStart().startsWith(`${CAPTURE_KEY}:`))) return 'capture-note';
   // The OLDER capture shape, written before notes stamped `capture:` — it
   // carries the time it was captured instead. Adoption gave three of these
@@ -491,8 +491,27 @@ export function featureExclusion(raw: string): FeatureExclusion | null {
   // (2026-11-25). A positive marker like the others: no feature records when
   // it was captured.
   if (fm.some((line) => line.trimStart().startsWith(`${CAPTURED_AT_KEY}:`))) return 'capture-note';
+  // The OLDEST capture shape: the first brain-capture template (2026-03) wrote
+  // one note per piece of work, always with both a `**Created**:` and a
+  // `**Last Updated**:` line. Read as features they were most of a real
+  // project's board — 62 on one, 7 on this repository's own — and adopted as
+  // changes they were 272 more on another (2026-11-25). The pair is the
+  // template's own fingerprint; no feature writer has ever produced it.
+  if (OLD_CAPTURE_CREATED.test(body) && OLD_CAPTURE_UPDATED.test(body)) return 'capture-note';
+  // A WORK RECORD'S HEADER: a `**Status**:` line beside one naming the work's
+  // own documents or dates (`**Plan**:`, `**Discovery**:`, `**Jira**:`…) — how
+  // every per-ticket note an agent kept was opened, in any template. 25 such
+  // notes on two real projects, none of them a capability; no feature writer
+  // produces a status line.
+  if (WORK_STATUS.test(body) && WORK_FIELD.test(body)) return 'capture-note';
   return null;
 }
+
+const WORK_STATUS = /^\*\*Status(?:\*\*:|:\*\*)/m;
+const WORK_FIELD = /^\*\*(?:Discovery|Discovery doc|Plan|Created|Date|Jira|Branch|Phase|Source review)(?:\*\*:|:\*\*)/m;
+
+const OLD_CAPTURE_CREATED = /^\*\*Created\*\*:/m;
+const OLD_CAPTURE_UPDATED = /^\*\*Last Updated\*\*:/m;
 
 /**
  * A file that IS admitted but could not say what it is.
