@@ -1,4 +1,4 @@
-import type { BlueprintFeatureNode, BlueprintWorkspaceGraph, BlueprintWorkspaceProject } from '../../shared/ipc-contract'
+import type { BlueprintFeatureNode, BlueprintWorkspaceGraph, BlueprintWorkspaceLinkEnd, BlueprintWorkspaceProject } from '../../shared/ipc-contract'
 import {
   buildWorkspaceSheet,
   cellKey,
@@ -12,7 +12,7 @@ import {
   workspaceUnit,
   WORKSPACE_PALETTE_SIZE,
   WS_BAND_H,
-  WS_GUTTER, connectionsControlView, pairsChecked } from './workspace-sheet'
+  WS_GUTTER, connectionsControlView, onThisComputer, pairsChecked } from './workspace-sheet'
 import { understoodFraction } from './learn-progress-model'
 import type { Rect } from './territory-layout'
 import { TITLE_BLOCK_H, TITLE_STRIP_H } from './territory-view'
@@ -399,5 +399,47 @@ describe('a Workspace cell carries its type (plan feature-type-icons)', () => {
     expect(chats?.showRoleIcon).toBe(chats?.labelClass === '')
     expect(chats?.labelClass).toBe('')
     expect(old).toMatchObject({ role: null, roleSource: null, showRoleIcon: false })
+  })
+})
+
+describe('only the projects on this computer are on the map', () => {
+  const end = (project: string): BlueprintWorkspaceLinkEnd => ({
+    address: `${project}/x`,
+    project,
+    ref: 'x',
+    type: 'feature',
+    features: [],
+  })
+  const link = (a: string, b: string) => ({ kind: 'calls' as const, from: end(a), to: end(b) })
+
+  it('hides a project only a teammate has, with its links, and recounts the connections left', () => {
+    const graph = graphOf(
+      [
+        project('web', 0, [core('web::a', 10)], { connections: 2 }),
+        project('api', 1, [core('api::b', 10)], { connections: 1 }),
+        project('open', 2, [core('open::c', 10)], { state: 'remote', local: null, connections: 1 }),
+      ],
+      [link('web', 'api'), link('web', 'open')],
+    )
+    const shown = onThisComputer(graph)
+    // The positive: both local projects and their link stay…
+    expect(shown.projects.map((p) => p.slug)).toEqual(['web', 'api'])
+    expect(shown.links?.map((l) => `${l.from.project}>${l.to.project}`)).toEqual(['web>api'])
+    // …and nothing about the teammate's project is drawn.
+    expect(shown.projects.map((p) => [p.slug, p.connections])).toEqual([['web', 1], ['api', 1]])
+    const sheet = buildWorkspaceSheet(shown, { stage: STAGE, showConnections: false })
+    expect(sheet.countries.map((c) => c.slug)).toEqual(expect.arrayContaining(['web', 'api']))
+    expect(sheet.countries.some((c) => c.note === NOT_ON_THIS_COMPUTER)).toBe(false)
+  })
+
+  it('keeps a project that is here but could not be read, and leaves an all-local map untouched', () => {
+    const local = graphOf([project('web', 0, [core('web::a', 10)]), project('broken', 1, null)])
+    expect(onThisComputer(local)).toBe(local)
+  })
+
+  it('a Workspace left with one project here opens on that project', () => {
+    const graph = graphOf([project('web', 0, [core('web::a', 10)]), project('open', 1, [core('open::c', 10)], { state: 'remote', local: null })])
+    expect(workspaceIsRoot(graph)).toBe(true)
+    expect(workspaceIsRoot(onThisComputer(graph))).toBe(false)
   })
 })

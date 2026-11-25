@@ -345,6 +345,7 @@ import {
   projectUnderstood,
   workspaceIsRoot,
   type WorkspaceSheetView,
+  onThisComputer,
 } from './workspace-sheet'
 import {
   connectedCellKeys,
@@ -13239,6 +13240,8 @@ export class BlueprintBoard {
     } finally {
       if (this.#wsInFlight === rootId) this.#wsInFlight = null
     }
+    // Only the projects on this computer are drawn — see `onThisComputer`.
+    result = onThisComputer(result)
     const openRoots = await this.#readOpenRootPaths()
     // An answer that outlived its project is dropped, as every read here is.
     if (rootId !== this.#activeRoot) return
