@@ -266,9 +266,9 @@ export interface MergeFacts {
 
 // ─── Git helpers ────────────────────────────────────────────────────────────
 
-function attempt(git: WorkspaceGit, args: string[], cwd: string): string | null {
+function attempt(git: WorkspaceGit, args: string[], cwd: string, input?: string): string | null {
   try {
-    return git(args, cwd);
+    return input === undefined ? git(args, cwd) : git(args, cwd, { input });
   } catch {
     return null;
   }
@@ -278,8 +278,127 @@ function splitZ(out: string | null): string[] {
   return (out ?? '').split('\0').filter((entry) => entry.length > 0);
 }
 
+// ─── Bulk reads (user report 2026-11-24) ─────────────────────────────────────
+//
+// A merge reads three blob ids and three texts for every path both sides
+// touched — one git process each. Two Workspaces combined share no history, so
+// that is EVERY file: on a real Workspace the merge was still reading one file
+// at a time when the app stopped it at five minutes, and every later sync did
+// the same. A commit's content never changes, so a commit (or tree) named by
+// its id is listed ONCE (`ls-tree`) and its texts read in a few `cat-file
+// --batch` calls; `blobAt`/`textAt` answer from that. Anything else — a ref
+// name, a git that cannot list — reads one file at a time, as before.
+
+const OBJECT_ID = /^[0-9a-f]{40}$/;
+/** A blob larger than this is read on its own, when asked for. */
+const BATCH_MAX_BLOB_BYTES = 1024 * 1024;
+/** One `cat-file --batch` answer stays well under the runner's 16 MB buffer. */
+const BATCH_MAX_BYTES = 8 * 1024 * 1024;
+const MAX_TREES = 8;
+const MAX_TEXT_BYTES = 64 * 1024 * 1024;
+
+interface TreeEntry {
+  id: string;
+  size: number;
+}
+
+const treeCache = new Map<string, Map<string, TreeEntry>>();
+const textCache = new Map<string, string>();
+let textCacheBytes = 0;
+
+function cacheKey(repo: string, id: string): string {
+  return `${repo}\0${id}`;
+}
+
+/** Every blob of an immutable commit or tree, by path — or null when it cannot be listed in one call. */
+function treeOf(git: WorkspaceGit, repo: string, rev: string): Map<string, TreeEntry> | null {
+  if (!OBJECT_ID.test(rev)) return null;
+  const key = cacheKey(repo, rev);
+  const cached = treeCache.get(key);
+  if (cached !== undefined) return cached;
+  const out = attempt(git, ['ls-tree', '-r', '-l', '-z', '--full-tree', rev], repo);
+  if (out === null) return null;
+  const entries = new Map<string, TreeEntry>();
+  for (const record of splitZ(out)) {
+    const tab = record.indexOf('\t');
+    if (tab === -1) continue;
+    const [, type, id, size] = record.slice(0, tab).trim().split(/\s+/);
+    if (type !== 'blob' || id === undefined) continue;
+    entries.set(record.slice(tab + 1), { id, size: Number.parseInt(size ?? '', 10) || 0 });
+  }
+  if (treeCache.size >= MAX_TREES) treeCache.delete(treeCache.keys().next().value as string);
+  treeCache.set(key, entries);
+  return entries;
+}
+
+function rememberText(repo: string, id: string, text: string): void {
+  if (textCacheBytes + text.length > MAX_TEXT_BYTES) {
+    textCache.clear();
+    textCacheBytes = 0;
+  }
+  textCache.set(cacheKey(repo, id), text);
+  textCacheBytes += text.length;
+}
+
+/**
+ * Parse a `cat-file --batch` answer into id → text. Sizes are bytes, so the
+ * answer is walked as bytes; anything that does not line up stops the walk
+ * (what was read stays, the rest is read one at a time).
+ */
+function parseBatch(out: string): Map<string, string> {
+  const bytes = Buffer.from(out, 'utf-8');
+  const texts = new Map<string, string>();
+  let at = 0;
+  while (at < bytes.length) {
+    const newline = bytes.indexOf(0x0a, at);
+    if (newline === -1) break;
+    const header = /^([0-9a-f]{40}) blob (\d+)$/.exec(bytes.subarray(at, newline).toString('utf-8'));
+    if (header === null) break;
+    const size = Number.parseInt(header[2], 10);
+    const end = newline + 1 + size;
+    if (end > bytes.length || bytes[end] !== 0x0a) break;
+    texts.set(header[1], bytes.subarray(newline + 1, end).toString('utf-8'));
+    at = end + 1;
+  }
+  return texts;
+}
+
+/** Read the texts of `paths` on each of `revs` in a few batched calls (a cache fill: failures are silent). */
+export function prefetchTexts(git: WorkspaceGit, repo: string, revs: readonly string[], paths: Iterable<string>): void {
+  const wanted = new Set<string>();
+  const wantedPaths = [...paths];
+  for (const rev of new Set(revs)) {
+    const tree = treeOf(git, repo, rev);
+    if (tree === null) continue;
+    for (const path of wantedPaths) {
+      const entry = tree.get(path);
+      if (entry === undefined || entry.size > BATCH_MAX_BLOB_BYTES || textCache.has(cacheKey(repo, entry.id))) continue;
+      wanted.add(`${entry.id}\0${entry.size}`);
+    }
+  }
+  let chunk: string[] = [];
+  let chunkBytes = 0;
+  const flush = (): void => {
+    if (chunk.length === 0) return;
+    const out = attempt(git, ['cat-file', '--batch'], repo, `${chunk.join('\n')}\n`);
+    if (out !== null) for (const [id, text] of parseBatch(out)) rememberText(repo, id, text);
+    chunk = [];
+    chunkBytes = 0;
+  };
+  for (const item of wanted) {
+    const [id, size] = item.split('\0') as [string, string];
+    const bytes = Number.parseInt(size, 10) + 64;
+    if (chunkBytes + bytes > BATCH_MAX_BYTES) flush();
+    chunk.push(id);
+    chunkBytes += bytes;
+  }
+  flush();
+}
+
 /** `<rev>:<path>`'s blob id, or null when the path is absent there. */
 export function blobAt(git: WorkspaceGit, repo: string, rev: string, path: string): string | null {
+  const tree = treeOf(git, repo, rev);
+  if (tree !== null) return tree.get(path)?.id ?? null;
   const out = attempt(git, ['rev-parse', '--verify', '-q', `${rev}:${path}`], repo);
   const id = out?.trim() ?? '';
   return id === '' ? null : id;
@@ -297,8 +416,13 @@ function authorAt(git: WorkspaceGit, repo: string, rev: string, path: string): s
 
 /** `<rev>:<path>`'s text, or null when the path is absent there. */
 export function textAt(git: WorkspaceGit, repo: string, rev: string, path: string): string | null {
-  if (blobAt(git, repo, rev, path) === null) return null;
-  return attempt(git, ['cat-file', 'blob', `${rev}:${path}`], repo);
+  const id = blobAt(git, repo, rev, path);
+  if (id === null) return null;
+  const cached = textCache.get(cacheKey(repo, id));
+  if (cached !== undefined) return cached;
+  const text = attempt(git, ['cat-file', 'blob', `${rev}:${path}`], repo);
+  if (text !== null && OBJECT_ID.test(id)) rememberText(repo, id, text);
+  return text;
 }
 
 /** Paths changed between two commits, with their status (renames off). */
@@ -331,16 +455,13 @@ export function readMergeFacts(git: WorkspaceGit, repo: string, ours: string, th
   // file each side holds counts as added by that side.
   const found = attempt(git, ['merge-base', ours, theirs], repo);
   const base = found !== null && found.trim() !== '' ? found.trim() : EMPTY_TREE;
-  return {
-    repo,
-    git,
-    base,
-    ours,
-    theirs,
-    oursChanged: changedPaths(git, repo, base, ours),
-    theirsChanged: changedPaths(git, repo, base, theirs),
-    conflicted: unmergedPaths(git, repo),
-  };
+  const oursChanged = changedPaths(git, repo, base, ours);
+  const theirsChanged = changedPaths(git, repo, base, theirs);
+  const conflicted = unmergedPaths(git, repo);
+  // Every path both sides touched is read on all three sides: read them in bulk.
+  const both = [...oursChanged.keys()].filter((path) => theirsChanged.has(path));
+  prefetchTexts(git, repo, [base, ours, theirs], new Set([...both, ...conflicted]));
+  return { repo, git, base, ours, theirs, oursChanged, theirsChanged, conflicted };
 }
 
 function workingText(repo: string, path: string): string | null {

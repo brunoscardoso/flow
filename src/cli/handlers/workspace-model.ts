@@ -265,6 +265,8 @@ export interface WorkspaceGitOptions {
   network?: boolean;
   /** How long this one call may take; default by kind (local or network). */
   timeoutMs?: number;
+  /** Written to the call's stdin (a `--batch` read); stdin is closed otherwise. */
+  input?: string;
 }
 
 /** Run git, return stdout, throw on a non-zero exit. */
@@ -333,7 +335,9 @@ export const defaultWorkspaceGit: WorkspaceGit = (args, cwd, options = {}) => {
     env: workspaceGitEnv(process.env, cwd, network),
     timeout: options.timeoutMs ?? (network ? NETWORK_GIT_TIMEOUT_MS : LOCAL_GIT_TIMEOUT_MS),
     maxBuffer: 16 * 1024 * 1024,
-    stdio: [...QUIET_CHILD_STDIO],
+    ...(options.input === undefined
+      ? { stdio: [...QUIET_CHILD_STDIO] }
+      : { input: options.input, stdio: ['pipe', QUIET_CHILD_STDIO[1], QUIET_CHILD_STDIO[2]] }),
   });
 };
 
