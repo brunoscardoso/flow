@@ -188,6 +188,12 @@ export type WorkspaceRefusalReason =
   | 'invalid-link-kind'
   | 'invalid-link-address'
   | 'same-project'
+  // the shared merge-decisions record (workspace-merge-decisions.ts)
+  | 'invalid-decision-kind'
+  | 'invalid-decision-take'
+  | 'invalid-decision-outcome'
+  | 'invalid-decision'
+  | 'unknown-decision'
   // workspace sync (workspace-sync.ts)
   | 'personal-files'
   | 'no-identity'
@@ -199,6 +205,10 @@ export type WorkspaceRefusalReason =
   | 'invalid-resolution'
   /** `--id` names an ask/review whose content changed since it was shown. */
   | 'stale-decision'
+  /** `--settle-held` names an id nothing is held aside under on this machine. */
+  | 'unknown-held'
+  /** `--hold-back` names an id nothing waits for review under on this machine. */
+  | 'unknown-review-item'
   /** The incoming side carries a personal file, a symlink or a repo-settings change. */
   | 'incoming-unsafe'
   /** The remote's history was rewritten (the new tip does not descend from the last one seen). */

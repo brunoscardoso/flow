@@ -1,5 +1,5 @@
 import { WORKSPACE_SETTINGS_EVENT as MAIN_EVENT } from '../../main/knowledge-sync/pause-notice'
-import { WORKSPACE_SETTINGS_EVENT, initWorkspaceSettingsLink } from './workspace-settings-link'
+import { WORKSPACE_SETTINGS_EVENT, clearReviewFocus, initWorkspaceSettingsLink, requestedReviewFocus } from './workspace-settings-link'
 
 describe('the Workspace settings link', () => {
   it('names the same event main\'s notification dispatches', () => {
@@ -16,5 +16,17 @@ describe('the Workspace settings link', () => {
     stop()
     target.dispatchEvent(new CustomEvent(WORKSPACE_SETTINGS_EVENT))
     expect(opened).toHaveLength(1)
+  })
+
+  it('remembers which Workspace\'s review the notice asked for, until the section brings it into view', () => {
+    const target = new EventTarget()
+    clearReviewFocus()
+    const stop = initWorkspaceSettingsLink(target)
+    expect(requestedReviewFocus()).toBeNull()
+    target.dispatchEvent(new CustomEvent(WORKSPACE_SETTINGS_EVENT, { detail: { slug: 'acme' } }))
+    expect(requestedReviewFocus()).toBe('acme')
+    clearReviewFocus()
+    expect(requestedReviewFocus()).toBeNull()
+    stop()
   })
 })

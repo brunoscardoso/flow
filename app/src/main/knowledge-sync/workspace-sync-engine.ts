@@ -52,26 +52,62 @@
  *    while the sync waits for a person. A failure is logged and the sync runs
  *    anyway; a promotion that decided anything is carried by a sync (the
  *    status log is append-only and synced like every other file).
- *  · A PAUSE MADE ONLY OF INTENT DOCUMENTS IS MERGED BY AN AGENT (FR-12,
- *    intent-merge.ts): every text first, then every resolve, then one
- *    notification with Undo. Anything the agent cannot merge stays a pause.
- *    Undo and "keep yours / theirs" put a document back as a NEW commit
- *    through the CLI (`--put-back`), then sync — never a force push.
+ *  · A PAUSE IS DECIDED BY AN AGENT FIRST (intent-merge.ts): every item is
+ *    decided or left for a person, then ONE CLI run applies the whole batch
+ *    and commits the merge on this computer without pushing
+ *    (`--decisions --no-push`); items left for a person are held aside. The
+ *    merge then waits like a pause until it is reviewed. When the agent
+ *    decides nothing, the pause stays exactly as the CLI put it.
+ *  · A REVIEW IS NEVER SHARED UNAGREED (NFR-1). The merged batch puts the
+ *    Workspace in `review`. While a review holds anything committed and not
+ *    agreed, EVERY CLI run this engine starts carries `--no-push` (or is
+ *    `--commit-only`) — except the one share an agree triggers (`--agreed`).
+ *    Background, timer, turn and "Sync now" runs only commit this computer's
+ *    work while it waits (`--commit-only`: nothing fetched, nothing merged on
+ *    top). The CLI keeps its own record of the open review and refuses to
+ *    publish it without `--agreed` too, so a restart or a terminal run cannot
+ *    either; the engine rebuilds the review from that answer.
+ *  · AGREE, DISAGREE, DECIDE. Agreeing marks items; a disagreement (reason
+ *    required) puts the item back to the Workspace's version and holds this
+ *    computer's text aside (`--hold-back`), then the agent decides it ONCE
+ *    more with the reason; a second disagreement leaves it to the person
+ *    (`needs-you`), who decides directly (`--settle-held`). Items a person
+ *    must choose for are never agreed in bulk. AGREED GROUPS ARE SHARED AS
+ *    SOON AS THEY ARE AGREED; THE REST WAITS HERE (FR-9): an agree that
+ *    leaves items nobody has looked at (`pending`) first holds them ALL back
+ *    in one local run (`--hold-back … --commit-only`) — they stay in their
+ *    group as `held`, with the agent's decision, and agreeing one later writes
+ *    that decision (`--settle-held`) and shares again. Disagreed, needs-you
+ *    and held items are held aside, so they never hold the push. The agent's
+ *    merged text is kept in memory only: after a restart a held item is the
+ *    person's to decide. Agreeing every group at once (`allGroups`) holds
+ *    nothing back. Each agreed decision and each disagreement is written to
+ *    the shared record through the CLI's `merge-decision record`, one run at a
+ *    time. A share that did not go out is reported as such, never as done.
  *
  * Nothing here throws to its caller: every failure becomes a status.
  */
 
 import { RETRY_BASE_MS, RETRY_MAX_MS, OPEN_SYNC_COOLDOWN_MS, PUSH_DEBOUNCE_MS, QUIT_PUSH_TIMEOUT_MS, commitMessage, type EngineTimers } from './sync-timing'
-import { createHash } from 'node:crypto'
 
 import { lastJsonLine } from '../workspaces/cli-json'
-import { settleIntentAsks, type IntentItem, type IntentMergeDeps } from './intent-merge'
+import { decideConflicts, projectOf, type DecideOutcome, type DeciderDeps, type IntentItem, type IntentMergeDeps } from './intent-merge'
 import type {
-  IntentMergeKeep,
-  WorkspaceIntentMergeSet,
-  WorkspaceIntentMergesRequest,
-  WorkspaceKeepIntentRequest,
-  WorkspaceKeepIntentResult,
+  WorkspaceAgentSuggestion,
+  WorkspaceAgentTake,
+  WorkspaceMergeGroupKey,
+  WorkspaceMergeItemKind,
+  WorkspaceMergeItemState,
+  WorkspaceMergeRedo,
+  WorkspaceMergeReview,
+  WorkspaceMergeReviewGroup,
+  WorkspaceMergeReviewHeld,
+  WorkspaceNeedsYouReason,
+  WorkspaceReviewAgreeRequest,
+  WorkspaceReviewDecideRequest,
+  WorkspaceReviewDisagreeRequest,
+  WorkspaceReviewRefusal,
+  WorkspaceReviewResult,
   WorkspaceResolveRequest,
   WorkspaceResolveResult,
   WorkspaceSyncAsk,
@@ -102,8 +138,12 @@ export const PROMOTE_TIMEOUT_MS = 2 * 60_000
 export const PROMOTE_INTERVAL_MS = 10 * 60_000
 /** A promotion started this recently is not started again by an open or the timer. */
 export const PROMOTE_COOLDOWN_MS = 5 * 60_000
-/** How many merge sets per Workspace this computer keeps for Undo / "See both". */
-const KEPT_MERGE_SETS = 5
+/** `workspace merge-decision list`: one local read of the shared record — short. */
+export const REASONS_TIMEOUT_MS = 30_000
+/** `workspace merge-decision record`: one local append — short. */
+export const RECORD_TIMEOUT_MS = 30_000
+/** The most characters of a person's reason kept (the record keeps one line). */
+const MAX_REASON_CHARS = 500
 
 const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const MAX_SLUG_LENGTH = 64
@@ -111,7 +151,10 @@ const MAX_SLUG_LENGTH = 64
 const OPEN_LABEL = 'changes since the last sync'
 const SYNC_NOW_LABEL = 'sync requested'
 const PROMOTE_LABEL = 'knowledge status checked'
-const PUT_BACK_LABEL = 'a merged document put back'
+const REVIEW_LABEL = 'reviewed changes shared'
+const SETTLE_LABEL = 'a reviewed change settled'
+const HOLD_BACK_LABEL = 'a disagreed change held back'
+const HOLD_BACK_PENDING_LABEL = 'changes not reviewed yet held back'
 const QUIT_LABEL = 'changes before closing'
 /** How many turn labels one commit message names before it just counts them. */
 const MAX_NAMED_TURNS = 3
@@ -176,10 +219,10 @@ export interface WorkspaceSyncEngineDeps {
    * needs the person's PATH (a GUI-launched app cannot see Homebrew's folder).
    */
   runPromotionCli: WorkspaceSyncCliRunner
-  /** REQUIRED (allowed-pattern #26): the one-shot agent that merges an intent document. */
+  /** REQUIRED (allowed-pattern #26): the capable one-shot agent that writes one text from both sides. */
   mergeIntent: IntentMergeDeps['merge']
-  /** An agent merged a pause away: raise ONE notification for the set. */
-  onIntentMerged: (slug: string, name: string | null, set: WorkspaceIntentMergeSet) => void
+  /** REQUIRED (allowed-pattern #26): the fast one-shot agent that sorts a waiting merge's items in batches. */
+  decideFast: DeciderDeps['decideFast']
   /** Diagnostics only (the CLI's own words); never UI. */
   log: (message: string, detail?: Record<string, unknown>) => void
 }
@@ -193,10 +236,12 @@ export interface WorkspaceSyncEngine {
   syncNow(slug: string): Promise<WorkspaceSyncStatus>
   /** Apply a person's decision about one paused item, then sync again. */
   resolve(request: WorkspaceResolveRequest): Promise<WorkspaceResolveResult>
-  /** The documents one agent merge settled, while this computer holds them. */
-  intentMerges(request: WorkspaceIntentMergesRequest): WorkspaceIntentMergeSet | null
-  /** Put merged documents to one text (`ours` = Undo): a new commit each, then a sync. */
-  keepIntent(request: WorkspaceKeepIntentRequest): Promise<WorkspaceKeepIntentResult>
+  /** Agree to items of the open review; shares the agreed part once nothing is left un-looked-at. */
+  reviewAgree(request: WorkspaceReviewAgreeRequest): Promise<WorkspaceReviewResult>
+  /** Disagree with items (a reason is required): held back, then decided once more by the agent. */
+  reviewDisagree(request: WorkspaceReviewDisagreeRequest): Promise<WorkspaceReviewResult>
+  /** A person decides one held item directly. */
+  reviewDecide(request: WorkspaceReviewDecideRequest): Promise<WorkspaceReviewResult>
   /** The Workspace's current status. Reading it starts nothing. */
   status(slug: string): WorkspaceSyncStatus
   /** The Workspace left this computer: clear its timers and drop its record. */
@@ -253,6 +298,7 @@ function readAsk(value: unknown): WorkspaceSyncAsk {
     ask.base = typeof value['base'] === 'string' ? value['base'] : null
     ask.theirAuthor = authorOf(value['theirAuthor'])
   }
+  if (value['suggested'] === 'both') ask.suggested = 'both'
   return ask
 }
 
@@ -285,7 +331,7 @@ function readReview(value: unknown): WorkspaceSyncReview {
   return review
 }
 
-const CLI_STATES = ['synced', 'local-only', 'nothing-to-do', 'ask', 'review', 'behind', 'offline', 'no-access', 'committed'] as const
+const CLI_STATES = ['synced', 'local-only', 'nothing-to-do', 'ask', 'review', 'behind', 'offline', 'no-access', 'committed', 'merged-local'] as const
 type CliState = (typeof CLI_STATES)[number]
 
 /** Why the remote refused a `no-access` sync (the CLI's `rejection`); null when an older CLI did not say. */
@@ -295,6 +341,16 @@ type CliRejection =
   | { kind: 'pull-request-required' }
   | { kind: 'declined' }
 
+/** One item a committed merge decided (the CLI's `mergedItems`); `held` = the Workspace's version kept, this machine's text aside. */
+interface CliMergedItem {
+  id: string
+  path: string
+  take: string
+  held: boolean
+  /** Absent from an older CLI. */
+  kind?: WorkspaceMergeItemKind
+}
+
 interface CliResult {
   state: CliState
   name: string | null
@@ -302,6 +358,322 @@ interface CliResult {
   asks: WorkspaceSyncAsk[]
   reviews: WorkspaceSyncReview[]
   rejection: CliRejection | null
+  /** Empty from a CLI that does not say. */
+  mergedItems: CliMergedItem[]
+  /** What is held aside on this computer now; empty from a CLI that does not say. */
+  heldAside: WorkspaceMergeReviewHeld[]
+}
+
+const ITEM_KINDS: readonly WorkspaceMergeItemKind[] = [...ASK_KINDS, ...REVIEW_KINDS]
+
+/** Lenient: an entry that cannot be read is left out, never fatal (these only feed the review). */
+function readMergedItems(value: unknown): CliMergedItem[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((entry): CliMergedItem[] => {
+    if (!isRecord(entry) || typeof entry['id'] !== 'string' || typeof entry['path'] !== 'string' || typeof entry['take'] !== 'string') return []
+    const kind = entry['kind']
+    return [
+      {
+        id: entry['id'],
+        path: entry['path'],
+        take: entry['take'],
+        held: entry['held'] === true,
+        ...((ITEM_KINDS as readonly unknown[]).includes(kind) ? { kind: kind as WorkspaceMergeItemKind } : {}),
+      },
+    ]
+  })
+}
+
+function readHeldAside(value: unknown): WorkspaceMergeReviewHeld[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((entry): WorkspaceMergeReviewHeld[] => {
+    if (!isRecord(entry) || typeof entry['id'] !== 'string' || typeof entry['path'] !== 'string') return []
+    const kind = entry['kind']
+    if (!(ITEM_KINDS as readonly unknown[]).includes(kind)) return []
+    return [{ id: entry['id'], path: entry['path'], kind: kind as WorkspaceMergeItemKind, heldAt: typeof entry['heldAt'] === 'string' ? entry['heldAt'] : '' }]
+  })
+}
+
+/** One line of the shared merge-decisions record, as the decider's guidance needs it. */
+interface RecordedReason {
+  kind: string
+  project: string
+  take: string
+  summary: string
+  reason: string
+  outcome: 'agreed' | 'disagreed'
+  ts: string
+}
+
+const GROUP_ORDER: readonly WorkspaceMergeReviewGroup['key'][] = ['merged', 'took-theirs', 'kept-mine', 'kept-both', 'identical']
+
+/**
+ * One item of the open review as the engine keeps it. `heldHere`: this
+ * computer's text is held aside by the CLI (never committed), so the item can
+ * never be published by a share; `recorded`: its agreed decision is in the
+ * shared record already.
+ */
+interface ReviewEntry {
+  id: string
+  path: string
+  kind: WorkspaceMergeItemKind
+  /** Where it is shown: a decided group, the agent's "needs you", or held with no decision remembered. */
+  section: 'group' | 'needs-you' | 'held'
+  group: WorkspaceMergeGroupKey | null
+  /** The agent's decision (group items). */
+  take: WorkspaceAgentTake | null
+  /** The agent's one-line reason (group items). */
+  reason: string
+  /**
+   * The agent's decided text for `take: 'file'` — what agreeing a HELD group
+   * item writes (the held store keeps this computer's original text, not the
+   * decision). In memory only: after a restart a held item has no decision
+   * remembered and is the person's to decide (`section: 'held'`).
+   */
+  content: string | null
+  needsYouReason: WorkspaceNeedsYouReason | null
+  suggestion: WorkspaceAgentSuggestion | null
+  state: WorkspaceMergeItemState
+  disagreedReason: string | null
+  redo: WorkspaceMergeRedo | null
+  /** What a person decided directly, for the record. */
+  decided: 'ours' | 'theirs' | 'file' | null
+  heldHere: boolean
+  recorded: boolean
+}
+
+/** The agent-decided merge waiting for review, kept in memory (the CLI keeps what protects it). */
+interface OpenReview {
+  mergedAt: string
+  entries: ReviewEntry[]
+  /** What the CLI says is held aside on this computer now. */
+  held: WorkspaceMergeReviewHeld[]
+  /** Each item's two sides as the agent saw them — what a redo needs. Empty after a restart. */
+  items: Map<string, IntentItem>
+}
+
+function entryBase(id: string, path: string, kind: WorkspaceMergeItemKind): ReviewEntry {
+  return {
+    id,
+    path,
+    kind,
+    section: 'group',
+    group: null,
+    take: null,
+    reason: '',
+    content: null,
+    needsYouReason: null,
+    suggestion: null,
+    state: 'pending',
+    disagreedReason: null,
+    redo: null,
+    decided: null,
+    heldHere: false,
+    recorded: false,
+  }
+}
+
+/**
+ * The open review of one agent-decided merge: the decisions the CLI says it
+ * applied (and did not hold), the items left for a person (held aside), and
+ * everything held aside on this computer now.
+ */
+function openReviewOf(
+  at: number,
+  items: readonly (WorkspaceSyncAsk | WorkspaceSyncReview)[],
+  decided: DecideOutcome,
+  result: Pick<CliResult, 'mergedItems' | 'heldAside'>,
+): OpenReview {
+  const byId = new Map(items.map((item) => [item.id, item]))
+  const applied = new Set(result.mergedItems.filter((item) => !item.held).map((item) => item.id))
+  const heldIds = new Set(result.heldAside.map((held) => held.id))
+  const entries: ReviewEntry[] = []
+  for (const key of GROUP_ORDER) {
+    for (const decision of decided.decisions) {
+      const item = byId.get(decision.id)
+      if (decision.group !== key || !applied.has(decision.id) || item === undefined) continue
+      entries.push({
+        ...entryBase(decision.id, item.path, item.kind),
+        group: key,
+        take: decision.take,
+        reason: decision.reason,
+        content: decision.take === 'file' ? (decision.content ?? '') : null,
+      })
+    }
+  }
+  for (const left of decided.needsYou) {
+    const item = byId.get(left.id)
+    if (item === undefined) continue
+    entries.push({
+      ...entryBase(left.id, item.path, item.kind),
+      section: 'needs-you',
+      state: 'needs-you',
+      needsYouReason: left.reason,
+      suggestion: left.suggestion === undefined ? null : { ...left.suggestion },
+      heldHere: heldIds.has(left.id),
+    })
+  }
+  const review: OpenReview = { mergedAt: new Date(at).toISOString(), entries, held: [], items: new Map(byId) }
+  withHeld(review, result.heldAside)
+  return review
+}
+
+/**
+ * The review rebuilt from the CLI alone — after a restart, or a merge this
+ * engine did not make: each decided item as `pending`, grouped by what it took
+ * (the agent's reasons are not known any more), and the held items as `held`.
+ */
+function reviewFromCli(at: number, result: Pick<CliResult, 'mergedItems' | 'heldAside'>): OpenReview {
+  const entries = result.mergedItems.flatMap((item): ReviewEntry[] => {
+    if (item.held) return []
+    const take: WorkspaceAgentTake = item.take === 'ours' ? 'ours' : item.take === 'theirs' ? 'theirs' : 'file'
+    const group: WorkspaceMergeGroupKey = take === 'ours' ? 'kept-mine' : take === 'theirs' ? 'took-theirs' : 'merged'
+    return [{ ...entryBase(item.id, item.path, item.kind ?? 'conflict'), group, take }]
+  })
+  const review: OpenReview = { mergedAt: new Date(at).toISOString(), entries, held: [], items: new Map() }
+  withHeld(review, result.heldAside)
+  return review
+}
+
+/**
+ * Fold the CLI's held list in: an entry whose held text is gone (settled
+ * elsewhere) and that nobody agreed is dropped; a held item Flow has no entry
+ * for becomes a `held` entry a person can decide.
+ */
+function withHeld(review: OpenReview, heldAside: readonly WorkspaceMergeReviewHeld[]): void {
+  const heldIds = new Set(heldAside.map((held) => held.id))
+  review.entries = review.entries.filter((entry) => !entry.heldHere || heldIds.has(entry.id) || entry.state === 'agreed')
+  const known = new Set(review.entries.map((entry) => entry.id))
+  for (const held of heldAside) {
+    if (known.has(held.id)) {
+      const entry = review.entries.find((candidate) => candidate.id === held.id)
+      if (entry !== undefined && entry.state !== 'agreed') entry.heldHere = true
+      continue
+    }
+    review.entries.push({ ...entryBase(held.id, held.path, held.kind), section: 'held', state: 'held', heldHere: true })
+  }
+  review.held = heldAside.map((held) => ({ ...held }))
+}
+
+/** A newer merge's review on top of the open one: what was already looked at keeps its state. */
+function mergeReviews(older: OpenReview, newer: OpenReview): OpenReview {
+  const ids = new Set(newer.entries.map((entry) => entry.id))
+  const kept = older.entries.filter((entry) => !ids.has(entry.id))
+  const items = new Map([...older.items, ...newer.items])
+  return { mergedAt: newer.mergedAt, entries: [...kept, ...newer.entries], held: newer.held, items }
+}
+
+/** What a status shows of the open review. */
+function publicReview(review: OpenReview): WorkspaceMergeReview {
+  const groups: WorkspaceMergeReviewGroup[] = []
+  for (const key of GROUP_ORDER) {
+    const members = review.entries
+      .filter((entry) => entry.section === 'group' && entry.group === key)
+      .map((entry) => ({
+        id: entry.id,
+        path: entry.path,
+        kind: entry.kind,
+        take: entry.take ?? 'theirs',
+        reason: entry.reason,
+        state: entry.state,
+        ...(entry.disagreedReason === null ? {} : { disagreedReason: entry.disagreedReason }),
+        ...(entry.redo === null ? {} : { redo: { ...entry.redo } }),
+        ...(entry.suggestion === null ? {} : { suggestion: { ...entry.suggestion } }),
+      }))
+    if (members.length > 0) groups.push({ key, count: members.length, items: members })
+  }
+  const needsYou = review.entries
+    .filter((entry) => entry.section === 'needs-you')
+    .map((entry) => ({
+      id: entry.id,
+      path: entry.path,
+      kind: entry.kind,
+      reason: entry.needsYouReason ?? 'agent-unavailable',
+      ...(entry.suggestion === null ? {} : { suggestion: { ...entry.suggestion } }),
+      state: entry.state === 'agreed' ? ('agreed' as const) : ('needs-you' as const),
+    }))
+  const stateOf = new Map(review.entries.map((entry) => [entry.id, entry.state]))
+  const held = review.held.map((entry) => ({ ...entry, state: stateOf.get(entry.id) ?? 'held' }))
+  return { mergedAt: review.mergedAt, groups, needsYou, held }
+}
+
+/** What a status shows of one agent-decided merge, straight from the decider and the CLI's answer. */
+export function reviewOf(
+  at: number,
+  items: readonly (WorkspaceSyncAsk | WorkspaceSyncReview)[],
+  decided: DecideOutcome,
+  result: Pick<CliResult, 'mergedItems' | 'heldAside'>,
+): WorkspaceMergeReview {
+  return publicReview(openReviewOf(at, items, decided, result))
+}
+
+/**
+ * A held group item whose agent decision can still be written as it was made:
+ * `ours` (the held text IS this computer's) and `theirs` always; `file` only
+ * while its decided text is remembered.
+ */
+function decisionKept(entry: ReviewEntry): boolean {
+  return entry.section === 'group' && entry.take !== null && (entry.take !== 'file' || entry.content !== null)
+}
+
+/** May a person agree to this entry (alone or in bulk)? Never an item that needs their own choice. */
+function agreeable(entry: ReviewEntry): boolean {
+  if (entry.state === 'pending') return true
+  if (entry.state === 'redone') return entry.redo !== null
+  if (entry.state === 'held') return decisionKept(entry)
+  return false
+}
+
+/** Something committed here that no person agreed to yet: while true, nothing this engine runs may publish. */
+function reviewHoldsPush(review: OpenReview | null): boolean {
+  return review !== null && review.entries.some((entry) => entry.state === 'pending' || (entry.state === 'agreed' && !entry.heldHere))
+}
+
+/**
+ * The agreed part may go out: nothing is left un-looked-at, and something
+ * agreed waits. Disagreed, redone, needs-you and held items are held aside —
+ * the share carries the Workspace's version there — so they never hold it.
+ * An item nobody has looked at yet (`pending`) is committed with the agent's
+ * decision and so WOULD be published: an agree first holds every pending item
+ * back (`holdBackPending`, FR-9), which is what lets agreed groups go out at
+ * once while the rest waits here.
+ */
+function readyToShare(review: OpenReview | null): boolean {
+  if (review === null) return false
+  if (review.entries.some((entry) => entry.state === 'pending')) return false
+  return review.entries.some((entry) => entry.state === 'agreed')
+}
+
+/** How many changes a review is about — the number a sentence names. */
+function reviewSize(review: OpenReview): number {
+  return review.entries.length
+}
+
+/** The record's word for what an entry took. */
+function recordTake(entry: ReviewEntry): string {
+  if (entry.decided !== null) return entry.decided
+  if (entry.redo !== null) return entry.redo.take
+  if (entry.group === 'kept-both') return 'both'
+  return entry.take ?? 'theirs'
+}
+
+const GROUP_SUMMARY: Record<WorkspaceMergeGroupKey, string> = {
+  'kept-both': 'kept both notes',
+  'took-theirs': "took the Workspace's version",
+  'kept-mine': "kept this computer's version",
+  merged: 'merged both into one text',
+  identical: 'both sides said the same',
+}
+
+function recordSummary(entry: ReviewEntry): string {
+  if (entry.decided !== null) return entry.decided === 'file' ? 'a person wrote the text' : entry.decided === 'ours' ? "a person kept this computer's version" : "a person kept the Workspace's version"
+  if (entry.redo !== null) return `redone: ${entry.redo.take === 'file' ? 'merged both into one text' : entry.redo.take === 'ours' ? "kept this computer's version" : "took the Workspace's version"}`
+  return entry.group === null ? 'settled' : GROUP_SUMMARY[entry.group]
+}
+
+/** One line, bounded: what the shared record keeps of a person's words. */
+function oneLine(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().slice(0, MAX_REASON_CHARS)
 }
 
 /** Lenient on purpose: an unknown or missing rejection falls back to the generic access sentence. */
@@ -338,6 +710,8 @@ function readResult(payload: Json): CliResult {
     asks: asks.map(readAsk),
     reviews: reviews.map(readReview),
     rejection: readRejection(payload['rejection']),
+    mergedItems: readMergedItems(payload['mergedItems']),
+    heldAside: readHeldAside(payload['heldAside']),
   }
 }
 
@@ -382,14 +756,18 @@ export const WORKSPACE_SYNC_SENTENCES = {
   unrelatedHistory: (name: string) =>
     `The shared repository for ${name} already holds a different history, so Flow won't mix the two. Connect ${name} to an empty repository, or join the Workspace it holds instead.`,
   invalidTake: 'That choice can\'t settle this item.',
-  keptOurs: (title: string) => `Flow put back your version of "${title}".`,
-  keptOursMany: (count: number) => `Flow put back your versions of ${count} documents.`,
-  keptTheirs: (title: string, who: string) => `Flow kept ${who}'s version of "${title}".`,
-  keptTheirsMany: (count: number) => `Flow kept your teammates' versions of ${count} documents.`,
-  keptMerged: (title: string) => `Flow kept the merged version of "${title}".`,
-  keptMergedMany: (count: number) => `Flow kept the merged versions of ${count} documents.`,
-  intentChanged: (title: string) => `Someone changed "${title}" since Flow merged it, so Flow left it as it is.`,
-  intentGone: 'Flow no longer has that merge on this computer.',
+  mergedForReview: (name: string, count: number) =>
+    `Flow merged ${count} ${count === 1 ? 'change' : 'changes'} in ${name} on this computer. Review them before they're shared.`,
+  reasonRequired: 'Say why you disagree, so Flow can try again with that in mind.',
+  needsDecision: 'Some of these need you to choose what they should say. Choose for each of them on its own.',
+  reviewItemGone: (name: string) => `That change in ${name} is no longer waiting for review.`,
+  reviewNotAllowed: "That change can't be settled that way right now.",
+  reviewStale: 'That changed since Flow merged it, so Flow left it as it is.',
+  pendingChanged: (name: string) =>
+    `Some changes in ${name} that you haven't reviewed yet changed since Flow merged them, so nothing was shared. What you agreed to is kept on this computer.`,
+  notShared: (name: string) => `Flow couldn't share the changes you agreed to in ${name}. They are kept on this computer.`,
+  newChangesArrived: (name: string) =>
+    `New changes arrived in ${name} while Flow was sharing yours, so nothing was shared yet. Review what came in first.`,
   unknownWorkspace: "That Workspace isn't on this computer.",
 } as const
 
@@ -494,8 +872,8 @@ interface WorkspaceRecord {
   promoteInFlight: boolean
   /** The 10-minute promotion timer — armed on the first open, cleared only on forget/quit. */
   promoteTimer: unknown
-  /** The last few agent merges, newest last — what Undo and "See both" read. */
-  mergeSets: WorkspaceIntentMergeSet[]
+  /** The agent-decided merge committed here and waiting for review, or null. */
+  review: OpenReview | null
 }
 
 interface RunOptions {
@@ -504,13 +882,18 @@ interface RunOptions {
   resolve?: { path: string; id: string; take: string }
   /** `--commit-only`: commit, nothing else. */
   commitOnly?: boolean
-  /** `--put-back`: one intent document to a chosen text, over exactly the text last seen. */
-  putBack?: { path: string; expect: string; take: string }
-}
-
-/** sha256 hex of a text's UTF-8 bytes — what the CLI's `--expect` compares. */
-function textHash(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex')
+  /** `--decisions <file>`: the agent's whole batch, applied in ONE merge. */
+  decisions?: string
+  /** `--hold <ids>` (with `decisions`): the Workspace's version is kept there, this machine's text held aside. */
+  hold?: readonly string[]
+  /** `--no-push`: commit, fetch and merge, publish nothing. */
+  noPush?: boolean
+  /** `--settle-held <id> --take <take>`: one held item written as a local commit. */
+  settleHeld?: { id: string; take: string }
+  /** `--hold-back <ids>`: review items put back to the Workspace's version, this machine's text held aside. */
+  holdBack?: readonly string[]
+  /** `--agreed`: a person agreed to the open review — the ONLY run that may publish it. */
+  agreed?: boolean
 }
 
 const IDLE_STATUS = (lastSyncedAt: number | null): WorkspaceSyncStatus => ({
@@ -559,7 +942,7 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
         promotedAt: null,
         promoteInFlight: false,
         promoteTimer: null,
-        mergeSets: [],
+        review: null,
       }
       rec.lastEmitted = JSON.stringify(statusOf(rec))
       records.set(slug, rec)
@@ -575,6 +958,7 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
       ...(rec.cause === null ? {} : { cause: rec.cause }),
       asks: rec.asks.map((ask) => ({ ...ask, options: [...ask.options], ...(ask.anchors === undefined ? {} : { anchors: [...ask.anchors] }) })),
       reviews: rec.reviews.map((review) => ({ ...review, options: [...review.options] })),
+      ...(rec.review === null ? {} : { review: publicReview(rec.review) }),
     }
   }
 
@@ -657,9 +1041,17 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
       // The item's id pins the decision to exactly what the person saw.
       args.push(`--resolve=${options.resolve.path}`, `--id=${options.resolve.id}`, `--take=${options.resolve.take}`)
     }
-    if (options.putBack !== undefined) {
-      args.push(`--put-back=${options.putBack.path}`, `--expect=${options.putBack.expect}`, `--take=${options.putBack.take}`)
+    if (options.decisions !== undefined) {
+      args.push(`--decisions=${options.decisions}`)
+      if (options.hold !== undefined && options.hold.length > 0) args.push(`--hold=${options.hold.join(',')}`)
     }
+    if (options.settleHeld !== undefined) args.push(`--settle-held=${options.settleHeld.id}`, `--take=${options.settleHeld.take}`)
+    if (options.holdBack !== undefined) args.push(`--hold-back=${options.holdBack.join(',')}`)
+    // THE GUARD (NFR-1): while a review holds anything committed and not
+    // agreed, no run but the agreed share may publish — whoever asked for it.
+    const mayPublish = options.commitOnly !== true && options.noPush !== true && (options.agreed === true || !reviewHoldsPush(rec.review))
+    if (options.commitOnly !== true && !mayPublish) args.push('--no-push')
+    if (options.agreed === true) args.push('--agreed')
     args.push('--json')
     // EVERY RUN IS LOGGED (user, 2026-11-24 — a teammate's sync kept failing
     // with nothing to go on): what was asked, how long it took, what came back.
@@ -733,79 +1125,142 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
     set(rec, 'syncing', null, { asks: rec.asks, reviews: rec.reviews })
     let outcome = await callCli(rec, options)
     if (rec.forgotten) return outcome
-    // A pause nobody has looked at yet, made only of intent documents: an agent
-    // merges it before it ever reaches a person. Never on a person's own
-    // decision or put-back — those are a person's choice already.
-    let mergedSet: WorkspaceIntentMergeSet | null = null
+    // A pause nobody has looked at yet: the agent decides it before it ever
+    // reaches a person. Never on a person's own decision — that is a person's
+    // choice already — and never on the agent's own batch.
     if (
       outcome.kind === 'result' &&
       (outcome.result.state === 'ask' || outcome.result.state === 'review') &&
       options.resolve === undefined &&
-      options.putBack === undefined &&
+      options.decisions === undefined &&
+      options.settleHeld === undefined &&
+      options.holdBack === undefined &&
       options.commitOnly !== true
     ) {
       const settled = await settleByAgent(rec, outcome.result, options)
       if (rec.forgotten) return outcome
-      if (settled.outcome !== null) outcome = settled.outcome
-      mergedSet = settled.set
+      if (settled !== null) outcome = settled
     }
+    return fold(rec, outcome, carried, retryOnce)
+  }
+
+  /**
+   * The recorded reasons for one kind of conflict in one project, newest
+   * first — read from the shared record through the CLI ONCE per settle (the
+   * first prompt that needs them), never per item. A record that cannot be
+   * read gives no reasons; it never stops a merge.
+   */
+  function reasonsLookup(rec: WorkspaceRecord): DeciderDeps['reasonsFor'] {
+    let listed: Promise<RecordedReason[]> | null = null
+    return async (kind, project) => {
+      if (project === null) return []
+      listed ??= listReasons(rec)
+      const entries = await listed
+      return entries
+        .filter((entry) => entry.kind === kind && entry.project === project)
+        .sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0))
+        .map((entry) => `${entry.summary === '' ? `took ${entry.take}` : entry.summary} — ${entry.outcome}: ${entry.reason}`)
+    }
+  }
+
+  async function listReasons(rec: WorkspaceRecord): Promise<RecordedReason[]> {
     try {
-      return fold(rec, outcome, carried, retryOnce)
-    } finally {
-      if (mergedSet !== null) {
-        try {
-          deps.onIntentMerged(rec.slug, rec.name, mergedSet)
-        } catch (error) {
-          deps.log('intent merge listener failed', { error: String(error) })
-        }
+      const run = await deps.runCli(deps.cwd, ['workspace', 'merge-decision', 'list', '--workspace', rec.slug, '--json'], {
+        timeoutMs: REASONS_TIMEOUT_MS,
+      })
+      const payload = lastJsonLine(run.stdout)
+      const listed = payload?.['decisions']
+      if (!run.ok || payload === null || payload['action'] !== 'merge-decision' || !Array.isArray(listed)) {
+        deps.log('the recorded merge reasons could not be read', { slug: rec.slug, error: run.error, stderr: tail(run.stderr) })
+        return []
       }
+      return listed.flatMap((entry): RecordedReason[] => {
+        if (!isRecord(entry)) return []
+        const { kind, project, take, summary, reason, outcome, ts } = entry
+        if (typeof kind !== 'string' || typeof project !== 'string' || typeof reason !== 'string' || reason.trim() === '') return []
+        return [
+          {
+            kind,
+            project,
+            take: typeof take === 'string' ? take : '',
+            summary: typeof summary === 'string' ? summary : '',
+            reason,
+            outcome: outcome === 'disagreed' ? 'disagreed' : 'agreed',
+            ts: typeof ts === 'string' ? ts : '',
+          },
+        ]
+      })
+    } catch (error) {
+      deps.log('the recorded merge reasons could not be read', { slug: rec.slug, error: String(error) })
+      return []
     }
   }
 
   /**
-   * Ask the agent for every intent document of a pause, then resolve each
-   * through the CLI (intent-merge.ts). `outcome` is the last CLI answer when
-   * anything was resolved (it says where things stand now); `set` is the
-   * merge set when every item was merged.
+   * The agent decides every item of a pause (intent-merge.ts), then ONE CLI
+   * run applies the whole batch, committing the merge HERE and pushing
+   * nothing (`--decisions <file> --no-push`) — one merge, not one per item.
+   *
+   * Items left for a person cannot stay undecided in that run: the CLI
+   * refuses to commit a merge while anything waits. They go in `--hold`
+   * WITHOUT a decision of their own: the merge keeps the Workspace's version
+   * at their paths, and this machine's text — exactly as it was, since no
+   * decision rewrote it — is held aside on this computer, never committed and
+   * so never pushed. (A `theirs` decision beside the hold would have held the
+   * Workspace's text aside instead, losing this machine's.) The review later
+   * asks the person about them and settles each one. Nothing the person has
+   * not seen leaves this computer: the merge waits for review either way.
+   *
+   * Returns the batch's answer, or null when the pause should stay as the CLI
+   * first put it — the per-item choices of before: the agent decided nothing,
+   * or the batch was refused (a side changed meanwhile, a take not accepted).
    */
-  async function settleByAgent(
-    rec: WorkspaceRecord,
-    result: CliResult,
-    options: RunOptions,
-  ): Promise<{ outcome: CliOutcome | null; set: WorkspaceIntentMergeSet | null }> {
+  async function settleByAgent(rec: WorkspaceRecord, result: CliResult, options: RunOptions): Promise<CliOutcome | null> {
     const items: IntentItem[] = [...result.asks, ...result.reviews]
-    const seen: { last: CliOutcome | null } = { last: null }
-    const merged = await settleIntentAsks(rec.slug, items, {
+    if (items.length === 0) return null
+    const decided = await decideConflicts(rec.slug, items, {
       merge: deps.mergeIntent,
+      decideFast: deps.decideFast,
+      reasonsFor: reasonsLookup(rec),
       timers: deps.timers,
       log: deps.log,
-      resolve: async (item, mergedText) => {
-        const temp = await deps.writeTempText(mergedText)
-        try {
-          const answer = await callCli(rec, {
-            message: options.message,
-            timeoutMs: WORKSPACE_SYNC_TIMEOUT_MS,
-            resolve: { path: item.path, id: item.id, take: `file:${temp.path}` },
-          })
-          if (answer.kind !== 'result') return false
-          seen.last = answer
-          return true
-        } finally {
-          await temp.dispose().catch(() => undefined)
-        }
-      },
     })
-    if (merged.kind !== 'settled') return { outcome: seen.last, set: null }
-    const at = deps.now()
-    const set: WorkspaceIntentMergeSet = {
-      slug: rec.slug,
-      mergeId: `m${at.toString(36)}${rec.mergeSets.length}`,
-      at: new Date(at).toISOString(),
-      documents: merged.documents,
+    if (decided.decisions.length === 0) {
+      deps.log('the agent decided nothing; the pause waits for a person', { slug: rec.slug, items: items.length })
+      return null
     }
-    rec.mergeSets.push(set)
-    if (rec.mergeSets.length > KEPT_MERGE_SETS) rec.mergeSets.splice(0, rec.mergeSets.length - KEPT_MERGE_SETS)
-    return { outcome: seen.last, set }
+    const batch = JSON.stringify({
+      decisions: decided.decisions.map((decision) => ({
+        id: decision.id,
+        take: decision.take,
+        ...(decision.take === 'file' ? { content: decision.content ?? '' } : {}),
+      })),
+    })
+    const temp = await deps.writeTempText(batch)
+    let answer: CliOutcome
+    try {
+      answer = await callCli(rec, {
+        message: options.message,
+        timeoutMs: WORKSPACE_SYNC_TIMEOUT_MS,
+        decisions: temp.path,
+        hold: decided.needsYou.map((item) => item.id),
+        noPush: true,
+      })
+    } finally {
+      await temp.dispose().catch(() => undefined)
+    }
+    if (answer.kind !== 'result') {
+      deps.log('the agent\'s decisions were not applied; the pause waits for a person', {
+        slug: rec.slug,
+        answer: answer.kind === 'refused' ? answer.reason : 'unavailable',
+      })
+      return null
+    }
+    if (answer.result.state === 'merged-local') {
+      const fresh = openReviewOf(deps.now(), items, decided, answer.result)
+      rec.review = rec.review === null ? fresh : mergeReviews(rec.review, fresh)
+    }
+    return answer
   }
 
   /** Fold one CLI answer into the record. */
@@ -829,6 +1284,10 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
     const result = outcome.result
     if (result.name !== null) rec.name = result.name
     rec.ahead = result.ahead
+    if (rec.review !== null) {
+      withHeld(rec.review, result.heldAside)
+      if (rec.review.entries.length === 0) rec.review = null
+    }
     // Every turn carried so far is committed (or waiting on a person's decision, which commits it).
     rec.turnLabels.splice(0, carried)
     switch (result.state) {
@@ -858,6 +1317,25 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
         rec.retryAttempt = 0
         set(rec, 'no-access', noAccessSentence(nameIn(rec), result.rejection), undefined, result.rejection?.kind ?? 'access')
         break
+      case 'merged-local': {
+        // Merged and committed HERE, nothing pushed: it waits for review.
+        // Nothing retries on its own, and every run until it is agreed only
+        // commits. A review this engine did not build (a restart, a terminal
+        // run) is rebuilt from what the CLI recorded.
+        clearTimers(rec)
+        rec.retryAttempt = 0
+        if (rec.review === null) {
+          const rebuilt = reviewFromCli(deps.now(), result)
+          rec.review = rebuilt.entries.length === 0 ? null : rebuilt
+        }
+        if (rec.review === null) {
+          // Merged here with nothing to review (no decision in it): an ordinary sync publishes it.
+          set(rec, 'idle', null)
+          break
+        }
+        set(rec, 'review', WORKSPACE_SYNC_SENTENCES.mergedForReview(nameIn(rec), reviewSize(rec.review)))
+        break
+      }
       case 'committed':
         // Only a commit-only run answers this; nothing was exchanged.
         set(rec, 'idle', null)
@@ -870,14 +1348,37 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
     return outcome
   }
 
-  /** Waiting for a person: a decision, or access only they can fix. */
+  /** Waiting for a person: a decision, a review, or access only they can fix. */
   function waitsForPerson(rec: WorkspaceRecord): boolean {
-    return rec.state === 'paused' || rec.state === 'no-access'
+    return rec.state === 'paused' || rec.state === 'no-access' || rec.state === 'review'
   }
 
-  /** A sync nobody asked for: never over a pause or refused access, never while off. */
+  /**
+   * While a review waits, a sync only COMMITS this computer's work: nothing
+   * is fetched, nothing merged on top of what the person is reviewing, and
+   * nothing published. The review state and its sentence stay as they are.
+   */
+  async function commitDuringReview(rec: WorkspaceRecord, label: string): Promise<void> {
+    if (!mayRun(rec)) return
+    const carried = rec.turnLabels.length
+    const message = carried > 0 ? turnsMessage(rec.turnLabels) : commitMessage(label)
+    const outcome = await callCli(rec, { message, timeoutMs: COMMIT_ONLY_TIMEOUT_MS, commitOnly: true })
+    if (rec.forgotten) return
+    if (outcome.kind === 'result') {
+      rec.turnLabels.splice(0, carried)
+      if (rec.review !== null) withHeld(rec.review, outcome.result.heldAside)
+      emitIfChanged(rec)
+    }
+  }
+
+  /** A sync nobody asked for: never over a pause or refused access, never while off; only a commit during a review. */
   async function background(rec: WorkspaceRecord, label: string, retryOnce = false): Promise<void> {
-    if (!mayRun(rec) || waitsForPerson(rec)) return
+    if (!mayRun(rec)) return
+    if (rec.state === 'review') {
+      if (rec.turnLabels.length > 0) await commitDuringReview(rec, label)
+      return
+    }
+    if (waitsForPerson(rec)) return
     const message = rec.turnLabels.length > 0 ? turnsMessage(rec.turnLabels) : commitMessage(label)
     await sync(rec, { message, timeoutMs: WORKSPACE_SYNC_TIMEOUT_MS }, retryOnce)
   }
@@ -957,6 +1458,7 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
     armPromoteTimer(rec)
     if (rec.openInFlight !== null) return rec.openInFlight
     const run = enqueue(rec, async () => {
+      if (rec.state === 'review') return background(rec, OPEN_LABEL)
       if (waitsForPerson(rec)) return
       // Promotion first (its own cooldown); a promotion that decided anything
       // is carried by a sync even inside the open cooldown.
@@ -974,8 +1476,9 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
     if (closed || !isWorkspaceSlug(slug)) return
     const rec = record(slug)
     rec.turnLabels.push(label)
-    // A pause waits for a person: the turn is carried by the sync that settles it.
-    if (waitsForPerson(rec)) return
+    // A pause waits for a person: the turn is carried by the sync that settles
+    // it. A review does not: the turn is committed here (and nothing more).
+    if (waitsForPerson(rec) && rec.state !== 'review') return
     // ARMED ONCE: turns that end before it fires join this sync.
     if (rec.turnTimer !== null) return
     rec.turnTimer = deps.timers.setTimeout(() => {
@@ -992,6 +1495,13 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
       if (closed || rec.forgotten) return
       clearTimers(rec)
       rec.retryAttempt = 0
+      if (rec.state === 'review') {
+        // A person asked during a review: share the agreed part if it is ready
+        // (a share that failed is tried again here), otherwise only commit.
+        if (readyToShare(rec.review)) await shareReview(rec)
+        else await commitDuringReview(rec, SYNC_NOW_LABEL)
+        return
+      }
       // A person asked: promotion runs whatever its cooldown — but never over a pause.
       await promote(rec, true)
       const message = rec.turnLabels.length > 0 ? turnsMessage(rec.turnLabels) : commitMessage(SYNC_NOW_LABEL)
@@ -1066,87 +1576,345 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
     return answer ?? { ok: false, reason: 'failed', detail: WORKSPACE_SYNC_SENTENCES.failed(nameIn(rec)), status: statusOf(rec) }
   }
 
-  // ── Intent merges: Undo and "See both" ──
+  // ── The review: agree, disagree, decide, share ──
 
-  function copySet(set: WorkspaceIntentMergeSet): WorkspaceIntentMergeSet {
-    return { ...set, documents: set.documents.map((document) => ({ ...document })) }
+  function refusal(rec: WorkspaceRecord, reason: WorkspaceReviewRefusal, detail: string): WorkspaceReviewResult {
+    return { ok: false, reason, detail, status: statusOf(rec) }
   }
 
-  function intentMerges(request: WorkspaceIntentMergesRequest): WorkspaceIntentMergeSet | null {
-    if (!isWorkspaceSlug(request.slug)) return null
-    const set = records.get(request.slug)?.mergeSets.find((candidate) => candidate.mergeId === request.mergeId)
-    return set === undefined ? null : copySet(set)
-  }
-
-  function keptSentence(keep: IntentMergeKeep, documents: readonly WorkspaceIntentMergeSet['documents'][number][]): string {
-    const s = WORKSPACE_SYNC_SENTENCES
-    const [only] = documents
-    if (documents.length === 1 && only !== undefined) {
-      if (keep === 'ours') return s.keptOurs(only.title)
-      if (keep === 'theirs') return s.keptTheirs(only.title, only.theirName ?? 'your teammate')
-      return s.keptMerged(only.title)
+  /** Run one review request inside the Workspace's queue; anything thrown becomes `failed`. */
+  async function reviewStep(slug: string, work: (rec: WorkspaceRecord, review: OpenReview) => Promise<WorkspaceReviewResult>): Promise<WorkspaceReviewResult> {
+    if (!isWorkspaceSlug(slug)) {
+      return { ok: false, reason: 'unknown-workspace', detail: WORKSPACE_SYNC_SENTENCES.unknownWorkspace, status: IDLE_STATUS(null) }
     }
-    if (keep === 'ours') return s.keptOursMany(documents.length)
-    if (keep === 'theirs') return s.keptTheirsMany(documents.length)
-    return s.keptMergedMany(documents.length)
-  }
-
-  async function keepIntent(request: WorkspaceKeepIntentRequest): Promise<WorkspaceKeepIntentResult> {
-    if (!isWorkspaceSlug(request.slug)) {
-      return { ok: false, reason: 'not-found', detail: WORKSPACE_SYNC_SENTENCES.intentGone, status: IDLE_STATUS(null) }
-    }
-    const rec = record(request.slug)
-    let answer: WorkspaceKeepIntentResult | null = null
+    const rec = record(slug)
+    let answer: WorkspaceReviewResult | null = null
     await enqueue(rec, async () => {
-      const set = rec.mergeSets.find((candidate) => candidate.mergeId === request.mergeId)
-      const chosen =
-        set === undefined
-          ? []
-          : set.documents.filter((document) => request.documentId === undefined || document.id === request.documentId)
-      if (set === undefined || chosen.length === 0 || closed || rec.forgotten) {
-        answer = { ok: false, reason: 'not-found', detail: WORKSPACE_SYNC_SENTENCES.intentGone, status: statusOf(rec) }
+      if (closed || rec.forgotten) return
+      if (rec.review === null) {
+        answer = refusal(rec, 'not-waiting', WORKSPACE_SYNC_SENTENCES.reviewItemGone(nameIn(rec)))
         return
       }
-      const textOf = (document: (typeof chosen)[number], which: IntentMergeKeep): string =>
-        which === 'ours' ? document.ours : which === 'theirs' ? document.theirs : document.merged
-      for (const document of chosen) {
-        if (document.current === request.keep) continue
-        let temp: TempText | null = null
-        try {
-          temp = await deps.writeTempText(textOf(document, request.keep))
-          const message = rec.turnLabels.length > 0 ? turnsMessage(rec.turnLabels) : commitMessage(PUT_BACK_LABEL)
-          const outcome = await sync(
-            rec,
-            {
-              message,
-              timeoutMs: WORKSPACE_SYNC_TIMEOUT_MS,
-              // Only over exactly the text this computer put there: a teammate's later edit is never overwritten.
-              putBack: { path: document.path, expect: textHash(textOf(document, document.current)), take: `file:${temp.path}` },
-            },
-            true,
-          )
-          if (outcome.kind === 'refused' && (outcome.reason === 'stale-decision' || outcome.reason === 'invalid-resolution')) {
-            // Read where things stand, so the status is not left mid-sync.
-            await sync(rec, { message, timeoutMs: WORKSPACE_SYNC_TIMEOUT_MS }, true)
-            answer = { ok: false, reason: 'stale', detail: WORKSPACE_SYNC_SENTENCES.intentChanged(document.title), status: statusOf(rec) }
-            return
-          }
-          if (outcome.kind !== 'result') {
-            answer = { ok: false, reason: 'failed', detail: rec.detail ?? WORKSPACE_SYNC_SENTENCES.failed(nameIn(rec)), status: statusOf(rec) }
-            return
-          }
-          document.current = request.keep
-        } catch (error) {
-          deps.log('putting a merged document back failed', { slug: rec.slug, error: String(error) })
-          answer = { ok: false, reason: 'failed', detail: WORKSPACE_SYNC_SENTENCES.failed(nameIn(rec)), status: statusOf(rec) }
-          return
-        } finally {
-          if (temp !== null) await temp.dispose().catch(() => undefined)
+      try {
+        answer = await work(rec, rec.review)
+      } catch (error) {
+        deps.log('a review step failed', { slug, error: String(error) })
+        answer = refusal(rec, 'failed', WORKSPACE_SYNC_SENTENCES.failed(nameIn(rec)))
+      }
+    })
+    return answer ?? refusal(rec, 'failed', WORKSPACE_SYNC_SENTENCES.failed(nameIn(rec)))
+  }
+
+  /** The review's sentence again (after an item changed), unless the state says something else. */
+  function reviewSentence(rec: WorkspaceRecord): void {
+    if (rec.review !== null && rec.review.entries.length === 0) rec.review = null
+    if (rec.state === 'review' && rec.review !== null) {
+      set(rec, 'review', WORKSPACE_SYNC_SENTENCES.mergedForReview(nameIn(rec), reviewSize(rec.review)))
+    } else emitIfChanged(rec)
+  }
+
+  /**
+   * Append one line to the shared record through the CLI's verb (the ONE
+   * writer). A line that cannot be written is logged; it never stops a review.
+   */
+  async function recordDecision(rec: WorkspaceRecord, entry: ReviewEntry, outcome: 'agreed' | 'disagreed', reason: string): Promise<boolean> {
+    const project = projectOf(entry.path)
+    if (project === null) {
+      deps.log('a review decision names no project; not recorded', { slug: rec.slug })
+      return false
+    }
+    const args = [
+      'workspace',
+      'merge-decision',
+      'record',
+      '--workspace',
+      rec.slug,
+      `--kind=${entry.kind}`,
+      `--project=${project}`,
+      `--path=${entry.path}`,
+      `--take=${recordTake(entry)}`,
+      `--summary=${recordSummary(entry)}`,
+      `--reason=${oneLine(reason)}`,
+      `--outcome=${outcome}`,
+      '--json',
+    ]
+    try {
+      const run = await deps.runCli(deps.cwd, args, { timeoutMs: RECORD_TIMEOUT_MS })
+      const payload = lastJsonLine(run.stdout)
+      if (run.ok && payload !== null && payload['action'] === 'merge-decision') return true
+      deps.log('a review decision could not be recorded', { slug: rec.slug, refused: payload?.['refused'], error: run.error, stderr: tail(run.stderr) })
+    } catch (error) {
+      deps.log('a review decision could not be recorded', { slug: rec.slug, error: String(error) })
+    }
+    return false
+  }
+
+  /**
+   * One local CLI step of a review — `--settle-held` or `--hold-back`, always
+   * `--commit-only`: nothing fetched, merged or published. Answers the
+   * refusal reason, or null when it was done.
+   */
+  async function localStep(rec: WorkspaceRecord, options: Pick<RunOptions, 'settleHeld' | 'holdBack'>, label: string): Promise<string | null> {
+    const carried = rec.turnLabels.length
+    const message = carried > 0 ? turnsMessage(rec.turnLabels) : commitMessage(label)
+    const outcome = await callCli(rec, { message, timeoutMs: COMMIT_ONLY_TIMEOUT_MS, commitOnly: true, ...options })
+    if (outcome.kind === 'refused') return outcome.reason
+    if (outcome.kind === 'unavailable') return 'unavailable'
+    rec.turnLabels.splice(0, carried)
+    if (rec.review !== null) withHeld(rec.review, outcome.result.heldAside)
+    return null
+  }
+
+  /**
+   * Share the agreed part: record every agreed decision not recorded yet (one
+   * CLI run at a time), then ONE sync with `--agreed` — the only run that may
+   * publish a review. Held items go out as the Workspace's version. Answers
+   * null when it was shared, or the sentence saying why it was not: a share
+   * that did not go out is never reported as done (forbidden-pattern #20).
+   */
+  async function shareReview(rec: WorkspaceRecord): Promise<string | null> {
+    const review = rec.review
+    if (review === null) return null
+    for (const entry of review.entries) {
+      if (entry.state !== 'agreed' || entry.recorded) continue
+      entry.recorded = await recordDecision(rec, entry, 'agreed', entry.disagreedReason ?? entry.reason)
+    }
+    const message = rec.turnLabels.length > 0 ? turnsMessage(rec.turnLabels) : commitMessage(REVIEW_LABEL)
+    const outcome = await sync(rec, { message, timeoutMs: WORKSPACE_SYNC_TIMEOUT_MS, agreed: true }, false)
+    if (rec.forgotten) return null
+    if (outcome.kind === 'result' && (outcome.result.state === 'synced' || outcome.result.state === 'nothing-to-do')) {
+      // Shared: what was agreed is out. What is still held aside waits for a
+      // person, and no longer holds anything back.
+      if (rec.review !== null) {
+        rec.review.entries = rec.review.entries.filter((entry) => entry.state !== 'agreed')
+        if (rec.review.entries.length === 0) rec.review = null
+      }
+      emitIfChanged(rec)
+      return null
+    }
+    if (outcome.kind === 'result' && outcome.result.state === 'merged-local') {
+      // New changes came in and the agent settled them: they join the review.
+      return WORKSPACE_SYNC_SENTENCES.newChangesArrived(nameIn(rec))
+    }
+    if (outcome.kind === 'result' && (outcome.result.state === 'ask' || outcome.result.state === 'review')) {
+      // New changes wait for a person (the pause): the review waits behind it.
+      return rec.detail ?? WORKSPACE_SYNC_SENTENCES.notShared(nameIn(rec))
+    }
+    // Refused, offline, no access, an error: nothing was shared. The review
+    // stays open and SAYS so; nothing retries on its own ("Sync now" or the
+    // next agree tries again), so nothing else can run over it.
+    const why = rec.detail ?? WORKSPACE_SYNC_SENTENCES.notShared(nameIn(rec))
+    const cause = rec.cause
+    clearTimers(rec)
+    if (rec.review !== null) set(rec, 'review', why, undefined, cause)
+    return why
+  }
+
+  /**
+   * FR-9 — agreed groups are shared as soon as they are agreed; the rest waits
+   * here. Items nobody has looked at yet (`pending`) are committed with the
+   * agent's decision, so before an agree shares anything they are ALL put back
+   * to the Workspace's version in ONE local run (`--hold-back … --commit-only`),
+   * this computer's text held aside. Each stays in its group as `held`, with
+   * the agent's decision and reason, so the person can still agree it later —
+   * which writes that decision (`settleEntry`). A `file` decision whose text is
+   * not remembered (a review rebuilt after a restart) becomes the person's to
+   * decide. Answers null when done or when there was nothing to hold, else the
+   * sentence saying why nothing was shared.
+   */
+  async function holdBackPending(rec: WorkspaceRecord): Promise<string | null> {
+    const review = rec.review
+    if (review === null) return null
+    const pending = review.entries.filter((entry) => entry.state === 'pending')
+    if (pending.length === 0 || !review.entries.some((entry) => entry.state === 'agreed')) return null
+    const refused = await localStep(rec, { holdBack: pending.map((entry) => entry.id) }, HOLD_BACK_PENDING_LABEL)
+    if (refused === 'stale-decision') return WORKSPACE_SYNC_SENTENCES.pendingChanged(nameIn(rec))
+    if (refused === 'unknown-review-item' || refused === 'unavailable') return WORKSPACE_SYNC_SENTENCES.notShared(nameIn(rec))
+    if (refused !== null) return refusalSentence(refused, nameIn(rec))
+    for (const entry of pending) {
+      entry.state = 'held'
+      entry.heldHere = true
+      if (!decisionKept(entry)) Object.assign(entry, { section: 'held', group: null, take: null, reason: '' })
+    }
+    return null
+  }
+
+  /**
+   * After a request changed items: share when ready, and answer honestly.
+   * `holdPending` (an agree): what nobody has looked at yet is held back
+   * first, so the agreed part goes out now.
+   */
+  async function afterChange(rec: WorkspaceRecord, holdPending = false): Promise<WorkspaceReviewResult> {
+    if (holdPending) {
+      const why = await holdBackPending(rec)
+      if (why !== null) {
+        // Nothing was shared, and the review SAYS so (forbidden-pattern #20).
+        if (rec.review !== null) set(rec, 'review', why)
+        return refusal(rec, 'not-shared', why)
+      }
+    }
+    if (readyToShare(rec.review)) {
+      const why = await shareReview(rec)
+      if (why !== null) return refusal(rec, 'not-shared', why)
+      return { ok: true, status: statusOf(rec) }
+    }
+    reviewSentence(rec)
+    return { ok: true, status: statusOf(rec) }
+  }
+
+  /** Settle a held entry to what was decided, as a local commit. Null when done, else the refusal for the person. */
+  async function settleEntry(rec: WorkspaceRecord, entry: ReviewEntry, take: 'ours' | 'theirs' | 'file', text: string | null): Promise<WorkspaceReviewResult | null> {
+    let temp: TempText | null = null
+    // Marked agreed BEFORE the run answers: its answer no longer lists the
+    // item as held, and an unagreed entry that is no longer held is dropped.
+    const before = { state: entry.state, heldHere: entry.heldHere }
+    try {
+      if (take === 'file') temp = await deps.writeTempText(text ?? '')
+      entry.state = 'agreed'
+      entry.heldHere = false
+      const refused = await localStep(rec, { settleHeld: { id: entry.id, take: temp === null ? take : `file:${temp.path}` } }, SETTLE_LABEL)
+      if (refused !== null) Object.assign(entry, before)
+      if (refused === 'unknown-held') {
+        // Settled elsewhere meanwhile: it no longer waits here.
+        if (rec.review !== null) rec.review.entries = rec.review.entries.filter((candidate) => candidate !== entry)
+        reviewSentence(rec)
+        return refusal(rec, 'not-waiting', WORKSPACE_SYNC_SENTENCES.reviewItemGone(nameIn(rec)))
+      }
+      if (refused !== null) return refusal(rec, 'failed', refusalSentence(refused, nameIn(rec)))
+      return null
+    } catch (error) {
+      Object.assign(entry, before)
+      throw error
+    } finally {
+      if (temp !== null) await temp.dispose().catch(() => undefined)
+    }
+  }
+
+  async function reviewAgree(request: WorkspaceReviewAgreeRequest): Promise<WorkspaceReviewResult> {
+    return reviewStep(request.slug, async (rec, review) => {
+      let chosen: ReviewEntry[]
+      if (request.allGroups === true) {
+        // "Agree to all groups": every group item a person may agree to; never "Needs you".
+        chosen = review.entries.filter((entry) => entry.section === 'group' && agreeable(entry))
+        if (chosen.length === 0) return refusal(rec, 'not-waiting', WORKSPACE_SYNC_SENTENCES.reviewItemGone(nameIn(rec)))
+      } else {
+        chosen =
+          request.group !== undefined
+            ? review.entries.filter((entry) => entry.section === 'group' && entry.group === request.group)
+            : review.entries.filter((entry) => (request.ids ?? []).includes(entry.id))
+        if (chosen.length === 0 || (request.ids !== undefined && chosen.length !== new Set(request.ids).size)) {
+          return refusal(rec, 'not-waiting', WORKSPACE_SYNC_SENTENCES.reviewItemGone(nameIn(rec)))
+        }
+        // A person's own choice is never made in bulk: refuse the whole request.
+        if (chosen.some((entry) => entry.state !== 'agreed' && !agreeable(entry))) {
+          return refusal(rec, 'needs-decision', WORKSPACE_SYNC_SENTENCES.needsDecision)
         }
       }
-      answer = { ok: true, detail: keptSentence(request.keep, chosen), set: copySet(set), status: statusOf(rec) }
+      // What is held aside is written here first, one local commit each: a
+      // redo as redone, a held-back decision exactly as the agent made it.
+      for (const entry of chosen) {
+        let failed: WorkspaceReviewResult | null = null
+        if (entry.state === 'redone' && entry.redo !== null) {
+          failed = await settleEntry(rec, entry, entry.redo.take, entry.redo.content ?? null)
+        } else if (entry.state === 'held' && entry.take !== null) {
+          failed = await settleEntry(rec, entry, entry.take, entry.content)
+        }
+        if (failed !== null) return failed
+      }
+      for (const entry of chosen) {
+        if (entry.state === 'pending') entry.state = 'agreed'
+      }
+      return afterChange(rec, true)
     })
-    return answer ?? { ok: false, reason: 'failed', detail: WORKSPACE_SYNC_SENTENCES.failed(nameIn(rec)), status: statusOf(rec) }
+  }
+
+  async function reviewDisagree(request: WorkspaceReviewDisagreeRequest): Promise<WorkspaceReviewResult> {
+    return reviewStep(request.slug, async (rec, review) => {
+      const reason = request.reason.trim()
+      if (reason === '') return refusal(rec, 'reason-required', WORKSPACE_SYNC_SENTENCES.reasonRequired)
+      const chosen = review.entries.filter((entry) => request.ids.includes(entry.id))
+      if (chosen.length === 0 || chosen.length !== new Set(request.ids).size) {
+        return refusal(rec, 'not-waiting', WORKSPACE_SYNC_SENTENCES.reviewItemGone(nameIn(rec)))
+      }
+      // A held-back group item still carries the agent's decision: it may be disagreed with (already held aside).
+      if (chosen.some((entry) => entry.state !== 'pending' && entry.state !== 'redone' && !(entry.state === 'held' && decisionKept(entry)))) {
+        return refusal(rec, 'needs-decision', WORKSPACE_SYNC_SENTENCES.needsDecision)
+      }
+      // The agent's committed decisions go back to the Workspace's version
+      // first, this computer's text held aside — so they never hold the share.
+      const toHold = chosen.filter((entry) => entry.state === 'pending').map((entry) => entry.id)
+      if (toHold.length > 0) {
+        const refused = await localStep(rec, { holdBack: toHold }, HOLD_BACK_LABEL)
+        if (refused === 'stale-decision') return refusal(rec, 'stale', WORKSPACE_SYNC_SENTENCES.reviewStale)
+        if (refused === 'unknown-review-item') return refusal(rec, 'not-waiting', WORKSPACE_SYNC_SENTENCES.reviewItemGone(nameIn(rec)))
+        if (refused !== null) return refusal(rec, 'failed', refusalSentence(refused, nameIn(rec)))
+      }
+      for (const entry of chosen) {
+        await recordDecision(rec, entry, 'disagreed', reason)
+        entry.heldHere = true
+        entry.disagreedReason = oneLine(reason)
+        // A second disagreement: the person decides it (FR-8). No third try.
+        entry.state = entry.state === 'redone' ? 'needs-you' : 'disagreed'
+      }
+      await redo(rec, chosen.filter((entry) => entry.state === 'disagreed'), reason)
+      return afterChange(rec)
+    })
+  }
+
+  /**
+   * The agent decides disagreed items ONCE more, with the person's reason as
+   * guidance beside the recorded ones. A redo is held aside until agreed.
+   * Without the item's two sides (a restart), or without an answer, the item
+   * is left to the person.
+   */
+  async function redo(rec: WorkspaceRecord, entries: readonly ReviewEntry[], reason: string): Promise<void> {
+    const review = rec.review
+    if (review === null || entries.length === 0) return
+    const items = entries.flatMap((entry) => {
+      const item = review.items.get(entry.id)
+      return item === undefined ? [] : [item]
+    })
+    const recorded = reasonsLookup(rec)
+    const decided =
+      items.length === 0
+        ? { decisions: [], needsYou: [] }
+        : await decideConflicts(rec.slug, items, {
+            merge: deps.mergeIntent,
+            decideFast: deps.decideFast,
+            reasonsFor: async (kind, project) => [
+              `A person disagreed with the earlier decision for this item. Their reason: ${oneLine(reason)}`,
+              ...(await recorded(kind, project)),
+            ],
+            timers: deps.timers,
+            log: deps.log,
+          })
+    for (const entry of entries) {
+      const decision = decided.decisions.find((candidate) => candidate.id === entry.id)
+      if (decision !== undefined) {
+        entry.state = 'redone'
+        entry.redo = { take: decision.take, reason: decision.reason, ...(decision.take === 'file' ? { content: decision.content ?? '' } : {}) }
+        continue
+      }
+      const left = decided.needsYou.find((candidate) => candidate.id === entry.id)
+      entry.state = 'needs-you'
+      entry.suggestion = left?.suggestion === undefined ? null : { ...left.suggestion }
+    }
+  }
+
+  async function reviewDecide(request: WorkspaceReviewDecideRequest): Promise<WorkspaceReviewResult> {
+    return reviewStep(request.slug, async (rec, review) => {
+      const entry = review.entries.find((candidate) => candidate.id === request.id)
+      if (entry === undefined) return refusal(rec, 'not-waiting', WORKSPACE_SYNC_SENTENCES.reviewItemGone(nameIn(rec)))
+      // Only an item held aside can be settled here: its text was never committed.
+      if (!entry.heldHere || entry.state === 'agreed' || entry.state === 'pending') {
+        return refusal(rec, 'not-allowed', WORKSPACE_SYNC_SENTENCES.reviewNotAllowed)
+      }
+      const take = request.take === 'text' ? 'file' : request.take
+      const failed = await settleEntry(rec, entry, take, request.take === 'text' ? request.text : null)
+      if (failed !== null) return failed
+      entry.decided = take
+      return afterChange(rec)
+    })
   }
 
   function status(slug: string): WorkspaceSyncStatus {
@@ -1205,7 +1973,7 @@ export function createWorkspaceSyncEngine(deps: WorkspaceSyncEngineDeps): Worksp
     silenced = true
   }
 
-  return { open, commitAfterTurn, syncNow, resolve, intentMerges, keepIntent, status, forget, quit }
+  return { open, commitAfterTurn, syncNow, resolve, reviewAgree, reviewDisagree, reviewDecide, status, forget, quit }
 }
 
 /** The last part of a CLI stream, for a log line — never the whole thing. */

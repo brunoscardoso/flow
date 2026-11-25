@@ -13,16 +13,35 @@ export const WORKSPACE_SETTINGS_EVENT = 'flow:open-workspace-settings'
 const OPEN_SETTINGS_EVENT = 'flow:open-settings'
 const WORKSPACES_GROUP = 'workspaces'
 
+/**
+ * The Workspace whose review the person asked to see (the review notice names
+ * it). Settings → Workspaces is built lazily, so the section reads this on its
+ * next paint rather than listening for the event itself.
+ */
+let requestedReview: string | null = null
+
+/** The Workspace a notice asked to bring into view, or null. */
+export function requestedReviewFocus(): string | null {
+  return requestedReview
+}
+
+/** The section brought it into view (or it has nothing to show): forget the ask. */
+export function clearReviewFocus(): void {
+  requestedReview = null
+}
+
 /** The slice of `document` this needs — structural, so a test can hand in a fake. */
 export interface EventTargetLike {
-  addEventListener(type: string, listener: () => void): void
-  removeEventListener(type: string, listener: () => void): void
+  addEventListener(type: string, listener: (event: Event) => void): void
+  removeEventListener(type: string, listener: (event: Event) => void): void
   dispatchEvent(event: Event): boolean
 }
 
 /** Forward the notification's action to Settings → Workspaces. Returns the unsubscribe. */
 export function initWorkspaceSettingsLink(target: EventTargetLike): () => void {
-  const listener = (): void => {
+  const listener = (event: Event): void => {
+    const slug = (event as CustomEvent<{ slug?: unknown } | null>).detail?.slug
+    if (typeof slug === 'string' && slug !== '') requestedReview = slug
     target.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { group: WORKSPACES_GROUP } }))
   }
   target.addEventListener(WORKSPACE_SETTINGS_EVENT, listener)

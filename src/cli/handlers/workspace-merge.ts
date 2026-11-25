@@ -151,6 +151,12 @@ export interface SyncAsk {
   base?: string | null;
   /** agentMergeable only: git's author name of the Workspace side's last change to `existingPath`. */
   theirAuthor?: string | null;
+  /**
+   * The outcome the suggestion expects. `'both'` (overlapping-anchors only): two
+   * different features claim the same anchors, so keeping both notes unchanged
+   * is the expected answer. Additive — a consumer that ignores it loses nothing.
+   */
+  suggested?: 'both';
   truncated: boolean;
   /** Every `take` this item accepts (`file` always). */
   options: Take[];
@@ -1025,7 +1031,7 @@ function askOf(
   topic: string,
   path: string,
   existingPath: string,
-  extra: { anchors?: string[]; agentMergeable?: boolean } = {}
+  extra: { anchors?: string[]; agentMergeable?: boolean; suggested?: 'both' } = {}
 ): SyncAsk {
   const { git, repo } = facts;
   const oursBlob = blobAt(git, repo, facts.ours, path);
@@ -1050,6 +1056,7 @@ function askOf(
     ...(extra.agentMergeable === true
       ? { agentMergeable: true as const, base: base.text, theirAuthor: authorAt(git, repo, facts.theirs, existingPath) }
       : {}),
+    ...(extra.suggested === undefined ? {} : { suggested: extra.suggested }),
     truncated: existing.truncated || incoming.truncated || merged.truncated || base.truncated,
     options,
   };
@@ -1190,7 +1197,7 @@ export function inspectMerge(facts: MergeFacts): MergeInspection {
     topic: string,
     path: string,
     existingPath: string,
-    extra: { anchors?: string[]; agentMergeable?: boolean } = {}
+    extra: { anchors?: string[]; agentMergeable?: boolean; suggested?: 'both' } = {}
   ): void => {
     const key = `${path}\0${existingPath}`;
     if (asked.has(key)) return;
@@ -1223,7 +1230,12 @@ export function inspectMerge(facts: MergeFacts): MergeInspection {
       const overlap = ourNew.filter((anchor) => theirNew.has(anchor));
       if (overlap.length > 0) {
         const project = FEATURE_PATH.exec(ourPath)?.[1] ?? '';
-        pushAsk('overlapping-anchors', `${project}: ${overlap.join(', ')}`, ourPath, theirPath, { anchors: overlap });
+        // Two different features (the ids differ here) on the same anchors: keeping both is the expected answer.
+        pushAsk('overlapping-anchors', `${project}: ${overlap.join(', ')}`, ourPath, theirPath, {
+          anchors: overlap,
+          agentMergeable: true,
+          suggested: 'both',
+        });
       }
     }
   }
@@ -1433,7 +1445,7 @@ export function applyResolutions(facts: MergeFacts, planned: readonly PlannedRes
 }
 
 /** What `take` puts at the item's path. */
-function decidedText(facts: MergeFacts, item: SyncAsk | SyncReview, decision: StoredDecision): string | null {
+export function decidedText(facts: MergeFacts, item: SyncAsk | SyncReview, decision: StoredDecision): string | null {
   switch (decision.take) {
     case 'ours':
       return textAt(facts.git, facts.repo, facts.ours, item.path);
@@ -1574,6 +1586,11 @@ export function writeMergeLog(
   ];
   resolutions.forEach((resolution, index) => {
     parts.push(`## ${index + 1}. ${resolution.kind} — ${resolution.path}`, '', describeResolution(resolution), '');
+    // A decision's sides are never copied into the log: the log is committed with the
+    // merge, so this machine's text for an item still under review (or held aside, or
+    // later held back) would reach the team through it before anyone agreed. The
+    // decided file itself is what gets shared, and only once it is agreed.
+    if (resolution.kind === 'decision') return;
     parts.push(sideBlock('This machine', textAt(git, repo, facts.ours, resolution.path), blobAt(git, repo, facts.ours, resolution.path)));
     parts.push(sideBlock('The Workspace', textAt(git, repo, facts.theirs, resolution.path), blobAt(git, repo, facts.theirs, resolution.path)));
   });

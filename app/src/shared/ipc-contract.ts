@@ -106,10 +106,13 @@ import type {
   WorkspaceAnswer,
   WorkspaceResolveRequest,
   WorkspaceResolveResult,
-  WorkspaceIntentMergeSet,
-  WorkspaceIntentMergesRequest,
-  WorkspaceKeepIntentRequest,
-  WorkspaceKeepIntentResult,
+  WorkspaceReviewAgreeRequest,
+  WorkspaceReviewDecideRequest,
+  WorkspaceReviewDisagreeRequest,
+  WorkspaceReviewResult,
+  WorkspaceMergeReasonsRequest,
+  WorkspaceMergeReasonsResult,
+  WorkspaceRemoveMergeReasonRequest,
   WorkspaceCreateRemoteRequest,
   WorkspaceHostTools,
   WorkspaceRemoteResult,
@@ -7058,15 +7061,23 @@ export interface IpcInvokeMap {
    */
   'workspaces:resolve': { request: WorkspaceResolveRequest; response: WorkspaceResolveResult }
   /**
-   * The documents Flow merged in one sync (the "merged two edits"
-   * notification names it) — null when this computer no longer holds it.
+   * The review of an agent-decided merge. `reviewAgree`: agree by items, by
+   * group or to all groups (never items a person must choose for); the agreed
+   * part is shared at once, what nobody has looked at yet held back first — a share that did not go out is
+   * `not-shared`, never reported as done. `reviewDisagree`: a reason is
+   * required; the agent tries once more with it, and a second disagreement
+   * leaves the item to the person. `reviewDecide`: the person settles one item.
    */
-  'workspaces:intentMerges': { request: WorkspaceIntentMergesRequest; response: WorkspaceIntentMergeSet | null }
+  'workspaces:reviewAgree': { request: WorkspaceReviewAgreeRequest; response: WorkspaceReviewResult }
+  'workspaces:reviewDisagree': { request: WorkspaceReviewDisagreeRequest; response: WorkspaceReviewResult }
+  'workspaces:reviewDecide': { request: WorkspaceReviewDecideRequest; response: WorkspaceReviewResult }
   /**
-   * Put a merged document (or all of one sync's) to one text: `ours` is Undo.
-   * A new commit through the CLI, then a sync — never a force push.
+   * The Workspace's shared merge reasons: `mergeReasons` lists the live
+   * recorded decisions; `removeMergeReason` withdraws one (a recorded removal,
+   * never a rewrite) and answers the list as it is afterwards.
    */
-  'workspaces:keepIntent': { request: WorkspaceKeepIntentRequest; response: WorkspaceKeepIntentResult }
+  'workspaces:mergeReasons': { request: WorkspaceMergeReasonsRequest; response: WorkspaceMergeReasonsResult }
+  'workspaces:removeMergeReason': { request: WorkspaceRemoveMergeReasonRequest; response: WorkspaceMergeReasonsResult }
   /**
    * Connecting a Workspace to a shared repository. `hostTools`: which hosts
    * this computer's own signed-in tools can create a repository on, and where
@@ -8230,8 +8241,11 @@ export const IPC_INVOKE_CHANNELS = [
   'workspaces:syncStatus',
   'workspaces:syncNow',
   'workspaces:resolve',
-  'workspaces:intentMerges',
-  'workspaces:keepIntent',
+  'workspaces:reviewAgree',
+  'workspaces:reviewDisagree',
+  'workspaces:reviewDecide',
+  'workspaces:mergeReasons',
+  'workspaces:removeMergeReason',
   'workspaces:hostTools',
   'workspaces:learnConnections',
   'workspaces:connectionsLearningStatus',
@@ -9460,8 +9474,11 @@ export interface FlowWorkspacesApi {
   syncStatus(request: IpcRequest<'workspaces:syncStatus'>): Promise<IpcResponse<'workspaces:syncStatus'>>
   syncNow(request: IpcRequest<'workspaces:syncNow'>): Promise<IpcResponse<'workspaces:syncNow'>>
   resolve(request: IpcRequest<'workspaces:resolve'>): Promise<IpcResponse<'workspaces:resolve'>>
-  intentMerges(request: IpcRequest<'workspaces:intentMerges'>): Promise<IpcResponse<'workspaces:intentMerges'>>
-  keepIntent(request: IpcRequest<'workspaces:keepIntent'>): Promise<IpcResponse<'workspaces:keepIntent'>>
+  reviewAgree(request: IpcRequest<'workspaces:reviewAgree'>): Promise<IpcResponse<'workspaces:reviewAgree'>>
+  reviewDisagree(request: IpcRequest<'workspaces:reviewDisagree'>): Promise<IpcResponse<'workspaces:reviewDisagree'>>
+  reviewDecide(request: IpcRequest<'workspaces:reviewDecide'>): Promise<IpcResponse<'workspaces:reviewDecide'>>
+  mergeReasons(request: IpcRequest<'workspaces:mergeReasons'>): Promise<IpcResponse<'workspaces:mergeReasons'>>
+  removeMergeReason(request: IpcRequest<'workspaces:removeMergeReason'>): Promise<IpcResponse<'workspaces:removeMergeReason'>>
   hostTools(): Promise<IpcResponse<'workspaces:hostTools'>>
   createRemote(request: IpcRequest<'workspaces:createRemote'>): Promise<IpcResponse<'workspaces:createRemote'>>
   setRemote(request: IpcRequest<'workspaces:setRemote'>): Promise<IpcResponse<'workspaces:setRemote'>>

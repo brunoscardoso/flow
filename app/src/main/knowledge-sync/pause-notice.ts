@@ -12,7 +12,7 @@
  */
 
 import type { FlowNotification } from '../../shared/ipc-contract'
-import type { WorkspaceIntentMergeSet, WorkspaceSyncStatus } from '../../shared/workspaces-contract'
+import type { WorkspaceSyncStatus } from '../../shared/workspaces-contract'
 
 // ── Workspace sync ──────────────────────────────────────────────────────────
 
@@ -38,9 +38,24 @@ export function workspaceNotificationRoot(slug: string): string {
   return `workspace:${slug}`
 }
 
+/** FR-13's sentence: how many changes Flow merged, and that nothing is shared before a review. */
+export function reviewNoticeBody(count: number): string {
+  return `Flow merged ${count} ${count === 1 ? 'change' : 'changes'}. Review them before they're shared.`
+}
+
+/** How many changes a review is about: every decided item, every item left for a person, and anything else held aside. */
+export function reviewCount(status: WorkspaceSyncStatus): number {
+  const review = status.review
+  if (review === undefined) return 0
+  const decided = review.groups.reduce((sum, group) => sum + group.count, 0)
+  const listed = new Set([...review.groups.flatMap((group) => group.items.map((item) => item.id)), ...review.needsYou.map((item) => item.id)])
+  return decided + review.needsYou.length + review.held.filter((held) => !listed.has(held.id)).length
+}
+
 /**
  * The notification for a Workspace status, or null when it needs nobody.
- * `paused` (a decision or a merged version), `no-access` (the shared
+ * `review` (an agent's merge waits for a person — FR-13's one notice, which
+ * opens Workspace settings where the review is), `paused` (a decision or a merged version), `no-access` (the shared
  * repository refused this person) and `error` (sync can't run) need a person; the body is the engine's own sentence, which names the Workspace and
  * nothing else (forbidden-pattern #12).
  */
@@ -50,9 +65,22 @@ export function workspacePauseNotification(
   timestamp: string,
   name: string | null = null,
 ): FlowNotification | null {
-  if (status.detail === null) return null
   const label = name !== null && name.trim() !== '' ? name : UNNAMED_WORKSPACE_LABEL
   const detail = { slug }
+  if (status.state === 'review') {
+    if (status.review === undefined) return null
+    return {
+      kind: 'state-change',
+      rootId: workspaceNotificationRoot(slug),
+      label,
+      title: 'Merged changes wait for your review',
+      body: reviewNoticeBody(reviewCount(status)),
+      timestamp,
+      level: 'info',
+      action: { label: 'Review the changes', event: WORKSPACE_SETTINGS_EVENT, detail },
+    }
+  }
+  if (status.detail === null) return null
   if (status.state === 'paused') {
     return {
       kind: 'state-change',
@@ -92,54 +120,6 @@ export function workspacePauseNotification(
   return null
 }
 
-// ── Flow merged two edits (FR-12) ──────────────────────────────────────────
-
-/** The renderer event "Undo" dispatches — puts back this computer's versions. */
-export const WORKSPACE_INTENT_UNDO_EVENT = 'flow:workspace-intent-undo'
-/** The renderer event "See both" dispatches — opens the three-pane view. */
-export const WORKSPACE_INTENT_SEE_BOTH_EVENT = 'flow:workspace-intent-see-both'
-
-/** What a sentence calls the teammate when git did not name them. */
-export const UNNAMED_TEAMMATE = 'a teammate'
-
-/**
- * The ONE notification for one sync's agent merges, in place of the pause it
- * replaced. Words: the documents' own titles and the teammate's git name —
- * never a path, a command or a setting (forbidden-pattern #12).
- */
-export function workspaceIntentMergeNotification(
-  set: WorkspaceIntentMergeSet,
-  timestamp: string,
-  name: string | null = null,
-): FlowNotification | null {
-  const documents = set.documents
-  if (documents.length === 0) return null
-  const label = name !== null && name.trim() !== '' ? name : UNNAMED_WORKSPACE_LABEL
-  const names = [...new Set(documents.map((document) => document.theirName ?? UNNAMED_TEAMMATE))]
-  const who = names.length === 1 ? names[0] : 'your teammates'
-  const detail = { slug: set.slug, mergeId: set.mergeId }
-  const [only] = documents
-  const single = documents.length === 1 && only !== undefined
-  const title = single ? `Flow merged two edits to "${only.title}"` : `Flow merged edits to ${documents.length} documents`
-  const body = single
-    ? `You and ${who} both changed this ${only.kind}. Flow combined them into one version and kept both originals.`
-    : [
-        `You and ${who} both changed these. Flow combined each into one version and kept both originals.`,
-        ...documents.map((document) => `- "${document.title}" (${document.kind})`),
-      ].join('\n')
-  return {
-    kind: 'state-change',
-    rootId: workspaceNotificationRoot(set.slug),
-    label,
-    title,
-    body,
-    timestamp,
-    level: 'info',
-    action: { label: 'Undo', event: WORKSPACE_INTENT_UNDO_EVENT, detail },
-    secondaryAction: { label: 'See both', event: WORKSPACE_INTENT_SEE_BOTH_EVENT, detail },
-  }
-}
-
 export interface WorkspacePauseNotifier {
   /** Fold one status in; answers the notification to raise, or null. */
   observe(slug: string, status: WorkspaceSyncStatus, timestamp: string, name?: string | null): FlowNotification | null
@@ -157,7 +137,9 @@ export function createWorkspacePauseNotifier(): WorkspacePauseNotifier {
   return {
     observe(slug, status, timestamp, name) {
       if (status.state === 'syncing') return null
-      const key = `${status.state}\u0000${status.detail ?? ''}`
+      // A review is announced once per merge: what changes while it waits
+      // (an agree, a share that did not go out) is answered where it was asked.
+      const key = status.state === 'review' ? `review\u0000${status.review?.mergedAt ?? ''}` : `${status.state}\u0000${status.detail ?? ''}`
       const previous = last.get(slug)
       last.set(slug, key)
       if (previous === key) return null

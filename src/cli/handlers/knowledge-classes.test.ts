@@ -117,6 +117,8 @@ describe('classifyKnowledgePath', () => {
     expect(classifyKnowledgePath('projects/backend/brain/index.md', { root: 'workspace' })).toBe('generated');
     expect(classifyKnowledgePath('workspace.json', { root: 'workspace' })).toBe('authored');
     expect(classifyKnowledgePath('links.jsonl', { root: 'workspace' })).toBe('append-only');
+    expect(classifyKnowledgePath('merge-decisions.jsonl', { root: 'workspace' })).toBe('append-only');
+    expect(classifyKnowledgePathDetailed('merge-decisions.jsonl', { root: 'workspace' }).row?.pattern).toBe('/merge-decisions.jsonl');
     expect(classifyKnowledgePath('merges/2026-10-06-abc.md', { root: 'workspace' })).toBe('authored');
     // A personal file dropped at the root by hand is still recognised.
     expect(classifyKnowledgePath('.scratchpad.md', { root: 'workspace' })).toBe('personal');

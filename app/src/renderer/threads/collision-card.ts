@@ -455,7 +455,7 @@ export function initCollisionCard(): void {
 
 let stylesInjected = false
 
-/** The card's styles — shared with the intent-merge view, which draws in the same surface. */
+/** The card's styles. */
 export function injectStyles(): void {
   if (stylesInjected) return
   stylesInjected = true

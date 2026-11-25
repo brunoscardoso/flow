@@ -20,8 +20,8 @@ import {
   type WorkspaceSyncCliRunner,
   type WorkspaceSyncEngine,
 } from './workspace-sync-engine'
-import type { IntentMergeDeps } from './intent-merge'
-import type { WorkspaceIntentMergeSet, WorkspaceSyncStatus } from '../../shared/workspaces-contract'
+import type { DeciderDeps, IntentMergeDeps } from './intent-merge'
+import type { WorkspaceSyncStatus } from '../../shared/workspaces-contract'
 
 /** Node's timers, unref'd: a pending sync never holds the process open. */
 export const realEngineTimers: EngineTimers = {
@@ -62,8 +62,8 @@ export interface WorkspaceSyncWiringDeps {
   runPromotionCli: WorkspaceSyncCliRunner
   /** REQUIRED: the one-shot agent that merges two edits of an intent document. */
   mergeIntent: IntentMergeDeps['merge']
-  /** An agent merged a pause away: raise its one notification. */
-  onIntentMerged: (slug: string, name: string | null, set: WorkspaceIntentMergeSet) => void
+  /** REQUIRED: the fast one-shot agent that sorts a waiting merge's items in batches. */
+  decideFast: DeciderDeps['decideFast']
 }
 
 export function createWorkspaceSync(deps: WorkspaceSyncWiringDeps): WorkspaceSyncEngine {
@@ -78,7 +78,7 @@ export function createWorkspaceSync(deps: WorkspaceSyncWiringDeps): WorkspaceSyn
     onStatus: deps.onStatus,
     runPromotionCli: deps.runPromotionCli,
     mergeIntent: deps.mergeIntent,
-    onIntentMerged: deps.onIntentMerged,
+    decideFast: deps.decideFast,
     log: (message, detail) => console.warn(`[WorkspaceSync] ${message}`, detail ?? {}),
   })
 }

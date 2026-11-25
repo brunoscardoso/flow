@@ -253,4 +253,65 @@ describeWithGit('workspace sync CLI — real CLI, real git, two machines', () =>
     },
     SUITE_TIMEOUT_MS
   );
+  it(
+    'decides a batch with --decisions in one run, refuses a stale batch whole with nothing pushed, and holds and settles an item',
+    () => {
+      const bare = join(sandbox, 'remotes', 'team', 'ws.git');
+      const refs = (): string => git(bare, 'for-each-ref', '--format=%(refname) %(objectname)');
+      expect(workspace(machineA, 'create', '--name', 'Team', '--remote', WORKSPACE_REMOTE, '--json').status).toBe(0);
+      const wsA = join(machineA, 'workspaces', 'team');
+      const plans = ['projects/backend/plans/plan_x_v1.md', 'projects/backend/plans/plan_y_v1.md'];
+      for (const plan of plans) write(wsA, plan, '# Base\n');
+      expect(workspace(machineA, 'sync', '--workspace', 'team', '--json').status).toBe(0);
+      expect(workspace(machineB, 'join', '--remote', WORKSPACE_REMOTE, '--json').status).toBe(0);
+      const wsB = join(machineB, 'workspaces', 'team');
+      for (const plan of plans) write(wsA, plan, '# By A\n');
+      expect(workspace(machineA, 'sync', '--workspace', 'team', '--json').status).toBe(0);
+      for (const plan of plans) write(wsB, plan, '# By B\n');
+      const shown = workspace(machineB, 'sync', '--workspace', 'team', '--json');
+      expect(shown.json).toMatchObject({ state: 'review' });
+      const reviews = (shown.json as { reviews: { id: string; path: string }[] }).reviews;
+      const idOf = (path: string): string => reviews.find((review) => review.path === path)?.id as string;
+      const file = (entries: unknown[]): string => {
+        const path = join(sandbox, `decisions-${entries.length}-${Math.random().toString(16).slice(2)}.json`);
+        writeFileSync(path, JSON.stringify({ decisions: entries }));
+        return path;
+      };
+
+      // One stale id refuses the whole batch: a refusal line, its payload, and nothing published.
+      const before = refs();
+      const stale = workspace(
+        machineB,
+        'sync', '--workspace', 'team', '--json',
+        '--decisions', file([{ id: idOf(plans[0]), take: 'ours' }, { id: 'deadbeef0000', take: 'theirs' }])
+      );
+      expect(stale.status).toBe(1);
+      expect(stale.combined).toContain('workspace refused: stale-decision');
+      expect(stale.json).toMatchObject({ refused: 'stale-decision', stale: ['deadbeef0000'] });
+      expect(refs()).toBe(before);
+      // --hold goes only with --decisions.
+      const loneHold = workspace(machineB, 'sync', '--workspace', 'team', '--hold', idOf(plans[1]), '--json');
+      expect(loneHold.status).toBe(1);
+      expect(loneHold.combined).toContain('workspace refused: sync --hold <ids> goes with --decisions');
+      expect(refs()).toBe(before);
+
+      // A valid batch, one item held: one run, the held path published as the Workspace's version.
+      const merged = workspace(
+        machineB,
+        'sync', '--workspace', 'team', '--json',
+        '--decisions', file([{ id: idOf(plans[0]), take: 'ours' }, { id: idOf(plans[1]), take: 'file', content: '# Redo\n' }]),
+        '--hold', idOf(plans[1])
+      );
+      expect(merged.status).toBe(0);
+      expect(merged.json).toMatchObject({ state: 'synced', pushed: true, heldAside: [{ id: idOf(plans[1]), path: plans[1] }] });
+      expect(git(bare, 'show', `refs/heads/main:${plans[0]}`)).toBe('# By B\n');
+      expect(git(bare, 'show', `refs/heads/main:${plans[1]}`)).toBe('# By A\n');
+
+      const settled = workspace(machineB, 'sync', '--workspace', 'team', '--settle-held', idOf(plans[1]), '--take', 'ours', '--json');
+      expect(settled.status).toBe(0);
+      expect(settled.json).toMatchObject({ state: 'synced', pushed: true, heldAside: [], settled: { path: plans[1], take: 'ours' } });
+      expect(git(bare, 'show', `refs/heads/main:${plans[1]}`)).toBe('# Redo\n');
+    },
+    SUITE_TIMEOUT_MS
+  );
 });

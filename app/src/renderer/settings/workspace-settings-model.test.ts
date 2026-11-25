@@ -447,7 +447,7 @@ describe('the join suggestion', () => {
 function everyString(): string[] {
   const out: string[] = [...FIXED_STRINGS, ...collision.FIXED_STRINGS]
   const { projects: _p, ...summary } = ACME
-  for (const state of ['idle', 'syncing', 'synced', 'paused', 'offline', 'no-access', 'error', 'local-only'] as const) {
+  for (const state of ['idle', 'syncing', 'synced', 'paused', 'offline', 'no-access', 'error', 'local-only', 'review'] as const) {
     for (const last of [null, TWO_MIN_AGO]) out.push(syncLine(status({ state, lastSyncedAt: last }), NOW).text)
   }
   out.push(syncLine(status({ state: 'paused' }), NOW).text)
@@ -516,6 +516,7 @@ describe('the Workspace views write no copy of their own', () => {
     'workspace-settings-section.ts',
     'workspace-dialogs-view.ts',
     join('..', 'threads', 'collision-card.ts'),
+    'merge-review-card.ts',
   ]
   it.each(files)('%s assigns no literal text — every visible string is a model export', (file) => {
     const source = readFileSync(join(__dirname, file), 'utf8')

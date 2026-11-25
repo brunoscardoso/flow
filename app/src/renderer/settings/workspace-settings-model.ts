@@ -61,6 +61,20 @@ export const SYNC_LABEL = 'Sync'
 export const SYNC_NOW_LABEL = 'Sync now'
 export const SYNCING_LABEL = 'Syncing…'
 export const REVIEW_CHANGES_LABEL = 'Review the changes'
+/** `review`: an agent's merge is committed here and waits for a person before anything is shared. */
+export const REVIEW_WAITING_LINE = 'Merged here. Waiting for your review before it is shared with the team.'
+/** After a partial share: what is left waits for a person while the team keeps its version. */
+export const REVIEW_LEFTOVER_LINE = 'Some changes are waiting for your decision. The team keeps its version until then.'
+
+/** Whether a review still holds something no person has settled (the card shows while it does). */
+export function reviewWaits(review: WorkspaceSyncStatus['review']): boolean {
+  if (review === undefined) return false
+  return (
+    review.groups.some((group) => group.items.some((item) => item.state !== 'agreed')) ||
+    review.needsYou.some((entry) => entry.state !== 'agreed') ||
+    review.held.some((held) => held.state !== 'agreed')
+  )
+}
 export const NO_ACCESS_LINE = 'The shared repository did not accept this computer’s git sign-in. Sync waits until it does.'
 
 export const PROJECTS_LABEL = 'Projects'
@@ -114,8 +128,10 @@ export interface SyncLineView {
   tone: SyncTone
   /** "Sync now" can be pressed (not while syncing). */
   canSyncNow: boolean
-  /** A person must choose before sync runs again. */
+  /** A person must choose before sync runs again (the old paused dialog — the fallback when the agent could not run). */
   paused: boolean
+  /** An agent's merge waits for a person's review in the review card. */
+  review?: boolean
   /** The repository holds another Workspace: offer to join it instead. */
   joinInstead?: boolean
 }
@@ -143,6 +159,7 @@ function syncLineOf(status: WorkspaceSyncStatus | null, now: number, syncing: bo
   const last = status.lastSyncedAt
   switch (status.state) {
     case 'synced':
+      if (reviewWaits(status.review)) return { text: REVIEW_LEFTOVER_LINE, tone: 'warning', canSyncNow: true, paused: false, review: true }
       return {
         text: last === null ? 'Up to date' : `Synced ${relativeTime(last, now)}`,
         tone: 'ok',
@@ -158,6 +175,8 @@ function syncLineOf(status: WorkspaceSyncStatus | null, now: number, syncing: bo
       }
     case 'paused':
       return { text: needsYou(waitingCount(status)), tone: 'warning', canSyncNow: true, paused: true }
+    case 'review':
+      return { text: REVIEW_WAITING_LINE, tone: 'warning', canSyncNow: true, paused: false, review: true }
     case 'offline':
       return {
         text: last === null ? 'Offline — will retry' : `Offline — will retry. Last synced ${relativeTime(last, now)}`,

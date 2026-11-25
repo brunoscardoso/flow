@@ -349,4 +349,59 @@ describeWithGit('workspace CLI — real CLI, real git, two machines', () => {
     },
     SUITE_TIMEOUT_MS
   );
+
+  it(
+    'merge-decision record → list → remove through the verb the app calls; a refusal says so on the transcript and writes nothing',
+    () => {
+      expect(workspace(machineA, 'create', '--name', 'Team', '--json').status).toBe(0);
+      const backendA = makeRepo(join(sandbox, 'machine-a', 'code', 'backend'), 'git@github.com:acme/backend.git');
+      expect(workspace(machineA, 'link', '--target', backendA, '--json').status).toBe(0);
+      const record = join(machineA, 'workspaces', 'team', 'merge-decisions.jsonl');
+      const lines = (): string[] => (existsSync(record) ? readFileSync(record, 'utf-8').split('\n').filter((line) => line !== '') : []);
+      // The exact argument shape the app's sync engine sends (`--key=value`, --workspace, no --target).
+      const args = (overrides: Record<string, string> = {}): string[] => {
+        const fields = { kind: 'conflict', project: 'backend', path: 'projects/backend/plans/plan_x_v1.md', take: 'theirs', summary: 'took the Workspace text', reason: 'the shared text is newer', outcome: 'agreed', ...overrides };
+        return ['merge-decision', 'record', '--workspace', 'team', ...Object.entries(fields).map(([key, value]) => `--${key}=${value}`), '--json'];
+      };
+
+      // A refused record: the line on the combined transcript, the vocabulary in the payload…
+      const refused = workspace(machineA, ...args({ take: 'neither' }));
+      expect(refused.status).toBe(1);
+      expect(refused.combined).toContain('workspace refused: invalid-decision-take');
+      expect(refused.json).toMatchObject({ refused: 'invalid-decision-take', valid: ['ours', 'theirs', 'merged', 'file', 'both'] });
+      const unknownProject = workspace(machineA, ...args({ project: 'billing' }));
+      expect(unknownProject.status).toBe(1);
+      expect(unknownProject.combined).toContain('workspace refused: unknown-project');
+      // …and nothing written: the record does not exist yet.
+      expect(lines()).toEqual([]);
+
+      // Recorded (the positive the absence above stands against): the same file, one line.
+      const recorded = workspace(machineA, ...args());
+      expect(recorded.status).toBe(0);
+      expect(recorded.json).toMatchObject({ action: 'merge-decision', op: 'record', recorded: true, decision: { author: 'Test Person', outcome: 'agreed' } });
+      const id = (recorded.json as { id: string }).id;
+      expect(lines()).toHaveLength(1);
+      expect(workspace(machineA, ...args()).json).toMatchObject({ recorded: false, id });
+      expect(lines()).toHaveLength(1);
+
+      const listed = workspace(machineA, 'merge-decision', 'list', '--workspace', 'team', '--json');
+      expect(listed.status).toBe(0);
+      expect(listed.json).toMatchObject({ action: 'merge-decision', decisions: [{ id, reason: 'the shared text is newer' }] });
+
+      // Removed through the verb: a second line, and the list folds it away.
+      const removed = workspace(machineA, 'merge-decision', 'remove', '--id', id, '--workspace', 'team', '--json');
+      expect(removed.json).toMatchObject({ action: 'merge-decision', op: 'remove', recorded: true });
+      expect(lines()).toHaveLength(2);
+      expect(workspace(machineA, 'merge-decision', 'list', '--workspace', 'team', '--json').json).toMatchObject({ decisions: [] });
+      const unknownId = workspace(machineA, 'merge-decision', 'remove', '--id', 'deadbeefdeadbeef', '--workspace', 'team', '--json');
+      expect(unknownId.status).toBe(1);
+      expect(unknownId.combined).toContain('workspace refused: unknown-decision');
+      expect(lines()).toHaveLength(2);
+
+      const noSub = workspace(machineA, 'merge-decision', '--workspace', 'team');
+      expect(noSub.status).toBe(1);
+      expect(noSub.combined).toContain('workspace refused: merge-decision needs record, remove or list');
+    },
+    SUITE_TIMEOUT_MS
+  );
 });

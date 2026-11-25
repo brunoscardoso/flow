@@ -107,6 +107,7 @@ import {
   type KnowledgeRouter,
 } from './knowledge-sync'
 import { registerWorkspaceChannels } from './workspaces/ipc'
+import { createMergeReasons } from './workspaces/merge-reasons'
 import { createWorkspaceRegistry, type WorkspaceRegistry } from './workspaces/workspace-registry'
 import { createHostToolSpawner, createHostTools, type HostToolSpawner } from './workspaces/host-tools'
 import { createWorkspaceRemoteSetup } from './workspaces/workspace-remote'
@@ -125,7 +126,7 @@ import {
   shouldAskBasicDiscovery,
   type BasicDiscovery,
 } from './learn/basic-discovery'
-import { createWorkspacePauseNotifier, workspaceIntentMergeNotification } from './knowledge-sync/pause-notice'
+import { createWorkspacePauseNotifier } from './knowledge-sync/pause-notice'
 import { intentMergePrompt } from './knowledge-sync/intent-merge'
 import { appEntryFor, isAppEntryUrl, opensExternally, shouldBlockNavigation, type AppEntry } from './share/app-entry'
 import { createProjectIds } from './share/share-project-id'
@@ -1022,8 +1023,8 @@ function bootstrapMainProcess(): void {
     },
     // The brief model through the agent manager's one-shot path; a hidden run
     // answers it only through its seam, so no hidden run reaches a real model.
-    mergeIntent: async ({ slug, kind, title, base, ours, theirs, signal }) => {
-      const prompt = intentMergePrompt({ kind, title, base, ours, theirs })
+    mergeIntent: async ({ slug, kind, title, base, ours, theirs, reasons, signal }) => {
+      const prompt = intentMergePrompt({ kind, title, base, ours, theirs, reasons })
       if (process.env['FLOW_E2E'] === '1') {
         const standIn = e2eSeams()?.mergeIntent
         return standIn === undefined ? null : standIn({ projectRoot: app.getPath('home'), prompt, signal })
@@ -1031,9 +1032,15 @@ function bootstrapMainProcess(): void {
       if (agentManager === null) return null
       return agentManager.askMergeModel({ projectRoot: await rootOfWorkspace(slug), prompt, signal })
     },
-    onIntentMerged: (_slug, name, set) => {
-      const notice = workspaceIntentMergeNotification(set, new Date().toISOString(), name)
-      if (notice !== null) broadcastNotification(notice)
+    // The fast model sorts a waiting merge's items in batches (the decider
+    // builds the prompt); a hidden run answers only through its seam.
+    decideFast: async ({ slug, prompt, signal }) => {
+      if (process.env['FLOW_E2E'] === '1') {
+        const standIn = e2eSeams()?.decideFast
+        return standIn === undefined ? null : standIn({ projectRoot: app.getPath('home'), prompt, signal })
+      }
+      if (agentManager === null) return null
+      return agentManager.askFastModel({ projectRoot: await rootOfWorkspace(slug), prompt, signal })
     },
     cwd: app.getPath('home'),
     lastSynced: {
@@ -3634,6 +3641,11 @@ const understandFeature = async (request: {
       ),
     broadcastChanged: (event) => broadcast('workspaces:changed', event),
     sync: workspaceSync,
+    mergeReasons: createMergeReasons({
+      runCli: (cwd, args, options) => runBundledCliCapturing(bundledCli, cwd, args, options),
+      cwd: app.getPath('home'),
+      log: (message, details) => console.warn(`[Workspaces] ${message}`, details),
+    }),
     // Connecting a Workspace to a shared repository: the person's own signed-in
     // `gh` / `az` (never a credential of Flow's), then the CLI's set-remote,
     // then one sync. A hidden end-to-end run never reaches a real host tool:

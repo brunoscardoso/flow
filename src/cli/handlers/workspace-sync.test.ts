@@ -642,8 +642,18 @@ describeWithGit('workspace sync against real git, two machines', () => {
           path: 'projects/backend/brain/features/checkout.md',
           existingPath: 'projects/backend/brain/features/orders.md',
           anchors: ['endpoint:POST /api/orders'],
+          // Agent-mergeable, with the base and the Workspace author; two different features keep both notes.
+          agentMergeable: true,
+          suggested: 'both',
         }),
       ]);
+      // checkout.md is new on this side, so its base is absent (null), but the field is present.
+      expect(asked.asks[0]).toHaveProperty('base', null);
+      expect(asked.asks[0]).toHaveProperty('theirAuthor', 'Test Person');
+      // Both notes' text reaches the agent: the Workspace's note and this machine's.
+      expect(asked.asks[0].existing).toBe(featureNote('feature:backend::orders', 'endpoint:POST /api/orders'));
+      expect(asked.asks[0].incoming).toBe(featureNote('feature:backend::checkout', 'endpoint:POST /api/orders'));
+      expect(asked.asks[0].truncated).toBe(false);
       // Keeping both is "ours" — this machine's file stays as it is.
       expect(sync(flowB, { resolve: { path: 'projects/backend/brain/features/checkout.md', take: 'ours' } })).toMatchObject({ state: 'synced', pushed: true });
       expect(existsSync(join(wsB, 'projects/backend/brain/features/orders.md'))).toBe(true);
@@ -1657,6 +1667,287 @@ describeWithGit('workspace sync against real git, two machines', () => {
       const resolved = sync(flowB, { resolve: { id: fetched.asks[0].id, take: 'theirs' } });
       expect(resolved).toMatchObject({ state: 'synced', pushed: true, decided: [fetched.asks[0].id] });
       expect(read(wsB, decision)).toBe('# DB\n\nA, revised.\n');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  /** N plans changed differently on both machines: B's next sync shows N reviews. */
+  function conflictingPlans(names: readonly string[]): string[] {
+    const paths = names.map((name) => `projects/backend/plans/plan_${name}_v1.md`);
+    for (const path of paths) write(wsA, path, `# ${path}\n\nBase.\n`);
+    sync(flowA);
+    sync(flowB);
+    for (const path of paths) write(wsA, path, `# ${path}\n\nBy A.\n`);
+    sync(flowA);
+    for (const path of paths) write(wsB, path, `# ${path}\n\nBy B.\n`);
+    return paths;
+  }
+
+  function decisionsFile(entries: readonly { id: string; take: string; content?: string }[]): string {
+    const file = join(sandbox, `decisions-${Math.random().toString(16).slice(2)}.json`);
+    writeFileSync(file, JSON.stringify({ decisions: entries }));
+    return file;
+  }
+
+  const onRemote = (path: string): string => git(bare, 'show', `refs/heads/main:${path}`);
+  const mergeCalls = (): number => calls.filter((args) => args.includes('merge') && args.includes('--no-commit')).length;
+
+  it(
+    'applies a whole batch of decisions in ONE merge, and the merge commit names each one and who agreed',
+    () => {
+      const [ours, theirs, written] = conflictingPlans(['bat_one', 'bat_two', 'bat_three']);
+      const shown = sync(flowB);
+      expect(shown.state).toBe('review');
+      expect(shown.reviews).toHaveLength(3);
+      const idOf = (path: string): string => shown.reviews.find((review) => review.path === path)?.id as string;
+      calls = [];
+
+      const merged = sync(flowB, {
+        decisions: decisionsFile([
+          { id: idOf(ours), take: 'ours' },
+          { id: idOf(theirs), take: 'theirs' },
+          { id: idOf(written), take: 'file', content: '# Written\n\nBoth.\n' },
+        ]),
+      });
+      expect(merged).toMatchObject({ state: 'synced', pushed: true, asks: [], reviews: [] });
+      // One merge for the whole batch — not one per decision.
+      expect(mergeCalls()).toBe(1);
+      expect(merged.merge).not.toBeNull();
+      expect(merged.decided.sort()).toEqual([idOf(ours), idOf(theirs), idOf(written)].sort());
+      expect(merged.mergedItems).toEqual(
+        expect.arrayContaining([
+          { id: idOf(ours), path: ours, kind: 'conflict', take: 'ours' },
+          { id: idOf(theirs), path: theirs, kind: 'conflict', take: 'theirs' },
+          { id: idOf(written), path: written, kind: 'conflict', take: 'file' },
+        ])
+      );
+      expect(merged.heldAside).toEqual([]);
+      expect(onRemote(ours)).toBe(`# ${ours}\n\nBy B.\n`);
+      expect(onRemote(theirs)).toBe(`# ${theirs}\n\nBy A.\n`);
+      expect(onRemote(written)).toBe('# Written\n\nBoth.\n');
+      expect(existsSync(join(wsB, '.git', 'plan-flow-sync-decisions.json'))).toBe(false);
+
+      const message = git(wsB, 'log', '-1', '--format=%B', merged.merge?.sha as string);
+      expect(message.split('\n')[0]).toMatch(/^Merge origin\/main/);
+      expect(message).toContain('Decided (3):');
+      expect(message).toContain(`- ${ours}: ours`);
+      expect(message).toContain(`- ${theirs}: theirs`);
+      expect(message).toContain(`- ${written}: file`);
+      expect(message).toContain('Agreed-by: Test Person');
+      expect(message).not.toContain('test@example.com');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'refuses the WHOLE batch when one id is stale or one take is not allowed — nothing written, no merge left, nothing pushed',
+    () => {
+      const [first, second] = conflictingPlans(['stale_one', 'stale_two']);
+      const shown = sync(flowB);
+      expect(shown.reviews).toHaveLength(2);
+      const headBefore = head(wsB);
+      const refsBefore = remoteRefs();
+      const firstId = shown.reviews.find((review) => review.path === first)?.id as string;
+      const secondId = shown.reviews.find((review) => review.path === second)?.id as string;
+      calls = [];
+
+      const stale = refusalOf(
+        () => sync(flowB, { decisions: decisionsFile([{ id: firstId, take: 'ours' }, { id: 'deadbeef0000', take: 'theirs' }]) }),
+        'stale-decision'
+      );
+      expect(stale.payload).toMatchObject({ stale: ['deadbeef0000'] });
+      expect((stale.payload as { waiting: unknown[] }).waiting).toEqual(
+        expect.arrayContaining([
+          { id: firstId, path: first },
+          { id: secondId, path: second },
+        ])
+      );
+      const invalid = refusalOf(
+        () => sync(flowB, { decisions: decisionsFile([{ id: firstId, take: 'ours' }, { id: secondId, take: 'merged' }]) }),
+        'invalid-resolution'
+      );
+      expect(invalid.payload).toMatchObject({ invalid: [{ id: secondId, path: second, take: 'merged', options: ['ours', 'theirs', 'file'] }] });
+      // Malformed entries are refused before anything runs.
+      refusalOf(() => sync(flowB, { decisions: decisionsFile([{ id: firstId, take: 'file' }]) }), 'invalid-resolution');
+      refusalOf(() => sync(flowB, { decisions: decisionsFile([{ id: firstId, take: 'ours' }, { id: firstId, take: 'theirs' }]) }), 'invalid-resolution');
+      refusalOf(() => sync(flowB, { hold: [firstId] }), 'invalid-resolution');
+
+      // The merge really ran for the refused batches (the positive), and left nothing behind (the absence).
+      expect(calls.some((args) => args.includes('merge') && args.includes('--no-commit'))).toBe(true);
+      expect(existsSync(join(wsB, '.git', 'MERGE_HEAD'))).toBe(false);
+      expect(existsSync(join(wsB, '.git', 'plan-flow-sync-decisions.json'))).toBe(false);
+      expect(existsSync(join(wsB, '.git', 'plan-flow-held.json'))).toBe(false);
+      expect(head(wsB)).toBe(headBefore);
+      expect(read(wsB, first)).toBe(`# ${first}\n\nBy B.\n`);
+      expect(calls.some((args) => args.includes('push'))).toBe(false);
+      expect(remoteRefs()).toBe(refsBefore);
+
+      // The same items still decide in one valid batch afterwards.
+      const merged = sync(flowB, { decisions: decisionsFile([{ id: firstId, take: 'ours' }, { id: secondId, take: 'theirs' }]) });
+      expect(merged).toMatchObject({ state: 'synced', pushed: true });
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    '--no-push commits the merge here, says it waits for review, and leaves the remote as it was',
+    () => {
+      const [only] = conflictingPlans(['local_one']);
+      const shown = sync(flowB);
+      const id = shown.reviews[0].id;
+      const refsBefore = remoteRefs();
+      const headBefore = head(wsB);
+      calls = [];
+
+      const local = sync(flowB, { push: false, decisions: decisionsFile([{ id, take: 'ours' }]) });
+      // The merge is committed on this machine (the positive)…
+      expect(local).toMatchObject({ state: 'merged-local', awaitingReview: true, pushed: false, ahead: 2 });
+      expect(local.merge).not.toBeNull();
+      expect(head(wsB)).toBe(local.merge?.sha);
+      expect(head(wsB)).not.toBe(headBefore);
+      expect(local.mergedItems).toEqual([{ id, path: only, kind: 'conflict', take: 'ours' }]);
+      // …and nothing left the machine (the absence).
+      expect(calls.some((args) => args.includes('push'))).toBe(false);
+      expect(remoteRefs()).toBe(refsBefore);
+
+      // An ordinary run (no decisions) that merges with --no-push says the same.
+      write(wsA, 'projects/backend/plans/plan_elsewhere_v1.md', '# Elsewhere\n');
+      sync(flowA);
+      const ordinary = sync(flowB, { push: false });
+      // The open review is still reported (the first merge's decided item); this merge decided nothing new.
+      expect(ordinary).toMatchObject({ state: 'merged-local', awaitingReview: true, pushed: false, mergedItems: [{ id, path: only, kind: 'conflict', take: 'ours' }] });
+      expect(ordinary.merge).not.toBeNull();
+      const pushed = sync(flowB, { agreed: true });
+      expect(pushed).toMatchObject({ pushed: true, ahead: 0 });
+      expect(onRemote(only)).toBe(`# ${only}\n\nBy B.\n`);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'holds an item aside: the push publishes the Workspace\'s version there, this machine\'s text stays in .git until it is settled',
+    () => {
+      const [agreed, pending] = conflictingPlans(['hold_one', 'hold_two']);
+      const shown = sync(flowB);
+      const agreedId = shown.reviews.find((review) => review.path === agreed)?.id as string;
+      const pendingId = shown.reviews.find((review) => review.path === pending)?.id as string;
+
+      const merged = sync(flowB, {
+        decisions: decisionsFile([
+          { id: agreedId, take: 'ours' },
+          { id: pendingId, take: 'file', content: '# Redo\n\nNot agreed yet.\n' },
+        ]),
+        hold: [pendingId],
+      });
+      // Pushed (the positive): the agreed item is published as decided…
+      expect(merged).toMatchObject({ state: 'synced', pushed: true });
+      expect(onRemote(agreed)).toBe(`# ${agreed}\n\nBy B.\n`);
+      // …and the held item is published ONLY as the Workspace's version.
+      expect(onRemote(pending)).toBe(`# ${pending}\n\nBy A.\n`);
+      const grep = spawnSync('git', ['grep', '-l', 'Not agreed yet', 'refs/heads/main'], { cwd: bare, encoding: 'utf-8', env: process.env });
+      expect(grep.status).toBe(1); // git grep: 1 = searched, nothing found
+      expect(grep.stdout.trim()).toBe('');
+      // The merge log is committed with the merge: it names the decisions but never copies
+      // this machine's text, which would publish the held item's own version through it.
+      const logs = spawnSync('git', ['ls-tree', '-r', '--name-only', 'refs/heads/main', 'merges/'], { cwd: bare, encoding: 'utf-8', env: process.env });
+      expect(logs.stdout.trim()).not.toBe('');
+      const leaked = spawnSync('git', ['grep', '-l', '-F', 'By B.', 'refs/heads/main', '--', 'merges/'], { cwd: bare, encoding: 'utf-8', env: process.env });
+      expect(leaked.status).toBe(1);
+      expect(read(wsB, pending)).toBe(`# ${pending}\n\nBy A.\n`);
+      expect(merged.heldAside).toEqual([{ id: pendingId, path: pending, kind: 'conflict', heldAt: NOW.toISOString() }]);
+      expect(merged.mergedItems).toEqual(expect.arrayContaining([{ id: pendingId, path: pending, kind: 'conflict', take: 'theirs', held: true }]));
+      const store = JSON.parse(readFileSync(join(wsB, '.git', 'plan-flow-held.json'), 'utf-8')) as { version: number; held: { id: string; text: string }[] };
+      expect(store).toMatchObject({ version: 1, held: [{ id: pendingId, text: '# Redo\n\nNot agreed yet.\n' }] });
+      expect(git(wsB, 'log', '-1', '--format=%B', merged.merge?.sha as string)).toContain(`- ${pending}: held aside`);
+
+      // A later ordinary sync still never publishes it, and every result lists it.
+      const later = sync(flowB);
+      expect(later.heldAside).toEqual([{ id: pendingId, path: pending, kind: 'conflict', heldAt: NOW.toISOString() }]);
+      expect(onRemote(pending)).toBe(`# ${pending}\n\nBy A.\n`);
+
+      // An unknown id is refused with what IS held, and nothing is pushed.
+      const refsBefore = remoteRefs();
+      calls = [];
+      const unknown = refusalOf(() => sync(flowB, { settleHeld: { id: 'deadbeef0000', take: 'ours' } }), 'unknown-held');
+      expect(unknown.payload).toMatchObject({ id: 'deadbeef0000', held: [{ id: pendingId, path: pending }] });
+      expect(calls.some((args) => args.includes('push'))).toBe(false);
+      expect(remoteRefs()).toBe(refsBefore);
+
+      // Settled: the held text becomes an ordinary commit, and is pushed.
+      const settled = sync(flowB, { settleHeld: { id: pendingId, take: 'ours' } });
+      expect(settled).toMatchObject({ state: 'synced', pushed: true, heldAside: [], settled: { id: pendingId, path: pending, take: 'ours' } });
+      expect(settled.settled?.sha).toEqual(expect.any(String));
+      expect(git(wsB, 'log', '-1', '--format=%s', settled.settled?.sha as string).trim()).toBe(`knowledge: settle ${pending}`);
+      expect(onRemote(pending)).toBe('# Redo\n\nNot agreed yet.\n');
+      expect(existsSync(join(wsB, '.git', 'plan-flow-held.json'))).toBe(false);
+      expect(sync(flowA)).toMatchObject({ state: 'synced' });
+      expect(read(wsA, pending)).toBe('# Redo\n\nNot agreed yet.\n');
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  it(
+    'an open review is never published without --agreed; --hold-back puts a disagreed item back to the Workspace\'s version',
+    () => {
+      const [kept, disputed] = conflictingPlans(['review_one', 'review_two']);
+      const shown = sync(flowB);
+      const keptId = shown.reviews.find((review) => review.path === kept)?.id as string;
+      const disputedId = shown.reviews.find((review) => review.path === disputed)?.id as string;
+      const refsBefore = remoteRefs();
+
+      const local = sync(flowB, {
+        push: false,
+        decisions: decisionsFile([
+          { id: keptId, take: 'ours' },
+          { id: disputedId, take: 'file', content: '# Agent text\n' },
+        ]),
+      });
+      expect(local).toMatchObject({ state: 'merged-local', awaitingReview: true });
+      const record = JSON.parse(readFileSync(join(wsB, '.git', 'plan-flow-review.json'), 'utf-8')) as { items: { id: string; merge: string }[] };
+      expect(record.items.map((entry) => entry.id).sort()).toEqual([keptId, disputedId].sort());
+      expect(record.items[0].merge).toBe(local.merge?.sha);
+
+      // An ordinary sync that WOULD push (a restart, a terminal run): it runs (the positive)…
+      calls = [];
+      write(wsB, 'projects/backend/resources/later.md', 'later\n');
+      const ordinary = sync(flowB);
+      expect(ordinary.committed).not.toBeNull();
+      expect(calls.some((args) => args.includes('fetch'))).toBe(true);
+      expect(ordinary).toMatchObject({ state: 'merged-local', awaitingReview: true, pushed: false });
+      expect(ordinary.mergedItems.map((item) => item.id).sort()).toEqual([keptId, disputedId].sort());
+      // …and publishes nothing (the absence).
+      expect(calls.some((args) => args.includes('push'))).toBe(false);
+      expect(remoteRefs()).toBe(refsBefore);
+
+      // An unknown id is refused, nothing written.
+      const unknown = refusalOf(() => sync(flowB, { holdBack: ['deadbeef0000'], commitOnly: true }), 'unknown-review-item');
+      expect(unknown.payload).toMatchObject({ unknown: ['deadbeef0000'] });
+
+      // Held back: the Workspace's version is committed there, this machine's own text aside.
+      const heldBack = sync(flowB, { holdBack: [disputedId], commitOnly: true });
+      expect(heldBack.heldBack?.ids).toEqual([disputedId]);
+      expect(git(wsB, 'log', '-1', '--format=%s', heldBack.heldBack?.sha as string).trim()).toBe(`knowledge: hold back ${disputed}`);
+      expect(read(wsB, disputed)).toBe(`# ${disputed}\n\nBy A.\n`);
+      expect(heldBack.heldAside).toEqual([{ id: disputedId, path: disputed, kind: 'conflict', heldAt: NOW.toISOString() }]);
+      const store = JSON.parse(readFileSync(join(wsB, '.git', 'plan-flow-held.json'), 'utf-8')) as { held: { id: string; text: string }[] };
+      expect(store.held).toEqual([expect.objectContaining({ id: disputedId, text: `# ${disputed}\n\nBy B.\n` })]);
+      expect(remoteRefs()).toBe(refsBefore);
+      // Holding it back again is refused: it no longer waits for review.
+      refusalOf(() => sync(flowB, { holdBack: [disputedId], commitOnly: true }), 'unknown-review-item');
+
+      // Agreed: published, the record cleared — the held item only as the Workspace's version.
+      const agreed = sync(flowB, { agreed: true });
+      expect(agreed).toMatchObject({ state: 'synced', pushed: true });
+      expect(onRemote(kept)).toBe(`# ${kept}\n\nBy B.\n`);
+      expect(onRemote(disputed)).toBe(`# ${disputed}\n\nBy A.\n`);
+      expect(existsSync(join(wsB, '.git', 'plan-flow-review.json'))).toBe(false);
+      const grep = spawnSync('git', ['grep', '-l', 'Agent text', 'refs/heads/main'], { cwd: bare, encoding: 'utf-8', env: process.env });
+      expect(grep.status).toBe(1);
+
+      // The redo settles the held item later as an ordinary change.
+      const settled = sync(flowB, { settleHeld: { id: disputedId, take: 'ours' } });
+      expect(settled).toMatchObject({ pushed: true, heldAside: [] });
+      expect(onRemote(disputed)).toBe(`# ${disputed}\n\nBy B.\n`);
     },
     TEST_TIMEOUT_MS
   );

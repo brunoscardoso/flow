@@ -60,6 +60,7 @@ import {
   PROJECTS_LABEL,
   RENAME_LABEL,
   REVIEW_CHANGES_LABEL,
+  reviewWaits,
   SAME_PROJECT_LABEL,
   SHARED_REPOSITORY_LABEL,
   SYNC_LABEL,
@@ -88,6 +89,8 @@ import {
 } from './workspace-settings-model'
 import { workspaceScope } from '../threads/workspace-scope'
 import { WORKSPACE_SYNC_EVENT } from '../threads/collision-card-model'
+import { MergeReviewCard } from './merge-review-card'
+import { WORKSPACE_SETTINGS_EVENT, clearReviewFocus, requestedReviewFocus } from './workspace-settings-link'
 import { CHANGE_REMOTE_LABEL, CONNECT_REMOTE_LABEL, DISCONNECT_REMOTE_LABEL } from './workspace-remote-model'
 import { BRANCH_LABEL, CHANGE_BRANCH_LABEL, NO_BRANCH_YET } from './workspace-branch-model'
 
@@ -103,6 +106,8 @@ export class WorkspaceSettingsSection {
   #open: OpenProject[] = []
   #sync = new Map<string, WorkspaceSyncStatus>()
   #syncing = new Set<string>()
+  /** One review card per Workspace, kept across repaints so a half-typed reason survives. */
+  #reviewCards = new Map<string, MergeReviewCard>()
   /** Per-Workspace line after an action (what was added, what refused). */
   #notices = new Map<string, string>()
   /** The Workspace whose "Move a project here" picker is open. */
@@ -173,10 +178,18 @@ export class WorkspaceSettingsSection {
         api.onSyncChanged((event) => {
           if (this.#disposed) return
           this.#sync.set(event.slug, event.status)
+          // The card redraws itself only when the review part changed.
+          this.#reviewCards.get(event.slug)?.update(event.status, this.#hasRemote(event.slug))
           if (this.element.isConnected) this.#render()
         }),
       )
     }
+    // The review notice asks for a Workspace's review while this section is alive: paint, then bring it into view.
+    const focusReview = (): void => {
+      if (!this.#disposed && this.element.isConnected) requestAnimationFrame(() => this.#render())
+    }
+    document.addEventListener(WORKSPACE_SETTINGS_EVENT, focusReview)
+    this.#unsubscribe.push(() => document.removeEventListener(WORKSPACE_SETTINGS_EVENT, focusReview))
     this.#clock = setInterval(() => {
       if (this.#onScreen() && !this.#busy) this.#render()
     }, RELATIVE_TIME_REFRESH_MS)
@@ -203,6 +216,47 @@ export class WorkspaceSettingsSection {
     this.#unsubscribe = []
     if (this.#clock !== null) clearInterval(this.#clock)
     this.#clock = null
+    for (const card of this.#reviewCards.values()) card.dispose()
+    this.#reviewCards.clear()
+  }
+
+  #hasRemote(slug: string): boolean {
+    return this.#list?.workspaces.find((workspace) => workspace.slug === slug)?.remote != null
+  }
+
+  #reviewCard(slug: string): MergeReviewCard {
+    let card = this.#reviewCards.get(slug)
+    if (card === undefined) {
+      card = new MergeReviewCard({
+        slug,
+        onStatus: (status) => {
+          this.#sync.set(slug, status)
+          if (!this.#disposed && this.element.isConnected) this.#render()
+        },
+      })
+      this.#reviewCards.set(slug, card)
+    }
+    return card
+  }
+
+  /** A notice asked for this Workspace's review: once its card has a review on screen, bring it into view. */
+  #applyReviewFocus(): void {
+    const slug = requestedReviewFocus()
+    if (slug === null || this.#list === null) return
+    if (!this.#list.workspaces.some((workspace) => workspace.slug === slug)) {
+      clearReviewFocus()
+      return
+    }
+    // Not read yet: wait for the status (a later paint tries again).
+    if (!this.#sync.has(slug)) return
+    const card = this.#reviewCards.get(slug)
+    requestAnimationFrame(() => {
+      if (card?.focusReview() !== true) {
+        // No review to show (already settled): the section itself is what the person sees.
+        this.element.scrollIntoView({ block: 'start' })
+      }
+    })
+    clearReviewFocus()
   }
 
   /** Re-read everything the section shows, then paint. */
@@ -236,9 +290,14 @@ export class WorkspaceSettingsSection {
     // No Flow folder block: each Workspace card already says where its things
     // live (user, 2026-10-06).
 
+    // A notice asked for a Workspace's review: never leave that Workspace folded.
+    const focus = requestedReviewFocus()
+    if (focus !== null) this.#expanded.add(focus)
+
     if (list.workspaces.length === 0) this.#body.appendChild(this.#line(NO_WORKSPACES_LINE, 'fl-wss-muted'))
     for (const workspace of list.workspaces) this.#body.appendChild(this.#workspaceCard(workspace))
     if (list.unreadable.length > 0) this.#body.appendChild(this.#line(UNREADABLE_LINE, 'fl-wss-muted'))
+    this.#applyReviewFocus()
   }
 
   #workspaceCard(workspace: WorkspaceListing): HTMLElement {
@@ -360,6 +419,9 @@ export class WorkspaceSettingsSection {
     dot.setAttribute('aria-hidden', 'true')
     statusLine.append(dot, status)
     const syncActions: HTMLElement[] = []
+    // An agent's merge waiting for review is settled in the review card under
+    // the facts; "Review the changes" (the old dialog) is only the fallback
+    // for a pause the agent could not run on.
     if (view.sync.paused) {
       syncActions.push(
         this.#button(REVIEW_CHANGES_LABEL, () => {
@@ -382,6 +444,11 @@ export class WorkspaceSettingsSection {
     facts.appendChild(this.#fact('sync', SYNC_LABEL, [statusLine], syncActions))
     card.appendChild(facts)
 
+    // The review of an agent-decided merge, and the Workspace's shared merge reasons.
+    const review = this.#reviewCard(view.slug)
+    review.update(this.#sync.get(view.slug) ?? null, view.hasRemote)
+    if (review.visible) card.appendChild(review.element)
+
     card.appendChild(this.#projects(view))
     const notice = this.#notices.get(view.slug)
     if (notice !== undefined) card.appendChild(this.#line(notice, 'fl-wss-notice'))
@@ -390,7 +457,8 @@ export class WorkspaceSettingsSection {
 
   /** Default and the Workspace being looked at are open; any other is folded until shown. */
   #isExpanded(slug: string, isDefault: boolean): boolean {
-    return isDefault || slug === workspaceScope.state.currentSlug || this.#expanded.has(slug)
+    // A Workspace with a merge waiting for review is always open: folded, the review would be out of sight.
+    return isDefault || slug === workspaceScope.state.currentSlug || this.#expanded.has(slug) || reviewWaits(this.#sync.get(slug)?.review)
   }
 
   /** One row of the facts grid. `part` names the row for the page's own wiring. */

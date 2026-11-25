@@ -1,5 +1,5 @@
 /**
- * `planflow-ai workspace <create|link|join|status|link-knowledge|links|describe|sync|move-flow-folder|migrate|rename|move-project|delete|set-default|set-remote|unset-remote|promote>` — the ONE door onto
+ * `planflow-ai workspace <create|link|join|status|link-knowledge|links|merge-decision|describe|sync|move-flow-folder|migrate|rename|move-project|delete|set-default|set-remote|unset-remote|promote>` — the ONE door onto
  * Workspaces, used by the terminal, the app and the heartbeat daemon alike.
  *
  * THIN ON PURPOSE. Every decision — where a Workspace lives, which project a
@@ -106,6 +106,12 @@ import {
   type LinkKnowledgeResult,
   type LinksListResult,
 } from '../handlers/workspace-links.js';
+import {
+  listMergeDecisions,
+  recordMergeDecision,
+  type MergeDecisionsListResult,
+  type RecordMergeDecisionResult,
+} from '../handlers/workspace-merge-decisions.js';
 import { promoteWorkspace, type PromoteResult } from '../handlers/workspace-promote.js';
 import {
   describeLearnConnections,
@@ -128,6 +134,7 @@ export const WORKSPACE_ACTIONS = [
   'status',
   'link-knowledge',
   'links',
+  'merge-decision',
   'describe',
   'sync',
   'move-flow-folder',
@@ -170,6 +177,16 @@ export interface WorkspaceCommandOptions {
   kind?: string;
   /** link-knowledge: one line of why/how. */
   note?: string;
+  /** merge-decision: record | remove | list. */
+  sub?: string;
+  /** merge-decision record: the path the decision settled (Workspace-relative). */
+  path?: string;
+  /** merge-decision record: one line of what was taken. */
+  summary?: string;
+  /** merge-decision record: one line of why (may be empty for an agreed decision). remove: why it is withdrawn. */
+  reason?: string;
+  /** merge-decision record: agreed | disagreed. */
+  outcome?: string;
   /** describe: the project's description. */
   text?: string;
   /** describe: only write when the project has no description yet. */
@@ -202,6 +219,16 @@ export interface WorkspaceCommandOptions {
   putBack?: string;
   /** sync --put-back: sha256 of the text the document holds now, as last seen. */
   expect?: string;
+  /** sync: a JSON file of many decisions `{ decisions: [{ id, take, content? }] }`, applied in one merge. */
+  decisions?: string;
+  /** sync --decisions: comma-separated ids held aside — the merge takes the Workspace's version there. */
+  hold?: string;
+  /** sync: settle this held item (with --take ours | theirs | file:<path>). */
+  settleHeld?: string;
+  /** sync: comma-separated ids of the open review put back to the Workspace's version, this machine's text held aside. */
+  holdBack?: string;
+  /** sync: a person agreed to the open review — this run may publish it. */
+  agreed?: boolean;
   /** set-remote: a person chose to change the shared repository the Workspace already has. */
   replace?: boolean;
   /** set-branch (required), set-remote, join: the branch the Workspace syncs on. */
@@ -232,6 +259,8 @@ type WorkspaceResult =
   | StatusTargetResult
   | LinkKnowledgeResult
   | LinksListResult
+  | RecordMergeDecisionResult
+  | MergeDecisionsListResult
   | DescribeResult
   | SyncResult
   | SyncAllResult
@@ -324,6 +353,36 @@ function dispatch(action: WorkspaceAction, options: WorkspaceCommandOptions, run
         ...(options.workspace === undefined ? {} : { workspace: options.workspace }),
         ...(options.project === undefined ? {} : { project: options.project }),
       });
+    case 'merge-decision': {
+      const scope = {
+        ...context,
+        ...(options.target === undefined ? {} : { target: options.target }),
+        ...(options.workspace === undefined ? {} : { workspace: options.workspace }),
+      };
+      const sub = options.sub?.trim();
+      if (sub === 'list') {
+        return listMergeDecisions({
+          ...scope,
+          ...(options.project === undefined ? {} : { project: options.project }),
+          ...(options.kind === undefined ? {} : { kind: options.kind }),
+        });
+      }
+      if (sub !== 'record' && sub !== 'remove') {
+        throw new WorkspaceRefusalLine("merge-decision needs record, remove or list — e.g. 'workspace merge-decision list'");
+      }
+      return recordMergeDecision({
+        ...scope,
+        action: sub,
+        ...(options.kind === undefined ? {} : { kind: options.kind }),
+        ...(options.project === undefined ? {} : { project: options.project }),
+        ...(options.path === undefined ? {} : { path: options.path }),
+        ...(options.take === undefined ? {} : { take: options.take }),
+        ...(options.summary === undefined ? {} : { summary: options.summary }),
+        ...(options.reason === undefined ? {} : { reason: options.reason }),
+        ...(options.outcome === undefined ? {} : { outcome: options.outcome }),
+        ...(options.id === undefined ? {} : { id: options.id }),
+      });
+    }
     case 'describe':
       return describeProject({
         ...context,
@@ -439,17 +498,58 @@ function dispatchSync(options: WorkspaceCommandOptions, runtime: WorkspaceRuntim
     ...(runtime.deps === undefined ? {} : { deps: runtime.deps }),
     ...(options.message === undefined ? {} : { message: options.message }),
     ...(options.commitOnly === true ? { commitOnly: true } : {}),
+    ...(options.agreed === true ? { agreed: true } : {}),
     // Each step on stderr as it starts: when the app stops a run at its time
     // limit, it still has these, so the last line names the step that hung.
     trace: (line: string) => process.stderr.write(`${line}\n`),
   };
   const deciding = options.resolve !== undefined || options.id !== undefined;
   const puttingBack = options.putBack !== undefined;
+  const batching = options.decisions !== undefined;
+  const settling = options.settleHeld !== undefined;
+  const holdingBack = options.holdBack !== undefined;
   if (options.all === true) {
-    if (options.workspace !== undefined || deciding || puttingBack) {
-      throw new WorkspaceRefusalLine('sync --all syncs every Workspace — it takes neither --workspace nor --resolve/--id');
+    if (options.workspace !== undefined || deciding || puttingBack || batching || settling || holdingBack || options.hold !== undefined || options.agreed === true) {
+      throw new WorkspaceRefusalLine('sync --all syncs every Workspace — it takes neither --workspace nor --resolve/--id/--decisions/--settle-held/--hold-back/--agreed');
     }
     return syncAllWorkspaces(shared);
+  }
+  if (options.hold !== undefined && !batching) {
+    throw new WorkspaceRefusalLine('sync --hold <ids> goes with --decisions <file> — the merge it holds items aside in');
+  }
+  if (batching) {
+    if (deciding || puttingBack || settling || options.take !== undefined || options.commitOnly === true) {
+      throw new WorkspaceRefusalLine('sync --decisions is its own sync — it takes no --resolve/--id/--take, no --put-back, no --settle-held and no --commit-only');
+    }
+    return syncWorkspace({
+      ...shared,
+      ...(options.workspace === undefined ? {} : { workspace: options.workspace }),
+      decisions: options.decisions as string,
+      ...(options.hold === undefined ? {} : { hold: options.hold.split(',') }),
+    });
+  }
+  if (holdingBack) {
+    if (deciding || puttingBack || batching || settling || options.take !== undefined) {
+      throw new WorkspaceRefusalLine('sync --hold-back <ids> is its own sync — it takes no --resolve/--id/--take, no --put-back, no --decisions and no --settle-held');
+    }
+    return syncWorkspace({
+      ...shared,
+      ...(options.workspace === undefined ? {} : { workspace: options.workspace }),
+      holdBack: (options.holdBack as string).split(','),
+    });
+  }
+  if (settling) {
+    if (deciding || puttingBack) {
+      throw new WorkspaceRefusalLine('sync --settle-held is its own sync — it takes no --resolve/--id and no --put-back');
+    }
+    if (options.take === undefined) {
+      throw new WorkspaceRefusalLine('sync --settle-held <id> needs --take ours|theirs|file:<path>');
+    }
+    return syncWorkspace({
+      ...shared,
+      ...(options.workspace === undefined ? {} : { workspace: options.workspace }),
+      settleHeld: { id: options.settleHeld as string, take: options.take },
+    });
   }
   if (options.commitOnly === true && deciding) {
     throw new WorkspaceRefusalLine('sync --commit-only commits and nothing else — it takes no --resolve/--id');
@@ -493,6 +593,9 @@ function renderSync(result: SyncResult): string {
   if (result.pulled > 0) parts.push(`pulled ${result.pulled} commit(s)`);
   if (result.resolutions.length > 0) parts.push(`${result.resolutions.length} merge(s) recorded`);
   if (result.pushed) parts.push('pushed');
+  if (result.settled !== undefined) parts.push(`settled ${result.settled.path}`);
+  if (result.state === 'merged-local') parts.push(`merged here, not pushed — ${result.mergedItems.length} decision(s) wait for review`);
+  if (result.heldAside.length > 0) parts.push(`${result.heldAside.length} held aside`);
   if (result.asks.length > 0) parts.push(`${result.asks.length} need a decision`);
   if (result.reviews.length > 0) parts.push(`${result.reviews.length} need a merged version`);
   if (result.rules.copied.length > 0) parts.push(`team rules copied into ${result.rules.copied.length} checkout(s)`);
@@ -539,6 +642,18 @@ function renderHuman(result: WorkspaceResult): string {
       const listed = result as LinksListResult;
       if (listed.links.length === 0) return `workspace: no links in ${listed.workspace.name}${listed.project === null ? '' : ` for ${listed.project}`}`;
       return listed.links.map((link) => `${describeLink(link)}${link.note === undefined ? '' : ` — ${link.note}`}`).join('\n');
+    }
+    case 'merge-decision': {
+      if ('decisions' in result) {
+        const listed = result as MergeDecisionsListResult;
+        if (listed.decisions.length === 0) return `workspace: no merge decisions in ${listed.workspace.name}`;
+        return listed.decisions
+          .map((entry) => `${entry.id} ${entry.outcome} ${entry.kind} ${entry.project}/${entry.path} (${entry.take}) — ${entry.summary}${entry.reason === '' ? '' : ` — ${entry.reason}`}`)
+          .join('\n');
+      }
+      const written = result as RecordMergeDecisionResult;
+      if (written.op === 'remove') return `workspace: merge decision ${written.id} ${written.recorded ? 'removed' : 'was already removed'}`;
+      return `workspace: merge decision ${written.id} ${written.recorded ? 'recorded' : written.removed ? 'was removed earlier, so it stays removed' : 'already recorded'}`;
     }
     case 'describe': {
       const described = result as DescribeResult;
