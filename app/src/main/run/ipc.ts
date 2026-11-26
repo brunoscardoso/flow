@@ -9,14 +9,19 @@
 
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 
-import type { IpcInvokeChannel, IpcRequest, IpcResponse } from '../../shared/ipc-contract'
+import type { IpcInvokeChannel, IpcRequest, IpcResponse, ThreadDataVolumesSummary } from '../../shared/ipc-contract'
 import {
   parseRunSaveSteps,
+  type RunDockerElsewhere,
   type RunGroupState,
+  type RunKeptData,
+  type RunOpenDockerAnswer,
   type RunResolution,
   type RunSaveChange,
   type RunScope,
   type RunSuggestion,
+  type RunThreadData,
+  type RunThreadDataAnswer,
   type RunView,
 } from '../../shared/run-setup'
 import { timed } from '../ipc/slow-handler'
@@ -24,7 +29,7 @@ import { RunSetupError } from './run-setup-store'
 import { idleGroupState, type RunSupervisor } from './run-supervisor'
 
 export interface RunChannelDependencies {
-  supervisor: Pick<RunSupervisor, 'start' | 'reload' | 'stop' | 'apply' | 'state' | 'states' | 'onUpdated' | 'runOnce'>
+  supervisor: Pick<RunSupervisor, 'start' | 'startDocker' | 'reload' | 'stop' | 'apply' | 'state' | 'states' | 'onUpdated' | 'runOnce'>
   setups: {
     resolve(scope: RunScope): Promise<RunResolution>
     save(scope: RunScope, change: RunSaveChange): Promise<void>
@@ -38,6 +43,38 @@ export interface RunChannelDependencies {
   /** REQUIRED: only the app window's own top frame may drive a Run. */
   isTrustedSender: (event: IpcMainInvokeEvent) => boolean
   broadcastUpdated: (state: RunGroupState) => void
+  /**
+   * The Manage containers panel, the thread list's live mark and the Run
+   * menu's Docker section: read while on screen, Restart, and Reset (which
+   * runs nothing unless confirmed).
+   */
+  threadDocker: {
+    read(threadId: string): Promise<RunThreadData | null>
+    /** Whose data runs instead of this conversation's — asked when the Run menu opens. */
+    elsewhere(scope: RunScope): Promise<RunDockerElsewhere | null>
+    restart(threadId: string): Promise<RunThreadDataAnswer>
+    reset(threadId: string, request: { confirmed?: unknown }): Promise<RunThreadDataAnswer>
+    liveThreads(): Promise<string[]>
+  }
+  /**
+   * A conversation's Docker data at delete time: read when the delete confirm
+   * opens; release stops its services if live, then removes its volumes.
+   */
+  threadVolumes: {
+    read(threadId: string): Promise<ThreadDataVolumesSummary | null>
+    release(threadId: string, request: { confirmed?: unknown }): Promise<{ ok: boolean; detail?: string }>
+  }
+  /**
+   * Docker data kept from deleted threads, for the Storage page: read while the
+   * page is open; delete runs nothing unless confirmed and refuses a thread
+   * that still exists.
+   */
+  keptData: {
+    read(): Promise<RunKeptData>
+    delete(request: { threadId: string; projectRoot: string; confirmed?: unknown }): Promise<RunThreadDataAnswer>
+  }
+  /** Open Docker, when the Docker group could not start because it is not running. */
+  openDocker: () => Promise<RunOpenDockerAnswer>
 }
 
 /** A refused request — the renderer sent something main will not act on. */
@@ -150,6 +187,10 @@ export function registerRunChannels(deps: RunChannelDependencies): () => void {
 
   handle('run:start', (request) => supervisor.start(scopeOf(request['scope'], 'run:start')))
 
+  // Start Docker / Switch to this thread: the conversation's Docker group
+  // alone, through the switch. Local steps are left as they are.
+  handle('run:startDocker', (request) => supervisor.startDocker(scopeOf(request['scope'], 'run:startDocker')))
+
   handle('run:reload', (request) => {
     const channel = 'run:reload'
     const scope = scopeOf(request['scope'], channel)
@@ -175,6 +216,63 @@ export function registerRunChannels(deps: RunChannelDependencies): () => void {
   })
 
   handle('run:states', () => supervisor.states())
+
+  // THE CONVERSATION'S OWN DATA. A project root the renderer names is checked
+  // here like a scope's.
+  function projectRootOf(request: Record<string, unknown>, channel: string, field = 'rootPath'): string {
+    const rootPath = deps.resolveRoot(requiredString(request[field], channel, field))
+    if (rootPath === null) throw new RunRequestError(channel, `unknown ${field}`)
+    return rootPath
+  }
+
+  handle('run:openDocker', () => deps.openDocker())
+
+  // Read only, and only for a conversation scope: whose data a switch would stop.
+  handle('run:dockerElsewhere', async (request) => {
+    const scope = scopeOf(request['scope'], 'run:dockerElsewhere')
+    return scope.threadId === null ? null : deps.threadDocker.elsewhere(scope)
+  })
+
+  // A CONVERSATION'S DATA AT DELETE TIME. `confirmed` must be the boolean
+  // true; anything else reaches main's release as a refusal that runs nothing.
+  function threadIdOf(request: Record<string, unknown>, channel: string): string {
+    return requiredString(request['threadId'], channel, 'threadId')
+  }
+
+  handle('threads:dataVolumes', (request) => deps.threadVolumes.read(threadIdOf(request, 'threads:dataVolumes')))
+
+  handle('threads:releaseDataVolumes', (request) =>
+    deps.threadVolumes.release(threadIdOf(request, 'threads:releaseDataVolumes'), {
+      confirmed: request['confirmed'] === true ? true : undefined,
+    }),
+  )
+
+  // THE MANAGE CONTAINERS PANEL. `confirmed` must be the boolean true;
+  // anything else reaches main's reset as a refusal that runs nothing.
+  handle('run:threadData', (request) => deps.threadDocker.read(threadIdOf(request, 'run:threadData')))
+
+  handle('run:restartThreadDocker', (request) =>
+    deps.threadDocker.restart(threadIdOf(request, 'run:restartThreadDocker')),
+  )
+
+  handle('run:emptyThreadData', (request) =>
+    deps.threadDocker.reset(threadIdOf(request, 'run:emptyThreadData'), {
+      confirmed: request['confirmed'] === true ? true : undefined,
+    }),
+  )
+
+  handle('run:keptData', () => deps.keptData.read())
+
+  handle('run:deleteKeptData', (request) => {
+    const channel = 'run:deleteKeptData'
+    return deps.keptData.delete({
+      threadId: threadIdOf(request, channel),
+      projectRoot: projectRootOf(request, channel, 'projectRoot'),
+      confirmed: request['confirmed'] === true ? true : undefined,
+    })
+  })
+
+  handle('run:liveThreads', () => deps.threadDocker.liveThreads())
 
   const unsubscribe = supervisor.onUpdated((state) => deps.broadcastUpdated(state))
 

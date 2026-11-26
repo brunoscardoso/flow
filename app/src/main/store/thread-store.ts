@@ -310,7 +310,13 @@ export interface ThreadChangeEvent {
   /** `subtask` events are emitted by SubtaskRegistry (the subtask rows' only
    *  writer), never by this store's own subtask methods. */
   entity: 'thread' | 'message' | 'tool_call' | 'subtask'
-  action: 'created' | 'updated' | 'deleted'
+  /**
+   * `archived` / `restored` are emitted by `updateThread` IN ADDITION to the
+   * ordinary `updated`, only when the archive flag really changed. Archive had
+   * no main-side signal of its own, and a subscriber that needs it (stopping a
+   * thread's Docker services) must not have to diff `updated` events.
+   */
+  action: 'created' | 'updated' | 'deleted' | 'archived' | 'restored'
   threadId: string
   /** The row as written — on a `subtask` event only. */
   subtask?: SubtaskRecord
@@ -1085,6 +1091,15 @@ export class ThreadStore extends EventEmitter {
         id,
       )
     this.emitChange({ entity: 'thread', action: 'updated', threadId: id })
+    // The archive flag really moved (a repeat archive keeps its first
+    // timestamp and a repeat restore stays null, so neither is a change).
+    if ((existing.archivedAt === null) !== (archivedAt === null)) {
+      this.emitChange({
+        entity: 'thread',
+        action: archivedAt === null ? 'restored' : 'archived',
+        threadId: id,
+      })
+    }
     return updated
   }
 

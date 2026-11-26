@@ -333,4 +333,31 @@ describe('readWorktreeInventory', () => {
       expect(['status', 'log', 'rev-list']).toContain(args[0])
     }
   })
+  describe('the Docker data hook', () => {
+    it('carries the conversations\u2019 volumes when a reader is wired', async () => {
+      const volumes = [{ threadId: 'thread-1', volume: 'pgdata', sizeBytes: 2048 }]
+      const result = await readWorktreeInventory(ROOT, deps({ threadVolumesFor: async () => volumes }))
+      expect(result.entries).toHaveLength(1)
+      expect(result.volumes).toEqual(volumes)
+    })
+
+    it('has no volumes field when nothing reads Docker', async () => {
+      const result = await readWorktreeInventory(ROOT, deps())
+      expect(result.entries).toHaveLength(1)
+      expect('volumes' in result).toBe(false)
+    })
+
+    it('reads a failing reader as "Docker could not be read", and still lists the worktrees', async () => {
+      const result = await readWorktreeInventory(
+        ROOT,
+        deps({
+          threadVolumesFor: async () => {
+            throw new Error('daemon gone')
+          },
+        }),
+      )
+      expect(result.entries).toHaveLength(1)
+      expect(result.volumes).toBeNull()
+    })
+  })
 })

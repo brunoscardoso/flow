@@ -217,6 +217,16 @@ import { RunSetupStore } from './run/run-setup-store'
 import { CommandUsageStore, onceUsageSuggestions, rankOnceSuggestions, rankSuggestions, usageSuggestions } from './run/command-usage'
 import { nodeSuggestFs, suggestOnceSteps, suggestRunSteps } from './run/run-suggest'
 import { RunSupervisor } from './run/run-supervisor'
+import { createDockerRunner, type DockerRunner } from './run/docker-runner'
+import { COMPOSE_OVERRIDES_DIR, createOverrideFiles, listProjectVolumes } from './run/compose-thread-store'
+import { projectDataSlug } from './run/compose-thread'
+import { stopDockerOnThreadArchived } from './run/docker-on-thread-archived'
+import { readThreadVolumes, releaseThreadVolumes } from './run/thread-volumes'
+import { deleteKeptData, readKeptData } from './run/kept-data'
+import { createLiveThreads, emptyThreadDataOf, readDockerElsewhere, readThreadData, restartThreadDocker } from './run/thread-data'
+import { detectDataCommands } from './run/run-suggest'
+import { createThreadDocker, createThreadDockerSource, dockerPlansOf } from './run/thread-docker'
+import { createComposePresence } from './run/compose-describe'
 import { createRunScriptFiles } from './run/run-script-files'
 import { wireShellPersistence } from './terminal/shell-persistence'
 import { registerFileChannels } from './project/files'
@@ -596,6 +606,26 @@ let disposeSettingsIpc: (() => void) | null = null
 let disposeTerminalIpc: (() => void) | null = null
 /** The one owner of every project Run — disposed BEFORE the terminal manager on quit. */
 let runSupervisor: RunSupervisor | null = null
+/**
+ * The one way main asks Docker anything (run/docker-runner.ts): every call a
+ * spawned child with a timeout, never synchronous (allowed-pattern #19). Made
+ * on first use, so a project that never uses Docker never spawns it.
+ */
+let dockerRunnerInstance: DockerRunner | null = null
+function dockerRunner(): DockerRunner {
+  dockerRunnerInstance ??= createDockerRunner()
+  return dockerRunnerInstance
+}
+/**
+ * "Does this project have a Compose file?" — the gate in front of every Docker
+ * call about a project's conversations (no Compose file: `docker` is never
+ * spawned). A file check, cached per project for a few seconds.
+ */
+let composePresenceInstance: ((root: string) => Promise<boolean>) | null = null
+function hasCompose(root: string): Promise<boolean> {
+  composePresenceInstance ??= createComposePresence(nodeSuggestFs())
+  return composePresenceInstance(root)
+}
 /** The commands typed into Flow's terminals, per project — flushed on quit. */
 let commandUsage: CommandUsageStore | null = null
 let disposeRunIpc: (() => void) | null = null
@@ -3462,6 +3492,15 @@ const understandFeature = async (request: {
         // `du` is async and scoped to one directory (allowed-pattern #19), and
         // it runs only for a list somebody opened (allowed-pattern #17).
         runDu: runDuCapturing,
+        // The conversations' Docker volumes, read only for a project that has
+        // a Compose file — one without never calls Docker (NFR-5).
+        threadVolumesFor: async (root) => {
+          if (!(await hasCompose(root))) return undefined
+          const listed = await listProjectVolumes(dockerRunner(), projectDataSlug(root))
+          return listed.ok
+            ? listed.items.map((volume) => ({ threadId: volume.threadId, volume: volume.volume, sizeBytes: volume.sizeBytes }))
+            : null
+        },
       }),
     // Where a copy no thread claims actually is. Read from the same listing the
     // inventory is built from; the path never crosses IPC.
@@ -3769,12 +3808,34 @@ const understandFeature = async (request: {
   {
     const manager = terminalManager
     const connect = createTcpConnect()
+    const suggestFs = nodeSuggestFs()
+    // A conversation's own Docker data: the override files live in the app's
+    // data folder, never in the project (FR-4).
+    const overrides = createOverrideFiles({ dir: join(app.getPath('userData'), COMPOSE_OVERRIDES_DIR) })
     const setups = new RunSetupStore({
       threads: threadStore,
       personal: appSettings,
       // A conversation's Run combines the steps of all its projects; a step
       // for a project outside the conversation never runs there, so Workspace
       // siblings are not offered.
+      docker: createThreadDockerSource({ fs: suggestFs, overrides }),
+    })
+    const threadDocker = createThreadDocker({
+      runner: dockerRunner(),
+      overrides,
+      fs: suggestFs,
+      // Detection is the only source of data commands; each passes the guard.
+      detectDataCommands: (root) => detectDataCommands(root, suggestFs),
+      // The live conversation is stopped with its own files when this
+      // computer still knows it; otherwise by its label alone.
+      resolveThread: async (threadId) => {
+        const thread = threadStore.getThread(threadId)
+        if (thread === null) return null
+        const resolution = await setups.resolve({ rootPath: thread.projectRoot, threadId })
+        return [...dockerPlansOf(resolution).values()]
+      },
+      processEnv: process.env,
+      opener: (path) => shell.openPath(path),
     })
     // USAGE SUGGESTIONS (a): the commands a person enters in Flow's own
     // interactive shells, keyed by the terminal's project; one writer, written
@@ -3808,8 +3869,51 @@ const understandFeature = async (request: {
       },
       // A one-time action's script runs as one private file under the app's data.
       scripts: createRunScriptFiles({ dir: join(app.getPath('userData'), 'run-scripts') }),
+      docker: threadDocker,
     })
-    const suggestFs = nodeSuggestFs()
+    const supervisor = runSupervisor
+    const threadRootsOf = (threadId: string): string[] => {
+      const thread = threadStore.getThread(threadId)
+      return thread === null ? [] : [thread.projectRoot, ...threadStore.getThreadRoots(threadId)]
+    }
+    const threadGroupsOf = async (threadId: string) => {
+      const thread = threadStore.getThread(threadId)
+      if (thread === null) return null
+      const resolution = await setups.resolve({ rootPath: thread.projectRoot, threadId })
+      return [...dockerPlansOf(resolution).values()]
+    }
+    const threadDataDeps = {
+      runner: dockerRunner(),
+      groupsOf: threadGroupsOf,
+      stopThreadDocker: (threadId: string) => supervisor.stopThreadDocker(threadId),
+    }
+    // The projects on this computer that have a Compose file — the only ones
+    // Docker is ever asked about.
+    const composeRoots = async (): Promise<string[]> => {
+      const roots = (projectRegistry?.getRoots() ?? []).filter((root) => root.available !== false).map((root) => root.rootPath)
+      const found: string[] = []
+      for (const root of roots) if (await hasCompose(root)) found.push(root)
+      return found
+    }
+    // Whose data is live, for the thread list: only projects with a Compose
+    // file are asked, and one answer is reused for a few seconds.
+    const liveThreads = createLiveThreads({ runner: dockerRunner(), composeRoots })
+    supervisor.onUpdated(() => liveThreads.forget())
+    const volumeDeps = {
+      runner: dockerRunner(),
+      rootsOf: threadRootsOf,
+      hasCompose,
+      stopThreadDocker: (threadId: string) => supervisor.stopThreadDocker(threadId),
+    }
+    const keptDataDeps = {
+      runner: dockerRunner(),
+      // Only projects with a Compose file are ever asked of Docker.
+      projects: async () => (await composeRoots()).map((root) => ({ root, name: basename(root) })),
+      lookupThread: (threadId: string) => {
+        const thread = threadStore.getThread(threadId)
+        return thread === null ? null : { title: thread.title }
+      },
+    }
     disposeRunIpc = registerRunChannels({
       supervisor: runSupervisor,
       setups,
@@ -3849,6 +3953,46 @@ const understandFeature = async (request: {
           (url) => isAppEntryUrl(url, rendererEntry()),
         ),
       broadcastUpdated: (state) => broadcast('run:updated', state),
+      threadDocker: {
+        read: (threadId) => readThreadData(threadDataDeps, threadId),
+        elsewhere: (scope) =>
+          readDockerElsewhere(
+            {
+              runner: dockerRunner(),
+              rootsOf: threadRootsOf,
+              hasCompose,
+              titleOf: (threadId) => threadStore.getThread(threadId)?.title ?? null,
+            },
+            scope,
+          ),
+        restart: (threadId) => {
+          const thread = threadStore.getThread(threadId)
+          return restartThreadDocker(supervisor, thread === null ? null : { rootPath: thread.projectRoot, threadId })
+        },
+        reset: async (threadId, request) => {
+          const answer = await emptyThreadDataOf(threadDataDeps, threadId, request)
+          liveThreads.forget()
+          return answer
+        },
+        liveThreads: () => liveThreads.read(),
+      },
+      openDocker: () => threadDocker.openDocker(),
+      keptData: {
+        read: () => readKeptData(keptDataDeps),
+        delete: (request) => deleteKeptData(keptDataDeps, request),
+      },
+      threadVolumes: {
+        read: (threadId) => readThreadVolumes(volumeDeps, threadId),
+        release: (threadId, request) => releaseThreadVolumes(volumeDeps, threadId, request),
+      },
+    })
+    // Archiving a conversation stops its Docker services; its data stays.
+    // Every other way a thread ends leaves its volumes in place (see the
+    // module header) — nothing here removes data.
+    stopDockerOnThreadArchived(threadStore, {
+      rootsOf: threadRootsOf,
+      hasCompose,
+      stopThreadDocker: (threadId) => supervisor.stopThreadDocker(threadId),
     })
   }
 

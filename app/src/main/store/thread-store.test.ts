@@ -1237,6 +1237,20 @@ describe('ThreadStore', () => {
       expect(store.getThread(thread.id)?.archivedAt).toBeNull()
     })
 
+    it('emits archived / restored only when the archive flag really changes', () => {
+      const thread = store.createThread({ projectRoot: ROOT_A })
+      const seen: string[] = []
+      store.on(THREAD_STORE_CHANGE_EVENT, (event: ThreadChangeEvent) => {
+        if (event.entity === 'thread') seen.push(event.action)
+      })
+      store.updateThread(thread.id, { archived: true })
+      store.updateThread(thread.id, { archived: true, title: 'x' })
+      store.updateThread(thread.id, { archived: false })
+      store.updateThread(thread.id, { archived: false })
+      store.updateThread(thread.id, { pinned: true })
+      expect(seen).toEqual(['updated', 'archived', 'updated', 'updated', 'restored', 'updated', 'updated'])
+    })
+
     it('re-archiving keeps the original archived_at timestamp', () => {
       const thread = store.createThread({ projectRoot: ROOT_A })
       const first = store.updateThread(thread.id, { archived: true }).archivedAt

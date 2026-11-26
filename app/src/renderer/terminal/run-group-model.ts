@@ -10,6 +10,8 @@
 import {
   scriptLineCount,
   type ResolvedRunStep,
+  type RunDockerElsewhere,
+  type RunDockerNotice,
   type RunGroupState,
   type RunOnceState,
   type RunStepState,
@@ -59,7 +61,41 @@ export const RUN_STRINGS = {
   failedToRunOnce: 'Flow could not run this action. Nothing was started.',
 } as const
 
+/** Every fixed sentence of the Run menu's Docker group — scanned by the test for #12. */
+export const DOCKER_STRINGS = {
+  heading: 'Docker',
+  localHeading: 'This computer',
+  startSentence: "Starts this project's containers with this thread's own data.",
+  startDocker: 'Start Docker',
+  startDockerTitle: "Start this thread's Docker services. The steps on this computer are left as they are.",
+  switchToThread: 'Switch to this thread',
+  switchTitle: "Stop the other thread's Docker services and start this thread's own data",
+  anotherThread: 'another thread',
+  liveHere: "This thread's data",
+  liveHereTitle: "The data running now is this thread's own.",
+  reloadAllTitle: 'Restart every Docker service',
+  stopAllTitle: 'Stop every Docker service',
+  manage: 'Manage containers…',
+  manageTitle: "See this thread's services and data, restart them, or reset the data",
+  openDocker: 'Open Docker',
+  resetData: 'Reset data…',
+  notRunningTitle: "Docker isn't running",
+  notRunning: "The Docker services can't start until Docker is open. Press Start Docker again once it is.",
+  portClash:
+    'Two projects of this thread want the same port on this computer, so their Docker services were not started. Change the port in one of them, or remove one project from the thread.',
+  stoppedRightAway:
+    "This branch may use a different database version than the one this thread's data was made with. Its last lines:",
+  stoppedRightAwayNoLines: "This branch may use a different database version than the one this thread's data was made with.",
+  refusedTail: 'The services started anyway.',
+} as const
+
 const NUMBER_WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten']
+
+/** The line above "Switch to this thread": whose data runs now, by its title when this computer knows it. */
+export function switchSentence(title: string | null): string {
+  const who = title === null || title.trim() === '' ? DOCKER_STRINGS.anotherThread : `“${title.trim()}”`
+  return `Running with the data of ${who}. Switching stops it and starts this thread's data.`
+}
 
 /** "four", "12" — small counts read as words in a sentence. */
 export function countWord(n: number): string {
@@ -386,14 +422,79 @@ export interface LaunchpadMenu {
   reloadAll: boolean
   /** "Stop all": shown while the running steps run (moved here from the pill). */
   stopAll: boolean
+  /** The thread's Docker group, when its projects use their own data; null otherwise. */
+  docker: DockerMenuGroup | null
+  /** With a Docker group: the steps that run on this computer, under their own heading. */
+  local: RunMenuStepRow[]
+}
+
+/** One running step as a row of the Run menu: dot, name, and its port or status. */
+export interface RunMenuStepRow {
+  key: string
+  name: string
+  tone: RunDotTone
+  /** "port 5432", "Starting", "Stopped"… */
+  note: string
+  title: string
+  /** Its tab, when it has one: pressing the row shows it. */
+  terminalId: string | null
+}
+
+/** A data step of the Docker group ("Update database"): its run and how it went. */
+export interface DockerDataRow {
+  key: string
+  name: string
+  tone: RunDotTone
+  note: string
+  terminalId: string | null
+}
+
+/** Something the Docker group says, in the reader's words. */
+export interface DockerNoticeFace {
+  key: string
+  tone: 'warning' | 'error'
+  /** A short bold line above the sentence, when there is one. */
+  title: string | null
+  sentence: string
+  /** What Docker or the service printed — shown in a mono block, never as the sentence. */
+  lines: string | null
+  /** The button the notice offers. */
+  action: 'open-docker' | 'reset' | null
+}
+
+export interface DockerMenuGroup {
+  /**
+   * Which face the section shows: `start` (nothing of this thread's runs),
+   * `switch` (another thread's data runs in this project) or `running` (this
+   * thread's services are going — the face with its services and tools).
+   */
+  mode: 'start' | 'switch' | 'running'
+  /** The services by name ("db, redis, api"), beside the heading before they run. */
+  serviceNames: string
+  /** The line under the heading before the services run; null while they run. */
+  sentence: string | null
+  /** Start Docker / Switch to this thread — null while the services run. */
+  primary: { label: string; title: string; icon: 'play' | 'sync' } | null
+  /** The data running now is this thread's: the header's pill. */
+  liveHere: boolean
+  /** Reload all / Stop all of the Docker services. */
+  canReload: boolean
+  canStop: boolean
+  services: RunMenuStepRow[]
+  data: DockerDataRow[]
+  notices: DockerNoticeFace[]
+  /** "Manage containers…" is offered (the scope is a thread). */
+  manage: boolean
 }
 
 /**
  * What the Launchpad menu offers: the conversation's one-time actions that
  * are turned on, grouped by the project they run in (first-seen order), then
- * "Run all running steps" and "Edit Launchpad".
+ * "Run all running steps" and "Edit Launchpad". `dockerElsewhere` is whose
+ * Docker data runs instead of this thread's, as main answered when the menu
+ * opened (null: none, or not known yet).
  */
-export function launchpadMenu(view: RunView | null): LaunchpadMenu {
+export function launchpadMenu(view: RunView | null, dockerElsewhere: RunDockerElsewhere | null = null): LaunchpadMenu {
   const once: readonly ResolvedRunStep[] = view?.resolution.once ?? []
   const states = new Map((view?.state.once ?? []).map((entry) => [entry.key, entry]))
   const groups: LaunchpadMenuGroup[] = []
@@ -416,8 +517,15 @@ export function launchpadMenu(view: RunView | null): LaunchpadMenu {
     else groups.push({ projectName: step.projectName, items: [item] })
   }
   const services = view?.resolution.steps.length ?? 0
-  const active = view?.state.active ?? false
+  // Active only because Start Docker ran: Run all still starts the local steps.
+  const stepStates = view?.state.steps ?? []
+  const isGoing = (status: string): boolean => status === 'waiting' || status === 'starting' || status === 'running' || status === 'ready'
+  const onlyDockerGoing =
+    stepStates.some((step) => step.docker === undefined && !isGoing(step.status)) &&
+    stepStates.every((step) => !isGoing(step.status) || step.docker !== undefined)
+  const active = (view?.state.active ?? false) && !onlyDockerGoing
   const face = pillFace(view)
+  const docker = dockerMenuGroup(view, dockerElsewhere)
   return {
     groups,
     empty: groups.length === 0,
@@ -428,7 +536,235 @@ export function launchpadMenu(view: RunView | null): LaunchpadMenu {
     },
     reloadAll: face.canReload,
     stopAll: face.canStop,
+    docker,
+    local: docker === null ? [] : localStepRows(view),
   }
+}
+
+// ─── the Run menu's Docker group ─────────────────────────────────────────────
+
+/** The marker in a data step's key (main names them `<root>::docker-data:<id>`). */
+export const DOCKER_DATA_KEY = '::docker-data:'
+
+/** The port a step waits on, from its resolved step. */
+function portOf(view: RunView, key: string): number | null {
+  const ready = view.resolution.steps.find((candidate) => candidate.key === key)?.ready
+  return ready?.kind === 'port' ? ready.port : null
+}
+
+/** A running step as a menu row: going with a port reads "port 5432", else its status. */
+export function stepRow(step: RunStepState, port: number | null): RunMenuStepRow {
+  const tab = stepTabFace(step)
+  let note: string
+  switch (step.status) {
+    case 'running':
+    case 'ready':
+      note = port === null ? 'Running' : `port ${port}`
+      break
+    case 'starting':
+      note = 'Starting'
+      break
+    case 'waiting':
+      note = 'Waiting'
+      break
+    case 'blocked':
+      note = step.notHere === true ? "Can't start here" : "Didn't start"
+      break
+    case 'timed-out':
+      note = 'Not ready'
+      break
+    case 'exited':
+      note = step.offerReset === true ? 'Stopped right away' : step.exitCode === 0 ? 'Finished' : 'Stopped'
+      break
+    case 'stopped':
+      note = 'Stopped'
+      break
+    case 'idle':
+    default:
+      note = 'Not started'
+  }
+  // A Docker step's detail can hold a service's last lines: the hover keeps
+  // only the sentence before them.
+  const title = splitDetail(tab.tooltip).sentence
+  return { key: step.key, name: step.name, tone: tab.tone, note, title, terminalId: step.terminalId }
+}
+
+/**
+ * A detail as a sentence and the lines that came with it. Main appends what
+ * Docker printed after "Docker said:", and a service's last lines after the
+ * first line break; neither is ever the sentence.
+ */
+export function splitDetail(detail: string): { sentence: string; lines: string | null } {
+  const said = detail.indexOf('Docker said:')
+  if (said >= 0) {
+    const lines = detail.slice(said + 'Docker said:'.length).trim()
+    return { sentence: detail.slice(0, said).trim(), lines: lines === '' ? null : lines }
+  }
+  const newline = detail.indexOf('\n')
+  if (newline >= 0) {
+    const lines = detail.slice(newline + 1).trim()
+    return { sentence: detail.slice(0, newline).trim(), lines: lines === '' ? null : lines }
+  }
+  return { sentence: detail.trim(), lines: null }
+}
+
+const PORT_CLASH = /^(.+?) and (.+?) both use port (\d+)/
+
+/** One notice of the Docker group in the reader's words. */
+export function dockerNoticeFace(notice: RunDockerNotice, offerOpenDocker: boolean, index: number): DockerNoticeFace {
+  const key = `${notice.kind}:${notice.projectRoot ?? ''}:${index}`
+  const { sentence, lines } = splitDetail(notice.detail)
+  switch (notice.kind) {
+    case 'docker-unavailable':
+      return offerOpenDocker
+        ? { key, tone: 'warning', title: DOCKER_STRINGS.notRunningTitle, sentence: DOCKER_STRINGS.notRunning, lines: null, action: 'open-docker' }
+        : { key, tone: 'warning', title: null, sentence, lines, action: null }
+    case 'port-clash': {
+      const match = PORT_CLASH.exec(notice.detail)
+      if (match === null) return { key, tone: 'error', title: null, sentence, lines, action: null }
+      return {
+        key,
+        tone: 'error',
+        title: `${match[1]} and ${match[2]} both use port ${match[3]}`,
+        sentence: DOCKER_STRINGS.portClash,
+        lines: null,
+        action: null,
+      }
+    }
+    case 'migration-refused':
+      return { key, tone: 'warning', title: null, sentence: `${sentence} ${DOCKER_STRINGS.refusedTail}`, lines, action: null }
+    case 'switch-failed':
+    case 'migration-failed':
+      return { key, tone: 'error', title: null, sentence, lines, action: null }
+    case 'no-data-commands':
+    case 'services-not-ready':
+    default:
+      return { key, tone: 'warning', title: null, sentence, lines, action: null }
+  }
+}
+
+/** A Docker service that stopped right after starting: its last lines and Reset data. */
+export function stoppedRightAwayFace(step: RunStepState): DockerNoticeFace {
+  const lines = step.detail === null ? null : splitDetail(step.detail).lines
+  return {
+    key: `reset:${step.key}`,
+    tone: 'error',
+    title: `${step.name} stopped after it started`,
+    sentence: lines === null ? DOCKER_STRINGS.stoppedRightAwayNoLines : DOCKER_STRINGS.stoppedRightAway,
+    lines,
+    action: 'reset',
+  }
+}
+
+function dataRow(once: RunOnceState): DockerDataRow {
+  let note: string
+  let tone: RunDotTone
+  if (once.status === 'running') {
+    note = 'Running'
+    tone = 'busy'
+  } else if (once.status === 'stopped') {
+    note = 'Stopped'
+    tone = 'off'
+  } else if (once.exitCode === 0) {
+    note = 'Done'
+    tone = 'ok'
+  } else {
+    note = 'Failed'
+    tone = 'bad'
+  }
+  return { key: once.key, name: once.name, tone, note, terminalId: once.terminalId }
+}
+
+const LIVE: ReadonlySet<RunStepStatus> = new Set(['starting', 'running', 'ready'])
+/** A Docker service on its way up or up: the section shows its running face. */
+const DOCKER_GOING: ReadonlySet<RunStepStatus> = new Set(['starting', 'waiting', 'running', 'ready'])
+
+/**
+ * The Docker section of the Run menu: present for a thread whose project has a
+ * Compose file (never for the project itself — its Compose file runs as
+ * written). Before this thread's services go, it says what Start Docker does,
+ * or whose data a switch would stop, and offers the one button. Once they go:
+ * its services (from the state, else the setup), the data steps that ran, and
+ * whether this thread's data is the one running — a Docker service of this
+ * scope going means it is, since starting is the switch. Notices show in
+ * every face.
+ */
+export function dockerMenuGroup(view: RunView | null, elsewhere: RunDockerElsewhere | null = null): DockerMenuGroup | null {
+  if (view === null || view.resolution.scope.threadId === null) return null
+  const groups = view.resolution.docker ?? []
+  if (groups.length === 0) return null
+  const stateSteps = view.state.steps.filter((step) => step.docker !== undefined)
+  const known = new Set(stateSteps.map((step) => step.key))
+  const fromSetup: RunStepState[] = view.resolution.steps
+    .filter((step) => step.docker !== undefined && !known.has(step.key))
+    .map((step) => ({
+      key: step.key,
+      name: step.name,
+      projectRoot: step.projectRoot,
+      status: 'idle' as const,
+      terminalId: null,
+      exitCode: null,
+      detail: null,
+      docker: step.docker,
+    }))
+  const steps = [...stateSteps, ...fromSetup]
+  const services = steps.map((step) => stepRow(step, portOf(view, step.key)))
+  const data = (view.state.once ?? []).filter((once) => once.key.includes(DOCKER_DATA_KEY)).map(dataRow)
+  const notices: DockerNoticeFace[] = []
+  const seen = new Set<string>()
+  for (const [index, notice] of (view.state.dockerNotices ?? []).entries()) {
+    const fingerprint = `${notice.kind}\u0000${notice.detail}`
+    if (seen.has(fingerprint)) continue
+    seen.add(fingerprint)
+    notices.push(dockerNoticeFace(notice, view.state.offerOpenDocker === true, index))
+  }
+  for (const step of stateSteps) if (step.offerReset === true && step.status === 'exited') notices.push(stoppedRightAwayFace(step))
+  const started = stateSteps.some((step) => step.status !== 'idle' || step.terminalId !== null)
+  const going = stateSteps.some((step) => LIVE.has(step.status))
+  const running = stateSteps.some((step) => DOCKER_GOING.has(step.status))
+  const serviceNames = groups
+    .flatMap((group) => group.services)
+    .filter((name, index, all) => all.indexOf(name) === index)
+    .join(', ')
+  const mode: DockerMenuGroup['mode'] = running ? 'running' : elsewhere !== null && elsewhere.threadId !== view.resolution.scope.threadId ? 'switch' : 'start'
+  return {
+    mode,
+    serviceNames,
+    sentence: mode === 'running' ? null : mode === 'switch' ? switchSentence(elsewhere?.title ?? null) : DOCKER_STRINGS.startSentence,
+    primary:
+      mode === 'running'
+        ? null
+        : mode === 'switch'
+          ? { label: DOCKER_STRINGS.switchToThread, title: DOCKER_STRINGS.switchTitle, icon: 'sync' }
+          : { label: DOCKER_STRINGS.startDocker, title: DOCKER_STRINGS.startDockerTitle, icon: 'play' },
+    liveHere: going,
+    canReload: started,
+    canStop: going,
+    services,
+    data,
+    notices,
+    manage: view.resolution.scope.threadId !== null,
+  }
+}
+
+/** The steps that run on this computer (not in Docker), as menu rows. */
+export function localStepRows(view: RunView | null): RunMenuStepRow[] {
+  if (view === null) return []
+  const byKey = new Map(view.state.steps.map((step) => [step.key, step]))
+  return view.resolution.steps
+    .filter((step) => step.docker === undefined)
+    .map((step) => {
+      const state: RunStepState = byKey.get(step.key) ?? {
+        key: step.key,
+        name: step.name,
+        projectRoot: step.projectRoot,
+        status: 'idle',
+        terminalId: null,
+        exitCode: null,
+        detail: null,
+      }
+      return stepRow(state, step.ready?.kind === 'port' ? step.ready.port : null)
+    })
 }
 
 /** The menu's items in keyboard order (arrow keys move through them). */

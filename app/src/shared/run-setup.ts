@@ -100,6 +100,59 @@ export interface ResolvedRunStep {
   confirm?: boolean
   /** Set (one-time actions only) when `command` is a whole script, run as one file. */
   body?: 'script'
+  /**
+   * Set on a step of a conversation's DOCKER GROUP: one Compose service of one
+   * project, run with the conversation's own data and checkout. Never stored —
+   * the store adds these on every resolve while the project has a Compose file —
+   * so a Save never writes one into a setup.
+   */
+  docker?: RunDockerStepRef
+}
+
+/** Which Compose service of which project a Docker-group step runs. */
+export interface RunDockerStepRef {
+  projectRoot: string
+  service: string
+}
+
+/**
+ * One project's Docker group in a conversation's Run: the Compose services
+ * Flow runs with the conversation's own data. Plain words only in `unreadable`
+ * and `notes` — they are shown as they are (forbidden-pattern #12).
+ */
+export interface RunDockerGroup {
+  projectRoot: string
+  projectName: string
+  threadId: string
+  /** Where the services run from: the conversation's checkout of the project. */
+  checkout: string
+  /** The services that are steps of the group, in the Compose file's order. */
+  services: string[]
+  /** The services among them that keep data in the conversation's own volumes. */
+  dataServices: string[]
+  /** The conversation's Docker volumes for this project. */
+  volumes: string[]
+  /** Services run as written, without data of their own, each with why. */
+  unreadable: Array<{ service: string; reason: string }>
+  /** Keys of hand-made steps the group replaced (they started one of the same services). */
+  folded: string[]
+  /** Sentences about what is shared whatever Flow does (a host folder, an outside volume). */
+  notes: string[]
+}
+
+/** Something the Run's Docker group has to tell the person. */
+export interface RunDockerNotice {
+  /** The project it is about; null for the whole group. */
+  projectRoot: string | null
+  kind:
+    | 'docker-unavailable'
+    | 'port-clash'
+    | 'switch-failed'
+    | 'migration-refused'
+    | 'migration-failed'
+    | 'no-data-commands'
+    | 'services-not-ready'
+  detail: string
 }
 
 export type RunStepStatus =
@@ -124,6 +177,14 @@ export interface RunStepState {
   detail: string | null
   /** True when the project the step runs in is not on this computer — it cannot start at all. */
   notHere?: boolean
+  /** Set on a Docker-group step: the service it runs. */
+  docker?: RunDockerStepRef
+  /**
+   * A Docker-group service that stopped right after a switch: `detail` holds
+   * its last lines, and resetting the conversation's data is the way out
+   * (an old volume a new image cannot read).
+   */
+  offerReset?: boolean
 }
 
 /** Where a one-time action's run is: going, finished (any exit code), or its process was ended. */
@@ -149,6 +210,10 @@ export interface RunGroupState {
   steps: RunStepState[]
   /** One-time actions that have a tab. Absent when there are none. */
   once?: RunOnceState[]
+  /** What the Docker group has to say (Docker not running, a refused migration…). Absent when nothing. */
+  dockerNotices?: RunDockerNotice[]
+  /** Docker is not running: offering to open it is the way on. */
+  offerOpenDocker?: boolean
 }
 
 export const DEFAULT_READY_TIMEOUT_MS = 60_000
@@ -707,6 +772,92 @@ export interface RunResolution {
   steps: ResolvedRunStep[]
   /** The one-time actions that are turned on, for the Launchpad menu. Absent from older builds. */
   once?: ResolvedRunStep[]
+  /**
+   * The conversation's Docker groups, one per project with a readable Compose
+   * file. Their services are at the START of `steps` (data before the apps
+   * that use it). Absent outside a conversation and for a project without one.
+   */
+  docker?: RunDockerGroup[]
+}
+
+// ─── the conversation's own data (the Docker group) ─────────────────────────
+
+/**
+ * Another conversation whose Docker data is running in a project of this
+ * conversation — what the Run menu's Docker section says before a switch.
+ * Read only when the menu opens (never on a broadcast). `title` is null when
+ * this computer has no record of that conversation.
+ */
+export interface RunDockerElsewhere {
+  threadId: string
+  title: string | null
+}
+
+/** One service of a conversation's Docker data, as the Manage containers panel shows it. */
+export interface RunThreadDataService {
+  projectName: string
+  service: string
+  /** Docker's own word (running, exited, created…); null when it has no container yet. */
+  state: string | null
+}
+
+/** One volume of a conversation's Docker data. */
+export interface RunThreadDataVolume {
+  projectName: string
+  /** The project's own volume it stands in for, as the Compose file names it. */
+  volume: string
+  /** The service that keeps its data there, when one does. */
+  service: string | null
+  sizeBytes: number | null
+}
+
+/** What the Manage containers panel shows for one conversation. Plain words only in the sentences. */
+export interface RunThreadData {
+  threadId: string
+  /** This conversation's data is the one running now (in any of its projects). */
+  live: boolean
+  services: RunThreadDataService[]
+  volumes: RunThreadDataVolume[]
+  /** Null when Docker did not say the size of at least one volume. */
+  totalBytes: number | null
+  /** Folders shared with the project and every conversation: their last name only. */
+  sharedFolders: string[]
+  /** Services run as written, without data of their own, each with why. */
+  unreadable: Array<{ service: string; reason: string }>
+  /** Set when Docker could not be asked: a plain sentence. */
+  problem: string | null
+}
+
+/** What a panel action did: done, or a plain sentence why not. */
+export interface RunThreadDataAnswer {
+  ok: boolean
+  detail?: string
+}
+
+/** One deleted conversation's Docker data that Flow kept, in one project. */
+export interface RunKeptDataItem {
+  /** The deleted conversation's id. Never shown. */
+  threadId: string
+  /** The project the data belongs to. Never shown. */
+  projectRoot: string
+  projectName: string
+  /** The conversation's title when Flow still has it; null otherwise. */
+  title: string | null
+  volumes: Array<{ volume: string; sizeBytes: number | null }>
+  /** Null when Docker did not say the size of at least one volume. */
+  totalBytes: number | null
+}
+
+/** What the Storage page lists under "Data kept from deleted threads". */
+export interface RunKeptData {
+  dockerAvailable: boolean
+  items: RunKeptDataItem[]
+}
+
+/** Opening Docker: did it open, and if not, a sentence for the person. */
+export interface RunOpenDockerAnswer {
+  ok: boolean
+  detail: string
 }
 
 /**

@@ -73,6 +73,15 @@ export interface ThreadDeleteSubject {
    *  question changes shape there (#1061) — a task stripped of its only chat
    *  is a different loss from a loose conversation. */
   owningTaskTitle?: string | null
+  /**
+   * The Docker data this conversation holds, or null/absent when it has none
+   * (or the read has not landed, or Docker could not say). `totalBytes` is null
+   * when at least one volume's size is unknown.
+   *
+   * Absent and null are the same answer, on purpose: with no volumes the notice
+   * is exactly what it was before the feature existed.
+   */
+  dataVolumes?: { count: number; totalBytes: number | null } | null
 }
 
 export interface ThreadDeleteNotice {
@@ -96,6 +105,17 @@ export interface ThreadDeleteNotice {
    * not by this flag.
    */
   releaseWorktree: boolean
+  /**
+   * Present ONLY when the conversation holds Docker data: the line that offers
+   * to delete it, with its total size. The sidebar shows it beside a checkbox
+   * that starts unticked — the data is removed only when the person ticks it
+   * (forbidden-pattern #15), never by the Delete press alone.
+   */
+  volumesLine?: string
+  /** The checkbox's own label ("Also delete its data"), present with `volumesLine`. */
+  volumesLabel?: string
+  /** True exactly when `volumesLine` is present: the sidebar offers the choice. */
+  offerVolumes?: boolean
 }
 
 const UNTITLED = 'Untitled thread'
@@ -103,6 +123,32 @@ const UNTITLED = 'Untitled thread'
 function threadName(subject: ThreadDeleteSubject): string {
   const title = subject.threadTitle?.trim() ?? ''
   return title === '' ? UNTITLED : title
+}
+
+/** Bytes as a person reads them: "340 MB", "1.2 GB". */
+export function humanSize(bytes: number): string {
+  const value = Math.max(0, bytes)
+  if (value < 1024) return `${Math.round(value)} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let size = value / 1024
+  let unit = 0
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024
+    unit += 1
+  }
+  // One decimal below 10, whole numbers above — "1.2 GB", "340 MB".
+  const text = size < 10 ? size.toFixed(1) : String(Math.round(size))
+  return `${text.replace(/\.0$/, '')} ${units[unit]}`
+}
+
+/** The checkbox's label in the delete confirm. */
+export const VOLUMES_LABEL = 'Also delete its data'
+
+/** "2 volumes · 1.3 GB. Left unticked, the data stays and can be removed later from Storage." */
+function volumesLineOf(volumes: { count: number; totalBytes: number | null }): string {
+  const count = volumes.count === 1 ? '1 volume' : `${String(volumes.count)} volumes`
+  const size = volumes.totalBytes === null ? 'size unknown' : humanSize(volumes.totalBytes)
+  return `${count} · ${size}. Left unticked, the data stays and can be removed later from Storage.`
 }
 
 function files(count: number): string {
@@ -119,6 +165,13 @@ function changes(count: number): string {
  * release, exactly as before.
  */
 export function threadDeleteNotice(subject: ThreadDeleteSubject): ThreadDeleteNotice {
+  const notice = worktreeNotice(subject)
+  const volumes = subject.dataVolumes
+  if (volumes === undefined || volumes === null || volumes.count < 1) return notice
+  return { ...notice, volumesLine: volumesLineOf(volumes), volumesLabel: VOLUMES_LABEL, offerVolumes: true }
+}
+
+function worktreeNotice(subject: ThreadDeleteSubject): ThreadDeleteNotice {
   const owner = subject.owningTaskTitle?.trim() ?? ''
   // Unchanged from #1061: a task owns exactly one chat, so deleting the chat
   // strips the task of it — the question has to say whose chat this is.

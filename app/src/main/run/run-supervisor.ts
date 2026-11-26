@@ -29,6 +29,19 @@
  * Nothing here runs a command until a person asks (NFR-5): a setup is only
  * read on `start`, `reload` and `apply`.
  *
+ * A CONVERSATION'S DOCKER GROUP (`thread-docker.ts`). When a resolution
+ * carries one, Run, Reload all and Start Docker (`startDocker`, the Run
+ * menu's Docker section) are the SWITCH. Start Docker runs ONLY the group's
+ * steps and leaves the steps on this computer as they are; Run and Reload all
+ * start everything. Before the group's steps start, the Docker port refuses a port clash between projects, checks Docker
+ * answers, stops whichever conversation's services are live and (re)creates
+ * this one's containers. A refusal blocks only the group's steps, with its
+ * sentence; local steps run as always. Once the group's services are ready,
+ * its migrations (every Run) and seeds (new volumes only) run one after the
+ * other in one-time tabs — each already decided by the guard; a refused one is
+ * reported on the Run and never stops a service. A group service that stops
+ * within twenty seconds of starting shows its last lines and offers a reset.
+ *
  * Every dependency — the terminals, the setup store, the ready checks — is
  * injected; the tests drive fakes only and never spawn or signal a process
  * (forbidden-pattern #15).
@@ -37,6 +50,7 @@ import type { TerminalInfo } from '../../shared/ipc-contract'
 import {
   runScopeKey,
   type ResolvedRunStep,
+  type RunDockerNotice,
   type RunGroupState,
   type RunOnceState,
   type RunReady,
@@ -48,6 +62,7 @@ import {
 } from '../../shared/run-setup'
 import type { ReadyWait } from './ready-check'
 import type { RunScriptFiles } from './run-script-files'
+import { DOCKER_SENTENCE, EARLY_EXIT_MS, dockerPlansOf, type DockerGroupPlan, type RunDockerPort } from './thread-docker'
 
 export interface RunTerminalPort {
   createUserTerminal(request: {
@@ -85,6 +100,12 @@ export interface RunSupervisorDeps {
    * a supervisor built without it would have to run a script some other way.
    */
   scripts: Pick<RunScriptFiles, 'prepare' | 'remove'>
+  /**
+   * The Docker side of a conversation's own data. REQUIRED (allowed-pattern
+   * #26): a supervisor without it would start a Docker group without first
+   * stopping the live conversation or guarding its migrations.
+   */
+  docker: RunDockerPort
   /** Defer the coalesced report — `queueMicrotask` by default. */
   defer?: (fn: () => void) => void
   /** The clock, for how long a one-time action ran — `Date.now` by default. */
@@ -136,6 +157,12 @@ interface StepRun {
   gate: Gate
   /** Bumped by every launch and retirement, so a stale sequence never double-starts a step. */
   epoch: number
+  /** Set when the Docker group was refused for this Run: the step stays blocked with this sentence. */
+  refused: string | null
+  /** When its process last started (for a Docker step's early exit). */
+  launchedAt: number | null
+  /** A Docker step that stopped right after a switch: a reset is the way out. */
+  offerReset: boolean
 }
 
 /** One run of a one-time action; it exists while its tab does. */
@@ -159,6 +186,16 @@ interface ScopeRun {
   once: OnceRun[]
   /** Bumped by Stop and Reload all: every sequence started before it stops at its next await. */
   generation: number
+  /** The Docker plans of the resolution this Run started from, by project root. */
+  dockerPlans: ReadonlyMap<string, DockerGroupPlan>
+  /**
+   * Bumped by every Start Docker: a switch started before it stops at its next
+   * await. Separate from `generation`, so a Start Docker never cancels the
+   * local steps' sequence.
+   */
+  dockerEpoch: number
+  dockerNotices: RunDockerNotice[]
+  offerOpenDocker: boolean
   lastReported: string | null
   reportQueued: boolean
 }
@@ -175,6 +212,9 @@ function newStepRun(step: ResolvedRunStep): StepRun {
     wait: null,
     gate: newGate(),
     epoch: 0,
+    refused: null,
+    launchedAt: null,
+    offerReset: false,
   }
 }
 
@@ -221,6 +261,7 @@ export function idleGroupState(scopeKey: string, steps: ResolvedRunStep[]): RunG
       exitCode: null,
       detail: step.unavailable ?? null,
       ...(step.unavailable !== undefined ? { notHere: true } : {}),
+      ...(step.docker !== undefined ? { docker: { ...step.docker } } : {}),
     })),
   }
 }
@@ -233,6 +274,10 @@ export class RunSupervisor {
   readonly #ownedOnce = new Map<string, { run: ScopeRun; once: OnceRun }>()
   /** One-time actions whose script is being written (`scopeKey::stepKey`): a second press waits for nothing. */
   readonly #preparingOnce = new Set<string>()
+  /** Scopes whose Start Docker is between its press and its switch. */
+  readonly #startingDocker = new Set<string>()
+  /** Data commands of a Docker group waiting for their tab's process to end. */
+  readonly #onceWaiters = new Map<string, (exitCode: number | null) => void>()
   readonly #now: () => number
   readonly #listeners = new Set<(state: RunGroupState) => void>()
   readonly #unsubscribe: Array<() => void>
@@ -283,10 +328,86 @@ export class RunSupervisor {
   /** Run: start every step in order. A Run already going is left alone. */
   async start(scope: RunScope): Promise<RunGroupState> {
     const existing = this.#runs.get(runScopeKey(scope))
-    if (existing !== undefined && this.#isActive(existing)) return this.#snapshot(existing)
+    if (existing !== undefined && this.#isActive(existing)) {
+      // After Start Docker only the Docker group is going. Run all then starts
+      // the local steps that are not, and leaves the containers alone — the
+      // Run menu promises that Run all starts "the rest".
+      const going = existing.steps.filter((step) => this.#isGoing(step))
+      const rest = existing.steps.filter((step) => step.step.docker === undefined && !this.#isGoing(step))
+      if (rest.length > 0 && going.every((step) => step.step.docker !== undefined)) {
+        await Promise.all(rest.map((step) => this.#retire(existing, step)))
+        if (this.#disposed || this.#runs.get(existing.key) !== existing) return this.state(scope)
+        this.#launch(existing, rest, { force: false, waitSettledOnly: false })
+      }
+      return this.#snapshot(existing)
+    }
     const resolution = await this.#deps.setups.resolve(scope)
+    return this.#begin(scope, resolution)
+  }
+
+  /** A fresh Run from a resolution: the switch first when it has a Docker group, then every step in order. */
+  #begin(scope: RunScope, resolution: RunResolution): RunGroupState {
     const run = this.#replaceRun(scope, resolution)
-    this.#launch(run, run.steps, { force: false, waitSettledOnly: false })
+    const plans = dockerPlansOf(resolution)
+    if (plans.size === 0 || scope.threadId === null) {
+      this.#launch(run, run.steps, { force: false, waitSettledOnly: false })
+      return this.#snapshot(run)
+    }
+    run.dockerPlans = plans
+    for (const step of run.steps) {
+      if (step.step.docker !== undefined) this.#set(run, step, { status: 'starting', detail: DOCKER_SENTENCE.preparing })
+    }
+    void this.#switchThenLaunch(run, scope.threadId, run.steps).catch((error: unknown) => {
+      console.warn('[Run] a Docker switch failed', error)
+    })
+    return this.#snapshot(run)
+  }
+
+  /**
+   * Start Docker (the Run menu's Docker section; "Switch to this thread" is
+   * the same press): the switch for the conversation's Docker group ONLY —
+   * stop whichever conversation's services are live, (re)create this one's
+   * containers, start its services, then its guarded data steps. The steps
+   * that run on this computer are left exactly as they are. Nothing happens
+   * for a scope without a conversation or without a Docker group, or while
+   * this conversation's Docker services are already going.
+   */
+  async startDocker(scope: RunScope): Promise<RunGroupState> {
+    const threadId = scope.threadId
+    if (threadId === null) return this.state(scope)
+    // A second press while the first is still resolving starts nothing.
+    const key = runScopeKey(scope)
+    if (this.#startingDocker.has(key)) return this.state(scope)
+    this.#startingDocker.add(key)
+    try {
+      return await this.#startDockerNow(scope, threadId)
+    } finally {
+      this.#startingDocker.delete(key)
+    }
+  }
+
+  async #startDockerNow(scope: RunScope, threadId: string): Promise<RunGroupState> {
+    // Re-resolved, so the Compose file is read as it is now (FR-4).
+    const resolution = await this.#deps.setups.resolve(scope)
+    if (this.#disposed) return this.state(scope)
+    const plans = dockerPlansOf(resolution)
+    if (plans.size === 0) return this.state(scope)
+    const run = this.#ensureRun(scope, resolution)
+    const previous = run.steps.filter((step) => step.step.docker !== undefined)
+    if (previous.some((step) => this.#isGoing(step))) return this.#snapshot(run)
+    await Promise.all(previous.map((step) => this.#retire(run, step, { removeTab: true })))
+    if (this.#disposed || this.#runs.get(run.key) !== run) return this.state(scope)
+    const fresh = resolution.steps.filter((step) => step.docker !== undefined).map(newStepRun)
+    // The group's services come first, as in a resolution; local steps keep their state.
+    run.steps = [...fresh, ...run.steps.filter((step) => step.step.docker === undefined)]
+    run.dockerPlans = plans
+    run.dockerEpoch += 1
+    run.dockerNotices = []
+    run.offerOpenDocker = false
+    for (const step of fresh) this.#set(run, step, { status: 'starting', detail: DOCKER_SENTENCE.preparing })
+    void this.#switchThenLaunch(run, threadId, fresh).catch((error: unknown) => {
+      console.warn('[Run] a Docker switch failed', error)
+    })
     return this.#snapshot(run)
   }
 
@@ -301,14 +422,19 @@ export class RunSupervisor {
       if (run === undefined) return this.start(scope)
       run.generation += 1
       await Promise.all(run.steps.map((step) => this.#retire(run, step)))
+      // Re-resolved, so the Compose file is read again (FR-4).
       const resolution = await this.#deps.setups.resolve(scope)
-      const fresh = this.#replaceRun(scope, resolution)
-      this.#launch(fresh, fresh.steps, { force: false, waitSettledOnly: false })
-      return this.#snapshot(fresh)
+      return this.#begin(scope, resolution)
     }
     if (run === undefined) return this.state(scope)
     const step = run.steps.find((candidate) => candidate.step.key === stepKey)
     if (step === undefined) return this.#snapshot(run)
+    // A Docker step whose group is not going may no longer own its
+    // containers (another thread switched, or its data was emptied): it
+    // starts again only through the switch, never attached to what exists.
+    if (step.step.docker !== undefined && scope.threadId !== null && !run.steps.some((other) => other.step.docker !== undefined && this.#isGoing(other))) {
+      return this.startDocker(scope)
+    }
     const forced = force === true || step.status === 'blocked'
     await this.#retire(run, step)
     this.#launch(run, [step], { force: forced, waitSettledOnly: true })
@@ -464,6 +590,172 @@ export class RunSupervisor {
     return this.#snapshot(run)
   }
 
+  /**
+   * Stop a conversation's Docker group everywhere: its group steps read
+   * stopped, and every one of its services is stopped in Docker. Its volumes
+   * stay. For archive (and any other caller that ends a conversation's run).
+   */
+  async stopThreadDocker(threadId: string): Promise<boolean> {
+    this.#stopDockerStepsOf(threadId, null)
+    return this.#deps.docker.stopThread(threadId)
+  }
+
+  /** Mark another conversation's Docker steps stopped (its services are about to be). */
+  #stopDockerStepsOf(threadId: string, except: ScopeRun | null): void {
+    for (const run of this.#runs.values()) {
+      if (run === except || run.scope.threadId !== threadId) continue
+      // Its switch, if one is still going, has lost the containers: its data
+      // commands must not run.
+      run.dockerEpoch += 1
+      for (const step of run.steps) {
+        if (step.step.docker !== undefined) this.#stopStep(run, step)
+      }
+    }
+  }
+
+  /**
+   * The switch: let the Docker port prepare this conversation's group, block
+   * the group's steps with its sentence when it refused, start `launch` in
+   * order (every step for Run, the group's alone for Start Docker), then run
+   * the group's data commands once its services are ready.
+   */
+  async #switchThenLaunch(run: ScopeRun, threadId: string, launch: StepRun[]): Promise<void> {
+    const generation = run.generation
+    const epoch = run.dockerEpoch
+    const stale = (): boolean =>
+      this.#disposed || run.generation !== generation || run.dockerEpoch !== epoch || this.#runs.get(run.key) !== run
+    const groups = [...run.dockerPlans.values()]
+    const prepared = await this.#deps.docker.prepare({
+      threadId,
+      groups,
+      beforeStop: (other) => this.#stopDockerStepsOf(other, run),
+    })
+    if (stale()) return
+    const ready = new Map<string, boolean>()
+    if (!prepared.ok) {
+      run.dockerNotices.push({ projectRoot: null, kind: prepared.kind, detail: prepared.detail })
+      run.offerOpenDocker = prepared.offerOpenDocker
+      for (const step of run.steps) if (step.step.docker !== undefined) step.refused = prepared.detail
+    } else {
+      for (const [projectRoot, outcome] of prepared.projects) {
+        if (outcome.ok) {
+          ready.set(projectRoot, outcome.newVolumes)
+          continue
+        }
+        run.dockerNotices.push({ projectRoot, kind: 'switch-failed', detail: outcome.detail })
+        for (const step of run.steps) if (step.step.docker?.projectRoot === projectRoot) step.refused = outcome.detail
+      }
+    }
+    for (const step of run.steps) {
+      if (step.step.docker !== undefined && step.status === 'starting') this.#set(run, step, { status: 'idle', detail: null })
+    }
+    this.#report(run)
+    this.#launch(run, launch, { force: false, waitSettledOnly: false })
+
+    for (const [projectRoot, newVolumes] of ready) {
+      const groupPlan = run.dockerPlans.get(projectRoot)
+      if (groupPlan === undefined) continue
+      const steps = run.steps.filter((step) => step.step.docker?.projectRoot === projectRoot)
+      const oks = await Promise.all(steps.map((step) => step.gate.promise))
+      if (stale()) return
+      if (oks.some((ok) => !ok)) {
+        this.#notice(run, { projectRoot, kind: 'services-not-ready', detail: DOCKER_SENTENCE.notReady })
+        continue
+      }
+      const { items, notice } = await this.#deps.docker.dataCommands(groupPlan, newVolumes)
+      if (stale()) return
+      if (notice !== null) this.#notice(run, { projectRoot, kind: 'no-data-commands', detail: notice })
+      for (const [index, item] of items.entries()) {
+        if ('refused' in item) {
+          // Reported, never run — and the services keep running.
+          this.#notice(run, { projectRoot, kind: 'migration-refused', detail: item.refused })
+          continue
+        }
+        const exitCode = await this.#runDataCommand(run, groupPlan, `${item.kind}-${index + 1}`, item.name, item.run)
+        if (stale()) return
+        if (exitCode !== 0) {
+          this.#notice(run, { projectRoot, kind: 'migration-failed', detail: DOCKER_SENTENCE.migrationFailed })
+          break
+        }
+      }
+    }
+  }
+
+  #notice(run: ScopeRun, notice: RunDockerNotice): void {
+    run.dockerNotices.push(notice)
+    this.#report(run)
+  }
+
+  /** One data command in its own one-time tab; resolves with its exit code (null: its tab went first). */
+  #runDataCommand(
+    run: ScopeRun,
+    groupPlan: DockerGroupPlan,
+    id: string,
+    name: string,
+    command: { command: string; cwd: string },
+  ): Promise<number | null> {
+    const { group } = groupPlan
+    const step: ResolvedRunStep = {
+      key: `${group.projectRoot}::docker-data:${id}`,
+      projectRoot: group.projectRoot,
+      projectName: group.projectName,
+      cwd: command.cwd,
+      id: `docker-data:${id}`,
+      name,
+      command: command.command,
+      start: 'now',
+      readyTimeoutMs: 0,
+      from: { command: 'shared', ready: 'shared' },
+      kind: 'once',
+    }
+    let info: TerminalInfo
+    try {
+      info = this.#deps.terminals.createUserTerminal({
+        rootId: step.projectRoot,
+        cols: TERMINAL_COLS,
+        rows: TERMINAL_ROWS,
+        owner: { rootPath: run.scope.rootPath, threadId: run.scope.threadId },
+        command: step.command,
+        cwd: step.cwd,
+        title: step.name,
+        run: { scopeKey: run.key, stepId: step.id, projectRoot: step.projectRoot },
+      })
+    } catch {
+      return Promise.resolve(null)
+    }
+    const fresh: OnceRun = {
+      step,
+      terminalId: info.terminalId,
+      alive: true,
+      status: 'running',
+      exitCode: null,
+      startedAt: this.#now(),
+      durationMs: null,
+      scriptFile: null,
+    }
+    const existing = run.once.find((entry) => entry.step.key === step.key)
+    if (existing !== undefined && !existing.alive) {
+      this.#ownedOnce.delete(existing.terminalId)
+      run.once[run.once.indexOf(existing)] = fresh
+      this.#deps.terminals.dispose(existing.terminalId)
+    } else {
+      run.once.push(fresh)
+    }
+    this.#ownedOnce.set(info.terminalId, { run, once: fresh })
+    this.#report(run)
+    return new Promise((resolve) => {
+      this.#onceWaiters.set(info.terminalId, resolve)
+    })
+  }
+
+  /** Settle a data command's waiter, once. */
+  #settleWaiter(terminalId: string, exitCode: number | null): void {
+    const waiter = this.#onceWaiters.get(terminalId)
+    if (waiter === undefined) return
+    this.#onceWaiters.delete(terminalId)
+    waiter(exitCode)
+  }
+
   /** Quit: end every Run's processes and tabs, and stop listening. */
   disposeAll(): void {
     if (this.#disposed) return
@@ -486,6 +778,7 @@ export class RunSupervisor {
     this.#runs.clear()
     this.#owned.clear()
     this.#ownedOnce.clear()
+    for (const terminalId of [...this.#onceWaiters.keys()]) this.#settleWaiter(terminalId, null)
     this.#listeners.clear()
   }
 
@@ -512,6 +805,10 @@ export class RunSupervisor {
       // One-time actions are not part of the Run: their tabs stay as they are.
       once: previous?.once ?? [],
       generation: (previous?.generation ?? 0) + 1,
+      dockerPlans: new Map(),
+      dockerEpoch: 0,
+      dockerNotices: [],
+      offerOpenDocker: false,
       lastReported: previous?.lastReported ?? null,
       reportQueued: false,
     }
@@ -531,6 +828,10 @@ export class RunSupervisor {
       steps: resolution.steps.map(newStepRun),
       once: [],
       generation: 1,
+      dockerPlans: new Map(),
+      dockerEpoch: 0,
+      dockerNotices: [],
+      offerOpenDocker: false,
       lastReported: null,
       reportQueued: false,
     }
@@ -548,7 +849,10 @@ export class RunSupervisor {
     const epochs = new Map<StepRun, number>()
     for (const step of steps) {
       step.epoch += 1
+      // A step already waiting on the old gate hears this start's outcome.
+      const old = step.gate
       step.gate = newGate()
+      if (!old.settled) void step.gate.promise.then(old.resolve)
       step.stopping = false
       epochs.set(step, step.epoch)
     }
@@ -592,8 +896,18 @@ export class RunSupervisor {
       step.gate.resolve(false)
       return
     }
+    if (step.refused !== null) {
+      // The Docker group was refused for this Run (Docker not running, a port
+      // clash, a failed switch): nothing starts it until the next Run.
+      this.#set(run, step, { status: 'blocked', exitCode: null, detail: step.refused })
+      step.gate.resolve(false)
+      return
+    }
     const port = portOf(step.step)
-    if (port !== null && !force) {
+    // A Docker step's port is held by this project's own containers (another
+    // conversation's, or a run outside any): the switch recreates them, so a
+    // busy port is not a reason to hold it back.
+    if (port !== null && !force && step.step.docker === undefined) {
       let busy = false
       try {
         busy = await this.#deps.ready.portInUse(port)
@@ -616,6 +930,7 @@ export class RunSupervisor {
       }
     }
 
+    step.offerReset = false
     this.#set(run, step, { status: 'starting', exitCode: null, detail: null })
     let info: TerminalInfo
     try {
@@ -636,6 +951,7 @@ export class RunSupervisor {
     }
     step.terminalId = info.terminalId
     step.alive = true
+    step.launchedAt = this.#now()
     this.#owned.set(info.terminalId, { run, step })
 
     const ready = step.step.ready
@@ -709,6 +1025,7 @@ export class RunSupervisor {
       // The script has run (or was stopped): its file goes.
       this.#releaseScript(once.once)
       this.#report(once.run)
+      this.#settleWaiter(terminalId, exitCode)
       return
     }
     const owned = this.#owned.get(terminalId)
@@ -720,6 +1037,8 @@ export class RunSupervisor {
     step.gate.resolve(false)
     if (step.stopping) {
       this.#set(run, step, { status: 'stopped', exitCode, detail: null })
+    } else if (step.step.docker !== undefined && step.launchedAt !== null && this.#now() - step.launchedAt <= EARLY_EXIT_MS) {
+      this.#earlyDockerExit(run, step, exitCode)
     } else {
       this.#set(run, step, {
         status: 'exited',
@@ -727,6 +1046,23 @@ export class RunSupervisor {
         detail: exitCode === 0 ? 'Finished.' : `Ended with code ${exitCode}.`,
       })
     }
+  }
+
+  /** A Docker service that stopped right after a switch: its last lines, and Reset offered (FR-14). */
+  #earlyDockerExit(run: ScopeRun, step: StepRun, exitCode: number): void {
+    step.offerReset = true
+    this.#set(run, step, { status: 'exited', exitCode, detail: DOCKER_SENTENCE.earlyExitNoLines })
+    const ref = step.step.docker
+    const groupPlan = ref === undefined ? undefined : run.dockerPlans.get(ref.projectRoot)
+    if (ref === undefined || groupPlan === undefined) return
+    const epoch = step.epoch
+    void this.#deps.docker
+      .lastLines(groupPlan, ref.service)
+      .then((lines) => {
+        if (lines === null || step.epoch !== epoch || this.#runs.get(run.key) !== run || step.status !== 'exited') return
+        this.#set(run, step, { detail: `${DOCKER_SENTENCE.earlyExit}\n${lines}` })
+      })
+      .catch(() => undefined)
   }
 
   /** A person closed a step's tab: the step is stopped and has no tab. */
@@ -738,6 +1074,7 @@ export class RunSupervisor {
       this.#releaseScript(once.once)
       once.run.once = once.run.once.filter((entry) => entry !== once.once)
       this.#report(once.run)
+      this.#settleWaiter(terminalId, null)
       return
     }
     const owned = this.#owned.get(terminalId)
@@ -825,8 +1162,12 @@ export class RunSupervisor {
       exitCode: step.exitCode,
       detail: step.detail,
       ...(step.step.unavailable !== undefined ? { notHere: true } : {}),
+      ...(step.step.docker !== undefined ? { docker: { ...step.step.docker } } : {}),
+      ...(step.offerReset ? { offerReset: true } : {}),
     }))
     const state: RunGroupState = { scopeKey: run.key, active: this.#isActive(run), steps }
+    if (run.dockerNotices.length > 0) state.dockerNotices = run.dockerNotices.map((notice) => ({ ...notice }))
+    if (run.offerOpenDocker) state.offerOpenDocker = true
     if (run.once.length > 0) {
       state.once = run.once.map((once) => ({
         key: once.step.key,

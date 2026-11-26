@@ -8,6 +8,12 @@ import type {
   RunView,
 } from '../../shared/run-setup'
 import {
+  DOCKER_STRINGS,
+  dockerMenuGroup,
+  switchSentence,
+  dockerNoticeFace,
+  splitDetail,
+  stoppedRightAwayFace,
   askAgentPrompt,
   durationLabel,
   groupHasRun,
@@ -255,6 +261,7 @@ const FORBIDDEN: Array<[string, RegExp]> = [
 function uiStrings(): string[] {
   const all: string[] = [
     ...Object.values(RUN_STRINGS),
+    ...Object.values(DOCKER_STRINGS),
     ...Object.values(SETUP_STRINGS),
     setupTitle([{ name: 'lumen-app' }, { name: 'lumen-core' }]),
   ]
@@ -297,7 +304,67 @@ function uiStrings(): string[] {
   all.push(ask.title, ask.where, onceAsk(onceStep('migrate', { cwd: '/work/.lumen-threads/blue' })).where)
   // The sentence the page shows for a stored entry of a kind this build can't run.
   all.push(...parseRunSetup(JSON.stringify({ version: 1, steps: [{ name: 'x', command: 'y', kind: 'later' }] })).problems)
+  // The Docker group's rows and notices.
+  const dv = dockerView([dockerStep('db', 'running'), dockerStep('api', 'exited', { exitCode: 1, offerReset: true, detail: 'This service stopped right after starting. Its last lines:\nFATAL: bad' })], {
+    dockerNotices: [
+      { projectRoot: null, kind: 'docker-unavailable', detail: "Docker isn't running." },
+      { projectRoot: null, kind: 'port-clash', detail: 'api and billing both use port 5432 on this computer, so this conversation\'s services can\'t start together.' },
+    ],
+    offerOpenDocker: true,
+  })
+  const docker = dockerMenuGroup(dv)
+  // The section before its services go: Start Docker, and Switch to this thread (known title, and not).
+  for (const elsewhere of [null, { threadId: 'thread-2', title: 'Invoice export' }, { threadId: 'thread-2', title: null }]) {
+    const face = dockerMenuGroup(dockerView([dockerStep('db', 'idle')]), elsewhere)
+    all.push(face?.sentence ?? '', face?.primary?.label ?? '', face?.primary?.title ?? '')
+  }
+  for (const row of docker?.services ?? []) all.push(row.note, row.title)
+  for (const notice of docker?.notices ?? []) all.push(notice.title ?? '', notice.sentence)
   return all.filter((text) => text !== '')
+}
+
+function dockerStep(name: string, status: RunStepStatus, extra: Partial<RunStepState> = {}): RunStepState {
+  return step(name, status, { key: `${ROOT}::docker:${name}`, docker: { projectRoot: ROOT, service: name }, ...extra })
+}
+
+/** A view of a thread whose project keeps its own data: Docker steps first, then a local one. */
+function dockerView(dockerSteps: RunStepState[], extra: Partial<RunGroupState> = {}, local: RunStepState[] = []): RunView {
+  const base = view([...dockerSteps, ...local], dockerSteps.some((s) => s.status === 'running'), 0)
+  const resolved = (s: RunStepState, port: number | null): ResolvedRunStep => ({
+    key: s.key,
+    projectRoot: ROOT,
+    projectName: 'lumen',
+    cwd: ROOT,
+    id: s.key.split('::')[1]!,
+    name: s.name,
+    command: 'run it',
+    start: 'now',
+    readyTimeoutMs: 60_000,
+    from: { command: 'shared', ready: 'shared' },
+    ...(port === null ? {} : { ready: { kind: 'port' as const, port } }),
+    ...(s.docker === undefined ? {} : { docker: s.docker }),
+  })
+  return {
+    resolution: {
+      ...base.resolution,
+      steps: [...dockerSteps.map((s) => resolved(s, s.name === 'db' ? 5432 : null)), ...local.map((s) => resolved(s, 3000))],
+      docker: [
+        {
+          projectRoot: ROOT,
+          projectName: 'lumen',
+          threadId: 'thread-1',
+          checkout: ROOT,
+          services: dockerSteps.map((s) => s.name),
+          dataServices: ['db'],
+          volumes: [],
+          unreadable: [],
+          folded: [],
+          notes: [],
+        },
+      ],
+    },
+    state: { ...base.state, ...extra },
+  }
 }
 
 describe('UI text (forbidden-pattern #12)', () => {
@@ -447,5 +514,163 @@ describe('scripts in the Launchpad menu and the ask', () => {
   it('shows the whole script before it runs, with "Run script"', () => {
     const ask = onceAsk(onceStep('reset', { body: 'script', command: SCRIPT }))
     expect(ask).toMatchObject({ script: true, run: 'Run script', command: SCRIPT, where: 'This script runs in lumen, in its folder:' })
+  })
+})
+
+describe('the Run menu’s Docker section — its three faces', () => {
+  const idle = (): RunView => dockerView([dockerStep('db', 'idle'), dockerStep('redis', 'idle'), dockerStep('api', 'idle')], {}, [step('web', 'idle')])
+
+  it('not started: the services by name, what Start Docker does, and the button — no service rows or tools', () => {
+    const group = dockerMenuGroup(idle())!
+    expect(group).toMatchObject({
+      mode: 'start',
+      serviceNames: 'db, redis, api',
+      sentence: "Starts this project's containers with this thread's own data.",
+      primary: { label: 'Start Docker', icon: 'play' },
+      liveHere: false,
+      canStop: false,
+    })
+    // Run all still starts Docker and the local steps.
+    const menu = launchpadMenu(idle())
+    expect(menu.runAll).toMatchObject({ shown: true, disabled: false })
+    expect(menu.local.map((row) => row.name)).toEqual(['web'])
+  })
+
+  it('another thread’s data runs: whose, by title, and Switch to this thread', () => {
+    const group = dockerMenuGroup(idle(), { threadId: 'thread-2', title: 'Invoice export' })!
+    expect(group).toMatchObject({
+      mode: 'switch',
+      sentence: "Running with the data of “Invoice export”. Switching stops it and starts this thread's data.",
+      primary: { label: 'Switch to this thread', icon: 'sync' },
+    })
+    expect(launchpadMenu(idle(), { threadId: 'thread-2', title: 'Invoice export' }).docker?.mode).toBe('switch')
+  })
+
+  it('an unknown title reads as another thread; this thread’s own id is not a switch', () => {
+    expect(dockerMenuGroup(idle(), { threadId: 'thread-2', title: null })!.sentence).toBe(
+      "Running with the data of another thread. Switching stops it and starts this thread's data.",
+    )
+    expect(switchSentence('  ')).toBe(switchSentence(null))
+    expect(dockerMenuGroup(idle(), { threadId: 'thread-1', title: 'Mine' })!.mode).toBe('start')
+  })
+
+  it('running: unchanged — the pill, service rows, Restart and Stop; no sentence or button, whatever runs elsewhere', () => {
+    const v = dockerView([dockerStep('db', 'running'), dockerStep('redis', 'waiting')])
+    const group = dockerMenuGroup(v, { threadId: 'thread-2', title: 'Invoice export' })!
+    expect(group).toMatchObject({ mode: 'running', sentence: null, primary: null, liveHere: true, canReload: true, canStop: true, manage: true })
+    expect(group.services.map((row) => row.name)).toEqual(['db', 'redis'])
+  })
+
+  it('a service still waiting to answer is running, not a reason to offer Start Docker again', () => {
+    expect(dockerMenuGroup(dockerView([dockerStep('db', 'waiting')]))!.mode).toBe('running')
+  })
+
+  it('notices show before a start too (Docker not running offers Open Docker beside Start Docker)', () => {
+    const v = dockerView([dockerStep('db', 'blocked', { detail: "Docker isn't running." })], {
+      dockerNotices: [{ projectRoot: null, kind: 'docker-unavailable', detail: "Docker isn't running." }],
+      offerOpenDocker: true,
+    })
+    const group = dockerMenuGroup(v)!
+    expect(group.mode).toBe('start')
+    expect(group.notices[0]).toMatchObject({ action: 'open-docker' })
+  })
+
+  it('no thread (the project itself): no Docker section at all', () => {
+    const v = idle()
+    v.resolution.scope = { rootPath: ROOT, threadId: null }
+    expect(dockerMenuGroup(v)).toBeNull()
+    expect(dockerMenuGroup(v, { threadId: 'thread-2', title: 'Invoice export' })).toBeNull()
+    expect(launchpadMenu(v).docker).toBeNull()
+  })
+})
+
+describe('the Run menu’s Docker group', () => {
+  it('is absent when the thread keeps no data of its own', () => {
+    expect(dockerMenuGroup(null)).toBeNull()
+    expect(dockerMenuGroup(view([step('web', 'running')], true))).toBeNull()
+    expect(launchpadMenu(view([step('web', 'running')], true))).toMatchObject({ docker: null, local: [] })
+  })
+
+  it('Run all stays available after Start Docker while local steps are idle, and turns off once they go', () => {
+    const dockerOnly = launchpadMenu(dockerView([dockerStep('db', 'running')], { active: true }, [step('web', 'idle')]))
+    expect(dockerOnly.runAll).toEqual({ shown: true, disabled: false, title: RUN_STRINGS.runTitle })
+    const allGoing = launchpadMenu(dockerView([dockerStep('db', 'running')], { active: true }, [step('web', 'running')]))
+    expect(allGoing.runAll).toEqual({ shown: true, disabled: true, title: RUN_STRINGS.runAllGoing })
+  })
+
+  it('services with their port or status; the pill only while this thread’s data runs', () => {
+    const v = dockerView([dockerStep('db', 'running'), dockerStep('redis', 'starting')], {}, [step('web', 'running')])
+    const group = dockerMenuGroup(v)!
+    expect(group.liveHere).toBe(true)
+    expect(group.services.map((row) => [row.name, row.note, row.tone])).toEqual([
+      ['db', 'port 5432', 'ok'],
+      ['redis', 'Starting', 'busy'],
+    ])
+    expect(group.canReload && group.canStop).toBe(true)
+    expect(group.manage).toBe(true)
+    // The local steps stand under their own heading.
+    expect(launchpadMenu(v).local.map((row) => [row.name, row.note])).toEqual([['web', 'port 3000']])
+  })
+
+  it('before any Run: services from the setup, not started, no pill and no Stop', () => {
+    const v = dockerView([])
+    v.resolution.steps.push({ ...v.resolution.steps[0], key: `${ROOT}::docker:db`, id: 'docker:db', name: 'db', projectRoot: ROOT, projectName: 'lumen', cwd: ROOT, command: 'x', start: 'now', readyTimeoutMs: 1, from: { command: 'shared', ready: 'shared' }, docker: { projectRoot: ROOT, service: 'db' } })
+    const group = dockerMenuGroup(v)!
+    expect(group.services.map((row) => row.note)).toEqual(['Not started'])
+    expect(group).toMatchObject({ liveHere: false, canReload: false, canStop: false })
+  })
+
+  it('the data steps that ran, from the one-time runs main named for them', () => {
+    const v = dockerView([dockerStep('db', 'running')], {
+      once: [
+        onceState('x', { key: `${ROOT}::docker-data:migration-1`, name: 'Update database', status: 'exited', exitCode: 0 }),
+        onceState('codegen'),
+      ],
+    })
+    expect(dockerMenuGroup(v)!.data.map((row) => [row.name, row.note])).toEqual([['Update database', 'Done']])
+  })
+
+  it('a refused migration says the services started anyway; Docker not running offers Open Docker', () => {
+    const v = dockerView([dockerStep('db', 'running')], {
+      dockerNotices: [
+        { projectRoot: ROOT, kind: 'migration-refused', detail: "This would reach a database that isn't one of this conversation's services, so Flow didn't run it." },
+        { projectRoot: ROOT, kind: 'migration-refused', detail: "This would reach a database that isn't one of this conversation's services, so Flow didn't run it." },
+        { projectRoot: null, kind: 'docker-unavailable', detail: "Docker isn't running." },
+      ],
+      offerOpenDocker: true,
+    })
+    const notices = dockerMenuGroup(v)!.notices
+    expect(notices).toHaveLength(2)
+    expect(notices[0]!.sentence).toMatch(/The services started anyway\.$/)
+    expect(notices[1]).toMatchObject({ title: DOCKER_STRINGS.notRunningTitle, action: 'open-docker' })
+  })
+
+  it('what Docker printed goes in the mono block, never in the sentence', () => {
+    const face = dockerNoticeFace(
+      { projectRoot: ROOT, kind: 'switch-failed', detail: "Docker couldn't create this conversation's services, so they didn't start. Docker said:\npull access denied" },
+      false,
+      0,
+    )
+    expect(face.sentence).toBe("Docker couldn't create this conversation's services, so they didn't start.")
+    expect(face.lines).toBe('pull access denied')
+    expect(splitDetail('One sentence.')).toEqual({ sentence: 'One sentence.', lines: null })
+  })
+
+  it('two projects on one port: which two and the port, in the reader’s terms', () => {
+    const face = dockerNoticeFace(
+      { projectRoot: null, kind: 'port-clash', detail: "api and billing both use port 5432 on this computer, so this conversation's services can't start together. Change the port in one of them and press Run again." },
+      false,
+      0,
+    )
+    expect(face).toMatchObject({ title: 'api and billing both use port 5432', sentence: DOCKER_STRINGS.portClash, action: null })
+  })
+
+  it('a service that stopped right away: its last lines and Reset data', () => {
+    const s = dockerStep('db', 'exited', { exitCode: 1, offerReset: true, detail: 'This service stopped right after starting. Its last lines:\nFATAL: database files are incompatible' })
+    const group = dockerMenuGroup(dockerView([s]))!
+    expect(group.services[0]!.note).toBe('Stopped right away')
+    expect(group.services[0]!.title).not.toContain('FATAL')
+    expect(group.notices).toEqual([stoppedRightAwayFace(s)])
+    expect(group.notices[0]).toMatchObject({ title: 'db stopped after it started', lines: 'FATAL: database files are incompatible', action: 'reset' })
   })
 })
