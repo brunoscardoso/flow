@@ -11,6 +11,8 @@ import { join } from 'path'
 
 import type { RunSuggestion } from '../../shared/run-setup'
 
+import { readComposeDescription } from './compose-describe'
+
 export interface SuggestFs {
   /** The file's text, or null when it does not exist or cannot be read. */
   readFile(path: string): Promise<string | null>
@@ -140,42 +142,19 @@ async function fromProcfile(root: string, fs: SuggestFs): Promise<Candidate[]> {
 
 // ─── docker compose ──────────────────────────────────────────────────────────
 
-const COMPOSE_FILES = ['compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml']
-
-/** Top-level service names under `services:` — read by indentation, no YAML parser needed. */
-export function composeServices(text: string): string[] {
-  const lines = text.split(/\r?\n/)
-  const services: string[] = []
-  let inServices = false
-  let childIndent: number | null = null
-  for (const raw of lines) {
-    if (raw.trim() === '' || raw.trim().startsWith('#')) continue
-    const indent = raw.length - raw.trimStart().length
-    if (indent === 0) {
-      inServices = /^services\s*:\s*$/.test(raw.trim())
-      childIndent = null
-      continue
-    }
-    if (!inServices) continue
-    if (childIndent === null) childIndent = indent
-    if (indent !== childIndent) continue
-    const match = /^["']?([A-Za-z0-9._-]+)["']?\s*:/.exec(raw.trim())
-    if (match !== null) services.push(match[1]!)
-  }
-  return services
-}
+// One reader of the Compose file (allowed-pattern #14): the suggestions are the
+// services `describeCompose` lists, so the per-thread plan and the Docker group
+// read the same description these chips come from.
+export { composeServices, describeCompose, readComposeDescription } from './compose-describe'
 
 async function fromCompose(root: string, fs: SuggestFs): Promise<Candidate[]> {
-  for (const file of COMPOSE_FILES) {
-    const text = await fs.readFile(join(root, file))
-    if (text === null) continue
-    return composeServices(text).map((service) => ({
-      name: service,
-      command: `docker compose up ${service}`,
-      source: 'Docker Compose',
-    }))
-  }
-  return []
+  const found = await readComposeDescription(root, fs)
+  if (found === null) return []
+  return found.description.services.map((service) => ({
+    name: service.name,
+    command: `docker compose up ${service.name}`,
+    source: 'Docker Compose',
+  }))
 }
 
 // ─── Makefile ────────────────────────────────────────────────────────────────
@@ -344,30 +323,156 @@ async function onceFromMakefile(root: string, fs: SuggestFs): Promise<Candidate[
   return out
 }
 
+/**
+ * The migration tools a project's own files show it uses — the ONE reading of
+ * those markers, shared by the one-time action chips and the automatic
+ * migrations and seeds (`detectDataCommands`), so the two never disagree about
+ * which tool a project has (allowed-pattern #14).
+ */
+export interface ToolMarkers {
+  /** A `uv.lock`: Python commands run through `uv run`. */
+  uv: boolean
+  alembic: boolean
+  django: boolean
+  prisma: boolean
+  drizzle: boolean
+  rails: boolean
+}
+
+export async function readToolMarkers(root: string, fs: SuggestFs): Promise<ToolMarkers> {
+  let drizzle = false
+  for (const file of ['drizzle.config.ts', 'drizzle.config.js', 'drizzle.config.mjs']) {
+    if (await fs.exists(join(root, file))) {
+      drizzle = true
+      break
+    }
+  }
+  return {
+    uv: await fs.exists(join(root, 'uv.lock')),
+    alembic: await fs.exists(join(root, 'alembic.ini')),
+    django: await fs.exists(join(root, 'manage.py')),
+    prisma: await fs.exists(join(root, 'prisma', 'schema.prisma')),
+    drizzle,
+    rails: await fs.exists(join(root, 'bin', 'rails')),
+  }
+}
+
+const pythonCommand = (markers: ToolMarkers, command: string): string => (markers.uv ? `uv run ${command}` : command)
+
 /** The migration and codegen tools a project's own files show it uses. */
 async function onceFromTools(root: string, fs: SuggestFs): Promise<Candidate[]> {
   const out: Candidate[] = []
-  const uv = await fs.exists(join(root, 'uv.lock'))
-  const py = (command: string): string => (uv ? `uv run ${command}` : command)
-  if (await fs.exists(join(root, 'alembic.ini'))) {
-    out.push({ name: 'migrate', command: py('alembic upgrade head'), source: 'Alembic' })
-  }
-  if (await fs.exists(join(root, 'manage.py'))) {
-    out.push({ name: 'migrate', command: py('python manage.py migrate'), source: 'Django' })
-  }
-  if (await fs.exists(join(root, 'prisma', 'schema.prisma'))) {
+  const markers = await readToolMarkers(root, fs)
+  const py = (command: string): string => pythonCommand(markers, command)
+  if (markers.alembic) out.push({ name: 'migrate', command: py('alembic upgrade head'), source: 'Alembic' })
+  if (markers.django) out.push({ name: 'migrate', command: py('python manage.py migrate'), source: 'Django' })
+  if (markers.prisma) {
     out.push({ name: 'migrate', command: 'npx prisma migrate dev', source: 'Prisma' })
     out.push({ name: 'generate', command: 'npx prisma generate', source: 'Prisma' })
   }
-  for (const file of ['drizzle.config.ts', 'drizzle.config.js', 'drizzle.config.mjs']) {
-    if (!(await fs.exists(join(root, file)))) continue
-    out.push({ name: 'migrate', command: 'npx drizzle-kit migrate', source: 'Drizzle' })
-    break
-  }
-  if (await fs.exists(join(root, 'bin', 'rails'))) {
-    out.push({ name: 'migrate', command: 'bin/rails db:migrate', source: 'Rails' })
-  }
+  if (markers.drizzle) out.push({ name: 'migrate', command: 'npx drizzle-kit migrate', source: 'Drizzle' })
+  if (markers.rails) out.push({ name: 'migrate', command: 'bin/rails db:migrate', source: 'Rails' })
   return out
+}
+
+// ─── automatic migrations and seeds ──────────────────────────────────────────
+
+/** A migration or seed command Flow found. Detection only: nothing here runs it. */
+export interface DetectedCommand {
+  command: string
+  /** Where it was found, for the person checking the guess ("Alembic", "package.json", "Docker Compose"…). */
+  source: string
+  /** Set when the command IS a Compose service: the guard starts that service in the thread's run. */
+  service?: string
+}
+
+export interface DataCommands {
+  migrations: DetectedCommand[]
+  seeds: DetectedCommand[]
+}
+
+const MIGRATE_NAME = /^(db[:_-])?(migrate|migrations?)$/i
+const SEED_NAME = /^(db[:_-])?seeds?$/i
+
+/**
+ * The commands that bring a project's database up to date, and the ones that
+ * fill a new one — read from the same markers as the one-time chips. In order:
+ * a Compose service of their own, the project's tools, package.json scripts,
+ * Makefile targets; de-duplicated by command. Automatic runs use the
+ * non-interactive form (Prisma's deploy, not dev). Never throws.
+ */
+export async function detectDataCommands(root: string, fs: SuggestFs): Promise<DataCommands> {
+  const migrations: DetectedCommand[] = []
+  const seeds: DetectedCommand[] = []
+  const add = (list: DetectedCommand[], found: DetectedCommand): void => {
+    const command = found.command.replace(/\s+/g, ' ').trim()
+    if (command === '' || list.some((item) => item.command === command)) return
+    list.push({ ...found, command })
+  }
+
+  try {
+    const compose = await readComposeDescription(root, fs)
+    for (const service of compose?.description.services ?? []) {
+      if (MIGRATE_NAME.test(service.name)) {
+        add(migrations, { command: `docker compose run --rm ${service.name}`, source: 'Docker Compose', service: service.name })
+      } else if (SEED_NAME.test(service.name)) {
+        add(seeds, { command: `docker compose run --rm ${service.name}`, source: 'Docker Compose', service: service.name })
+      }
+    }
+  } catch {
+    // an unreadable Compose file contributes nothing
+  }
+
+  try {
+    const markers = await readToolMarkers(root, fs)
+    const py = (command: string): string => pythonCommand(markers, command)
+    if (markers.alembic) add(migrations, { command: py('alembic upgrade head'), source: 'Alembic' })
+    if (markers.django) add(migrations, { command: py('python manage.py migrate'), source: 'Django' })
+    if (markers.prisma) add(migrations, { command: 'npx prisma migrate deploy', source: 'Prisma' })
+    if (markers.drizzle) add(migrations, { command: 'npx drizzle-kit migrate', source: 'Drizzle' })
+    if (markers.rails) {
+      add(migrations, { command: 'bin/rails db:migrate', source: 'Rails' })
+      add(seeds, { command: 'bin/rails db:seed', source: 'Rails' })
+    }
+  } catch {
+    // a marker that cannot be read contributes nothing
+  }
+
+  try {
+    const text = await fs.readFile(join(root, 'package.json'))
+    if (text !== null) {
+      const parsed = JSON.parse(text) as { scripts?: unknown; prisma?: unknown }
+      const run = await packageRunner(root, fs)
+      const scripts = parsed.scripts
+      if (typeof scripts === 'object' && scripts !== null && !Array.isArray(scripts)) {
+        for (const [name, body] of Object.entries(scripts as Record<string, unknown>)) {
+          if (typeof body !== 'string' || body.trim() === '') continue
+          if (MIGRATE_NAME.test(name)) add(migrations, { command: run(name), source: 'package.json' })
+          else if (SEED_NAME.test(name)) add(seeds, { command: run(name), source: 'package.json' })
+        }
+      }
+      const prisma = parsed.prisma
+      if (typeof prisma === 'object' && prisma !== null && typeof (prisma as { seed?: unknown }).seed === 'string') {
+        add(seeds, { command: 'npx prisma db seed', source: 'Prisma' })
+      }
+    }
+  } catch {
+    // unreadable package.json contributes nothing
+  }
+
+  try {
+    const text = await fs.readFile(join(root, 'Makefile'))
+    for (const line of text?.split(/\r?\n/) ?? []) {
+      const target = /^([A-Za-z0-9_-]+)\s*:(?!=)/.exec(line)?.[1]
+      if (target === undefined) continue
+      if (MIGRATE_NAME.test(target)) add(migrations, { command: `make ${target}`, source: 'Makefile' })
+      else if (SEED_NAME.test(target)) add(seeds, { command: `make ${target}`, source: 'Makefile' })
+    }
+  } catch {
+    // unreadable Makefile contributes nothing
+  }
+
+  return { migrations, seeds }
 }
 
 const ONCE_SCANNERS = [onceFromPackageJson, onceFromTools, onceFromMakefile]

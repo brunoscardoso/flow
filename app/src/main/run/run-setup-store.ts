@@ -43,6 +43,7 @@ import {
   type RunSetup,
   type RunStep,
 } from '../../shared/run-setup'
+import { attachDockerPlans, dockerStepsFor, foldHandMadeSteps, type DockerGroupPlan, type RunDockerSource } from './thread-docker'
 
 /** What the store needs to know about a conversation. */
 export interface RunThreadSource {
@@ -70,6 +71,11 @@ export interface RunSetupStoreDeps {
   personal: RunPersonalSource
   /** A project's name as the app shows it. */
   projectName?: (root: string) => string
+  /**
+   * The conversation's Docker groups (`thread-docker.ts`). Absent: no project
+   * ever gets one — exactly the Run of a project without a Compose file.
+   */
+  docker?: RunDockerSource
 }
 
 /** A refusal a person reads — plain words, no path or setting (forbidden-pattern #12). */
@@ -183,14 +189,46 @@ export class RunSetupStore {
       conversation: {},
     }
     const places = await this.placesOf(scope)
-    return {
+    const local = resolveRunSteps(project, places, { keyOf: (step) => step.id })
+    const once = resolveOnceSteps(project, places, { keyOf: (step) => step.id })
+    const plans = await this.#dockerGroups(scope, gathered.projects)
+    if (plans.size === 0) {
+      return { scope, scopeKey: runScopeKey(scope), project, places, steps: local, once }
+    }
+    // The Docker group's services come first (data before the apps that use
+    // it), and a hand-made step that starts one of the same services is
+    // folded into the group so nothing starts twice.
+    const groups = [...plans.values()].map((entry) => entry.group)
+    const { kept, folded } = foldHandMadeSteps(local, groups)
+    for (const group of groups) group.folded = folded.get(group.projectRoot) ?? []
+    const resolution: RunResolution = {
       scope,
       scopeKey: runScopeKey(scope),
       project,
       places,
-      steps: resolveRunSteps(project, places, { keyOf: (step) => step.id }),
-      once: resolveOnceSteps(project, places, { keyOf: (step) => step.id }),
+      steps: [...[...plans.values()].flatMap((entry) => dockerStepsFor(entry)), ...kept],
+      once,
+      docker: groups,
     }
+    attachDockerPlans(resolution, plans)
+    return resolution
+  }
+
+  /**
+   * Each project's Docker group for a conversation scope, by project root.
+   * Outside a conversation (or for one this computer does not know) there is
+   * none: a run of the project itself uses its Compose file as written (FR-6).
+   */
+  async #dockerGroups(scope: RunScope, projects: NamedProject[]): Promise<Map<string, DockerGroupPlan>> {
+    const plans = new Map<string, DockerGroupPlan>()
+    const source = this.#deps.docker
+    if (source === undefined || scope.threadId === null) return plans
+    if (this.#deps.threads.getThread(scope.threadId) === null) return plans
+    for (const project of projects) {
+      const entry = await source.groupFor(project, scope.threadId).catch(() => null)
+      if (entry !== null) plans.set(project.root, entry)
+    }
+    return plans
   }
 
   /**

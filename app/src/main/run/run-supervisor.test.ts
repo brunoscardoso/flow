@@ -16,6 +16,11 @@ import type { ReadyOutcome, ReadyWait } from './ready-check'
 import { RunSetupStore } from './run-setup-store'
 import { RunOnceError, RunSupervisor, type RunReadyChecks, type RunSupervisorDeps, type RunTerminalPort } from './run-supervisor'
 import { createRunScriptFiles } from './run-script-files'
+import { describeCompose } from './compose-describe'
+import { LABEL_PROJECT, LABEL_THREAD, threadComposeOverride } from './compose-thread'
+import type { DockerRunner, DockerRunResult } from './docker-runner'
+import { GUARD_REFUSAL } from './migration-guard'
+import { attachDockerPlans, composeCreateArgs, createThreadDocker, dockerStepsFor, type DockerDataItem, type DockerGroupPlan, type DockerPrepareResult, type RunDockerPort } from './thread-docker'
 import { mkdtempSync, promises as fsp, rmSync, statSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -159,11 +164,30 @@ const NO_SCRIPTS: RunSupervisorDeps['scripts'] = {
   remove: async () => undefined,
 }
 
+/** A Docker port no plain Run may touch: every call throws, so a test that reaches Docker fails loudly. */
+const NO_DOCKER: RunSupervisorDeps['docker'] = {
+  prepare: async () => {
+    throw new Error('this test runs no Docker group')
+  },
+  dataCommands: async () => {
+    throw new Error('this test runs no Docker group')
+  },
+  lastLines: async () => {
+    throw new Error('this test runs no Docker group')
+  },
+  stopThread: async () => {
+    throw new Error('this test runs no Docker group')
+  },
+  openDocker: async () => {
+    throw new Error('this test runs no Docker group')
+  },
+}
+
 function harness(setup: RunSetup = THREE, clock: { now: number } = { now: 0 }, scripts: RunSupervisorDeps['scripts'] = NO_SCRIPTS) {
   const terminals = new FakeTerminals()
   const ready = new FakeReady()
   const store = setupStore(setup)
-  const supervisor = new RunSupervisor({ terminals, setups: store, ready, scripts, now: () => clock.now })
+  const supervisor = new RunSupervisor({ terminals, setups: store, ready, scripts, docker: NO_DOCKER, now: () => clock.now })
   const updates: RunGroupState[] = []
   supervisor.onUpdated((state) => updates.push(state))
   const statusOf = (): Array<[string, string]> => supervisor.state(SCOPE).steps.map((s) => [s.key.split('::')[1]!, s.status])
@@ -532,7 +556,7 @@ describe('RunSupervisor — apply with steps combined across projects', () => {
       ],
     })
     const terminals = new FakeTerminals()
-    const supervisor = new RunSupervisor({ terminals, setups: store, ready: new FakeReady(), scripts: NO_SCRIPTS })
+    const supervisor = new RunSupervisor({ terminals, setups: store, ready: new FakeReady(), scripts: NO_SCRIPTS, docker: NO_DOCKER })
     await supervisor.start(scope)
     await flush()
     expect(supervisor.state(scope).steps.map((s) => s.key)).toEqual([`${B}::db`, `${A}::web`, `${B}::old`])
@@ -846,5 +870,571 @@ describe('RunSupervisor — one-time actions that hold a script', () => {
     const h = harness(SETUP, { now: 0 }, NO_SCRIPTS)
     await expect(h.supervisor.runOnce(SCOPE, `${ROOT}::reset`)).rejects.toThrow('could not get this script ready')
     expect(h.terminals.created).toEqual([])
+  })
+})
+
+// ─── the Docker group: Run is the switch (change note 5) ────────────────────
+
+describe('RunSupervisor — the Docker group', () => {
+  const COMPOSE = [
+    'services:',
+    '  db:',
+    '    image: postgres:16',
+    '    volumes:',
+    '      - pgdata:/var/lib/postgresql/data',
+    '    ports:',
+    '      - 5432:5432',
+    '  web:',
+    '    build: .',
+    '    volumes:',
+    '      - .:/app',
+    'volumes:',
+    '  pgdata:',
+  ].join('\n')
+  const LOCAL: RunSetup = { version: 1, steps: [{ id: 'dev', name: 'Dev', command: 'npm run dev', start: 'now' }] }
+
+  function groupFor(threadId: string): DockerGroupPlan {
+    const checkout = `/repos/.shop-threads/${threadId}`
+    const plan = threadComposeOverride({ project: describeCompose(COMPOSE), projectSlug: 'shop', threadId, checkout })
+    return {
+      group: {
+        projectRoot: ROOT, projectName: 'shop', threadId, checkout, services: ['db', 'web'], dataServices: ['db'],
+        volumes: plan.volumes.map((v) => v.name), unreadable: [], folded: [], notes: [],
+      },
+      plan,
+      target: { projectName: 'shop', checkout, composeFile: `${checkout}/compose.yaml`, projectOverride: null, overridePath: `/data/o/${threadId}.yml` },
+    }
+  }
+
+  function dockerStore(setup: RunSetup = LOCAL): { resolve(scope: RunScope): Promise<RunResolution> } {
+    return {
+      resolve: async (scope) => {
+        const project = { root: ROOT, name: 'shop', cwd: ROOT, setup, personal: {}, conversation: {}, hasSharedSetup: true, problems: [] }
+        const local = resolveRunSteps(project, [])
+        if (scope.threadId === null) return { scope, scopeKey: runScopeKey(scope), project, places: [], steps: local, once: [] }
+        const entry = groupFor(scope.threadId)
+        const resolution: RunResolution = {
+          scope, scopeKey: runScopeKey(scope), project, places: [], once: [],
+          steps: [...dockerStepsFor(entry), ...local],
+          docker: [entry.group],
+        }
+        attachDockerPlans(resolution, new Map([[ROOT, entry]]))
+        return resolution
+      },
+    }
+  }
+
+  class FakeDockerPort implements RunDockerPort {
+    calls: string[] = []
+    prepared: Array<{ threadId: string }> = []
+    result: DockerPrepareResult = { ok: true, projects: new Map([[ROOT, { ok: true, newVolumes: true }]]) }
+    items: DockerDataItem[] = []
+    stopOthers: string[] = []
+    lines: string | null = 'FATAL: database files are incompatible with server'
+    /** When set, every prepare waits for it — a switch still pulling images. */
+    hold: Promise<void> | null = null
+    async prepare(input: { threadId: string; groups: DockerGroupPlan[]; beforeStop: (id: string) => void }): Promise<DockerPrepareResult> {
+      this.calls.push(`prepare:${input.threadId}`)
+      this.prepared.push({ threadId: input.threadId })
+      if (this.hold !== null) await this.hold
+      for (const other of this.stopOthers) input.beforeStop(other)
+      return this.result
+    }
+    async dataCommands(_plan: DockerGroupPlan, newVolumes: boolean): Promise<{ items: DockerDataItem[]; notice: string | null }> {
+      this.calls.push(`data:${newVolumes}`)
+      return { items: this.items, notice: null }
+    }
+    async lastLines(_plan: DockerGroupPlan, service: string): Promise<string | null> {
+      this.calls.push(`logs:${service}`)
+      return this.lines
+    }
+    async stopThread(threadId: string): Promise<boolean> {
+      this.calls.push(`stop:${threadId}`)
+      return true
+    }
+    async openDocker(): Promise<{ ok: boolean; detail: string }> {
+      return { ok: true, detail: '' }
+    }
+  }
+
+  function dockerHarness(clock = { now: 0 }, setup: RunSetup = LOCAL) {
+    const terminals = new FakeTerminals()
+    const ready = new FakeReady()
+    const docker = new FakeDockerPort()
+    const supervisor = new RunSupervisor({ terminals, setups: dockerStore(setup), ready, scripts: NO_SCRIPTS, docker, now: () => clock.now })
+    return { terminals, ready, docker, supervisor, clock }
+  }
+  const T1: RunScope = { rootPath: ROOT, threadId: 't1' }
+  const T0: RunScope = { rootPath: ROOT, threadId: 't0' }
+  const stepOf = (state: RunGroupState, key: string) => state.steps.find((s) => s.key === key)!
+
+  it('a Run outside a conversation never asks Docker (FR-6)', async () => {
+    const h = dockerHarness()
+    await h.supervisor.start({ rootPath: ROOT, threadId: null })
+    await flush()
+    expect(h.docker.calls).toEqual([])
+    expect(h.terminals.commands()).toEqual(['npm run dev'])
+  })
+
+  it('stops the live conversation first, then starts this one’s services in their own tabs', async () => {
+    const h = dockerHarness()
+    await h.supervisor.start(T0)
+    await flush()
+    const t0db = h.supervisor.terminalOf(T0, `${ROOT}::docker:db`)!
+    expect(t0db).not.toBeNull()
+
+    h.docker.stopOthers = ['t0']
+    const first = await h.supervisor.start(T1)
+    // While the switch runs, the group says it is getting ready.
+    expect(stepOf(first, `${ROOT}::docker:db`)).toMatchObject({ status: 'starting', docker: { projectRoot: ROOT, service: 'db' } })
+    await flush()
+    expect(h.docker.prepared.map((p) => p.threadId)).toEqual(['t0', 't1'])
+    expect(h.terminals.stopped).toContain(t0db)
+    const t1db = h.supervisor.terminalOf(T1, `${ROOT}::docker:db`)!
+    const created = h.terminals.created.find((c) => c.terminalId === t1db)!
+    expect(created.command).toContain('up --no-recreate db')
+    expect(created.cwd).toBe('/repos/.shop-threads/t1')
+    // A local step runs as always.
+    expect(h.terminals.created.filter((c) => c.command === 'npm run dev')).toHaveLength(2)
+  })
+
+  it('Start Docker runs the switch for the Docker steps only — local steps are not started', async () => {
+    const h = dockerHarness()
+    h.docker.stopOthers = ['t0']
+    const first = await h.supervisor.startDocker(T1)
+    expect(stepOf(first, `${ROOT}::docker:db`)).toMatchObject({ status: 'starting' })
+    await flush()
+    // Positive first: the switch ran and the group's services started in their tabs …
+    expect(h.docker.calls[0]).toBe('prepare:t1')
+    const t1db = h.supervisor.terminalOf(T1, `${ROOT}::docker:db`)
+    expect(t1db).not.toBeNull()
+    expect(h.terminals.commands().filter((c) => c.includes('up --no-recreate'))).toHaveLength(2)
+    // … and the local step was not started.
+    expect(h.terminals.commands()).not.toContain('npm run dev')
+    expect(stepOf(h.supervisor.state(T1), `${ROOT}::dev`)).toMatchObject({ status: 'idle', terminalId: null })
+  })
+
+  it('Start Docker leaves running local steps alone, and a second press while it goes starts nothing', async () => {
+    const h = dockerHarness()
+    await h.supervisor.start(T1)
+    await flush()
+    const dev = h.supervisor.terminalOf(T1, `${ROOT}::dev`)!
+    expect(dev).not.toBeNull()
+    await h.supervisor.stop(T1, `${ROOT}::docker:db`)
+    await h.supervisor.stop(T1, `${ROOT}::docker:web`)
+    const before = h.docker.calls.filter((c) => c.startsWith('prepare')).length
+    await h.supervisor.startDocker(T1)
+    await flush()
+    expect(h.docker.calls.filter((c) => c.startsWith('prepare')).length).toBe(before + 1)
+    expect(h.supervisor.terminalOf(T1, `${ROOT}::dev`)).toBe(dev)
+    expect(h.terminals.disposed).not.toContain(dev)
+    expect(h.terminals.stopped).not.toContain(dev)
+    expect(h.terminals.created.filter((c) => c.command === 'npm run dev')).toHaveLength(1)
+    // The services go again: another press asks Docker nothing.
+    await h.supervisor.startDocker(T1)
+    await flush()
+    expect(h.docker.calls.filter((c) => c.startsWith('prepare')).length).toBe(before + 1)
+  })
+
+  it('Run all after Start Docker starts the local steps and leaves the containers alone', async () => {
+    const h = dockerHarness()
+    await h.supervisor.startDocker(T1)
+    await flush()
+    // Positive first: only the Docker group is going.
+    const db = h.supervisor.terminalOf(T1, `${ROOT}::docker:db`)
+    expect(db).not.toBeNull()
+    expect(h.terminals.commands()).not.toContain('npm run dev')
+    const prepares = h.docker.calls.filter((c) => c.startsWith('prepare')).length
+    await h.supervisor.start(T1)
+    await flush()
+    // The local step starts …
+    expect(h.terminals.created.filter((c) => c.command === 'npm run dev')).toHaveLength(1)
+    // … and the containers were not switched or restarted.
+    expect(h.docker.calls.filter((c) => c.startsWith('prepare')).length).toBe(prepares)
+    expect(h.supervisor.terminalOf(T1, `${ROOT}::docker:db`)).toBe(db)
+    expect(h.terminals.stopped).not.toContain(db)
+    // Everything going: another Run all starts nothing more.
+    await h.supervisor.start(T1)
+    await flush()
+    expect(h.terminals.created.filter((c) => c.command === 'npm run dev')).toHaveLength(1)
+  })
+
+  it('reloading a Docker step whose group was switched away goes through the switch, never attached to what exists', async () => {
+    const h = dockerHarness()
+    await h.supervisor.startDocker(T1)
+    await flush()
+    const prepares = () => h.docker.calls.filter((c) => c === 'prepare:t1').length
+    // Control: while T1's group is going, reloading one step is a plain reload.
+    await h.supervisor.reload(T1, `${ROOT}::docker:db`)
+    await flush()
+    expect(prepares()).toBe(1)
+    // T0 switches: T1's Docker steps are stopped.
+    h.docker.stopOthers = ['t1']
+    await h.supervisor.startDocker(T0)
+    await flush()
+    expect(stepOf(h.supervisor.state(T1), `${ROOT}::docker:db`).status).toBe('stopped')
+    // Reloading T1's db now runs T1's switch again.
+    await h.supervisor.reload(T1, `${ROOT}::docker:db`, true)
+    await flush()
+    expect(prepares()).toBe(2)
+  })
+
+  it('a double press of Start Docker prepares once', async () => {
+    const h = dockerHarness()
+    await Promise.all([h.supervisor.startDocker(T1), h.supervisor.startDocker(T1)])
+    await flush()
+    expect(h.docker.calls.filter((c) => c === 'prepare:t1')).toHaveLength(1)
+    expect(h.terminals.commands().filter((c) => c.includes('up --no-recreate db'))).toHaveLength(1)
+  })
+
+  it('Run all pressed while Start Docker is still preparing starts the waiting local step once the group is ready', async () => {
+    const after: RunSetup = { version: 1, steps: [{ id: 'dev', name: 'Dev', command: 'npm run dev', start: 'after-previous' }] }
+    const h = dockerHarness({ now: 0 }, after)
+    let release: () => void = () => undefined
+    h.docker.hold = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await h.supervisor.startDocker(T1)
+    await flush()
+    await h.supervisor.start(T1)
+    await flush()
+    expect(h.terminals.commands()).not.toContain('npm run dev')
+    release()
+    await flush()
+    h.ready.last('port:5432').settle('ready')
+    await flush()
+    expect(h.terminals.commands().filter((c) => c === 'npm run dev')).toHaveLength(1)
+  })
+
+  it('stopping a conversation’s Docker also makes its switch still in progress stale: no data commands', async () => {
+    const h = dockerHarness()
+    let release: () => void = () => undefined
+    h.docker.hold = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await h.supervisor.startDocker(T1)
+    await flush()
+    expect(h.docker.calls).toContain('prepare:t1')
+    await h.supervisor.stopThreadDocker('t1')
+    release()
+    await flush()
+    expect(h.docker.calls).toContain('stop:t1')
+    expect(h.docker.calls.some((c) => c.startsWith('data:'))).toBe(false)
+  })
+
+  it('Start Docker outside a conversation does nothing and never asks Docker', async () => {
+    const h = dockerHarness()
+    await h.supervisor.startDocker({ rootPath: ROOT, threadId: null })
+    await flush()
+    expect(h.docker.calls).toEqual([])
+    expect(h.terminals.created).toEqual([])
+  })
+
+  it('Docker not running: the group is blocked with the sentence and the open-Docker offer; local steps still run; nothing else asked', async () => {
+    const h = dockerHarness()
+    h.docker.result = { ok: false, kind: 'docker-unavailable', detail: "Docker isn't running.", offerOpenDocker: true }
+    await h.supervisor.start(T1)
+    await flush()
+    const state = h.supervisor.state(T1)
+    expect(stepOf(state, `${ROOT}::docker:db`)).toMatchObject({ status: 'blocked', detail: "Docker isn't running." })
+    expect(stepOf(state, `${ROOT}::docker:web`)).toMatchObject({ status: 'blocked' })
+    expect(state.offerOpenDocker).toBe(true)
+    expect(state.dockerNotices).toEqual([{ projectRoot: null, kind: 'docker-unavailable', detail: "Docker isn't running." }])
+    expect(h.terminals.commands()).toEqual(['npm run dev'])
+    expect(h.docker.calls).toEqual(['prepare:t1'])
+  })
+
+  it('a port clash between projects blocks the group with the sentence', async () => {
+    const h = dockerHarness()
+    h.docker.result = { ok: false, kind: 'port-clash', detail: 'shop and billing both use port 5432 on this computer.', offerOpenDocker: false }
+    await h.supervisor.start(T1)
+    await flush()
+    const state = h.supervisor.state(T1)
+    expect(stepOf(state, `${ROOT}::docker:db`).detail).toContain('shop and billing both use port 5432')
+    expect(state.offerOpenDocker).toBeUndefined()
+    expect(h.terminals.commands().some((c) => c.includes('docker'))).toBe(false)
+  })
+
+  it('a refused migration is reported, the services keep running, and nothing runs for it', async () => {
+    const h = dockerHarness()
+    h.docker.items = [{ kind: 'migration', name: 'Update database', refused: "This would reach a database that isn't one of this conversation's services." }]
+    await h.supervisor.start(T1)
+    await flush()
+    // The services are started …
+    expect(h.supervisor.state(T1).steps.filter((s) => s.docker !== undefined).every((s) => s.terminalId !== null)).toBe(true)
+    h.ready.last('port:5432').settle('ready')
+    await flush()
+    // … the guard's decision was asked for …
+    expect(h.docker.calls).toEqual(['prepare:t1', 'data:true'])
+    const state = h.supervisor.state(T1)
+    expect(state.dockerNotices).toEqual([
+      { projectRoot: ROOT, kind: 'migration-refused', detail: "This would reach a database that isn't one of this conversation's services." },
+    ])
+    // … and no tab, no command, no stopped service.
+    expect(state.once).toBeUndefined()
+    expect(h.terminals.created).toHaveLength(3)
+    expect(h.terminals.stopped).toEqual([])
+    expect(stepOf(state, `${ROOT}::docker:db`).status).toBe('ready')
+  })
+
+  it('migrations only after the services are ready, then seeds, one after the other in one-time tabs', async () => {
+    const h = dockerHarness()
+    h.docker.items = [
+      { kind: 'migration', name: 'Update database', run: { command: 'docker compose exec -T web sh -lc migrate', cwd: '/repos/.shop-threads/t1' } },
+      { kind: 'seed', name: 'Fill new database', run: { command: 'docker compose exec -T web sh -lc seed', cwd: '/repos/.shop-threads/t1' } },
+    ]
+    await h.supervisor.start(T1)
+    await flush()
+    expect(h.docker.calls).toEqual(['prepare:t1'])
+    h.ready.last('port:5432').settle('ready')
+    await flush()
+    expect(h.terminals.commands().filter((c) => c.includes('sh -lc'))).toEqual(['docker compose exec -T web sh -lc migrate'])
+    const migrate = h.terminals.created.find((c) => c.command?.endsWith('migrate'))!
+    h.terminals.exit(migrate.terminalId, 0)
+    await flush()
+    expect(h.terminals.commands().filter((c) => c.includes('sh -lc'))).toEqual([
+      'docker compose exec -T web sh -lc migrate',
+      'docker compose exec -T web sh -lc seed',
+    ])
+    expect(h.supervisor.state(T1).once?.map((o) => o.name)).toEqual(['Update database', 'Fill new database'])
+  })
+
+  it('a failed migration stops the data steps after it, and says so', async () => {
+    const h = dockerHarness()
+    h.docker.items = [
+      { kind: 'migration', name: 'Update database', run: { command: 'migrate', cwd: '/c' } },
+      { kind: 'seed', name: 'Fill new database', run: { command: 'seed', cwd: '/c' } },
+    ]
+    await h.supervisor.start(T1)
+    await flush()
+    h.ready.last('port:5432').settle('ready')
+    await flush()
+    h.terminals.exit(h.terminals.created.find((c) => c.command === 'migrate')!.terminalId, 1)
+    await flush()
+    expect(h.terminals.commands()).not.toContain('seed')
+    expect(h.supervisor.state(T1).dockerNotices?.map((n) => n.kind)).toEqual(['migration-failed'])
+  })
+
+  it('a service that stops right after the switch shows its last lines and offers a reset', async () => {
+    const h = dockerHarness()
+    await h.supervisor.start(T1)
+    await flush()
+    h.clock.now = 5_000
+    h.terminals.exit(h.supervisor.terminalOf(T1, `${ROOT}::docker:db`)!, 1)
+    await flush()
+    const db = stepOf(h.supervisor.state(T1), `${ROOT}::docker:db`)
+    expect(db).toMatchObject({ status: 'exited', offerReset: true })
+    expect(db.detail).toContain('FATAL: database files are incompatible with server')
+    expect(h.docker.calls).toContain('logs:db')
+  })
+
+  it('a service that stops much later is an ordinary exit', async () => {
+    const h = dockerHarness()
+    await h.supervisor.start(T1)
+    await flush()
+    h.clock.now = 60_000
+    h.terminals.exit(h.supervisor.terminalOf(T1, `${ROOT}::docker:web`)!, 1)
+    await flush()
+    const web = stepOf(h.supervisor.state(T1), `${ROOT}::docker:web`)
+    expect(web.offerReset).toBeUndefined()
+    expect(web.detail).toBe('Ended with code 1.')
+  })
+
+  it('stopThreadDocker marks its group stopped and stops its services in Docker', async () => {
+    const h = dockerHarness()
+    await h.supervisor.start(T1)
+    await flush()
+    const db = h.supervisor.terminalOf(T1, `${ROOT}::docker:db`)!
+    await h.supervisor.stopThreadDocker('t1')
+    expect(h.terminals.stopped).toContain(db)
+    expect(h.docker.calls).toContain('stop:t1')
+  })
+})
+
+// ─── the supervisor with the REAL Docker port, Docker faked as an argv table ─
+
+describe('RunSupervisor — Start Docker with the real Docker port', () => {
+  const COMPOSE = ['services:', '  db:', '    image: postgres:16', '    volumes:', '      - pgdata:/var/lib/postgresql/data', '    ports:', '      - 5432:5432', 'volumes:', '  pgdata:'].join('\n')
+  const LOCAL: RunSetup = { version: 1, steps: [{ id: 'dev', name: 'Dev', command: 'npm run dev', start: 'now' }] }
+  const T1: RunScope = { rootPath: ROOT, threadId: 't1' }
+
+  it('stops the live thread first, recreates with renewed anonymous volumes, waits for ready, runs the guarded migration — and starts no local step', async () => {
+    const checkout = '/repos/.shop-threads/t1'
+    const plan = threadComposeOverride({ project: describeCompose(COMPOSE), projectSlug: 'shop', threadId: 't1', checkout })
+    const entry: DockerGroupPlan = {
+      group: {
+        projectRoot: ROOT, projectName: 'shop', threadId: 't1', checkout, services: ['db'], dataServices: ['db'],
+        volumes: plan.volumes.map((v) => v.name), unreadable: [], folded: [], notes: [],
+      },
+      plan,
+      target: { projectName: 'shop', checkout, composeFile: `${checkout}/compose.yaml`, projectOverride: null, overridePath: '/data/o/t1.yml' },
+    }
+    const calls: string[] = []
+    const table: Record<string, Partial<DockerRunResult>> = {
+      'version --format {{.Server.Version}}': { stdout: '27.0.1\n' },
+      'compose version --short': { stdout: '2.29.0\n' },
+      // Another thread's data is live in this project …
+      [`ps --filter label=${LABEL_PROJECT}=shop --format {{.Label "${LABEL_THREAD}"}}`]: { stdout: 't0\nt0\n' },
+      // … and is stopped by its label (this computer no longer knows it).
+      [`ps -q --filter label=${LABEL_THREAD}=t0`]: { stdout: 'c0\n' },
+      'stop c0': {},
+      [`volume ls --filter label=${LABEL_PROJECT}=shop --filter label=${LABEL_THREAD}=t1 --format {{.Name}}\t{{.Label "dev.planflow.volume"}}\t{{.Label "${LABEL_THREAD}"}}`]: { stdout: '' },
+      [composeCreateArgs(entry.target, ['db']).join(' ')]: {},
+      [`ps --all --filter label=${LABEL_PROJECT}=shop --filter label=${LABEL_THREAD}=t1 --format {{.ID}}\t{{.Label "com.docker.compose.service"}}\t{{.State}}`]: { stdout: 'c1\tdb\trunning\n' },
+    }
+    const liveKey = `ps --filter label=${LABEL_PROJECT}=shop --format {{.Label "${LABEL_THREAD}"}}`
+    const runner: DockerRunner = {
+      run: async (args) => {
+        const key = args.join(' ')
+        calls.push(key)
+        // Once this thread's containers are made, they are the ones that run.
+        if (key.includes('--renew-anon-volumes')) table[liveKey] = { stdout: 't1\n' }
+        const answer = table[key]
+        if (answer === undefined) throw new Error(`unexpected docker call: ${key}`)
+        return { ok: true, code: 0, stdout: '', stderr: '', timedOut: false, ...answer }
+      },
+    }
+    const docker = createThreadDocker({
+      runner,
+      overrides: { write: async () => '/data/o/t1.yml' },
+      fs: { readFile: async (path) => (path === `${checkout}/.env` ? 'DATABASE_URL=postgres://u:p@localhost:5432/app\n' : null), exists: async () => false },
+      detectDataCommands: async () => ({ migrations: [{ command: 'alembic upgrade head', source: 'Alembic' }], seeds: [] }),
+      resolveThread: async () => null,
+      processEnv: {},
+      opener: async () => '',
+      slugOf: () => 'shop',
+      wait: async () => undefined,
+    })
+    const setups = {
+      resolve: async (scope: RunScope): Promise<RunResolution> => {
+        const project = { root: ROOT, name: 'shop', cwd: ROOT, setup: LOCAL, personal: {}, conversation: {}, hasSharedSetup: true, problems: [] }
+        const resolution: RunResolution = {
+          scope, scopeKey: runScopeKey(scope), project, places: [], once: [],
+          steps: [...dockerStepsFor(entry), ...resolveRunSteps(project, [])],
+          docker: [entry.group],
+        }
+        attachDockerPlans(resolution, new Map([[ROOT, entry]]))
+        return resolution
+      },
+    }
+    const terminals = new FakeTerminals()
+    const ready = new FakeReady()
+    const supervisor = new RunSupervisor({ terminals, setups, ready, scripts: NO_SCRIPTS, docker, now: () => 0 })
+
+    await supervisor.startDocker(T1)
+    await flush()
+    // Positive first: the switch, in order — the live thread stopped before this one's containers were made.
+    const stopAt = calls.indexOf('stop c0')
+    const createAt = calls.findIndex((c) => c.includes('--renew-anon-volumes'))
+    expect(stopAt).toBeGreaterThanOrEqual(0)
+    expect(createAt).toBeGreaterThan(stopAt)
+    expect(terminals.commands().some((c) => c.includes('up --no-recreate db'))).toBe(true)
+    // The migration waits for the service to be ready …
+    expect(terminals.commands()).not.toContain('alembic upgrade head')
+    ready.last('port:5432').settle('ready')
+    await flush()
+    expect(terminals.commands()).toContain('alembic upgrade head')
+    // … and the local step was never started.
+    expect(terminals.commands()).not.toContain('npm run dev')
+    expect(supervisor.state(T1).steps.find((s) => s.key === `${ROOT}::dev`)).toMatchObject({ status: 'idle', terminalId: null })
+  })
+})
+
+describe('RunSupervisor — guarded migrations with the real Docker port', () => {
+  // No service mounts the code, so a migration may only run locally on a port
+  // this thread publishes — or not at all.
+  const COMPOSE = ['services:', '  db:', '    image: postgres:16', '    volumes:', '      - pgdata:/var/lib/postgresql/data', '    ports:', '      - 5432:5432', 'volumes:', '  pgdata:'].join('\n')
+  const T1: RunScope = { rootPath: ROOT, threadId: 't1' }
+
+  function groupFor(threadId: string): DockerGroupPlan {
+    const checkout = `/repos/.shop-threads/${threadId}`
+    const plan = threadComposeOverride({ project: describeCompose(COMPOSE), projectSlug: 'shop', threadId, checkout })
+    return {
+      group: {
+        projectRoot: ROOT, projectName: 'shop', threadId, checkout, services: ['db'], dataServices: ['db'],
+        volumes: plan.volumes.map((v) => v.name), unreadable: [], folded: [], notes: [],
+      },
+      plan,
+      target: { projectName: 'shop', checkout, composeFile: `${checkout}/compose.yaml`, projectOverride: null, overridePath: `/data/o/${threadId}.yml` },
+    }
+  }
+
+  function harness(envFile: string) {
+    const entry = groupFor('t1')
+    const calls: string[][] = []
+    const table: Record<string, Partial<DockerRunResult>> = {
+      'version --format {{.Server.Version}}': { stdout: '27.0.1\n' },
+      'compose version --short': { stdout: '2.29.0\n' },
+      [`ps --filter label=${LABEL_PROJECT}=shop --format {{.Label "${LABEL_THREAD}"}}`]: { stdout: '' },
+      [`volume ls --filter label=${LABEL_PROJECT}=shop --filter label=${LABEL_THREAD}=t1 --format {{.Name}}\t{{.Label "dev.planflow.volume"}}\t{{.Label "${LABEL_THREAD}"}}`]: { stdout: '' },
+      [composeCreateArgs(entry.target, ['db']).join(' ')]: {},
+      [`ps --all --filter label=${LABEL_PROJECT}=shop --filter label=${LABEL_THREAD}=t1 --format {{.ID}}\t{{.Label "com.docker.compose.service"}}\t{{.State}}`]: { stdout: 'c1\tdb\trunning\n' },
+    }
+    const runner: DockerRunner = {
+      run: async (args) => {
+        calls.push(args)
+        const answer = table[args.join(' ')]
+        if (answer === undefined) throw new Error(`unexpected docker call: ${args.join(' ')}`)
+        return { ok: true, code: 0, stdout: '', stderr: '', timedOut: false, ...answer }
+      },
+    }
+    const docker = createThreadDocker({
+      runner,
+      overrides: { write: async (plan) => `/data/o/${plan.threadId}.yml` },
+      fs: { readFile: async (path) => (path === `${entry.group.checkout}/.env` ? envFile : null), exists: async () => false },
+      detectDataCommands: async () => ({
+        migrations: [{ command: 'alembic upgrade head', source: 'Alembic' }],
+        seeds: [{ command: 'make seed', source: 'Makefile' }],
+      }),
+      resolveThread: async () => null,
+      processEnv: {},
+      opener: async () => '',
+      slugOf: () => 'shop',
+      wait: async () => undefined,
+    })
+    const setups = {
+      resolve: async (scope: RunScope): Promise<RunResolution> => {
+        const project = { root: ROOT, name: 'shop', cwd: ROOT, setup: null, personal: {}, conversation: {}, hasSharedSetup: false, problems: [] }
+        const resolution: RunResolution = { scope, scopeKey: runScopeKey(scope), project, places: [], once: [], steps: dockerStepsFor(entry), docker: [entry.group] }
+        attachDockerPlans(resolution, new Map([[ROOT, entry]]))
+        return resolution
+      },
+    }
+    const terminals = new FakeTerminals()
+    const ready = new FakeReady()
+    const supervisor = new RunSupervisor({ terminals, setups, ready, scripts: NO_SCRIPTS, docker, now: () => 0 })
+    return { calls, terminals, ready, supervisor }
+  }
+
+  it('a migration that would reach a foreign database: the services start, a notice says why, and no migration argv exists anywhere', async () => {
+    const h = harness('DATABASE_URL=postgres://u:p@db.prod.example.com:5432/app\n')
+    await h.supervisor.start(T1)
+    await flush()
+    h.ready.last('port:5432').settle('ready')
+    await flush()
+    const state = h.supervisor.state(T1)
+    // Positive first: the switch created the containers and the service runs in its tab.
+    expect(h.calls.some((c) => c.includes('--renew-anon-volumes'))).toBe(true)
+    expect(state.steps.find((s) => s.key === `${ROOT}::docker:db`)).toMatchObject({ status: 'ready' })
+    expect(h.terminals.commands().some((c) => c.includes('up --no-recreate db'))).toBe(true)
+    // The refusals, reported (the migration, and the seed a new volume asked for).
+    expect(state.dockerNotices).toEqual([
+      { projectRoot: ROOT, kind: 'migration-refused', detail: GUARD_REFUSAL.foreign },
+      { projectRoot: ROOT, kind: 'migration-refused', detail: GUARD_REFUSAL.foreign },
+    ])
+    // And nothing ran for them: no Docker exec or run, no tab, no command.
+    expect(h.calls.filter((c) => c.includes('exec') || c.includes('run'))).toEqual([])
+    expect(h.terminals.commands().filter((c) => c.includes('alembic') || c.includes('make seed'))).toEqual([])
+    expect(state.once).toBeUndefined()
+  })
+
+  it("the same Run on this thread's own published port runs the migration (the control for the refusal above)", async () => {
+    const h = harness('DATABASE_URL=postgres://u:p@localhost:5432/app\n')
+    await h.supervisor.start(T1)
+    await flush()
+    h.ready.last('port:5432').settle('ready')
+    await flush()
+    expect(h.supervisor.state(T1).dockerNotices).toBeUndefined()
+    expect(h.terminals.commands()).toContain('alembic upgrade head')
   })
 })

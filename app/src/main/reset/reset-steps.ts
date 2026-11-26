@@ -22,6 +22,7 @@
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
+import { COMPOSE_OVERRIDES_DIR } from '../run/compose-thread-store'
 import type { FlowDatabase } from '../store/db'
 import { PROJECTS_TABLE, PROJECT_STATE_TABLE } from '../store/storage-names'
 import type { ResetSteps } from './run-reset'
@@ -160,6 +161,11 @@ export function buildResetSteps(env: ResetEnvironment): ResetSteps {
     launchpad: () => {
       deleteOwnedSettings(db, 'launchpad')
       rm(join(env.userData, 'run-scripts'))
+      // The Compose override files Flow writes per conversation. Rewritten on
+      // every Run, so removing them loses nothing. The conversations' Docker
+      // volumes are NOT removed here: those go one conversation at a time,
+      // with an explicit confirmation (compose-thread-store.ts).
+      rm(join(env.userData, COMPOSE_OVERRIDES_DIR))
     },
     tasks: () => {
       db.prepare('DELETE FROM tasks').run()

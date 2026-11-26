@@ -62,6 +62,7 @@ import {
   type SidebarViewOptions,
 } from './sidebar-view-options'
 import { threadDeleteNotice, type ThreadDeleteSubject } from './thread-sidebar-delete-notice'
+import { LiveDataTracker, threadDataFace } from './thread-data-state'
 import { canOfferWorktree, worktreeActionNotice } from './worktree-outcome'
 import { askCarryInline } from './carry-menu-view'
 import { prepareThreadWorktree } from './prepare-worktree-flow'
@@ -336,6 +337,12 @@ export class ThreadSidebar {
    *  switch (pane display) and the collapse mode (`#listWrap.hidden`) hide the
    *  list that way, so one observer covers both reveal paths. */
   #revealObserver: IntersectionObserver | null = null
+  /**
+   * Whose own Docker data is live — the row's "Data running" mark. Read only
+   * while the list is on screen, and only after a Run change that touches a
+   * Docker service (thread-data-state.ts).
+   */
+  #liveData: LiveDataTracker | null = null
   /** Whether the "Archived" section is expanded. */
   /** Each project's order + archive answer, read once and remembered. */
   readonly #viewOptions = new Map<string, SidebarViewOptions>()
@@ -648,8 +655,20 @@ export class ThreadSidebar {
     // The resume side of the hidden-defer (#1696): the observer intersects on
     // the hidden→visible transition — rail switch back to Threads, sidebar
     // reopen, or collapse-mode expand — and settles the one owed refresh.
+    if (api.run?.liveThreads !== undefined) {
+      this.#liveData = new LiveDataTracker({
+        read: () => api.run?.liveThreads() ?? Promise.resolve([]),
+        isVisible: () => this.#listWrap.offsetParent !== null,
+        onChange: () => this.#list.refresh(),
+      })
+      const tracker = this.#liveData
+      const off = api.run?.onUpdated((state) => tracker.runUpdated(state))
+      if (off !== undefined) this.#unsubscribes.push(off)
+    }
     this.#revealObserver = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting) && this.#refreshOwedWhileHidden) {
+      if (!entries.some((entry) => entry.isIntersecting)) return
+      this.#liveData?.shown()
+      if (this.#refreshOwedWhileHidden) {
         void this.refresh()
       }
     })
@@ -922,6 +941,8 @@ export class ThreadSidebar {
     this.#closeMenu()
     this.#revealObserver?.disconnect()
     this.#revealObserver = null
+    this.#liveData?.dispose()
+    this.#liveData = null
     if (this.#searchTimer !== null) {
       window.clearTimeout(this.#searchTimer)
     }
@@ -1528,6 +1549,28 @@ export class ThreadSidebar {
       'background:var(--fl-color-accent-muted)',
       'white-space:nowrap',
     ].join(';')
+    return tag
+  }
+
+  /** The green dot and "Data running" — only on the thread whose own Docker data is live. */
+  #dataTag(thread: ThreadSummary): HTMLElement | null {
+    const face = this.#liveData === null ? null : threadDataFace(thread.id, this.#liveData.live)
+    if (face === null) return null
+    const tag = document.createElement('span')
+    tag.className = 'fl-row-data'
+    tag.title = face.title
+    tag.style.cssText = [
+      'flex:none',
+      'display:inline-flex',
+      'align-items:center',
+      'gap:4px',
+      'font-size:var(--fl-text-caption-size)',
+      'color:var(--fl-color-text-secondary)',
+      'white-space:nowrap',
+    ].join(';')
+    const dot = document.createElement('span')
+    dot.style.cssText = 'width:6px;height:6px;border-radius:50%;background:var(--fl-color-success);flex:none;'
+    tag.append(dot, document.createTextNode(face.label))
     return tag
   }
 
@@ -2169,6 +2212,8 @@ export class ThreadSidebar {
     rowEl.appendChild(title)
     const runningTag = this.#runningTag(thread)
     if (runningTag !== null) rowEl.appendChild(runningTag)
+    const dataTag = this.#dataTag(thread)
+    if (dataTag !== null) rowEl.appendChild(dataTag)
     const threadTag = this.#projectTag(thread.projectRoot)
     if (threadTag !== null) rowEl.appendChild(threadTag)
     const mark = this.#contextIndicator(thread)
@@ -3816,12 +3861,31 @@ export class ThreadSidebar {
     }
     const detail = document.createElement('div')
     detail.className = 'fl-thread-menu-confirm-detail'
+    // The conversation's Docker data: offered with a box that starts UNTICKED.
+    // Nothing is removed unless the person ticks it (forbidden-pattern #15).
+    const volumesRow = document.createElement('label')
+    volumesRow.className = 'fl-thread-menu-volumes'
+    volumesRow.hidden = true
+    const volumesBox = document.createElement('input')
+    volumesBox.type = 'checkbox'
+    volumesBox.checked = false
+    const volumesWords = document.createElement('span')
+    volumesWords.className = 'fl-thread-menu-volumes-words'
+    const volumesLabel = document.createElement('span')
+    volumesLabel.className = 'fl-thread-menu-volumes-label'
+    const volumesText = document.createElement('span')
+    volumesText.className = 'fl-thread-menu-volumes-line'
+    volumesWords.append(volumesLabel, volumesText)
+    volumesRow.append(volumesBox, volumesWords)
     const paint = (): void => {
       const notice = threadDeleteNotice(subject)
       label.textContent = notice.question
       detail.textContent = notice.detail ?? ''
       detail.hidden = notice.detail === null
       del.textContent = notice.confirmLabel
+      volumesLabel.textContent = notice.volumesLabel ?? ''
+      volumesText.textContent = notice.volumesLine ?? ''
+      volumesRow.hidden = notice.offerVolumes !== true
     }
     const actions = document.createElement('div')
     actions.className = 'fl-thread-menu-actions'
@@ -3836,7 +3900,8 @@ export class ThreadSidebar {
       // this confirm is on screen, so the sentence the user actually read is
       // the one computed from the subject as it stands NOW — and the decision
       // to free the copy is that same sentence's other half.
-      void this.#delete(thread, threadDeleteNotice(subject).releaseWorktree)
+      const notice = threadDeleteNotice(subject)
+      void this.#delete(thread, notice.releaseWorktree, notice.offerVolumes === true && volumesBox.checked)
     })
     const cancel = document.createElement('button')
     cancel.type = 'button'
@@ -3850,7 +3915,19 @@ export class ThreadSidebar {
     actions.appendChild(del)
     menu.appendChild(label)
     menu.appendChild(detail)
+    menu.appendChild(volumesRow)
     menu.appendChild(actions)
+    // Read once, when this confirm opens — never on a hot path. Main touches
+    // Docker only when the thread's project uses the feature; a failed or empty
+    // read leaves the confirm exactly as it was.
+    void window.flow.threads
+      .dataVolumes({ threadId: thread.id })
+      .then((volumes) => {
+        if (!label.isConnected || volumes === null) return
+        subject.dataVolumes = volumes
+        paint()
+      })
+      .catch(() => undefined)
     // #1173: the confirm swaps the menu's contents while it is already mounted,
     // so it focuses its own SAFE default — Cancel, never Delete. Enter on a
     // destructive confirm must not be the destructive answer.
@@ -4065,7 +4142,17 @@ export class ThreadSidebar {
    * A failed release never blocks the delete. The person asked for the thread
    * to go; the copy that stayed is what the conversation files list is for.
    */
-  async #delete(thread: ThreadSummary, releaseWorktree = false): Promise<void> {
+  async #delete(thread: ThreadSummary, releaseWorktree = false, releaseVolumes = false): Promise<void> {
+    // The conversation's Docker data goes only when the person ticked the box
+    // that offered it; a failed removal never blocks the delete (the Storage
+    // page can still remove what stayed).
+    if (releaseVolumes) {
+      try {
+        await window.flow.threads.releaseDataVolumes({ threadId: thread.id, confirmed: true })
+      } catch (error) {
+        console.error('flow: failed to remove the thread’s Docker data', error)
+      }
+    }
     if (releaseWorktree && thread.worktreePath !== null) {
       try {
         await window.flow.threads.releaseWorktree({ threadId: thread.id, confirmed: true })
@@ -5191,6 +5278,21 @@ function injectSidebarStyles(): void {
        count, the branch, and what becomes of the copy: kept when it holds work
        that lives nowhere else, freed when it does not. Wraps rather than
        truncates: this line's whole job is to be read. */
+    /* The thread's Docker data in the delete confirm: a box that starts
+       unticked, its label, and how much it holds. */
+    .fl-thread-menu-volumes {
+      display: flex; align-items: flex-start; gap: var(--fl-space-sm);
+      margin: 0 var(--fl-space-sm) 8px; padding: var(--fl-space-sm);
+      max-width: 260px; box-sizing: border-box; cursor: pointer;
+      background: var(--fl-color-bg);
+      border: var(--fl-border-width) solid var(--fl-color-border);
+      border-radius: var(--fl-radius-sm);
+    }
+    .fl-thread-menu-volumes[hidden] { display: none; }
+    .fl-thread-menu-volumes input { margin: 2px 0 0; flex: none; accent-color: var(--fl-color-accent); }
+    .fl-thread-menu-volumes-words { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .fl-thread-menu-volumes-label { color: var(--fl-color-text); font-size: var(--fl-text-ui-size); }
+    .fl-thread-menu-volumes-line { color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); line-height: 1.4; }
     .fl-thread-menu-confirm-detail {
       padding: 0 var(--fl-space-sm) 6px;
       max-width: 260px;

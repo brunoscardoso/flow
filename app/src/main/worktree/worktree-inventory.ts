@@ -23,6 +23,7 @@
 // (forbidden-pattern #12).
 
 import type {
+  ThreadDataVolume,
   ThreadWorktreeDrift,
   ThreadWorktreeEntry,
   ThreadWorktreeInventory,
@@ -76,6 +77,17 @@ export interface InventoryDeps {
   runDu?: (cwd: string, args: readonly string[]) => Promise<CapRunResult>
   /** The ceiling in force. Absent → the module default. */
   cap?: number
+  /**
+   * THE DOCKER DATA HOOK. The conversations' Docker volumes are disk this
+   * project holds too, so the same list shows them — but they are not
+   * worktrees, so this module only passes them through: reading them is
+   * `listProjectVolumes` (run/compose-thread-store.ts), removing them is
+   * `removeThreadVolumes` and nothing else. Absent → the inventory carries no
+   * `volumes` field; null → Docker could not be read. Never throws into the list.
+   * Answering `undefined` is "nobody asked Docker for this project" (it has
+   * no Compose file): no `volumes` field, as if absent.
+   */
+  threadVolumesFor?: (rootPath: string) => Promise<ThreadDataVolume[] | null | undefined>
 }
 
 /** Statuses with a turn in flight. Nothing offers to touch one of these. */
@@ -151,14 +163,28 @@ export async function readWorktreeInventory(
       })),
     deps.cap,
   )
+  const volumes = deps.threadVolumesFor === undefined ? undefined : await readVolumes(rootPath, deps.threadVolumesFor)
   return {
     rootPath,
     usage,
     entries,
+    ...(volumes === undefined ? {} : { volumes }),
     // Nothing on either side is a project with no worktrees, which is a fine
     // and common answer. "Unreadable" is reserved for the case where git had
     // records the app could not read at all.
     unreadable: false,
+  }
+}
+
+/** The Docker data hook, with a failure read as "Docker could not be read". */
+async function readVolumes(
+  rootPath: string,
+  read: (rootPath: string) => Promise<ThreadDataVolume[] | null | undefined>,
+): Promise<ThreadDataVolume[] | null | undefined> {
+  try {
+    return await read(rootPath)
+  } catch {
+    return null
   }
 }
 

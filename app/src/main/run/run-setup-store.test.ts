@@ -8,6 +8,7 @@ import { join } from 'path'
 
 import { parseRunSetup, runStepRef, type RunSetup, type RunStep } from '../../shared/run-setup'
 import { RunSetupError, RunSetupStore, type RunPersonalSource, type RunThreadSource } from './run-setup-store'
+import { createThreadDockerSource, dockerPlansOf } from './thread-docker'
 
 interface FakeThread {
   projectRoot: string
@@ -370,5 +371,120 @@ describe('RunSetupStore — one-time actions', () => {
       [`${A}::gen`, 'once'],
       [`${A}::seed`, 'once'],
     ])
+  })
+})
+
+// ─── the conversation's Docker group (change note 4) ────────────────────────
+
+describe('RunSetupStore — the Docker group', () => {
+  const ROOT = '/work/shop'
+  const CHECKOUT = '/work/.shop-threads/blue'
+  const COMPOSE = [
+    'services:',
+    '  db:',
+    '    image: postgres:16',
+    '    volumes:',
+    '      - pgdata:/var/lib/postgresql/data',
+    '    ports:',
+    '      - 5432:5432',
+    '  web:',
+    '    build: .',
+    '    volumes:',
+    '      - .:/app',
+    'volumes:',
+    '  pgdata:',
+  ].join('\n')
+  const threads = fakeThreads({ t1: { projectRoot: ROOT, worktreePath: CHECKOUT, roots: [], rootWorktrees: [] } })
+
+  /** `compose: false` is a project without a Compose file — the Run of a project before this feature existed. */
+  function store(compose: boolean, files: Record<string, string> = compose ? { [`${CHECKOUT}/compose.yaml`]: COMPOSE } : {}): { s: RunSetupStore; reads: string[] } {
+    const reads: string[] = []
+    const personal = fakePersonal()
+    personal.setRunSetup(
+      ROOT,
+      JSON.stringify({
+        version: 1,
+        steps: [
+          { id: 'db', name: 'Database', command: 'docker compose up -d db', start: 'now' },
+          { id: 'mail', name: 'Mail', command: 'docker compose up mailhog', start: 'now' },
+          { id: 'dev', name: 'Dev', command: 'npm run dev', start: 'after-previous' },
+        ],
+      }),
+    )
+    const s = new RunSetupStore({
+      threads,
+      personal,
+      docker: createThreadDockerSource({
+        fs: {
+          readFile: async (path) => {
+            reads.push(path)
+            return files[path] ?? null
+          },
+          exists: async (path) => path in files,
+        },
+        overrides: { pathFor: (slug, id) => `/data/o/${slug}/${id}.yml` },
+        slugOf: () => 'shop',
+      }),
+    })
+    return { s, reads }
+  }
+
+  it('no Compose file: the Run is exactly what it was', async () => {
+    const { s } = store(false)
+    const resolution = await s.resolve({ rootPath: ROOT, threadId: 't1' })
+    expect(resolution.steps.map((step) => step.key)).toEqual([`${ROOT}::db`, `${ROOT}::mail`, `${ROOT}::dev`])
+    expect(resolution.docker).toBeUndefined()
+    expect(dockerPlansOf(resolution).size).toBe(0)
+  })
+
+  it('no Compose file, or no conversation, resolves exactly as a store that has never heard of Docker', async () => {
+    // The old behaviour: the same store without the Docker source at all.
+    const personal = fakePersonal()
+    personal.setRunSetup(
+      ROOT,
+      JSON.stringify({
+        version: 1,
+        steps: [
+          { id: 'db', name: 'Database', command: 'docker compose up -d db', start: 'now' },
+          { id: 'mail', name: 'Mail', command: 'docker compose up mailhog', start: 'now' },
+          { id: 'dev', name: 'Dev', command: 'npm run dev', start: 'after-previous' },
+        ],
+      }),
+    )
+    const before = new RunSetupStore({ threads, personal })
+    const off = store(false).s
+    const on = store(true, { [`${ROOT}/compose.yaml`]: COMPOSE, [`${CHECKOUT}/compose.yaml`]: COMPOSE }).s
+    // Positive first: a Compose file in this conversation DOES change the Run …
+    const changed = await on.resolve({ rootPath: ROOT, threadId: 't1' })
+    expect(changed.docker).toHaveLength(1)
+    // … and without one, or outside any conversation, nothing differs, field for field.
+    for (const scope of [{ rootPath: ROOT, threadId: 't1' }, { rootPath: ROOT, threadId: null }]) {
+      const old = await before.resolve(scope)
+      expect(await off.resolve(scope)).toEqual(old)
+      if (scope.threadId === null) expect(await on.resolve(scope)).toEqual(old)
+    }
+  })
+
+  it('no conversation: the project runs its Compose file as written', async () => {
+    const { s, reads } = store(true, { [`${ROOT}/compose.yaml`]: COMPOSE, [`${CHECKOUT}/compose.yaml`]: COMPOSE })
+    const resolution = await s.resolve({ rootPath: ROOT, threadId: null })
+    expect(resolution.steps.map((step) => step.key)).toEqual([`${ROOT}::db`, `${ROOT}::mail`, `${ROOT}::dev`])
+    expect(resolution.docker).toBeUndefined()
+    expect(reads).toEqual([])
+  })
+
+  it('a Compose file in a conversation: the group comes first, and the hand-made step for one of its services is folded', async () => {
+    const { s, reads } = store(true)
+    const resolution = await s.resolve({ rootPath: ROOT, threadId: 't1' })
+    expect(resolution.steps.map((step) => step.key)).toEqual([`${ROOT}::docker:db`, `${ROOT}::docker:web`, `${ROOT}::mail`, `${ROOT}::dev`])
+    expect(resolution.docker?.[0]).toMatchObject({ projectRoot: ROOT, checkout: CHECKOUT, services: ['db', 'web'], folded: [`${ROOT}::db`] })
+    expect(resolution.steps[0]!.command).toContain(`-f /data/o/shop/t1.yml --project-directory ${CHECKOUT}`)
+    expect(resolution.steps[0]!.cwd).toBe(CHECKOUT)
+    // The setup the panel edits never holds a group step: a Save cannot store one.
+    expect(resolution.project.setup?.steps.some((step) => step.id.includes('docker:'))).toBe(false)
+    expect(dockerPlansOf(resolution).get(ROOT)?.plan.threadId).toBe('t1')
+    // Read from the thread's checkout, and again on the next resolve (Reload all).
+    await s.resolve({ rootPath: ROOT, threadId: 't1' })
+    expect(reads.filter((path) => path === `${CHECKOUT}/compose.yaml`)).toHaveLength(2)
   })
 })

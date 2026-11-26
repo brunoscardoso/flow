@@ -30,7 +30,12 @@ import type { UpdateStatus } from './updater'
 import type { ProblemsSnapshot } from './problems-model'
 import type { TerminalProblemCounts, TerminalProblemsSnapshot } from './terminal-problems'
 import type {
+  RunDockerElsewhere,
   RunGroupState,
+  RunOpenDockerAnswer,
+  RunThreadData,
+  RunKeptData,
+  RunThreadDataAnswer,
   RunSaveAnswer,
   RunSaveChange,
   RunScope,
@@ -821,6 +826,29 @@ export interface ThreadWorktreeInventory {
   entries: ThreadWorktreeEntry[]
   /** True when the project's checkouts could not be read at all. */
   unreadable: boolean
+  /**
+   * The Docker data Flow keeps for this project's conversations. Absent when
+   * nobody asked Docker (no reader wired, or the feature is off); null when
+   * Docker could not be read.
+   */
+  volumes?: ThreadDataVolume[] | null
+}
+
+/** What a conversation's Docker data adds up to (delete confirm). */
+export interface ThreadDataVolumesSummary {
+  count: number
+  /** Null when Docker did not say the size of at least one volume. */
+  totalBytes: number | null
+}
+
+/** One Docker volume Flow made for one of a project's conversations. */
+export interface ThreadDataVolume {
+  /** The conversation it belongs to; null when Docker no longer says. */
+  threadId: string | null
+  /** The project's own volume it stands in for, as the Compose file names it. */
+  volume: string
+  /** Bytes on disk; null when Docker did not say. */
+  sizeBytes: number | null
 }
 
 /** How renaming a worktree's branch ended. */
@@ -1021,7 +1049,8 @@ export interface ThreadChangeEvent {
    *  rides the same `threads:updated` batch, so a subscriber that draws no
    *  subtask filters it out by entity (allowed-pattern #17). */
   entity: 'thread' | 'message' | 'tool_call' | 'subtask'
-  action: 'created' | 'updated' | 'deleted'
+  /** `archived` / `restored` follow the `updated` of a thread whose archive flag changed. */
+  action: 'created' | 'updated' | 'deleted' | 'archived' | 'restored'
   threadId: string
   /** The row as written, on a `subtask` event only — a listener needs no
    *  second read to redraw one row. */
@@ -5537,6 +5566,23 @@ export interface IpcInvokeMap {
     }
     response: ThreadWorktreeReleaseResult
   }
+  /**
+   * The Docker data a conversation holds — read when its delete confirm opens.
+   * Null when it has none, its projects do not use the feature, or Docker
+   * could not say.
+   */
+  'threads:dataVolumes': {
+    request: { threadId: string }
+    response: ThreadDataVolumesSummary | null
+  }
+  /**
+   * Stop the conversation's services if they run, then remove its Docker
+   * volumes. Runs nothing unless `confirmed` is true.
+   */
+  'threads:releaseDataVolumes': {
+    request: { threadId: string; confirmed?: boolean }
+    response: { ok: boolean; detail?: string }
+  }
   /** How many thread checkouts a project is holding, and its ceiling (Phase 7). */
   'threads:worktreeUsage': {
     request: { rootPath: string }
@@ -6074,6 +6120,31 @@ export interface IpcInvokeMap {
   'run:once': { request: { scope: RunScope; stepKey: string }; response: RunGroupState }
   /** Which scopes have a Run going. */
   'run:states': { request: Record<string, never>; response: RunScopeSummary[] }
+  /**
+   * Start Docker / Switch to this thread: the conversation's Docker group
+   * alone, through the switch (stop the live conversation, recreate, start,
+   * guarded data steps). Local steps are left as they are.
+   */
+  'run:startDocker': { request: { scope: RunScope }; response: RunGroupState }
+  /** Whose Docker data runs instead of this conversation's — read when the Run menu opens. Null for none (or no conversation). */
+  'run:dockerElsewhere': { request: { scope: RunScope }; response: RunDockerElsewhere | null }
+  /** Open Docker (the Docker group could not start because it is not running). */
+  'run:openDocker': { request: Record<string, never>; response: RunOpenDockerAnswer }
+  /** A conversation's Docker data for the Manage containers panel — read only while it is open. Null when it keeps none. */
+  'run:threadData': { request: { threadId: string }; response: RunThreadData | null }
+  /** Restart a conversation's Docker services (start its Docker when none has started). */
+  'run:restartThreadDocker': { request: { threadId: string }; response: RunThreadDataAnswer }
+  /** Stop a conversation's services and empty its data. Runs nothing unless `confirmed` is true. */
+  'run:emptyThreadData': { request: { threadId: string; confirmed?: boolean }; response: RunThreadDataAnswer }
+  /** The conversations whose Docker data is live now — read only while the thread list is on screen. */
+  'run:liveThreads': { request: Record<string, never>; response: string[] }
+  /** Docker data kept from deleted conversations — read only while the Storage page is open. */
+  'run:keptData': { request: Record<string, never>; response: RunKeptData }
+  /** Delete one deleted conversation's kept data in one project. Runs nothing unless `confirmed` is true, and refuses a conversation that still exists. */
+  'run:deleteKeptData': {
+    request: { threadId: string; projectRoot: string; confirmed?: boolean }
+    response: RunThreadDataAnswer
+  }
 
   // connectors (plan_connectors) — MCP connectors. The connector service in
   // main is the one owner of the list, its status and every write; no secret
@@ -8076,6 +8147,8 @@ export const IPC_INVOKE_CHANNELS = [
   'threads:landingPreview',
   'threads:landWorktree',
   'threads:releaseWorktree',
+  'threads:dataVolumes',
+  'threads:releaseDataVolumes',
   'threads:worktreeUsage',
   'threads:worktreeInventory',
   'threads:renameWorktreeBranch',
@@ -8149,6 +8222,15 @@ export const IPC_INVOKE_CHANNELS = [
   'run:stop',
   'run:once',
   'run:states',
+  'run:startDocker',
+  'run:dockerElsewhere',
+  'run:openDocker',
+  'run:threadData',
+  'run:restartThreadDocker',
+  'run:emptyThreadData',
+  'run:liveThreads',
+  'run:keptData',
+  'run:deleteKeptData',
   'connectors:list',
   'connectors:add',
   'connectors:remove',
@@ -8542,6 +8624,10 @@ export interface FlowThreadsApi {
   releaseWorktree(
     request: IpcRequest<'threads:releaseWorktree'>,
   ): Promise<IpcResponse<'threads:releaseWorktree'>>
+  dataVolumes(request: IpcRequest<'threads:dataVolumes'>): Promise<IpcResponse<'threads:dataVolumes'>>
+  releaseDataVolumes(
+    request: IpcRequest<'threads:releaseDataVolumes'>,
+  ): Promise<IpcResponse<'threads:releaseDataVolumes'>>
   worktreeUsage(
     request: IpcRequest<'threads:worktreeUsage'>,
   ): Promise<IpcResponse<'threads:worktreeUsage'>>
@@ -8677,6 +8763,15 @@ export interface FlowRunApi {
   stop(request: IpcRequest<'run:stop'>): Promise<IpcResponse<'run:stop'>>
   once(request: IpcRequest<'run:once'>): Promise<IpcResponse<'run:once'>>
   states(): Promise<IpcResponse<'run:states'>>
+  startDocker(request: IpcRequest<'run:startDocker'>): Promise<IpcResponse<'run:startDocker'>>
+  dockerElsewhere(request: IpcRequest<'run:dockerElsewhere'>): Promise<IpcResponse<'run:dockerElsewhere'>>
+  openDocker(): Promise<IpcResponse<'run:openDocker'>>
+  threadData(request: IpcRequest<'run:threadData'>): Promise<IpcResponse<'run:threadData'>>
+  restartThreadDocker(request: IpcRequest<'run:restartThreadDocker'>): Promise<IpcResponse<'run:restartThreadDocker'>>
+  emptyThreadData(request: IpcRequest<'run:emptyThreadData'>): Promise<IpcResponse<'run:emptyThreadData'>>
+  liveThreads(): Promise<IpcResponse<'run:liveThreads'>>
+  keptData(): Promise<IpcResponse<'run:keptData'>>
+  deleteKeptData(request: IpcRequest<'run:deleteKeptData'>): Promise<IpcResponse<'run:deleteKeptData'>>
   onUpdated(listener: (state: IpcEventPayload<'run:updated'>) => void): Unsubscribe
   /** A script the agent wrote for a one-time action, for one conversation. */
   onScriptProposal(listener: (proposal: IpcEventPayload<'run:scriptProposal'>) => void): Unsubscribe

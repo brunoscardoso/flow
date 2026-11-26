@@ -26,6 +26,9 @@
  */
 
 import type { ThreadWorktreeInventory } from '../../shared/ipc-contract'
+import type { RunKeptData, RunKeptDataItem } from '../../shared/run-setup'
+import { markModalOverlay } from '../modal-overlay'
+import { KEPT_DATA_STRINGS, keptConfirm, keptKey, keptSection } from './kept-data-model'
 import {
   FREE_FAILED,
   STORAGE_PAGE_TITLE,
@@ -64,6 +67,13 @@ export class StoragePage {
   #busy = false
   /** What the last press did, in words. Null until something has been pressed. */
   #status: string | null = null
+  /** The kept-data section lives in its own element, so a repaint of the files above never loses it. */
+  readonly #keptEl: HTMLDivElement
+  #kept: RunKeptData | null = null
+  #keptSeq = 0
+  #keptBusy = false
+  #keptStatus: string | null = null
+  #keptConfirm: { close: () => void } | null = null
 
   constructor(rootPath: string, callbacks: StoragePageCallbacks) {
     injectStorageStyles()
@@ -71,6 +81,8 @@ export class StoragePage {
     this.#callbacks = callbacks
     this.#root = document.createElement('div')
     this.#root.className = 'fl-storage'
+    this.#keptEl = document.createElement('div')
+    this.#keptEl.className = 'fl-storage-kept'
     // THE CHROME IS UP BEFORE THE READ FINISHES. Listing what a project holds
     // walks directories and asks git about every row, which is fast but not
     // instant — and a door that opens onto nothing for half a second reads as a
@@ -86,6 +98,7 @@ export class StoragePage {
 
   /** Read the inventory and paint. Safe to call again at any time. */
   async load(): Promise<void> {
+    void this.#loadKept()
     const seq = ++this.#seq
     const threads = window.flow?.threads
     if (threads === undefined || typeof threads.worktreeInventory !== 'function') {
@@ -111,6 +124,7 @@ export class StoragePage {
     line.className = 'fl-storage-note'
     line.textContent = STORAGE_UNREADABLE
     this.#root.appendChild(line)
+    this.#root.appendChild(this.#keptEl)
   }
 
   #paint(inventory: ThreadWorktreeInventory): void {
@@ -169,6 +183,7 @@ export class StoragePage {
       empty.className = 'fl-storage-empty'
       empty.textContent = header.empty
       this.#root.appendChild(empty)
+      this.#root.appendChild(this.#keptEl)
       return
     }
 
@@ -176,6 +191,175 @@ export class StoragePage {
     list.className = 'fl-storage-rows'
     for (const row of rows) list.appendChild(this.#row(row))
     this.#root.appendChild(list)
+    this.#root.appendChild(this.#keptEl)
+  }
+
+  // ── Data kept from deleted threads ───────────────────────────────────────
+
+  /** Read only while this page is open (allowed-pattern #17); a slow read never paints over a newer one. */
+  async #loadKept(): Promise<void> {
+    const seq = ++this.#keptSeq
+    const run = window.flow?.run
+    if (run === undefined || typeof run.keptData !== 'function') {
+      this.#kept = null
+      this.#paintKept()
+      return
+    }
+    try {
+      const data = await run.keptData()
+      if (seq !== this.#keptSeq) return
+      this.#kept = data
+    } catch (error) {
+      console.warn('flow: could not read the data kept from deleted threads', error)
+      if (seq !== this.#keptSeq) return
+      this.#kept = null
+    }
+    this.#paintKept()
+  }
+
+  #paintKept(): void {
+    const el = this.#keptEl
+    el.textContent = ''
+    const view = keptSection(this.#kept)
+    if (view === null) return
+    const head = document.createElement('div')
+    head.className = 'fl-storage-head'
+    const heading = document.createElement('div')
+    heading.className = 'fl-settings-heading'
+    heading.textContent = view.heading
+    head.appendChild(heading)
+    if (view.kind === 'list' && view.total !== null) {
+      const total = document.createElement('div')
+      total.className = 'fl-storage-count'
+      total.textContent = view.total
+      head.appendChild(total)
+    }
+    el.appendChild(head)
+    const note = document.createElement('div')
+    note.className = 'fl-storage-note'
+    note.textContent = view.kind === 'list' ? view.explanation : view.closed
+    el.appendChild(note)
+    if (view.kind !== 'list') return
+    if (this.#keptStatus !== null) {
+      const status = document.createElement('div')
+      status.className = 'fl-storage-status'
+      status.setAttribute('role', 'status')
+      status.textContent = this.#keptStatus
+      el.appendChild(status)
+    }
+    const items = new Map((this.#kept?.items ?? []).map((item) => [keptKey(item), item]))
+    const list = document.createElement('div')
+    list.className = 'fl-storage-rows'
+    for (const row of view.rows) {
+      const item = items.get(row.key)
+      if (item === undefined) continue
+      const rowEl = document.createElement('div')
+      rowEl.className = 'fl-storage-row'
+      const main = document.createElement('div')
+      main.className = 'fl-storage-main'
+      const title = document.createElement('div')
+      title.className = 'fl-storage-title'
+      if (item.title === null || item.title.trim() === '') title.classList.add('plain')
+      title.textContent = row.title
+      const sub = document.createElement('div')
+      sub.className = 'fl-storage-facts'
+      sub.textContent = row.sub
+      main.append(title, sub)
+      const del = document.createElement('button')
+      del.type = 'button'
+      del.className = 'fl-settings-btn'
+      del.textContent = KEPT_DATA_STRINGS.delete
+      del.disabled = this.#keptBusy
+      del.addEventListener('click', () => {
+        if (!del.disabled) this.#openKeptConfirm(item)
+      })
+      rowEl.append(main, del)
+      list.appendChild(rowEl)
+    }
+    el.appendChild(list)
+  }
+
+  /** The confirm before deleting: what goes, its size, and what is not touched. Cancel has the keyboard. */
+  #openKeptConfirm(item: RunKeptDataItem): void {
+    this.#keptConfirm?.close()
+    const copy = keptConfirm(item)
+    const overlay = document.createElement('div')
+    overlay.className = 'fl-storage-confirm-overlay'
+    markModalOverlay(overlay)
+    const box = document.createElement('div')
+    box.className = 'fl-storage-confirm'
+    box.setAttribute('role', 'alertdialog')
+    box.setAttribute('aria-modal', 'true')
+    const title = document.createElement('div')
+    title.className = 'fl-storage-confirm-title'
+    title.id = `fl-storage-confirm-${String(Date.now())}`
+    title.textContent = copy.title
+    box.setAttribute('aria-labelledby', title.id)
+    const body = document.createElement('p')
+    body.className = 'fl-storage-note'
+    body.textContent = copy.body
+    const actions = document.createElement('div')
+    actions.className = 'fl-storage-confirm-actions'
+    const cancel = document.createElement('button')
+    cancel.type = 'button'
+    cancel.className = 'fl-settings-btn'
+    cancel.textContent = copy.cancel
+    const go = document.createElement('button')
+    go.type = 'button'
+    go.className = 'fl-settings-btn fl-storage-danger'
+    go.textContent = copy.confirm
+    actions.append(cancel, go)
+    box.append(title, body, actions)
+    overlay.appendChild(box)
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const close = (): void => {
+      overlay.remove()
+      document.removeEventListener('keydown', onKey, true)
+      if (this.#keptConfirm?.close === close) this.#keptConfirm = null
+      previous?.focus?.()
+    }
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        close()
+      } else if (event.key === 'Tab') {
+        event.preventDefault()
+        ;(document.activeElement === go ? cancel : go).focus()
+      }
+    }
+    cancel.addEventListener('click', close)
+    go.addEventListener('click', () => {
+      close()
+      void this.#deleteKept(item)
+    })
+    overlay.addEventListener('mousedown', (event) => {
+      if (event.target === overlay) close()
+    })
+    document.addEventListener('keydown', onKey, true)
+    document.body.appendChild(overlay)
+    this.#keptConfirm = { close }
+    // A destructive confirm focuses its SAFE answer.
+    cancel.focus()
+  }
+
+  /** `confirmed: true` IS THE PRESS on the confirm's button, written here and nowhere else (forbidden-pattern #15). */
+  async #deleteKept(item: RunKeptDataItem): Promise<void> {
+    const run = window.flow?.run
+    if (this.#keptBusy || run === undefined || typeof run.deleteKeptData !== 'function') return
+    this.#keptBusy = true
+    this.#keptStatus = null
+    this.#paintKept()
+    try {
+      const answer = await run.deleteKeptData({ threadId: item.threadId, projectRoot: item.projectRoot, confirmed: true })
+      if (!answer.ok) this.#keptStatus = answer.detail ?? KEPT_DATA_STRINGS.failed
+    } catch (error) {
+      console.error('flow: deleting kept data failed', error)
+      this.#keptStatus = KEPT_DATA_STRINGS.failed
+    } finally {
+      this.#keptBusy = false
+      await this.#loadKept()
+    }
   }
 
   #heading(): HTMLElement {
@@ -389,6 +573,23 @@ function injectStorageStyles(): void {
       font-size: var(--fl-text-caption-size);
       margin-top: 1px;
     }
+    .fl-storage-kept { display: flex; flex-direction: column; gap: var(--fl-space-sm); margin-top: var(--fl-space-md); }
+    .fl-storage-kept:empty { display: none; }
+    .fl-storage-confirm-overlay {
+      position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center;
+      background: rgba(0, 0, 0, 0.35);
+    }
+    .fl-storage-confirm {
+      width: min(440px, calc(100vw - 32px)); box-sizing: border-box; padding: var(--fl-space-lg);
+      display: flex; flex-direction: column; gap: var(--fl-space-sm);
+      background: var(--fl-color-surface-raised); color: var(--fl-color-text);
+      border: var(--fl-border-width) solid var(--fl-color-border); border-radius: var(--fl-radius-md);
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); font-family: var(--fl-font-ui); font-size: var(--fl-text-ui-size);
+    }
+    .fl-storage-confirm-title { font-weight: var(--fl-text-ui-weight-medium); }
+    .fl-storage-confirm .fl-storage-note { margin: 0; }
+    .fl-storage-confirm-actions { display: flex; justify-content: flex-end; gap: var(--fl-space-sm); }
+    .fl-storage-danger { background: var(--fl-color-error); border-color: var(--fl-color-error); color: var(--fl-color-on-accent); }
     .fl-storage-detail {
       color: var(--fl-color-text-secondary);
       font-size: var(--fl-text-caption-size);

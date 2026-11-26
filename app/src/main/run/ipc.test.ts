@@ -53,6 +53,10 @@ function harness(options: { trusted?: boolean; saveError?: Error } = {}) {
         calls.push({ start: scope })
         return empty(scope)
       },
+      startDocker: async (scope) => {
+        calls.push({ startDocker: scope })
+        return empty(scope)
+      },
       reload: async (scope, stepKey, force) => {
         calls.push({ reload: [scope, stepKey, force] })
         return empty(scope)
@@ -89,6 +93,52 @@ function harness(options: { trusted?: boolean; saveError?: Error } = {}) {
     resolveRoot: (path) => (path === ROOT || path === CHECKOUT ? ROOT : null),
     isTrustedSender: () => options.trusted ?? true,
     broadcastUpdated: (state) => broadcasts.push(state),
+    threadDocker: {
+      read: async (threadId) => {
+        calls.push({ dataRead: threadId })
+        return null
+      },
+      elsewhere: async (scope) => {
+        calls.push({ elsewhere: scope })
+        return { threadId: 'other', title: 'Invoice export' }
+      },
+      restart: async (threadId) => {
+        calls.push({ restart: threadId })
+        return { ok: true }
+      },
+      reset: async (threadId, request) => {
+        calls.push({ reset: [threadId, request.confirmed] })
+        return request.confirmed === true ? { ok: true } : { ok: false, detail: 'needs confirmation' }
+      },
+      liveThreads: async () => {
+        calls.push('liveThreads')
+        return ['t1']
+      },
+    },
+    keptData: {
+      read: async () => {
+        calls.push('keptRead')
+        return { dockerAvailable: true, items: [] }
+      },
+      delete: async (request) => {
+        calls.push({ keptDelete: [request.threadId, request.projectRoot, request.confirmed] })
+        return request.confirmed === true ? { ok: true } : { ok: false, detail: 'needs confirmation' }
+      },
+    },
+    threadVolumes: {
+      read: async (threadId) => {
+        calls.push({ volumesRead: threadId })
+        return { count: 1, totalBytes: 10 }
+      },
+      release: async (threadId, request) => {
+        calls.push({ volumesRelease: [threadId, request.confirmed] })
+        return request.confirmed === true ? { ok: true } : { ok: false, detail: 'needs confirmation' }
+      },
+    },
+    openDocker: async () => {
+      calls.push('openDocker')
+      return { ok: true, detail: '' }
+    },
   }
   const dispose = registerRunChannels(deps)
   const call = (channel: string, request: unknown): Promise<unknown> =>
@@ -101,7 +151,9 @@ afterEach(() => mockHandlers.clear())
 describe('registerRunChannels', () => {
   it('registers every run:* invoke channel of the contract', () => {
     harness()
-    const runChannels = IPC_INVOKE_CHANNELS.filter((channel) => channel.startsWith('run:'))
+    const runChannels = IPC_INVOKE_CHANNELS.filter(
+      (channel) => channel.startsWith('run:') || channel === 'threads:dataVolumes' || channel === 'threads:releaseDataVolumes',
+    )
     expect([...mockHandlers.keys()].sort()).toEqual([...runChannels].sort())
   })
 
@@ -220,5 +272,69 @@ describe('registerRunChannels', () => {
     h.dispose()
     expect(mockHandlers.size).toBe(0)
     expect(h.isSubscribed()).toBe(false)
+  })
+})
+
+describe('the conversation’s own data channels', () => {
+  it('run:startDocker starts the Docker group of a scope, a checkout answered as its project', async () => {
+    const h = harness()
+    await h.call('run:startDocker', { scope: { rootPath: CHECKOUT, threadId: 't1' } })
+    expect(h.calls).toEqual([{ startDocker: { rootPath: ROOT, threadId: 't1' } }])
+    await expect(h.call('run:startDocker', { scope: { rootPath: '/etc', threadId: 't1' } })).rejects.toThrow('unknown scope.rootPath')
+    expect(h.calls).toHaveLength(1)
+  })
+
+  it('run:dockerElsewhere reads for a conversation scope only', async () => {
+    const h = harness()
+    await expect(h.call('run:dockerElsewhere', { scope: { rootPath: ROOT, threadId: 't1' } })).resolves.toEqual({
+      threadId: 'other',
+      title: 'Invoice export',
+    })
+    expect(h.calls).toEqual([{ elsewhere: { rootPath: ROOT, threadId: 't1' } }])
+    await expect(h.call('run:dockerElsewhere', { scope: { rootPath: ROOT, threadId: null } })).resolves.toBeNull()
+    expect(h.calls).toHaveLength(1)
+  })
+
+  it('threads:dataVolumes reads one thread; threads:releaseDataVolumes relays confirmed only when it is exactly true', async () => {
+    const h = harness()
+    await expect(h.call('threads:dataVolumes', { threadId: 't1' })).resolves.toEqual({ count: 1, totalBytes: 10 })
+    await h.call('threads:releaseDataVolumes', { threadId: 't1', confirmed: true })
+    await h.call('threads:releaseDataVolumes', { threadId: 't1', confirmed: 'yes' })
+    await h.call('threads:releaseDataVolumes', { threadId: 't1' })
+    expect(h.calls).toEqual([
+      { volumesRead: 't1' },
+      { volumesRelease: ['t1', true] },
+      { volumesRelease: ['t1', undefined] },
+      { volumesRelease: ['t1', undefined] },
+    ])
+    await expect(h.call('threads:dataVolumes', {})).rejects.toThrow('threadId must be a non-empty string')
+  })
+
+  it('the panel channels read one thread, and reset relays confirmed only when it is exactly true', async () => {
+    const h = harness()
+    await expect(h.call('run:threadData', { threadId: 't1' })).resolves.toBeNull()
+    await h.call('run:restartThreadDocker', { threadId: 't1' })
+    await h.call('run:emptyThreadData', { threadId: 't1', confirmed: true })
+    await h.call('run:emptyThreadData', { threadId: 't1', confirmed: 1 })
+    await expect(h.call('run:liveThreads', {})).resolves.toEqual(['t1'])
+    expect(h.calls).toEqual([{ dataRead: 't1' }, { restart: 't1' }, { reset: ['t1', true] }, { reset: ['t1', undefined] }, 'liveThreads'])
+    await expect(h.call('run:emptyThreadData', {})).rejects.toThrow('threadId must be a non-empty string')
+  })
+
+  it('the kept data channels read, and delete relays confirmed only when exactly true, in a project the renderer may address', async () => {
+    const h = harness()
+    await expect(h.call('run:keptData', {})).resolves.toEqual({ dockerAvailable: true, items: [] })
+    await h.call('run:deleteKeptData', { threadId: 'gone', projectRoot: CHECKOUT, confirmed: true })
+    await h.call('run:deleteKeptData', { threadId: 'gone', projectRoot: ROOT, confirmed: 'yes' })
+    expect(h.calls).toEqual(['keptRead', { keptDelete: ['gone', ROOT, true] }, { keptDelete: ['gone', ROOT, undefined] }])
+    await expect(h.call('run:deleteKeptData', { projectRoot: ROOT })).rejects.toThrow('threadId must be a non-empty string')
+    await expect(h.call('run:deleteKeptData', { threadId: 'gone' })).rejects.toThrow('projectRoot must be a non-empty string')
+    expect(h.calls).toHaveLength(3)
+  })
+
+  it('run:openDocker opens Docker', async () => {
+    const h = harness()
+    await expect(h.call('run:openDocker', {})).resolves.toEqual({ ok: true, detail: '' })
+    expect(h.calls).toEqual(['openDocker'])
   })
 })

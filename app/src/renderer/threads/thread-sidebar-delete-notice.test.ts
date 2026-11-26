@@ -1,4 +1,4 @@
-import { threadDeleteNotice, type ThreadDeleteSubject } from './thread-sidebar-delete-notice'
+import { humanSize, threadDeleteNotice, type ThreadDeleteSubject } from './thread-sidebar-delete-notice'
 
 const subject = (over: Partial<ThreadDeleteSubject> = {}): ThreadDeleteSubject => ({
   threadTitle: 'Fix the sidebar flicker',
@@ -204,3 +204,56 @@ describe('a null commit count is not zero', () => {
     expect(detail).toContain('nothing in them')
   })
 })
+
+describe('threadDeleteNotice — Docker data', () => {
+  const GB = 1024 ** 3
+
+  it('is byte-for-byte the same with no volumes, absent or null or empty', () => {
+    const base = subject({ hasWorktree: false })
+    const plain = threadDeleteNotice(base)
+    expect(threadDeleteNotice({ ...base, dataVolumes: null })).toEqual(plain)
+    expect(threadDeleteNotice({ ...base, dataVolumes: { count: 0, totalBytes: 0 } })).toEqual(plain)
+    expect('volumesLine' in plain).toBe(false)
+    expect('offerVolumes' in plain).toBe(false)
+    expect('volumesLabel' in plain).toBe(false)
+  })
+
+  it('offers the volumes with their size, and leaves the rest of the notice alone', () => {
+    const base = subject({ hasWorktree: false })
+    const notice = threadDeleteNotice({ ...base, dataVolumes: { count: 1, totalBytes: 1.2 * GB } })
+    expect(notice.offerVolumes).toBe(true)
+    expect(notice.volumesLabel).toBe('Also delete its data')
+    expect(notice.volumesLine).toBe('1 volume · 1.2 GB. Left unticked, the data stays and can be removed later from Storage.')
+    expect({ ...notice, volumesLine: undefined, volumesLabel: undefined, offerVolumes: undefined }).toEqual({
+      ...threadDeleteNotice(base),
+      volumesLine: undefined,
+      volumesLabel: undefined,
+      offerVolumes: undefined,
+    })
+  })
+
+  it('says plainly when the size is unknown, and counts several volumes', () => {
+    const notice = threadDeleteNotice(subject({ dataVolumes: { count: 2, totalBytes: null } }))
+    expect(notice.volumesLine).toBe('2 volumes · size unknown. Left unticked, the data stays and can be removed later from Storage.')
+  })
+
+  it('does not change the worktree answer when volumes are present', () => {
+    const without = threadDeleteNotice(subject({ changedFiles: 0, aheadCommits: 0 }))
+    const withVolumes = threadDeleteNotice(subject({ changedFiles: 0, aheadCommits: 0, dataVolumes: { count: 1, totalBytes: 5 } }))
+    expect(withVolumes.releaseWorktree).toBe(without.releaseWorktree)
+    expect(withVolumes.detail).toBe(without.detail)
+  })
+
+  it('writes sizes as a person reads them', () => {
+    expect(humanSize(0)).toBe('0 B')
+    expect(humanSize(340 * 1024 * 1024)).toBe('340 MB')
+    expect(humanSize(1.2 * GB)).toBe('1.2 GB')
+    expect(humanSize(2 * GB)).toBe('2 GB')
+  })
+
+  it('never puts a command, path or setting in the sentence', () => {
+    const line = threadDeleteNotice(subject({ dataVolumes: { count: 3, totalBytes: 10 * GB } })).volumesLine ?? ''
+    expect(line).not.toMatch(/docker (volume|compose)|\/|`|[a-z]+_[a-z_]+|flowconfig/i)
+  })
+})
+

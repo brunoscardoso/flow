@@ -7,6 +7,9 @@
  * The menu, top to bottom: New terminal (one row per project, at most three,
  * then "More projects", which swaps the menu for every project with a filter
  * box; with one project just "New terminal"), "Split beside <project>", then
+ * for a thread whose project has a Compose file the Docker section (Start
+ * Docker, or Switch to this thread when another thread's data runs; once its
+ * services go, their rows and tools) with the steps on this computer under it,
  * the conversation's one-time actions grouped by project (each runs once, in
  * its own tab — after an ask when it asks first), Run all, Reload all, Stop
  * all and "Edit run steps". Before any step exists, "Set up run steps" stands
@@ -20,13 +23,16 @@
  * transitions only, and an update for another scope is dropped at once. An
  * update for this scope is folded in without any IPC; the setup is re-read
  * (one `run:get`) only when the panel is on screen — an off-screen panel marks
- * itself stale and re-reads on the way back in.
+ * itself stale and re-reads on the way back in. Whose Docker data runs
+ * instead of this thread's is asked once each time the menu opens (one
+ * `run:dockerElsewhere`), never on an update.
  */
 import { guideInfoButton } from '../guides/guide-info'
 import type { FlowApi } from '../../shared/ipc-contract'
 import { createScriptView } from './script-editor'
 import {
   runScopeKey,
+  type RunDockerElsewhere,
   type RunGroupState,
   type RunScope,
   type RunSuggestion,
@@ -42,9 +48,13 @@ import {
   onceAsk,
   pendingTabAction,
   pillFace,
+  DOCKER_STRINGS,
   RUN_STRINGS,
+  type DockerMenuGroup,
+  type DockerNoticeFace,
   type LaunchpadMenuEntry,
   type RunDotTone,
+  type RunMenuStepRow,
 } from './run-group-model'
 import { scriptProposals } from './script-proposals'
 import {
@@ -55,6 +65,7 @@ import {
   type RunMenuTerminals,
 } from './run-menu-terminals'
 import { RunSetupPanel } from './run-setup-panel'
+import { ComposePanel } from './compose-panel'
 
 export interface RunGroupDeps {
   api: FlowApi
@@ -107,6 +118,13 @@ export class RunGroupView {
   #menu: { element: HTMLElement; close: () => void } | null = null
   /** The open ask before a one-time action runs. */
   #ask: { close: () => void } | null = null
+  /** The Manage containers panel (the thread's Docker data). */
+  readonly #compose: ComposePanel
+  /**
+   * Whose Docker data runs instead of this thread's, as main last answered —
+   * asked when the menu opens (allowed-pattern #17), cleared with the scope.
+   */
+  #dockerElsewhere: RunDockerElsewhere | null = null
 
   constructor(deps: RunGroupDeps) {
     injectRunStyles()
@@ -127,6 +145,12 @@ export class RunGroupView {
       askAgent: () => this.#askAgent(),
       agentThread: () => this.#scope?.threadId ?? null,
       onSaved: (view) => this.#setView(view),
+      onClosed: () => this.#renderPill(),
+    })
+    this.#compose = new ComposePanel({
+      api: deps.api,
+      host: deps.dock,
+      isOnScreen: () => deps.isOnScreen(),
       onClosed: () => this.#renderPill(),
     })
     deps.api.run?.onUpdated((state) => this.#onUpdated(state))
@@ -158,6 +182,8 @@ export class RunGroupView {
     this.#closeMenu()
     this.#ask?.close()
     if (this.#panel.isOpen) this.#panel.close()
+    this.#compose.close()
+    this.#dockerElsewhere = null
     this.#renderPill()
     this.#deps.onChange()
     this.#refresh()
@@ -166,6 +192,7 @@ export class RunGroupView {
   /** The panel came on screen: pay any read owed while it was hidden. */
   shown(): void {
     if (this.#stale) this.#refresh()
+    if (this.#compose.isOpen) this.#compose.shown()
   }
 
   /** A step tab with no terminal was clicked. */
@@ -302,6 +329,84 @@ export class RunGroupView {
           }),
         )
       })
+  }
+
+  // ─── the thread's own data ─────────────────────────────────────────────────
+
+  /**
+   * Ask main whose Docker data runs instead of this thread's — once per menu
+   * opening, only for a thread whose Run has a Docker group. `then` runs when
+   * the answer changed what the section shows.
+   */
+  #askDockerElsewhere(then: () => void): void {
+    const run = this.#deps.api.run
+    const scope = this.#scope
+    if (run?.dockerElsewhere === undefined || scope === null || scope.threadId === null) return
+    if ((this.#view?.resolution.docker ?? []).length === 0) return
+    const seq = this.#seq
+    run
+      .dockerElsewhere({ scope })
+      .then((answer) => {
+        if (seq !== this.#seq) return
+        const before = this.#dockerElsewhere
+        this.#dockerElsewhere = answer
+        if (before?.threadId !== answer?.threadId || before?.title !== answer?.title) then()
+      })
+      .catch(() => undefined)
+  }
+
+  /** Start Docker / Switch to this thread: the thread's Docker services alone, through the switch. */
+  #startDocker(): void {
+    this.#compose.close()
+    this.#act((run, scope) => run.startDocker({ scope }))
+  }
+
+  /** Open the Manage containers panel for the thread on screen. */
+  #openCompose(options: { reset?: boolean } = {}): void {
+    const threadId = this.#scope?.threadId ?? null
+    if (threadId === null) return
+    this.#panel.tuck()
+    this.#compose.open(threadId, options)
+  }
+
+  #openDocker(): void {
+    const run = this.#deps.api.run
+    const scope = this.#scope
+    if (run === undefined || scope === null) return
+    run
+      .openDocker()
+      .then((answer) => {
+        if (answer.ok) return
+        document.dispatchEvent(
+          new CustomEvent('flow:notify', {
+            detail: {
+              kind: 'state-change',
+              rootId: scope.rootPath,
+              title: DOCKER_STRINGS.heading,
+              body: answer.detail,
+              timestamp: new Date().toISOString(),
+              level: 'error',
+            },
+          }),
+        )
+      })
+      .catch(() => undefined)
+  }
+
+  /** Reload or stop every Docker service of this Run, one step at a time. */
+  #eachDockerStep(intent: 'reload' | 'stop'): void {
+    const keys = (this.#view?.state.steps ?? []).filter((step) => step.docker !== undefined).map((step) => step.key)
+    for (const stepKey of keys) {
+      if (intent === 'reload') this.#act((run, scope) => run.reload({ scope, stepKey }))
+      else this.#act((run, scope) => run.stop({ scope, stepKey }))
+    }
+  }
+
+  /** A step row of the menu was pressed: show its tab, or start it. */
+  #pressStepRow(row: RunMenuStepRow): void {
+    this.#compose.close()
+    if (row.terminalId !== null) this.#deps.focusTerminal(row.terminalId)
+    else this.activatePending(row.key)
   }
 
   // ─── one-time actions ──────────────────────────────────────────────────────
@@ -551,7 +656,7 @@ export class RunGroupView {
         element.appendChild(setUp)
         return
       }
-      const menu = launchpadMenu(this.#view)
+      const menu = launchpadMenu(this.#view, this.#dockerElsewhere)
       const act = (entry: LaunchpadMenuEntry) => (): void => {
         close()
         if (entry.kind === 'once') this.#pressOnce(entry.key)
@@ -559,6 +664,14 @@ export class RunGroupView {
         else if (entry.kind === 'reload-all') this.#act((api, scope) => api.reload({ scope }))
         else if (entry.kind === 'stop-all') this.#act((api, scope) => api.stop({ scope }))
         else this.#openSetup({ addOnce: entry.kind === 'add' })
+      }
+      if (menu.docker !== null) {
+        drawDocker(menu.docker)
+        if (menu.local.length > 0) {
+          element.appendChild(heading(DOCKER_STRINGS.localHeading))
+          for (const local of menu.local) element.appendChild(stepRowNode(local))
+        }
+        element.appendChild(divider())
       }
       element.appendChild(heading(RUN_STRINGS.menuOnce, guideInfoButton('launchpad-menu', 'the Run menu')))
       if (menu.empty) {
@@ -620,9 +733,170 @@ export class RunGroupView {
         stop.append(icon('square', '12'), document.createTextNode(RUN_STRINGS.stopAll))
         element.appendChild(stop)
       }
+      if (menu.docker?.manage === true) {
+        const manage = row('manage-containers', 'fl-run-menu-item small', () => {
+          close()
+          this.#openCompose()
+        })
+        manage.title = DOCKER_STRINGS.manageTitle
+        manage.append(icon('layers', '12'), document.createTextNode(DOCKER_STRINGS.manage))
+        element.appendChild(manage)
+      }
       const edit = row('edit', 'fl-run-menu-item small', act({ kind: 'edit' }))
       edit.append(icon('settings', '12'), document.createTextNode(RUN_STRINGS.editLaunchpad))
       element.appendChild(edit)
+    }
+
+    // ONE STEP AS A ROW: dot, name, and its port or status. Pressing it shows
+    // its tab (or starts it when it has none).
+    const stepRowNode = (step: RunMenuStepRow): HTMLButtonElement => {
+      const node = row('step', 'fl-run-menu-item small step', () => {
+        close()
+        this.#pressStepRow(step)
+      })
+      node.title = step.title
+      const dot = document.createElement('span')
+      dot.className = 'fl-run-menu-dot'
+      dot.style.background = RUN_TONE_COLOR[step.tone]
+      const name = document.createElement('span')
+      name.className = 'fl-run-menu-grow'
+      name.textContent = step.name
+      const note = document.createElement('span')
+      note.className = 'fl-run-menu-note'
+      note.textContent = step.note
+      node.append(dot, name, note)
+      return node
+    }
+
+    const noticeNode = (notice: DockerNoticeFace): HTMLElement => {
+      const box = document.createElement('div')
+      box.className = `fl-run-notice ${notice.tone}`
+      box.setAttribute('role', notice.tone === 'error' ? 'alert' : 'status')
+      const lead = icon(notice.tone === 'error' ? 'error' : 'warning', '12')
+      lead.classList.add('fl-run-notice-icon')
+      const words = document.createElement('div')
+      words.className = 'fl-run-notice-words'
+      if (notice.title !== null) {
+        const title = document.createElement('div')
+        title.className = 'fl-run-notice-title'
+        title.textContent = notice.title
+        words.appendChild(title)
+      }
+      const sentence = document.createElement('div')
+      sentence.textContent = notice.sentence
+      words.appendChild(sentence)
+      if (notice.lines !== null) {
+        const lines = document.createElement('pre')
+        lines.className = 'fl-run-notice-lines'
+        lines.textContent = notice.lines
+        words.appendChild(lines)
+      }
+      if (notice.action !== null) {
+        const press = document.createElement('button')
+        press.type = 'button'
+        press.className = 'fl-run-btn small'
+        press.tabIndex = -1
+        press.textContent = notice.action === 'open-docker' ? DOCKER_STRINGS.openDocker : DOCKER_STRINGS.resetData
+        press.addEventListener('click', (event) => {
+          event.stopPropagation()
+          close()
+          if (notice.action === 'open-docker') this.#openDocker()
+          else this.#openCompose({ reset: true })
+        })
+        buttons.push(press)
+        words.appendChild(press)
+      }
+      box.append(lead, words)
+      return box
+    }
+
+    // THE DOCKER SECTION. Before this thread's services go: the heading with
+    // the services' names, one line, and the one button (Start Docker, or
+    // Switch to this thread). Once they go: header (pill, Reload all, Stop
+    // all), the services, the data steps that ran. Notices in every face.
+    const drawDocker = (group: DockerMenuGroup): void => {
+      const head = document.createElement('div')
+      head.className = 'fl-run-menu-head fl-run-docker-head'
+      const label = document.createElement('span')
+      label.className = 'fl-run-docker-label'
+      label.append(document.createTextNode(DOCKER_STRINGS.heading))
+      if (group.primary !== null) {
+        const names = document.createElement('span')
+        names.className = 'fl-run-docker-names'
+        names.textContent = group.serviceNames
+        names.title = group.serviceNames
+        head.append(label, names)
+        element.appendChild(head)
+        if (group.sentence !== null) {
+          const line = document.createElement('p')
+          line.className = 'fl-run-docker-sentence'
+          line.textContent = group.sentence
+          element.appendChild(line)
+        }
+        const primary = group.primary
+        const start = row('start-docker', 'fl-run-menu-item small fl-run-docker-primary', () => {
+          close()
+          this.#startDocker()
+        })
+        start.title = primary.title
+        start.append(icon(primary.icon, '12'), document.createTextNode(primary.label))
+        element.appendChild(start)
+        for (const notice of group.notices) element.appendChild(noticeNode(notice))
+        return
+      }
+      if (group.liveHere) {
+        const pill = document.createElement('span')
+        pill.className = 'fl-run-docker-pill'
+        pill.title = DOCKER_STRINGS.liveHereTitle
+        pill.textContent = DOCKER_STRINGS.liveHere
+        label.appendChild(pill)
+      }
+      const tools = document.createElement('span')
+      tools.className = 'fl-run-docker-tools'
+      const tool = (name: string, title: string, enabled: boolean, run: () => void): HTMLButtonElement => {
+        const press = document.createElement('button')
+        press.type = 'button'
+        press.className = 'fl-run-icon-btn'
+        press.title = title
+        press.setAttribute('aria-label', title)
+        press.tabIndex = -1
+        press.disabled = !enabled
+        press.append(icon(name, '12'))
+        if (enabled) {
+          press.addEventListener('click', (event) => {
+            event.stopPropagation()
+            close()
+            run()
+          })
+          buttons.push(press)
+        }
+        return press
+      }
+      tools.append(
+        tool('refresh', DOCKER_STRINGS.reloadAllTitle, group.canReload, () => this.#eachDockerStep('reload')),
+        tool('square', DOCKER_STRINGS.stopAllTitle, group.canStop, () => this.#eachDockerStep('stop')),
+      )
+      head.append(label, tools)
+      element.appendChild(head)
+      for (const service of group.services) element.appendChild(stepRowNode(service))
+      for (const data of group.data) {
+        const node = row('docker-data', 'fl-run-menu-item small step data', data.terminalId === null ? null : () => {
+          close()
+          if (data.terminalId !== null) this.#deps.focusTerminal(data.terminalId)
+        })
+        const dot = document.createElement('span')
+        dot.className = 'fl-run-menu-dot'
+        dot.style.background = RUN_TONE_COLOR[data.tone]
+        const name = document.createElement('span')
+        name.className = 'fl-run-menu-grow'
+        name.textContent = data.name
+        const note = document.createElement('span')
+        note.className = 'fl-run-menu-note'
+        note.textContent = data.note
+        node.append(dot, name, note)
+        element.appendChild(node)
+      }
+      for (const notice of group.notices) element.appendChild(noticeNode(notice))
     }
 
     // "More projects": the menu swaps to every project, with a filter box that
@@ -773,6 +1047,14 @@ export class RunGroupView {
     anchor.closest('.fl-run-pill')?.classList.add('open')
     // The first row (a new terminal) takes the keyboard.
     if (buttons.length > 0) focusAt(0)
+    // Whose Docker data runs instead of this thread's: asked now, and the
+    // menu's main face is drawn again when the answer changes it.
+    this.#askDockerElsewhere(() => {
+      if (this.#menu?.element !== element || filter !== null) return
+      const at = focus
+      drawMain()
+      if (at >= 0 && buttons.length > 0) focusAt(Math.min(at, buttons.length - 1))
+    })
   }
 
   async #loadSuggestions(): Promise<RunSuggestion[]> {
@@ -792,6 +1074,8 @@ export class RunGroupView {
   /** A terminal tab was chosen: tuck the setup away, keeping its unsaved edits. */
   tuckSetup(): void {
     this.#panel.tuck()
+    // The Manage containers panel is a look, not a draft: a chosen tab closes it.
+    this.#compose.close()
   }
 
   #toggleSetup(): void {
@@ -978,6 +1262,54 @@ function injectRunStyles(): void {
       font-size: var(--fl-text-caption-size); font-weight: normal; line-height: 1.4;
     }
     .fl-run-menu-divider { height: var(--fl-border-width); background: var(--fl-color-separator); margin: var(--fl-space-xs) 0; }
+    .fl-run-menu-item.step { min-height: 28px; }
+    .fl-run-menu-item.step.disabled { opacity: 1; }
+    .fl-run-docker-head { gap: var(--fl-space-sm); }
+    .fl-run-docker-label { display: inline-flex; align-items: center; gap: var(--fl-space-sm); }
+    .fl-run-docker-pill {
+      padding: 0 6px; border-radius: var(--fl-radius-pill); line-height: 1.6;
+      background: color-mix(in srgb, var(--fl-color-success) 16%, transparent); color: var(--fl-color-success);
+      font-weight: normal; letter-spacing: 0; text-transform: none;
+    }
+    .fl-run-docker-tools { display: inline-flex; align-items: center; gap: 2px; }
+    .fl-run-docker-names {
+      min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      color: var(--fl-color-text-secondary); font-weight: normal; letter-spacing: 0; text-transform: none;
+    }
+    .fl-run-docker-sentence {
+      margin: 0; padding: 0 var(--fl-space-sm) var(--fl-space-xs);
+      color: var(--fl-color-text-secondary); font-size: var(--fl-text-caption-size); line-height: 1.45;
+    }
+    .fl-run-menu-item.fl-run-docker-primary {
+      width: auto; margin: 0 var(--fl-space-xs) var(--fl-space-xs); padding: 0 var(--fl-space-md);
+      background: var(--fl-color-accent); color: var(--fl-color-on-accent, #fff);
+      font-weight: var(--fl-text-ui-weight-medium);
+    }
+    .fl-run-menu-item.fl-run-docker-primary:hover, .fl-run-menu-item.fl-run-docker-primary:focus-visible {
+      background: color-mix(in srgb, var(--fl-color-accent) 85%, var(--fl-color-text));
+      outline: 2px solid var(--fl-color-focus-ring); outline-offset: 1px;
+    }
+    .fl-run-docker-tools .fl-run-icon-btn:focus-visible { outline: 2px solid var(--fl-color-focus-ring); outline-offset: 1px; }
+    .fl-run-notice {
+      display: flex; align-items: flex-start; gap: var(--fl-space-sm); margin: 2px var(--fl-space-xs);
+      padding: var(--fl-space-sm); border-radius: var(--fl-radius-sm);
+      border: var(--fl-border-width) solid var(--fl-color-border); background: var(--fl-color-bg);
+      font-size: var(--fl-text-caption-size); line-height: 1.45; color: var(--fl-color-text);
+    }
+    .fl-run-notice.warning { border-color: color-mix(in srgb, var(--fl-color-warning) 45%, transparent); background: color-mix(in srgb, var(--fl-color-warning) 8%, var(--fl-color-bg)); }
+    .fl-run-notice.error { border-color: color-mix(in srgb, var(--fl-color-error) 45%, transparent); background: color-mix(in srgb, var(--fl-color-error) 8%, var(--fl-color-bg)); }
+    .fl-run-notice.warning .fl-run-notice-icon { color: var(--fl-color-warning); }
+    .fl-run-notice.error .fl-run-notice-icon { color: var(--fl-color-error); }
+    .fl-run-notice-icon { flex: none; margin-top: 2px; }
+    .fl-run-notice-words { display: flex; flex-direction: column; align-items: flex-start; gap: var(--fl-space-xs); min-width: 0; }
+    .fl-run-notice-title { font-weight: var(--fl-text-ui-weight-medium); }
+    .fl-run-notice-lines {
+      margin: 0; max-width: 100%; max-height: 120px; overflow: auto; box-sizing: border-box;
+      padding: var(--fl-space-xs) var(--fl-space-sm); border-radius: var(--fl-radius-sm);
+      background: var(--fl-color-surface); border: var(--fl-border-width) solid var(--fl-color-border);
+      font-family: var(--fl-font-mono); font-size: var(--fl-text-mono-size); white-space: pre-wrap; word-break: break-word;
+    }
+    .fl-run-notice .fl-run-btn:focus-visible { outline: 2px solid var(--fl-color-focus-ring); outline-offset: 2px; }
 
     .fl-run-ask-overlay {
       position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center;
